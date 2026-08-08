@@ -796,6 +796,7 @@ void urnet_device_remote_reset_reliability_metrics(uint64_t self);
 void urnet_device_remote_reset_reliability_settings(uint64_t self);
 void urnet_device_remote_set_reliability_settings(uint64_t self, const char* reliability_settings_json);
 bool urnet_device_remote_set_rpc_server(uint64_t self, const char* client_pem, const char* server_cert_pem, const char* host_port, char** out_error);
+void urnet_device_remote_shuffle_exits(uint64_t self);
 void urnet_device_remote_simulate_network_change(uint64_t self);
 bool urnet_device_remote_stall_exit(uint64_t self, const char* exit_client_id, bool stalled);
 bool urnet_device_remote_start_probe_suite(uint64_t self, const char* config_json);

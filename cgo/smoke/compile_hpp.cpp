@@ -65,9 +65,11 @@ void use_advanced_mode(const urnet::DeviceRemote& device) {
 	(void)stalled;
 	(void)unstalled;
 
-	// shuffling every exit at once is Device::shuffle -- there is deliberately
-	// no DeviceRemote::shuffleExits, since it would be a second name for it
+	// both spellings of "replace every exit at once" must stay callable on a
+	// DeviceRemote: shuffle is the queued legacy action, shuffleExits is the
+	// non-queued fault injection one, and they differ only on failure
 	device.shuffle();
+	device.shuffleExits();
 
 	// probe suite: a config-taking start, a poll, and a list getter
 	urnet::ProbeSuiteConfig config{};

@@ -4710,11 +4710,33 @@ func (self *DeviceRemote) StallExit(exitClientId string, stalled bool) bool {
 	return set
 }
 
-// NOTE: `DeviceLocal.ShuffleExits` is deliberately NOT bridged here. It is
-// `multi.Shuffle()`, which is the same call `DeviceLocal.Shuffle` already
-// makes through the `UserNatClient` interface, so `DeviceRemote.Shuffle`
-// (rpc `DeviceLocalRpc.Shuffle`, c abi `urnet_device_shuffle`) already
-// reaches it. A second bridged spelling would be two names for one effect.
+// ShuffleExits replaces every exit at once. No-op while the rpc is down.
+//
+// This reaches the same connect call as `DeviceRemote.Shuffle` -- both end at
+// `RemoteUserNatMultiClient.Shuffle` -- and both exist because they differ in
+// the only way that matters for a fault injection control: what happens when
+// the call FAILS.
+//
+// `Shuffle` is a queued action. A failed call sets `state.Shuffle`, and the
+// next successful sync replays it. That is right for the connect-flow caller
+// it was built for, where "shuffle once the device is reachable again" is the
+// intent. It is wrong here. In Advanced Mode the user presses this while
+// watching an exit table; if the service is down the press does nothing
+// visible, and a queued replay would then swap every exit minutes later,
+// under a user who has moved on -- the same "a fault the user did not ask for
+// twice" that `StallExit` refuses. Fault injection is immediate or nothing.
+//
+// So this is deliberately non-queued, like the other six advanced-mode
+// actions, and `Shuffle` is left exactly as it was for its existing callers.
+func (self *DeviceRemote) ShuffleExits() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	if self.service == nil {
+		return
+	}
+	rpcCallNoArgVoid(self.service, "DeviceLocalRpc.ShuffleExits", self.closeService)
+}
 
 // StartProbeSuite begins a probe run and returns immediately. Returns false
 // when a run is already in progress, and for a down rpc. A nil config means
@@ -6190,16 +6212,12 @@ type DeviceRemoteProbeSuiteConfigRpc struct {
 	Config *ProbeSuiteConfig
 }
 
-// configOrDefault resolves the nil config the wire is allowed to carry.
-// `DeviceLocal.StartProbeSuite` dereferences its config while building jobs,
-// so a nil reaching it panics inside the service process -- which the caller
-// sees as a dead rpc rather than as a bad argument.
-func (self *DeviceRemoteProbeSuiteConfigRpc) configOrDefault() *ProbeSuiteConfig {
-	if self == nil || self.Config == nil {
-		return GetDefaultProbeSuiteConfig()
-	}
-	return self.Config
-}
+// The nil config is carried, not resolved, on this side. Normalization lives
+// in `DeviceLocal.StartProbeSuite` so that the rpc path and the direct
+// gomobile/cgo callers get identical treatment -- a guard here would have
+// covered only the remote path, leaving
+// `urnet_device_local_start_probe_suite(handle, NULL)` to panic a spawned
+// goroutine inside the privileged service.
 
 // always returns a non-nil slice with non-nil elements
 // (gob cannot encode nil slice elements)
@@ -8679,8 +8697,17 @@ func (self *DeviceLocalRpc) StallExit(stallExit *DeviceRemoteStallExitRpc, set *
 	return nil
 }
 
+func (self *DeviceLocalRpc) ShuffleExits(_ RpcNoArg, _ RpcVoid) error {
+	self.deviceLocal.ShuffleExits()
+	return nil
+}
+
+// the nil config is passed through rather than defaulted here:
+// `DeviceLocal.StartProbeSuite` normalizes it (nil -> default, every field
+// bounded), so the rpc path and the direct gomobile/cgo path cannot disagree
+// about what an out-of-range or absent config means
 func (self *DeviceLocalRpc) StartProbeSuite(probeSuiteConfig *DeviceRemoteProbeSuiteConfigRpc, started *bool) error {
-	*started = self.deviceLocal.StartProbeSuite(probeSuiteConfig.configOrDefault())
+	*started = self.deviceLocal.StartProbeSuite(probeSuiteConfig.Config)
 	return nil
 }
 

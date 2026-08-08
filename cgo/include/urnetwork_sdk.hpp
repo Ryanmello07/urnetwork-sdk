@@ -10036,6 +10036,7 @@ public:
 	void resetReliabilitySettings() const;
 	void setReliabilitySettings(const std::optional<ReliabilitySettings>& reliability_settings) const;
 	void setRpcServer(const std::string& client_pem, const std::string& server_cert_pem, const std::string& host_port) const;
+	void shuffleExits() const;
 	void simulateNetworkChange() const;
 	bool stallExit(const std::string& exit_client_id, bool stalled) const;
 	bool startProbeSuite(const std::optional<ProbeSuiteConfig>& config) const;
@@ -16839,6 +16840,9 @@ inline void DeviceRemote::setRpcServer(const std::string& client_pem, const std:
 	if (!ok) {
 		throw Error("urnet: urnet_device_remote_set_rpc_server failed");
 	}
+}
+inline void DeviceRemote::shuffleExits() const {
+	urnet_device_remote_shuffle_exits(handle());
 }
 inline void DeviceRemote::simulateNetworkChange() const {
 	urnet_device_remote_simulate_network_change(handle());

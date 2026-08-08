@@ -211,6 +211,8 @@ func TestAdvancedModeDegradedWithoutMultiClient(t *testing.T) {
 	connect.AssertEqual(t, deviceRemote.StartProbeSuite(GetDefaultProbeSuiteConfig()), false)
 	connect.AssertEqual(t, deviceRemote.ProbeSuiteRunning(), false)
 	deviceRemote.StopProbeSuite()
+	// safe no-ops rather than panics with no service
+	deviceRemote.ShuffleExits()
 
 	// a malformed id is rejected client side, with the same values
 	connect.AssertEqual(t, deviceRemote.DropExit("not-an-id"), false)
@@ -333,11 +335,11 @@ func TestDeviceRemoteAdvancedModeActionsReachTheLocal(t *testing.T) {
 		return actionLogger.contains("probe_all")
 	})
 
-	// Shuffle is the whole-window action; there is deliberately no separate
-	// ShuffleExits bridge, since DeviceLocal.ShuffleExits and
-	// DeviceLocal.Shuffle both end at RemoteUserNatMultiClient.Shuffle
-	deviceRemote.Shuffle()
-	testingReliabilityWaitFor(t, "shuffle reached the local", func() bool {
+	// ShuffleExits is the whole-window action. It reaches the same connect
+	// call as Shuffle; the two differ only in what a FAILED call does, which
+	// TestDeviceRemoteAdvancedModeActionsAreNeverQueued pins.
+	deviceRemote.ShuffleExits()
+	testingReliabilityWaitFor(t, "shuffle_exits reached the local", func() bool {
 		return actionLogger.contains("shuffle")
 	})
 
@@ -351,6 +353,126 @@ func TestDeviceRemoteAdvancedModeActionsReachTheLocal(t *testing.T) {
 	}
 	connect.AssertEqual(t, actionLogger.count("drop_exit"), dropCount)
 	connect.AssertEqual(t, actionLogger.count("stall_exit"), stallCount)
+}
+
+// TestDeviceRemoteAdvancedModeActionsAreNeverQueued is the negative of the
+// sync-state property every advanced-mode action's doc comment promises.
+//
+// The reliability SETTINGS bridge deliberately queues: a value set while the
+// rpc is down is re-applied on the next sync, because the user is describing
+// how the device should behave. An ACTION is the opposite. If a fault
+// injection pressed against a dead service were queued, the reconnect --
+// which can be minutes later, and is not something the user sees -- would
+// drop an exit, stall an exit, or replace every exit under someone who has
+// moved on. `DeviceRemote.Shuffle` has exactly that shape (it sets
+// `state.Shuffle` on failure and the sync replays it), which is why
+// `ShuffleExits` exists alongside it rather than redirecting to it.
+//
+// The positive property has enforcing tests; without this one, nothing stops
+// the next person adding a `self.state.X.Set(...)` to one of these seven and
+// every test still passing.
+func TestDeviceRemoteAdvancedModeActionsAreNeverQueued(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	networkSpace, byJwt, err := testing_newNetworkSpace(ctx)
+	connect.AssertEqual(t, err, nil)
+
+	clientId := connect.NewId()
+	instanceId := NewId()
+
+	// the remote comes up with NO local: every action below is pressed
+	// against a dead service
+	deviceRemote, err := newDeviceRemoteWithOverrides(
+		networkSpace,
+		byJwt,
+		instanceId,
+		defaultDeviceRpcSettings(),
+		clientId,
+		testing_deviceRpcDialerDefault(),
+	)
+	connect.AssertEqual(t, err, nil)
+	defer deviceRemote.Close()
+
+	exitClientId := NewId()
+	connect.AssertEqual(t, deviceRemote.DropExit(exitClientId.IdStr), false)
+	connect.AssertEqual(t, deviceRemote.StallExit(exitClientId.IdStr, true), false)
+	connect.AssertEqual(t, deviceRemote.MigrateExit(exitClientId.IdStr), int32(-1))
+	connect.AssertEqual(t, deviceRemote.ProbeAllExits(), int32(0))
+	connect.AssertEqual(t, deviceRemote.StartProbeSuite(GetDefaultProbeSuiteConfig()), false)
+	deviceRemote.StopProbeSuite()
+	deviceRemote.ShuffleExits()
+
+	// nothing was recorded to replay. Shuffle is the counter-example and is
+	// checked explicitly: it MUST still queue, because its existing callers
+	// depend on that, and this test would otherwise pass just as well if
+	// ShuffleExits had been redirected to it.
+	func() {
+		deviceRemote.stateLock.Lock()
+		defer deviceRemote.stateLock.Unlock()
+		connect.AssertEqual(t, deviceRemote.state.Shuffle.IsSet, false)
+	}()
+	deviceRemote.Shuffle()
+	func() {
+		deviceRemote.stateLock.Lock()
+		defer deviceRemote.stateLock.Unlock()
+		connect.AssertEqual(t, deviceRemote.state.Shuffle.IsSet, true)
+		// and clear it, so the sync below cannot replay a shuffle this test
+		// asked for on purpose
+		deviceRemote.state.Shuffle.Unset()
+	}()
+
+	// now bring the service up and let the remote sync against it. A queued
+	// action would fire HERE, which is the moment the user is not watching.
+	actionLogger := &testingReliabilityActionLogger{}
+	settings := testDeviceLocalSettingsRpc()
+	settings.DisableLogging = false
+	settings.ClientSettings.Log = actionLogger
+	settings.AllowProvider = false
+	settings.GeneratorFunc = func(specs []*connect.ProviderSpec) connect.MultiClientGenerator {
+		return &rpcLeakTestGenerator{}
+	}
+	deviceLocal, err := newDeviceLocalWithOverrides(
+		networkSpace,
+		byJwt,
+		"",
+		"",
+		"",
+		instanceId,
+		settings,
+		clientId,
+	)
+	connect.AssertEqual(t, err, nil)
+	defer deviceLocal.Close()
+
+	upgradeMuxSettings := connect.DefaultUpgradeMuxSettings()
+	upgradeMuxSettings.Dns = nil
+	deviceLocal.SetUpgradeMuxSettings(upgradeMuxSettings)
+
+	testingForceDeviceRpcResync(deviceRemote)
+	testingReliabilityWaitFor(t, "the remote syncs to the local", func() bool {
+		return deviceRemote.GetRemoteConnected()
+	})
+	// the multi client the actions would act on, built AFTER the sync -- the
+	// ordering that catches a replay landing on a device that had nothing to
+	// act on at sync time
+	deviceLocal.SetConnectLocation(testingReliabilityConnectLocation("never queued"))
+	testingReliabilityWaitFor(t, "the local has a multi client", func() bool {
+		return deviceLocal.GetReliabilitySettings() != nil
+	})
+
+	// a live action here proves the log is actually wired: without it, an
+	// empty action log would "pass" this test for the wrong reason
+	deviceRemote.ProbeAllExits()
+	testingReliabilityWaitFor(t, "the action log is live", func() bool {
+		return actionLogger.contains("probe_all")
+	})
+
+	// and none of the queued-action shapes ever arrived
+	connect.AssertEqual(t, actionLogger.count("drop_exit"), 0)
+	connect.AssertEqual(t, actionLogger.count("stall_exit"), 0)
+	connect.AssertEqual(t, actionLogger.count("migrate_exit"), 0)
+	connect.AssertEqual(t, actionLogger.count("shuffle"), 0)
 }
 
 // TestDeviceRemoteProbeSuiteBridge runs the probe suite as a suite across the
@@ -447,39 +569,124 @@ func TestDeviceRemoteProbeSuiteBridge(t *testing.T) {
 	}
 
 	// The nil config ("use the sdk default") is deliberately NOT exercised
-	// live here: the default suite probes real dns and http targets, and a
-	// test that reaches the network to prove an argument default is a worse
-	// trade than the two tests that already pin it --
-	// TestRpcGobProbeSuiteConfigNilCrossesWire (nil survives the wire as nil,
-	// rather than decoding as a zero config that would run nothing) and
-	// TestDeviceLocalRpcStartProbeSuiteDefaultsNilConfig (the handler
-	// substitutes the default rather than passing nil to a DeviceLocal that
-	// would dereference it).
+	// through the rpc here: the default suite names real probe targets, and
+	// the nil is resolved on the DeviceLocal side rather than on this one.
+	// TestNormalizeProbeSuiteConfig and TestDeviceLocalStartProbeSuiteNilConfig
+	// cover that seam directly, including the goroutine that used to deref it.
 }
 
-// TestDeviceLocalRpcStartProbeSuiteDefaultsNilConfig pins the handler-side
-// half of the nil-config contract without starting a run.
+// TestNormalizeProbeSuiteConfig covers the seam every probe config passes
+// through, whichever process composed it.
 //
-// `DeviceLocal.StartProbeSuite` dereferences its config in `buildProbeJobs`,
-// so a nil arriving from the wire would panic inside the service process --
-// the caller would see a dead rpc, not a bad argument. The handler
-// substitutes the sdk default instead.
-func TestDeviceLocalRpcStartProbeSuiteDefaultsNilConfig(t *testing.T) {
-	// the substitution the handler actually performs
-	config := (&DeviceRemoteProbeSuiteConfigRpc{Config: nil}).configOrDefault()
-	connect.AssertNotEqual(t, config, nil)
-	connect.AssertEqual(t, config, GetDefaultProbeSuiteConfig())
+// A nil config reaches `buildProbeJobs` on a SPAWNED GOROUTINE, so the nil
+// deref it used to cause was not catchable by the cgo boundary's recover: an
+// unrecovered goroutine panic aborts the process, and on Windows that process
+// is the privileged service. The bounds matter for the same reason -- the
+// config crosses a process boundary, so `Concurrency: 1<<30` is a billion
+// goroutines asked for by the unprivileged side.
+func TestNormalizeProbeSuiteConfig(t *testing.T) {
+	// nil is the default, never a zero config (which would run nothing)
+	normalized := normalizeProbeSuiteConfig(nil, nil)
+	connect.AssertNotEqual(t, normalized, nil)
+	connect.AssertEqual(t, normalized, GetDefaultProbeSuiteConfig())
 
-	// a supplied config is passed through untouched
-	supplied := &ProbeSuiteConfig{Concurrency: 7, TimeoutMillis: 1234, RepeatCount: 2}
-	connect.AssertEqual(t, (&DeviceRemoteProbeSuiteConfigRpc{Config: supplied}).configOrDefault(), supplied)
+	// an in-range config is unchanged
+	sane := &ProbeSuiteConfig{
+		Concurrency:       4,
+		TimeoutMillis:     15_000,
+		RepeatCount:       2,
+		IncludeDns:        true,
+		DownloadByteCount: 1 << 20,
+	}
+	connect.AssertEqual(t, normalizeProbeSuiteConfig(sane, nil), sane)
 
-	// and the decoded-from-wire nil path, end to end
-	wired := gobRoundTrip(t, &DeviceRemoteProbeSuiteConfigRpc{Config: nil})
-	connect.AssertEqual(t, wired.configOrDefault(), GetDefaultProbeSuiteConfig())
+	// the hostile values, each clamped to its ceiling
+	hostile := &ProbeSuiteConfig{
+		Concurrency:       1 << 30,
+		RepeatCount:       1 << 30,
+		TimeoutMillis:     1 << 40,
+		DownloadByteCount: 1 << 40,
+	}
+	bounded := normalizeProbeSuiteConfig(hostile, nil)
+	connect.AssertEqual(t, bounded.Concurrency, int32(probeMaxConcurrency))
+	connect.AssertEqual(t, bounded.RepeatCount, int32(probeMaxRepeatCount))
+	connect.AssertEqual(t, bounded.TimeoutMillis, int64(probeMaxTimeoutMillis))
+	connect.AssertEqual(t, bounded.DownloadByteCount, int64(probeMaxDownloadByteCount))
+	// the caller's struct is not mutated -- a run in flight cannot be
+	// retuned by a caller that keeps hold of the config it passed
+	connect.AssertEqual(t, hostile.Concurrency, int32(1<<30))
 
-	// and the default is a config that would actually probe something -- a
-	// zero config (what a lost nil would decode to) builds no jobs at all
-	connect.AssertEqual(t, 0 < len(buildProbeJobs(config)), true)
+	// a zero timeout is "no deadline", which is how a stalled probe becomes a
+	// goroutine that never returns; it gets a floor
+	connect.AssertEqual(t, normalizeProbeSuiteConfig(&ProbeSuiteConfig{}, nil).TimeoutMillis, int64(probeMinTimeoutMillis))
+
+	// but a non-positive DownloadByteCount is a real choice ("no download
+	// probe"), so it keeps no floor
+	connect.AssertEqual(t, normalizeProbeSuiteConfig(&ProbeSuiteConfig{}, nil).DownloadByteCount, int64(0))
+	connect.AssertEqual(t, len(buildProbeJobs(normalizeProbeSuiteConfig(&ProbeSuiteConfig{IncludeDownload: true}, nil))), 0)
+
+	// the normalized default builds real jobs, where a zero config builds
+	// none -- the difference a lost nil would have erased
+	connect.AssertEqual(t, 0 < len(buildProbeJobs(normalizeProbeSuiteConfig(nil, nil))), true)
 	connect.AssertEqual(t, len(buildProbeJobs(&ProbeSuiteConfig{})), 0)
+
+	// the wire's nil survives to this seam as nil, since the rpc handler
+	// passes it through rather than resolving it
+	connect.AssertEqual(t, gobRoundTrip(t, &DeviceRemoteProbeSuiteConfigRpc{Config: nil}).Config, nil)
+}
+
+// TestDeviceLocalStartProbeSuiteNilConfig runs the real crash path: a nil
+// config through `DeviceLocal.StartProbeSuite` and into the goroutine that
+// used to deref it.
+//
+// If the guard regresses, the panic is unrecovered on a spawned goroutine and
+// takes the test binary down rather than failing an assertion -- which is
+// precisely what it would do to the privileged service. Reachable with no rpc
+// in between via `urnet_device_local_start_probe_suite(handle, NULL)` and
+// gomobile's `startProbeSuite(null)`.
+func TestDeviceLocalStartProbeSuiteNilConfig(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	networkSpace, byJwt, err := testing_newNetworkSpace(ctx)
+	connect.AssertEqual(t, err, nil)
+
+	settings := DefaultDeviceLocalSettings()
+	settings.DisableLogging = true
+	settings.AllowProvider = false
+	deviceLocal, err := newDeviceLocalWithOverrides(
+		networkSpace,
+		byJwt,
+		"",
+		"",
+		"",
+		NewId(),
+		settings,
+		connect.NewId(),
+	)
+	connect.AssertEqual(t, err, nil)
+	defer deviceLocal.Close()
+
+	// the nil the cgo export and gomobile both let through
+	connect.AssertEqual(t, deviceLocal.StartProbeSuite(nil), true)
+	// stopped immediately: the default config names real probe targets, and
+	// this test is about surviving the nil rather than measuring anything.
+	// The probes ride the suite's own tun into a device with no tunnel, so
+	// they reach no host network either way.
+	deviceLocal.StopProbeSuite()
+	testingReliabilityWaitFor(t, "the nil-config suite stops", func() bool {
+		return !deviceLocal.ProbeSuiteRunning()
+	})
+
+	// and the hostile config the ui process could compose, which must be
+	// bounded rather than spawning a billion goroutines in the service
+	connect.AssertEqual(t, deviceLocal.StartProbeSuite(&ProbeSuiteConfig{
+		Concurrency:   1 << 30,
+		RepeatCount:   1 << 30,
+		TimeoutMillis: 1 << 40,
+	}), true)
+	deviceLocal.StopProbeSuite()
+	testingReliabilityWaitFor(t, "the clamped suite stops", func() bool {
+		return !deviceLocal.ProbeSuiteRunning()
+	})
 }

@@ -360,6 +360,7 @@ EXPORTS
 	urnet_device_remote_reset_reliability_settings
 	urnet_device_remote_set_reliability_settings
 	urnet_device_remote_set_rpc_server
+	urnet_device_remote_shuffle_exits
 	urnet_device_remote_simulate_network_change
 	urnet_device_remote_stall_exit
 	urnet_device_remote_start_probe_suite

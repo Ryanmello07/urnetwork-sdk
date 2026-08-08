@@ -7601,6 +7601,16 @@ func urnet_device_remote_set_rpc_server(self C.uint64_t, clientPem *C.char, serv
 	return C.bool(true)
 }
 
+//export urnet_device_remote_shuffle_exits
+func urnet_device_remote_shuffle_exits(self C.uint64_t) {
+	defer cgoGuard("urnet_device_remote_shuffle_exits")
+	self_, ok := resolveHandle[*sdk.DeviceRemote](uint64(self), "urnet_device_remote_shuffle_exits")
+	if !ok {
+		return
+	}
+	self_.ShuffleExits()
+}
+
 //export urnet_device_remote_simulate_network_change
 func urnet_device_remote_simulate_network_change(self C.uint64_t) {
 	defer cgoGuard("urnet_device_remote_simulate_network_change")
