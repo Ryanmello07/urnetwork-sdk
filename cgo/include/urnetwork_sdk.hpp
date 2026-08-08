@@ -81,7 +81,20 @@ inline std::optional<std::string> takeStringOpt(char* s) {
 template <typename T>
 inline T parseJson(const char* s) {
 	try {
-		return nlohmann::json::parse(s).template get<T>();
+		nlohmann::json j = nlohmann::json::parse(s);
+		/* Go marshals a nil slice as the document null. A container asked
+		   to convert from null should be empty, not an exception:
+		   get<std::vector<T>>() throws type_error.302, out of an ordinary
+		   non-throwing-looking getter. Structs are already null-tolerant
+		   (their generated from_json returns early on a non-object), so this
+		   closes the last hole. The go side no longer emits null for an
+		   empty list, but this stays as the boundary guard: it costs one
+		   branch and it covers every future producer of a null document,
+		   not just the one that was fixed. */
+		if (j.is_null()) {
+			return T{};
+		}
+		return j.template get<T>();
 	} catch (const std::exception& e) {
 		throw Error(std::string("urnet: json: ") + e.what());
 	}
@@ -9992,12 +10005,14 @@ public:
 	void closePeerViewController(const PeerViewController& vc) const;
 	void closePostQuantumIdentityViewController(const PostQuantumIdentityViewController& vc) const;
 	void closeViewController(ViewController vc) const;
+	bool dropExit(const std::string& exit_client_id) const;
 	std::optional<DestinationExitList> getDestinationExits() const;
 	std::optional<ExitList> getExits() const;
+	std::optional<ProbeResultList> getProbeResults() const;
 	std::optional<ReliabilityMetrics> getReliabilityMetrics() const;
 	std::optional<ReliabilitySettings> getReliabilitySettings() const;
 	bool getRemoteConnected() const;
-	void migrateExit(const std::string& exit_client_id) const;
+	int64_t migrateExit(const std::string& exit_client_id) const;
 	AccountPreferencesViewController openAccountPreferencesViewController() const;
 	AccountViewController openAccountViewController() const;
 	BlockActionViewController openBlockActionViewController() const;
@@ -10015,12 +10030,17 @@ public:
 	ContractDetailsViewController openProviderContractDetailsViewController() const;
 	ReferralCodeViewController openReferralCodeViewController() const;
 	WalletViewController openWalletViewController() const;
-	void probeAllExits() const;
+	int64_t probeAllExits() const;
+	bool probeSuiteRunning() const;
 	void resetReliabilityMetrics() const;
 	void resetReliabilitySettings() const;
 	void setReliabilitySettings(const std::optional<ReliabilitySettings>& reliability_settings) const;
 	void setRpcServer(const std::string& client_pem, const std::string& server_cert_pem, const std::string& host_port) const;
+	void shuffleExits() const;
 	void simulateNetworkChange() const;
+	bool stallExit(const std::string& exit_client_id, bool stalled) const;
+	bool startProbeSuite(const std::optional<ProbeSuiteConfig>& config) const;
+	void stopProbeSuite() const;
 	void sync() const;
 	/* the raw public identity key (post quantum identity) */
 	std::vector<uint8_t> getPublicIdentityKey() const;
@@ -16668,6 +16688,10 @@ inline void DeviceRemote::closeViewController(ViewController vc) const {
 	}
 	urnet_device_remote_close_view_controller(handle(), vc_fn ? &detail::retained_view_controller_close : nullptr, vc_fn ? &detail::retained_view_controller_start : nullptr, vc_fn ? &detail::retained_view_controller_stop : nullptr, vc_fn.get());
 }
+inline bool DeviceRemote::dropExit(const std::string& exit_client_id) const {
+	bool r = urnet_device_remote_drop_exit(handle(), exit_client_id.c_str());
+	return r;
+}
 inline std::optional<DestinationExitList> DeviceRemote::getDestinationExits() const {
 	char* r_c = urnet_device_remote_get_destination_exits(handle());
 	auto r_s = detail::takeStringOpt(r_c);
@@ -16683,6 +16707,14 @@ inline std::optional<ExitList> DeviceRemote::getExits() const {
 		return std::nullopt;
 	}
 	return detail::parseJson<ExitList>(r_s->c_str());
+}
+inline std::optional<ProbeResultList> DeviceRemote::getProbeResults() const {
+	char* r_c = urnet_device_remote_get_probe_results(handle());
+	auto r_s = detail::takeStringOpt(r_c);
+	if (!r_s) {
+		return std::nullopt;
+	}
+	return detail::parseJson<ProbeResultList>(r_s->c_str());
 }
 inline std::optional<ReliabilityMetrics> DeviceRemote::getReliabilityMetrics() const {
 	char* r_c = urnet_device_remote_get_reliability_metrics(handle());
@@ -16704,8 +16736,9 @@ inline bool DeviceRemote::getRemoteConnected() const {
 	bool r = urnet_device_remote_get_remote_connected(handle());
 	return r;
 }
-inline void DeviceRemote::migrateExit(const std::string& exit_client_id) const {
-	urnet_device_remote_migrate_exit(handle(), exit_client_id.c_str());
+inline int64_t DeviceRemote::migrateExit(const std::string& exit_client_id) const {
+	int64_t r = urnet_device_remote_migrate_exit(handle(), exit_client_id.c_str());
+	return r;
 }
 inline AccountPreferencesViewController DeviceRemote::openAccountPreferencesViewController() const {
 	AccountPreferencesViewController r(urnet_device_remote_open_account_preferences_view_controller(handle()));
@@ -16775,8 +16808,13 @@ inline WalletViewController DeviceRemote::openWalletViewController() const {
 	WalletViewController r(urnet_device_remote_open_wallet_view_controller(handle()));
 	return r;
 }
-inline void DeviceRemote::probeAllExits() const {
-	urnet_device_remote_probe_all_exits(handle());
+inline int64_t DeviceRemote::probeAllExits() const {
+	int64_t r = urnet_device_remote_probe_all_exits(handle());
+	return r;
+}
+inline bool DeviceRemote::probeSuiteRunning() const {
+	bool r = urnet_device_remote_probe_suite_running(handle());
+	return r;
 }
 inline void DeviceRemote::resetReliabilityMetrics() const {
 	urnet_device_remote_reset_reliability_metrics(handle());
@@ -16803,8 +16841,28 @@ inline void DeviceRemote::setRpcServer(const std::string& client_pem, const std:
 		throw Error("urnet: urnet_device_remote_set_rpc_server failed");
 	}
 }
+inline void DeviceRemote::shuffleExits() const {
+	urnet_device_remote_shuffle_exits(handle());
+}
 inline void DeviceRemote::simulateNetworkChange() const {
 	urnet_device_remote_simulate_network_change(handle());
+}
+inline bool DeviceRemote::stallExit(const std::string& exit_client_id, bool stalled) const {
+	bool r = urnet_device_remote_stall_exit(handle(), exit_client_id.c_str(), stalled);
+	return r;
+}
+inline bool DeviceRemote::startProbeSuite(const std::optional<ProbeSuiteConfig>& config) const {
+	std::string config_json;
+	const char* config_c = nullptr;
+	if (config) {
+		config_json = nlohmann::json(*config).dump();
+		config_c = config_json.c_str();
+	}
+	bool r = urnet_device_remote_start_probe_suite(handle(), config_c);
+	return r;
+}
+inline void DeviceRemote::stopProbeSuite() const {
+	urnet_device_remote_stop_probe_suite(handle());
 }
 inline void DeviceRemote::sync() const {
 	urnet_device_remote_sync(handle());
