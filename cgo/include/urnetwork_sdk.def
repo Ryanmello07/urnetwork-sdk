@@ -170,6 +170,7 @@ EXPORTS
 	urnet_device_add_can_show_rating_dialog_change_listener
 	urnet_device_add_connect_change_listener
 	urnet_device_add_connect_location_change_listener
+	urnet_device_add_connected_provider_location_change_listener
 	urnet_device_add_contract_status_change_listener
 	urnet_device_add_default_location_change_listener
 	urnet_device_add_dns_resolver_settings_change_listener
@@ -212,6 +213,7 @@ EXPORTS
 	urnet_device_get_client_id
 	urnet_device_get_connect_enabled
 	urnet_device_get_connect_location
+	urnet_device_get_connected_provider_locations
 	urnet_device_get_contract_status
 	urnet_device_get_default_location
 	urnet_device_get_dns_resolver_settings
@@ -336,6 +338,7 @@ EXPORTS
 	urnet_device_remote_get_reliability_metrics
 	urnet_device_remote_get_reliability_settings
 	urnet_device_remote_get_remote_connected
+	urnet_device_remote_get_sync_error
 	urnet_device_remote_migrate_exit
 	urnet_device_remote_open_account_preferences_view_controller
 	urnet_device_remote_open_account_view_controller
@@ -367,6 +370,7 @@ EXPORTS
 	urnet_device_remote_stop_probe_suite
 	urnet_device_remote_sync
 	urnet_device_remove_block_action_override
+	urnet_device_remove_connected_provider
 	urnet_device_remove_destination
 	urnet_device_rpc_key_material_get_client_cert_pem
 	urnet_device_rpc_key_material_get_client_pem
