@@ -97,8 +97,13 @@ func (self *deviceTokenManager) run() {
 			first = false
 			refreshTimeout = 0
 		} else if expirationTime.IsZero() {
-			// jwt has no expiration, refresh at an arbitrary interval of 7 days
-			refreshTimeout = 7 * 27 * time.Hour
+			// jwt has no expiration, refresh at an arbitrary interval of 7 days.
+			// this was `7 * 27 * time.Hour` — 189h ≈ 7.9 days, a fat-fingered 24 —
+			// which surfaced while auditing an observed "[dtm]waiting 1382400.53s"
+			// (exactly 16 days) in a beta session. That log line itself traces to
+			// the exp branch below (30-day jwt minus the 14-day lead, by design),
+			// but the audit caught this constant not matching its own comment.
+			refreshTimeout = 7 * 24 * time.Hour
 		} else {
 			// jwts currently last 30 days on the server, so start attempting to refresh 14 days before expiration
 			refreshTime := expirationTime.Add(-14 * 24 * time.Hour)

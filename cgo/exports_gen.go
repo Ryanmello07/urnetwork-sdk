@@ -6270,9 +6270,13 @@ func urnet_device_local_close_block_action_view_controller(self C.uint64_t, vc C
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.BlockActionViewController](uint64(vc), "urnet_device_local_close_block_action_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.BlockActionViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.BlockActionViewController](uint64(vc), "urnet_device_local_close_block_action_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.CloseBlockActionViewController(vc_)
 }
@@ -6284,9 +6288,13 @@ func urnet_device_local_close_connect_view_controller(self C.uint64_t, vc C.uint
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.ConnectViewController](uint64(vc), "urnet_device_local_close_connect_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.ConnectViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.ConnectViewController](uint64(vc), "urnet_device_local_close_connect_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.CloseConnectViewController(vc_)
 }
@@ -6298,9 +6306,13 @@ func urnet_device_local_close_contract_details_view_controller(self C.uint64_t, 
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.ContractDetailsViewController](uint64(vc), "urnet_device_local_close_contract_details_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.ContractDetailsViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.ContractDetailsViewController](uint64(vc), "urnet_device_local_close_contract_details_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.CloseContractDetailsViewController(vc_)
 }
@@ -6312,9 +6324,13 @@ func urnet_device_local_close_contract_view_controller(self C.uint64_t, vc C.uin
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.ContractViewController](uint64(vc), "urnet_device_local_close_contract_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.ContractViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.ContractViewController](uint64(vc), "urnet_device_local_close_contract_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.CloseContractViewController(vc_)
 }
@@ -6326,9 +6342,13 @@ func urnet_device_local_close_devices_view_controller(self C.uint64_t, vc C.uint
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.DevicesViewController](uint64(vc), "urnet_device_local_close_devices_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.DevicesViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.DevicesViewController](uint64(vc), "urnet_device_local_close_devices_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.CloseDevicesViewController(vc_)
 }
@@ -6340,9 +6360,13 @@ func urnet_device_local_close_locations_view_controller(self C.uint64_t, vc C.ui
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.LocationsViewController](uint64(vc), "urnet_device_local_close_locations_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.LocationsViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.LocationsViewController](uint64(vc), "urnet_device_local_close_locations_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.CloseLocationsViewController(vc_)
 }
@@ -6354,9 +6378,13 @@ func urnet_device_local_close_peer_view_controller(self C.uint64_t, vc C.uint64_
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.PeerViewController](uint64(vc), "urnet_device_local_close_peer_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.PeerViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.PeerViewController](uint64(vc), "urnet_device_local_close_peer_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.ClosePeerViewController(vc_)
 }
@@ -6368,9 +6396,13 @@ func urnet_device_local_close_post_quantum_identity_view_controller(self C.uint6
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.PostQuantumIdentityViewController](uint64(vc), "urnet_device_local_close_post_quantum_identity_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.PostQuantumIdentityViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.PostQuantumIdentityViewController](uint64(vc), "urnet_device_local_close_post_quantum_identity_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.ClosePostQuantumIdentityViewController(vc_)
 }
@@ -6890,9 +6922,13 @@ func urnet_device_local_set_key_material(self C.uint64_t, keyMaterial C.uint64_t
 	if !ok {
 		return
 	}
-	keyMaterial_, ok := resolveHandle[*sdk.DeviceLocalKeyMaterial](uint64(keyMaterial), "urnet_device_local_set_key_material")
-	if !ok {
-		return
+	var keyMaterial_ *sdk.DeviceLocalKeyMaterial
+	if keyMaterial != 0 {
+		var ok bool
+		keyMaterial_, ok = resolveHandle[*sdk.DeviceLocalKeyMaterial](uint64(keyMaterial), "urnet_device_local_set_key_material")
+		if !ok {
+			return
+		}
 	}
 	self_.SetKeyMaterial(keyMaterial_)
 }
@@ -7116,9 +7152,13 @@ func urnet_device_remote_close_block_action_view_controller(self C.uint64_t, vc 
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.BlockActionViewController](uint64(vc), "urnet_device_remote_close_block_action_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.BlockActionViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.BlockActionViewController](uint64(vc), "urnet_device_remote_close_block_action_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.CloseBlockActionViewController(vc_)
 }
@@ -7130,9 +7170,13 @@ func urnet_device_remote_close_connect_view_controller(self C.uint64_t, vc C.uin
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.ConnectViewController](uint64(vc), "urnet_device_remote_close_connect_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.ConnectViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.ConnectViewController](uint64(vc), "urnet_device_remote_close_connect_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.CloseConnectViewController(vc_)
 }
@@ -7144,9 +7188,13 @@ func urnet_device_remote_close_contract_details_view_controller(self C.uint64_t,
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.ContractDetailsViewController](uint64(vc), "urnet_device_remote_close_contract_details_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.ContractDetailsViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.ContractDetailsViewController](uint64(vc), "urnet_device_remote_close_contract_details_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.CloseContractDetailsViewController(vc_)
 }
@@ -7158,9 +7206,13 @@ func urnet_device_remote_close_contract_view_controller(self C.uint64_t, vc C.ui
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.ContractViewController](uint64(vc), "urnet_device_remote_close_contract_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.ContractViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.ContractViewController](uint64(vc), "urnet_device_remote_close_contract_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.CloseContractViewController(vc_)
 }
@@ -7172,9 +7224,13 @@ func urnet_device_remote_close_devices_view_controller(self C.uint64_t, vc C.uin
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.DevicesViewController](uint64(vc), "urnet_device_remote_close_devices_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.DevicesViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.DevicesViewController](uint64(vc), "urnet_device_remote_close_devices_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.CloseDevicesViewController(vc_)
 }
@@ -7186,9 +7242,13 @@ func urnet_device_remote_close_locations_view_controller(self C.uint64_t, vc C.u
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.LocationsViewController](uint64(vc), "urnet_device_remote_close_locations_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.LocationsViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.LocationsViewController](uint64(vc), "urnet_device_remote_close_locations_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.CloseLocationsViewController(vc_)
 }
@@ -7200,9 +7260,13 @@ func urnet_device_remote_close_peer_view_controller(self C.uint64_t, vc C.uint64
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.PeerViewController](uint64(vc), "urnet_device_remote_close_peer_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.PeerViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.PeerViewController](uint64(vc), "urnet_device_remote_close_peer_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.ClosePeerViewController(vc_)
 }
@@ -7214,9 +7278,13 @@ func urnet_device_remote_close_post_quantum_identity_view_controller(self C.uint
 	if !ok {
 		return
 	}
-	vc_, ok := resolveHandle[*sdk.PostQuantumIdentityViewController](uint64(vc), "urnet_device_remote_close_post_quantum_identity_view_controller")
-	if !ok {
-		return
+	var vc_ *sdk.PostQuantumIdentityViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.PostQuantumIdentityViewController](uint64(vc), "urnet_device_remote_close_post_quantum_identity_view_controller")
+		if !ok {
+			return
+		}
 	}
 	self_.ClosePostQuantumIdentityViewController(vc_)
 }
@@ -8621,9 +8689,13 @@ func urnet_local_state_set_device_local_key_material(self C.uint64_t, keyMateria
 	if !ok {
 		return C.bool(false)
 	}
-	keyMaterial_, ok := resolveHandle[*sdk.DeviceLocalKeyMaterial](uint64(keyMaterial), "urnet_local_state_set_device_local_key_material")
-	if !ok {
-		return C.bool(false)
+	var keyMaterial_ *sdk.DeviceLocalKeyMaterial
+	if keyMaterial != 0 {
+		var ok bool
+		keyMaterial_, ok = resolveHandle[*sdk.DeviceLocalKeyMaterial](uint64(keyMaterial), "urnet_local_state_set_device_local_key_material")
+		if !ok {
+			return C.bool(false)
+		}
 	}
 	err := self_.SetDeviceLocalKeyMaterial(keyMaterial_)
 	if err != nil {
@@ -9369,9 +9441,13 @@ func urnet_network_space_manager_remove_network_space(self C.uint64_t, networkSp
 	if !ok {
 		return C.bool(false)
 	}
-	networkSpace_, ok := resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_network_space_manager_remove_network_space")
-	if !ok {
-		return C.bool(false)
+	var networkSpace_ *sdk.NetworkSpace
+	if networkSpace != 0 {
+		var ok bool
+		networkSpace_, ok = resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_network_space_manager_remove_network_space")
+		if !ok {
+			return C.bool(false)
+		}
 	}
 	r0 := self_.RemoveNetworkSpace(networkSpace_)
 	return C.bool(r0)
@@ -9384,9 +9460,13 @@ func urnet_network_space_manager_set_active_network_space(self C.uint64_t, netwo
 	if !ok {
 		return
 	}
-	networkSpace_, ok := resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_network_space_manager_set_active_network_space")
-	if !ok {
-		return
+	var networkSpace_ *sdk.NetworkSpace
+	if networkSpace != 0 {
+		var ok bool
+		networkSpace_, ok = resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_network_space_manager_set_active_network_space")
+		if !ok {
+			return
+		}
 	}
 	self_.SetActiveNetworkSpace(networkSpace_)
 }
@@ -9596,9 +9676,13 @@ func urnet_new_async_local_state(localStorageHome *C.char) C.uint64_t {
 //export urnet_new_device_local
 func urnet_new_device_local(networkSpace C.uint64_t, byJwt *C.char, deviceDescription *C.char, deviceSpec *C.char, appVersion *C.char, instanceId *C.char, settings *C.char, outError **C.char) C.uint64_t {
 	defer cgoGuard("urnet_new_device_local")
-	networkSpace_, ok := resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_new_device_local")
-	if !ok {
-		return 0
+	var networkSpace_ *sdk.NetworkSpace
+	if networkSpace != 0 {
+		var ok bool
+		networkSpace_, ok = resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_new_device_local")
+		if !ok {
+			return 0
+		}
 	}
 	var settings_ *sdk.DeviceLocalSettings
 	if settings != nil {
@@ -9631,9 +9715,13 @@ func urnet_new_device_local_key_material(clientKeySeed *C.uint8_t, clientKeySeed
 //export urnet_new_device_local_with_defaults
 func urnet_new_device_local_with_defaults(networkSpace C.uint64_t, byJwt *C.char, deviceDescription *C.char, deviceSpec *C.char, appVersion *C.char, instanceId *C.char, enableRpc C.bool, outError **C.char) C.uint64_t {
 	defer cgoGuard("urnet_new_device_local_with_defaults")
-	networkSpace_, ok := resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_new_device_local_with_defaults")
-	if !ok {
-		return 0
+	var networkSpace_ *sdk.NetworkSpace
+	if networkSpace != 0 {
+		var ok bool
+		networkSpace_, ok = resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_new_device_local_with_defaults")
+		if !ok {
+			return 0
+		}
 	}
 	r0, err := sdk.NewDeviceLocalWithDefaults(networkSpace_, goString(byJwt), goString(deviceDescription), goString(deviceSpec), goString(appVersion), goId(instanceId, "urnet_new_device_local_with_defaults"), bool(enableRpc))
 	if err != nil {
@@ -9649,13 +9737,21 @@ func urnet_new_device_local_with_defaults(networkSpace C.uint64_t, byJwt *C.char
 //export urnet_new_device_local_with_key_material
 func urnet_new_device_local_with_key_material(networkSpace C.uint64_t, byJwt *C.char, deviceDescription *C.char, deviceSpec *C.char, appVersion *C.char, instanceId *C.char, enableRpc C.bool, keyMaterial C.uint64_t, outError **C.char) C.uint64_t {
 	defer cgoGuard("urnet_new_device_local_with_key_material")
-	networkSpace_, ok := resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_new_device_local_with_key_material")
-	if !ok {
-		return 0
+	var networkSpace_ *sdk.NetworkSpace
+	if networkSpace != 0 {
+		var ok bool
+		networkSpace_, ok = resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_new_device_local_with_key_material")
+		if !ok {
+			return 0
+		}
 	}
-	keyMaterial_, ok := resolveHandle[*sdk.DeviceLocalKeyMaterial](uint64(keyMaterial), "urnet_new_device_local_with_key_material")
-	if !ok {
-		return 0
+	var keyMaterial_ *sdk.DeviceLocalKeyMaterial
+	if keyMaterial != 0 {
+		var ok bool
+		keyMaterial_, ok = resolveHandle[*sdk.DeviceLocalKeyMaterial](uint64(keyMaterial), "urnet_new_device_local_with_key_material")
+		if !ok {
+			return 0
+		}
 	}
 	r0, err := sdk.NewDeviceLocalWithKeyMaterial(networkSpace_, goString(byJwt), goString(deviceDescription), goString(deviceSpec), goString(appVersion), goId(instanceId, "urnet_new_device_local_with_key_material"), bool(enableRpc), keyMaterial_)
 	if err != nil {
@@ -9671,13 +9767,21 @@ func urnet_new_device_local_with_key_material(networkSpace C.uint64_t, byJwt *C.
 //export urnet_new_device_local_with_memory_target
 func urnet_new_device_local_with_memory_target(networkSpace C.uint64_t, byJwt *C.char, deviceDescription *C.char, deviceSpec *C.char, appVersion *C.char, instanceId *C.char, enableRpc C.bool, keyMaterial C.uint64_t, memoryTargetByteCount C.int64_t, outError **C.char) C.uint64_t {
 	defer cgoGuard("urnet_new_device_local_with_memory_target")
-	networkSpace_, ok := resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_new_device_local_with_memory_target")
-	if !ok {
-		return 0
+	var networkSpace_ *sdk.NetworkSpace
+	if networkSpace != 0 {
+		var ok bool
+		networkSpace_, ok = resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_new_device_local_with_memory_target")
+		if !ok {
+			return 0
+		}
 	}
-	keyMaterial_, ok := resolveHandle[*sdk.DeviceLocalKeyMaterial](uint64(keyMaterial), "urnet_new_device_local_with_memory_target")
-	if !ok {
-		return 0
+	var keyMaterial_ *sdk.DeviceLocalKeyMaterial
+	if keyMaterial != 0 {
+		var ok bool
+		keyMaterial_, ok = resolveHandle[*sdk.DeviceLocalKeyMaterial](uint64(keyMaterial), "urnet_new_device_local_with_memory_target")
+		if !ok {
+			return 0
+		}
 	}
 	r0, err := sdk.NewDeviceLocalWithMemoryTarget(networkSpace_, goString(byJwt), goString(deviceDescription), goString(deviceSpec), goString(appVersion), goId(instanceId, "urnet_new_device_local_with_memory_target"), bool(enableRpc), keyMaterial_, int64(memoryTargetByteCount))
 	if err != nil {
@@ -9693,9 +9797,13 @@ func urnet_new_device_local_with_memory_target(networkSpace C.uint64_t, byJwt *C
 //export urnet_new_device_remote_with_defaults
 func urnet_new_device_remote_with_defaults(networkSpace C.uint64_t, byJwt *C.char, instanceId *C.char, outError **C.char) C.uint64_t {
 	defer cgoGuard("urnet_new_device_remote_with_defaults")
-	networkSpace_, ok := resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_new_device_remote_with_defaults")
-	if !ok {
-		return 0
+	var networkSpace_ *sdk.NetworkSpace
+	if networkSpace != 0 {
+		var ok bool
+		networkSpace_, ok = resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_new_device_remote_with_defaults")
+		if !ok {
+			return 0
+		}
 	}
 	r0, err := sdk.NewDeviceRemoteWithDefaults(networkSpace_, goString(byJwt), goId(instanceId, "urnet_new_device_remote_with_defaults"))
 	if err != nil {
@@ -9718,9 +9826,13 @@ func urnet_new_id() *C.char {
 //export urnet_new_login_view_controller
 func urnet_new_login_view_controller(api C.uint64_t) C.uint64_t {
 	defer cgoGuard("urnet_new_login_view_controller")
-	api_, ok := resolveHandle[*sdk.Api](uint64(api), "urnet_new_login_view_controller")
-	if !ok {
-		return 0
+	var api_ *sdk.Api
+	if api != 0 {
+		var ok bool
+		api_, ok = resolveHandle[*sdk.Api](uint64(api), "urnet_new_login_view_controller")
+		if !ok {
+			return 0
+		}
 	}
 	r0 := sdk.NewLoginViewController(api_)
 	if r0 == nil {
@@ -9732,9 +9844,13 @@ func urnet_new_login_view_controller(api C.uint64_t) C.uint64_t {
 //export urnet_new_network_name_validation_view_controller
 func urnet_new_network_name_validation_view_controller(api C.uint64_t) C.uint64_t {
 	defer cgoGuard("urnet_new_network_name_validation_view_controller")
-	api_, ok := resolveHandle[*sdk.Api](uint64(api), "urnet_new_network_name_validation_view_controller")
-	if !ok {
-		return 0
+	var api_ *sdk.Api
+	if api != 0 {
+		var ok bool
+		api_, ok = resolveHandle[*sdk.Api](uint64(api), "urnet_new_network_name_validation_view_controller")
+		if !ok {
+			return 0
+		}
 	}
 	r0 := sdk.NewNetworkNameValidationViewController(api_)
 	if r0 == nil {
@@ -9776,9 +9892,13 @@ func urnet_new_network_space_manager_no_storage() C.uint64_t {
 //export urnet_new_platform_device_remote
 func urnet_new_platform_device_remote(networkSpace C.uint64_t, byJwt *C.char, proxyUrl *C.char, signedProxyId *C.char, instanceId *C.char, outError **C.char) C.uint64_t {
 	defer cgoGuard("urnet_new_platform_device_remote")
-	networkSpace_, ok := resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_new_platform_device_remote")
-	if !ok {
-		return 0
+	var networkSpace_ *sdk.NetworkSpace
+	if networkSpace != 0 {
+		var ok bool
+		networkSpace_, ok = resolveHandle[*sdk.NetworkSpace](uint64(networkSpace), "urnet_new_platform_device_remote")
+		if !ok {
+			return 0
+		}
 	}
 	r0, err := sdk.NewPlatformDeviceRemote(networkSpace_, goString(byJwt), goString(proxyUrl), goString(signedProxyId), goId(instanceId, "urnet_new_platform_device_remote"))
 	if err != nil {
