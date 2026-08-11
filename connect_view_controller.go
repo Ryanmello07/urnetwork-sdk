@@ -291,6 +291,31 @@ func (self *ConnectViewController) generationCurrent(generation uint64) bool {
 	return self.generation == generation
 }
 
+// setConnectionStatusForGeneration is setConnectionStatus with the D2 gate
+// closed all the way: the generation check and the status write happen under
+// the SAME stateLock that bumpGeneration takes, so a Disconnect that lands
+// after a monitor event passed the entry gate — but before the event finished
+// computing the grid and reached its status write — can never be overwritten
+// by that event's stale status. The entry gate alone leaves exactly that seam
+// open, and the seam is the original defect in miniature.
+func (self *ConnectViewController) setConnectionStatusForGeneration(status ConnectionStatus, generation uint64) {
+	changed := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.generation != generation {
+			return
+		}
+		if self.connectionStatus != status {
+			self.connectionStatus = status
+			changed = true
+		}
+	}()
+	if changed {
+		self.connectionStatusChanged()
+	}
+}
+
 func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	// self.setConnected(true)
 
@@ -1050,11 +1075,19 @@ func (self *ConnectGrid) windowMonitorEventCallback(windowExpandEvent *connect.W
 		return
 	}
 
+	// D2, second look: the entry gate was checked before the grid work above,
+	// and a disconnect can land while that work runs. The dot/grid dispatches
+	// get a best-effort recheck (they only make listeners re-read a grid that
+	// is about to close); the STATUS write is the one that must be airtight,
+	// so it re-checks the generation atomically with the write.
+	if !self.connectViewController.generationCurrent(self.generation) {
+		return
+	}
 	if providerGridPointChanged {
 		self.providerGridPointsMonitor.NotifyAll()
 	}
 	if windowSizeChanged || providerGridPointChanged {
 		self.connectViewController.gridChanged()
 	}
-	self.connectViewController.setConnectionStatus(connectionStatus)
+	self.connectViewController.setConnectionStatusForGeneration(connectionStatus, self.generation)
 }

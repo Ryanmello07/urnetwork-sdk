@@ -71,6 +71,31 @@ func TestConnectGridGenerationGate(t *testing.T) {
 	connect.AssertEqual(t, vc.GetConnectionStatus(), Connected)
 }
 
+// TestSetConnectionStatusForGenerationStale closes the D2 gate's residual
+// seam: the entry gate in windowMonitorEventCallback runs BEFORE the grid
+// work, and a disconnect (bumpGeneration) can land while that work runs. The
+// status write must therefore re-check the generation atomically with the
+// write — under the same stateLock bumpGeneration takes — so the stale
+// event's status can never land after the bump, however narrow the timing.
+func TestSetConnectionStatusForGenerationStale(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	vc := newTestingConnectViewController(ctx)
+	vc.setConnectionStatus(Disconnected)
+	stamped := vc.generation
+
+	// the event passed the entry gate under `stamped`, then the user
+	// disconnected before it reached its status write
+	vc.bumpGeneration()
+	vc.setConnectionStatusForGeneration(Connected, stamped)
+	connect.AssertEqual(t, vc.GetConnectionStatus(), Disconnected)
+
+	// a write stamped with the CURRENT generation still lands
+	vc.setConnectionStatusForGeneration(Connected, vc.generation)
+	connect.AssertEqual(t, vc.GetConnectionStatus(), Connected)
+}
+
 // TestConnectGridFailedStatus maps the window honesty layer's terminal
 // outcome onto the connection status: Failed (zero Added past both outcome
 // deadlines) renders CONNECT_FAILED, and a satisfied window always wins.
