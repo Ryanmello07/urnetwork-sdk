@@ -1,0 +1,443 @@
+package sdk
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/connect"
+)
+
+// testingJwt builds an unsigned-but-parseable jwt with the given claims. The sdk
+// only ever ParseUnverified's tokens, so a real signature is not needed to pin
+// the scheduling behavior.
+func testingJwt(claims map[string]any) string {
+	encode := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			panic(err)
+		}
+		return base64.RawURLEncoding.EncodeToString(b)
+	}
+	header := encode(map[string]any{"alg": "HS256", "typ": "JWT"})
+	body := encode(claims)
+	return fmt.Sprintf("%s.%s.%s", header, body, base64.RawURLEncoding.EncodeToString([]byte("sig")))
+}
+
+// TestJwtRefreshTimeoutNeverHotLoops is the regression pin for the refresh storm.
+//
+// The schedule used to be a FIXED 14-day lead subtracted from `exp`, calibrated
+// to a 30-day server token. When the server shortened its lifetime to 24h, the
+// lead exceeded the token's entire life and every computed timeout landed ~13
+// days in the PAST. A non-positive timeout means no sleep, and because a
+// successful refresh yields another 24h token, SUCCESS re-armed the same
+// condition. One observed 22-minute service session logged 593 refreshes at a
+// median 6.4ms apart.
+//
+// The invariant that matters is not the exact interval, it is that NO token the
+// server can hand us -- of any lifetime, at any age, with any clock skew -- can
+// produce a timeout that lets the loop spin.
+func TestJwtRefreshTimeoutNeverHotLoops(t *testing.T) {
+	now := time.Date(2026, 8, 11, 0, 7, 44, 0, time.UTC)
+
+	cases := []struct {
+		name   string
+		claims map[string]any
+	}{
+		{
+			// the exact shape that caused the storm: the server's current 24h token
+			"24h token, freshly issued",
+			map[string]any{"iat": now.Unix(), "exp": now.Add(24 * time.Hour).Unix()},
+		},
+		{
+			// the shape the old 14-day lead was written for
+			"30d token, freshly issued",
+			map[string]any{"iat": now.Unix(), "exp": now.Add(30 * 24 * time.Hour).Unix()},
+		},
+		{"1h token", map[string]any{"iat": now.Unix(), "exp": now.Add(time.Hour).Unix()}},
+		{"1m token", map[string]any{"iat": now.Unix(), "exp": now.Add(time.Minute).Unix()}},
+		{"token already past its half-life", map[string]any{"iat": now.Add(-20 * time.Hour).Unix(), "exp": now.Add(4 * time.Hour).Unix()}},
+		{"already expired token", map[string]any{"iat": now.Add(-48 * time.Hour).Unix(), "exp": now.Add(-24 * time.Hour).Unix()}},
+		{"no iat (pre-audit server)", map[string]any{"exp": now.Add(24 * time.Hour).Unix()}},
+		{"iat in the future (skewed clock)", map[string]any{"iat": now.Add(time.Hour).Unix(), "exp": now.Add(24 * time.Hour).Unix()}},
+		{"iat after exp (nonsense)", map[string]any{"iat": now.Add(48 * time.Hour).Unix(), "exp": now.Add(24 * time.Hour).Unix()}},
+		{"exp at the epoch", map[string]any{"exp": 0}},
+		{"no exp at all", map[string]any{"user_id": "u"}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := jwtRefreshTimeout(testingJwt(c.claims), now)
+			if got < minRefreshTimeout {
+				t.Fatalf("timeout = %s, which is below the %s floor -- the loop can spin", got, minRefreshTimeout)
+			}
+		})
+	}
+
+	// the degenerate inputs must not spin either
+	for _, jwt := range []string{"", "not-a-jwt", "a.b.c", "test-jwt"} {
+		if got := jwtRefreshTimeout(jwt, now); got < minRefreshTimeout {
+			t.Fatalf("timeout for %q = %s, below the %s floor", jwt, got, minRefreshTimeout)
+		}
+	}
+}
+
+// TestJwtRefreshTimeoutIsHalfLife pins the schedule itself: half of the token's
+// own lifetime, measured from `iat`, which is what the server documents for sdk
+// clients and is correct for whatever lifetime the server picks next.
+func TestJwtRefreshTimeoutIsHalfLife(t *testing.T) {
+	now := time.Date(2026, 8, 11, 0, 7, 44, 0, time.UTC)
+
+	cases := []struct {
+		lifetime time.Duration
+		want     time.Duration
+	}{
+		{24 * time.Hour, 12 * time.Hour},
+		{30 * 24 * time.Hour, 15 * 24 * time.Hour},
+		{2 * time.Hour, time.Hour},
+	}
+	for _, c := range cases {
+		jwt := testingJwt(map[string]any{"iat": now.Unix(), "exp": now.Add(c.lifetime).Unix()})
+		got := jwtRefreshTimeout(jwt, now)
+		if got != c.want {
+			t.Fatalf("lifetime %s: timeout = %s, want %s", c.lifetime, got, c.want)
+		}
+	}
+
+	// Halving must be of the token's REAL lifetime, not of the remaining time --
+	// otherwise repeated passes collapse the interval geometrically toward the
+	// floor. A 24h token read 6h in still refreshes at its 12h mark, i.e. in 6h.
+	jwt := testingJwt(map[string]any{"iat": now.Unix(), "exp": now.Add(24 * time.Hour).Unix()})
+	if got := jwtRefreshTimeout(jwt, now.Add(6*time.Hour)); got != 6*time.Hour {
+		t.Fatalf("6h into a 24h token: timeout = %s, want 6h", got)
+	}
+}
+
+// TestTokenManagerRunStopsOnCancel pins the second half of the storm: a CLOSED
+// device must stop refreshing.
+//
+// The retry backoff was computed correctly and then discarded. `select { case
+// <-ctx.Done(): return }` sat inside an anonymous func, so its `return` exited
+// only the CLOSURE; `loggedOut` was false, so run() fell through to the outer
+// loop, where the non-positive timeout skipped the only other ctx check and the
+// refresh fired again. The tester's log shows this verbatim -- "Will retry in
+// 128.69s" followed by the next attempt in the SAME millisecond, 297 times in
+// 497ms against an already-cancelled client.
+func TestTokenManagerRunStopsOnCancel(t *testing.T) {
+	// always fails, so the manager stays on the retry path where the bug lived
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":{"message":"nope"}}`)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	log := &countingLogger{}
+	attempts := &log.refreshes
+	manager := testingNewTokenManager(ctx, server.URL, func(string) {}, func() error { return nil })
+	manager.log = log
+	// a real, current token: the schedule must not be what stops the loop
+	manager.api.SetByJwt(testingJwt(map[string]any{
+		"iat":     time.Now().Unix(),
+		"exp":     time.Now().Add(24 * time.Hour).Unix(),
+		"user_id": "11111111-1111-1111-1111-111111111111",
+	}))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.run()
+	}()
+
+	// let it get into the retry path
+	time.Sleep(300 * time.Millisecond)
+	manager.cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() did not return within 5s of cancellation -- it is spinning on a closed device")
+	}
+
+	// and it must not have burned through attempts on the way out
+	settled := attempts.Load()
+	time.Sleep(200 * time.Millisecond)
+	if after := attempts.Load(); after != settled {
+		t.Fatalf("refresh attempts kept arriving after run() returned: %d -> %d", settled, after)
+	}
+	if 20 < settled {
+		t.Fatalf("%d refresh attempts in ~300ms -- the backoff is being discarded", settled)
+	}
+}
+
+// countingLogger counts the "[dtm]refreshing the jwt now" line -- the exact
+// quantity the tester's service log reports (593 in one 22-minute session), so
+// the tests below measure the same thing the production evidence does. Counting
+// http hits does NOT work: a cancelled ClientStrategy short-circuits before the
+// request is ever sent, so a spinning loop is invisible at the server.
+type countingLogger struct {
+	refreshes atomic.Int64
+}
+
+func (self *countingLogger) Info(args ...any) {}
+func (self *countingLogger) Infof(format string, args ...any) {
+	if strings.Contains(format, "refreshing the jwt now") {
+		self.refreshes.Add(1)
+	}
+}
+func (self *countingLogger) Warningf(format string, args ...any) {}
+func (self *countingLogger) Errorf(format string, args ...any)   {}
+func (self *countingLogger) V(level int32) connect.Verbose       { return noopVerbose{} }
+
+type noopVerbose struct{}
+
+func (noopVerbose) Enabled() bool                    { return false }
+func (noopVerbose) Info(args ...any)                 {}
+func (noopVerbose) Infof(format string, args ...any) {}
+
+// TestTokenManagerClosedDeviceDoesNotRefresh pins the second, independent half of
+// the cancellation fix: the outer loop must observe cancellation on the
+// ZERO-timeout path too.
+//
+// That path stays legitimately reachable after the scheduling fix -- the
+// immediate first refresh takes it, and so does an explicit RefreshToken -- so
+// the guarantee must not depend on the computed timeout being positive. Without
+// the unconditional check, a device closed before run() got going still entered
+// the refresh; with a non-positive schedule (the bug that shipped) it entered it
+// without bound.
+func TestTokenManagerClosedDeviceDoesNotRefresh(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	log := &countingLogger{}
+	manager := testingNewTokenManager(ctx, server.URL, func(string) {}, func() error { return nil })
+	manager.log = log
+	manager.api.SetByJwt(testingJwt(map[string]any{
+		"iat":     time.Now().Unix(),
+		"exp":     time.Now().Add(24 * time.Hour).Unix(),
+		"user_id": "11111111-1111-1111-1111-111111111111",
+	}))
+
+	// the device is closed BEFORE the loop starts: nothing it does can succeed,
+	// so it must do nothing at all
+	manager.cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.run()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() did not return on an already-cancelled ctx")
+	}
+
+	if got := log.refreshes.Load(); got != 0 {
+		t.Fatalf("a closed device entered the refresh %d time(s); the zero-timeout path is not checking ctx", got)
+	}
+}
+
+// TestTokenManagerRunSchedulesAfterSuccess pins the closed cycle itself: a
+// SUCCESSFUL refresh must put the loop to sleep, not immediately re-arm it.
+// Success was the trigger -- every completed refresh manufactured the exact
+// condition that forced the next one.
+func TestTokenManagerRunSchedulesAfterSuccess(t *testing.T) {
+	var refreshes atomic.Int64
+
+	// mints a fresh 24h token every time, exactly like the live server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshes.Add(1)
+		now := time.Now()
+		jwt := testingJwt(map[string]any{
+			"iat":     now.Unix(),
+			"exp":     now.Add(24 * time.Hour).Unix(),
+			"user_id": "11111111-1111-1111-1111-111111111111",
+		})
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"by_jwt":%q}`, jwt)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var current atomic.Value
+	current.Store("")
+
+	manager := testingNewTokenManager(ctx, server.URL, func(jwt string) {}, func() error { return nil })
+	manager.api.SetByJwt(testingJwt(map[string]any{
+		"iat":     time.Now().Unix(),
+		"exp":     time.Now().Add(24 * time.Hour).Unix(),
+		"user_id": "11111111-1111-1111-1111-111111111111",
+	}))
+	_ = current
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.run()
+	}()
+
+	time.Sleep(1500 * time.Millisecond)
+	got := refreshes.Load()
+	manager.cancel()
+	<-done
+
+	// exactly one: the immediate first refresh. The next is 12h away.
+	if got != 1 {
+		t.Fatalf("%d refreshes in 1.5s, want 1 (the immediate first) -- success is re-arming the loop", got)
+	}
+}
+
+// TestJwtIdentityRotation pins the identity half. A refresh re-signs the SAME
+// client with a new exp/iat/jti, so the jwt STRING always changes. The device
+// instance id -- which the app pairs to the running service by, over the device
+// rpc -- must survive that. It used to rotate on every string change: ~294
+// device identity rotations in one observed session, at up to 19/second.
+func TestJwtIdentityRotation(t *testing.T) {
+	ctx := context.Background()
+
+	identity := map[string]any{
+		"user_id":    "11111111-1111-1111-1111-111111111111",
+		"network_id": "22222222-2222-2222-2222-222222222222",
+		"client_id":  "33333333-3333-3333-3333-333333333333",
+		"sub":        "11111111-1111-1111-1111-111111111111",
+	}
+	withIssuance := func(base map[string]any, age time.Duration) string {
+		claims := map[string]any{}
+		for k, v := range base {
+			claims[k] = v
+		}
+		now := time.Now().Add(age)
+		claims["iat"] = now.Unix()
+		claims["exp"] = now.Add(24 * time.Hour).Unix()
+		claims["jti"] = fmt.Sprintf("jti-%d", now.UnixNano())
+		return testingJwt(claims)
+	}
+
+	dir := t.TempDir()
+	localState := newLocalState(ctx, dir)
+
+	// login
+	v0 := withIssuance(identity, 0)
+	localState.SetByJwt(v0)
+	localState.SetByClientJwt(v0)
+	first := localState.GetInstanceId()
+	if first == nil {
+		t.Fatal("login did not mint an instance id")
+	}
+
+	// twenty refreshes of the SAME identity, as the run loop performs them
+	for i := 0; i < 20; i += 1 {
+		next := withIssuance(identity, time.Duration(i+1)*time.Second)
+		localState.SetByJwt(next)
+		localState.SetByClientJwt(next)
+
+		got := localState.GetInstanceId()
+		if got == nil {
+			t.Fatalf("refresh %d cleared the instance id", i)
+		}
+		if got.Cmp(first) != 0 {
+			t.Fatalf("refresh %d ROTATED the device instance id (%s -> %s) -- this is the 'device instance mismatch' generator", i, first, got)
+		}
+		if localState.GetByClientJwt() != next {
+			t.Fatalf("refresh %d did not persist the new client jwt", i)
+		}
+	}
+
+	// a DIFFERENT identity must still rotate
+	other := map[string]any{
+		"user_id":    "44444444-4444-4444-4444-444444444444",
+		"network_id": "55555555-5555-5555-5555-555555555555",
+		"client_id":  "66666666-6666-6666-6666-666666666666",
+		"sub":        "44444444-4444-4444-4444-444444444444",
+	}
+	otherJwt := withIssuance(other, time.Minute)
+	localState.SetByJwt(otherJwt)
+	localState.SetByClientJwt(otherJwt)
+	rotated := localState.GetInstanceId()
+	if rotated == nil {
+		t.Fatal("account switch left no instance id")
+	}
+	if rotated.Cmp(first) == 0 {
+		t.Fatal("account switch did NOT rotate the instance id -- a different user reused the previous device identity")
+	}
+
+	// and logout must still clear everything
+	localState.SetByJwt("")
+	if got := localState.GetByClientJwt(); got != "" {
+		t.Fatalf("logout left by_client_jwt = %q", got)
+	}
+	if got := localState.GetInstanceId(); got != nil {
+		t.Fatalf("logout left instance_id = %s", got)
+	}
+}
+
+// TestSameJwtIdentityIsConservative: anything unreadable must be treated as a
+// DIFFERENT identity. A false negative costs one rotation; a false positive
+// would carry a device identity across a genuine account switch.
+func TestSameJwtIdentityIsConservative(t *testing.T) {
+	full := testingJwt(map[string]any{"user_id": "u", "network_id": "n", "client_id": "c", "sub": "u"})
+
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"identical", full, full, true},
+		{"empty a", "", full, false},
+		{"empty b", full, "", false},
+		{"both empty", "", "", false},
+		{"unparseable", "not-a-jwt", full, false},
+		{"legacy opaque strings", "CLIENT_JWT_v0", "CLIENT_JWT_v1", false},
+		{"no identity claims at all", testingJwt(map[string]any{"exp": 1}), testingJwt(map[string]any{"exp": 2}), false},
+		{
+			"same identity, new issuance",
+			testingJwt(map[string]any{"user_id": "u", "network_id": "n", "client_id": "c", "sub": "u", "exp": 1, "jti": "a"}),
+			testingJwt(map[string]any{"user_id": "u", "network_id": "n", "client_id": "c", "sub": "u", "exp": 2, "jti": "b"}),
+			true,
+		},
+		{
+			"different client",
+			testingJwt(map[string]any{"user_id": "u", "network_id": "n", "client_id": "c1", "sub": "u"}),
+			testingJwt(map[string]any{"user_id": "u", "network_id": "n", "client_id": "c2", "sub": "u"}),
+			false,
+		},
+		{
+			"claim present on one side only",
+			testingJwt(map[string]any{"user_id": "u", "sub": "u"}),
+			testingJwt(map[string]any{"user_id": "u", "sub": "u", "client_id": "c"}),
+			false,
+		},
+		{
+			"non-string claim value",
+			testingJwt(map[string]any{"user_id": "u", "sub": "u", "client_id": map[string]any{"x": 1}}),
+			testingJwt(map[string]any{"user_id": "u", "sub": "u", "client_id": map[string]any{"x": 1}}),
+			false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(strings.ReplaceAll(c.name, " ", "_"), func(t *testing.T) {
+			if got := sameJwtIdentity(c.a, c.b); got != c.want {
+				t.Fatalf("sameJwtIdentity = %v, want %v", got, c.want)
+			}
+		})
+	}
+}

@@ -101,18 +101,81 @@ func (self *LocalState) ParseByJwt() (*ByJwt, error) {
 	return byJwt, nil
 }
 
-// clears `byClientJwt` and `instanceId`
+// jwtIdentityClaims name WHO a credential is for, as opposed to WHICH issuance
+// it is. A refresh re-signs the same subject with a new `exp`/`iat`/`jti`, so the
+// jwt STRING always changes while every claim below stays put. Anything derived
+// from the identity -- the client jwt, the device instance id -- must survive
+// that, and must be discarded only when one of these actually changes.
+var jwtIdentityClaims = []string{"client_id", "device_id", "user_id", "network_id", "sub"}
+
+// sameJwtIdentity reports whether two jwts name the same subject.
+//
+// It is deliberately conservative: anything it cannot read -- an empty string, an
+// unparseable token, no identity claims at all, a claim that is not a string --
+// returns false, which reproduces the old unconditional "treat as different"
+// behavior. A false negative costs one identity rotation; a false positive would
+// keep credentials across a genuine account switch.
+func sameJwtIdentity(a string, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+
+	aClaims, aErr := parseJwtClaims(a)
+	bClaims, bErr := parseJwtClaims(b)
+	if aErr != nil || bErr != nil {
+		return false
+	}
+
+	matched := 0
+	for _, name := range jwtIdentityClaims {
+		aRaw, aPresent := aClaims[name]
+		bRaw, bPresent := bClaims[name]
+		if aPresent != bPresent {
+			// present on one side only: an identity change (e.g. a network jwt
+			// exchanged for a client jwt), not a refresh
+			return false
+		}
+		if !aPresent {
+			continue
+		}
+		// present but not a string is a claim we cannot compare, so we cannot
+		// assert sameness -- and comparing `any` values directly would panic on
+		// an uncomparable type
+		aValue, aOk := aRaw.(string)
+		bValue, bOk := bRaw.(string)
+		if !aOk || !bOk || aValue != bValue {
+			return false
+		}
+		matched += 1
+	}
+
+	// two tokens that carry no identity claims at all are not evidence of the
+	// same identity, they are evidence we cannot tell
+	return 0 < matched
+}
+
+// clears `byClientJwt` and `instanceId` when the jwt names a different identity
 func (self *LocalState) SetByJwt(byJwt string) error {
 	path := filepath.Join(self.localStorageDir, ".by_jwt")
 
+	existingByJwt := ""
 	if existingByJwtBytes, err := os.ReadFile(path); err == nil {
-		if string(existingByJwtBytes) == byJwt {
+		existingByJwt = string(existingByJwtBytes)
+		if existingByJwt == byJwt {
 			// already set, no need to clear state
 			return nil
 		}
 	}
 
-	self.SetByClientJwt("")
+	// Only a genuine identity change invalidates the derived state. This used to
+	// clear unconditionally, which meant every token REFRESH wiped the client jwt
+	// and the instance id -- and the caller immediately re-set them, minting a
+	// brand new instance id each time. The app pairs to the service by instance
+	// id over the device rpc, so that rotation is what produced "device instance
+	// mismatch": one observed session rotated the device's identity 294 times.
+	if !sameJwtIdentity(existingByJwt, byJwt) {
+		self.SetByClientJwt("")
+	}
 
 	if byJwt == "" {
 		os.Remove(path)
@@ -130,12 +193,15 @@ func (self *LocalState) GetByClientJwt() string {
 	return ""
 }
 
-// if `byClientJwt` is set, sets a new `instanceId`; othewwise, clears `instanceId`
+// if `byClientJwt` is set, ensures an `instanceId` exists, minting a new one only
+// when the jwt names a different identity; otherwise, clears `instanceId`
 func (self *LocalState) SetByClientJwt(byClientJwt string) error {
 	path := filepath.Join(self.localStorageDir, ".by_client_jwt")
 
+	existingByClientJwt := ""
 	if existingByClientJwtBytes, err := os.ReadFile(path); err == nil {
-		if string(existingByClientJwtBytes) == byClientJwt {
+		existingByClientJwt = string(existingByClientJwtBytes)
+		if existingByClientJwt == byClientJwt {
 			// already set, no need to clear state
 			return nil
 		}
@@ -146,8 +212,15 @@ func (self *LocalState) SetByClientJwt(byClientJwt string) error {
 		os.Remove(path)
 		return nil
 	} else {
-		instanceId := connect.NewId()
-		self.SetInstanceId(newId(instanceId))
+		// The instance id is this device's identity on the network and the key
+		// the app pairs to the running service by. It must be stable across a
+		// refresh, which re-signs the SAME client and therefore always changes
+		// the jwt string. Rotate only when the identity genuinely changed, or
+		// when there is no id to keep.
+		if self.GetInstanceId() == nil || !sameJwtIdentity(existingByClientJwt, byClientJwt) {
+			instanceId := connect.NewId()
+			self.SetInstanceId(newId(instanceId))
+		}
 		return os.WriteFile(path, []byte(byClientJwt), LocalStorageFilePermissions)
 	}
 }
