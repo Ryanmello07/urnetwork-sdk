@@ -20,6 +20,12 @@ const (
 	Connecting     ConnectionStatus = "CONNECTING"
 	DestinationSet ConnectionStatus = "DESTINATION_SET"
 	Connected      ConnectionStatus = "CONNECTED"
+	// ConnectFailed is the window honesty layer's terminal outcome: the
+	// connect window hit its outcome deadline twice with zero providers Added
+	// (WindowExpandEvent.Failed / WindowStatus.Failed). The app renders a
+	// failure state with a Retry; the session itself is still standing, so a
+	// provider that lands later flips this back to Connecting/Connected.
+	ConnectFailed ConnectionStatus = "CONNECT_FAILED"
 )
 
 type SelectedLocationListener interface {
@@ -54,6 +60,15 @@ type ConnectViewController struct {
 	connectionStatus ConnectionStatus
 	selectedLocation *ConnectLocation
 	grid             *ConnectGrid
+	// generation is the D2 gesture-generation gate. Bumped on every explicit
+	// Connect and Disconnect BEFORE the device call, and stamped onto each
+	// grid at creation: window-monitor events reaching a grid whose generation
+	// is no longer current are dropped whole, so an outgoing session's late
+	// events (the owner's grid flashed CONNECTED +424ms and +1.37s AFTER his
+	// disconnect click — monitor events ride an async rpc worker and outlive
+	// the gesture) can never recompute the rendered status. Guarded by
+	// stateLock.
+	generation uint64
 	// providerGridPointList *ProviderGridPointList
 
 	selectedLocationListeners *connect.CallbackList[SelectedLocationListener]
@@ -260,8 +275,28 @@ func (self *ConnectViewController) setConnected(connected bool) {
 	self.connected = connected
 }
 
+// bumpGeneration marks a new user gesture (see the `generation` field): every
+// event from before this instant belongs to the outgoing session.
+func (self *ConnectViewController) bumpGeneration() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.generation += 1
+}
+
+// generationCurrent reports whether a grid stamped with `generation` may still
+// drive the rendered status.
+func (self *ConnectViewController) generationCurrent(generation uint64) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.generation == generation
+}
+
 func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	// self.setConnected(true)
+
+	// D2: a new gesture starts a new generation, so any event still in flight
+	// from the previous session's monitor is dropped by the grid gate
+	self.bumpGeneration()
 
 	if self.device.GetProvideControlMode() == ProvideControlModeAuto {
 		// enable provider
@@ -292,6 +327,14 @@ func (self *ConnectViewController) ConnectBestAvailable() {
 
 func (self *ConnectViewController) Disconnect() {
 
+	// D2: the disconnect gesture ends the current generation FIRST, before
+	// any device call. From this instant the outgoing session's window-monitor
+	// events must not recompute the grid status — the field capture shows them
+	// arriving (and flipping the grid CONNECTED) hundreds of milliseconds
+	// after the click, because teardown is exactly when the stalled control
+	// plane suddenly completes.
+	self.bumpGeneration()
+
 	if self.device.GetProvideControlMode() == ProvideControlModeAuto {
 		// disable provider
 		provideMode := ProvideModeNone
@@ -320,6 +363,10 @@ func (self *ConnectViewController) setGrid() {
 		if self.connected {
 			previousGrid = self.grid
 			grid = newConnectGridWithDefaults(self.ctx, self)
+			// D2: stamp the grid with the generation it belongs to (under the
+			// same lock that guards the counter). Events reaching a grid from
+			// an older generation are dropped by windowMonitorEventCallback.
+			grid.generation = self.generation
 			self.grid = grid
 			changed = true
 		} else if self.grid != nil {
@@ -468,6 +515,11 @@ type ConnectGrid struct {
 	// the monitor this grid listens to; the run loop periodically reconciles
 	// the grid against its retained events (see reconcile)
 	windowMonitor windowMonitor
+
+	// generation is the view controller generation this grid was created
+	// under (see ConnectViewController.generation). Written once, before the
+	// grid is exposed; read by windowMonitorEventCallback's gate.
+	generation uint64
 
 	sideLength         int
 	gridPoints         map[gridPointCoord]*gridPoint
@@ -828,6 +880,17 @@ func (self *ConnectGrid) resize() {
 
 // connect.MonitorEventFunction
 func (self *ConnectGrid) windowMonitorEventCallback(windowExpandEvent *connect.WindowExpandEvent, providerEvents map[connect.Id]*connect.ProviderEvent, reset bool) {
+	// D2 generation gate: once the user has issued a disconnect (or a new
+	// connect), this grid's generation is stale and the outgoing session's
+	// monitor events must not recompute the grid or the rendered status. The
+	// events are dropped WHOLE — the grid itself is about to be closed by the
+	// location change that follows the gesture, so there is nothing worth
+	// updating, and a partial update that skipped only the status write would
+	// still flash dots. Checked before any lock: the gate takes the view
+	// controller's stateLock, and the grid's own stateLock is taken below.
+	if !self.connectViewController.generationCurrent(self.generation) {
+		return
+	}
 	done := false
 	windowSizeChanged := false
 	providerGridPointChanged := false
@@ -962,6 +1025,11 @@ func (self *ConnectGrid) windowMonitorEventCallback(windowExpandEvent *connect.W
 		// note the callback is only active while the device is connected
 		if windowExpandEvent.MinSatisfied {
 			connectionStatus = Connected
+		} else if windowExpandEvent.Failed {
+			// the window honesty layer's terminal outcome: zero Added past
+			// both deadlines. Checked after MinSatisfied so a recovered
+			// window's satisfied state always wins.
+			connectionStatus = ConnectFailed
 		} else {
 			connectionStatus = Connecting
 		}

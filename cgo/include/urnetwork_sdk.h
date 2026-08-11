@@ -62,6 +62,7 @@ bool urnet_device_get_public_identity_key(uint64_t self, uint8_t* out, int32_t* 
 #define URNET_ASYNC_QUEUE_SIZE 32
 #define URNET_CONNECTED "CONNECTED"
 #define URNET_CONNECTING "CONNECTING"
+#define URNET_CONNECT_FAILED "CONNECT_FAILED"
 #define URNET_CONTRACT_STATUS_CLOSED "closed"
 #define URNET_CONTRACT_STATUS_OPEN "open"
 #define URNET_DESTINATION_SET "DESTINATION_SET"
@@ -2834,6 +2835,8 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   ProviderStateNotAdded: number
  *   ProviderStateAdded: number
  *   ProviderStateRemoved: number
+ *   StallReason: string
+ *   Failed: boolean
  */
 
 #ifdef __cplusplus
