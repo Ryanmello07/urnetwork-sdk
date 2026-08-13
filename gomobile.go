@@ -315,6 +315,16 @@ func NewTransferBalanceList() *TransferBalanceList {
 	}
 }
 
+type SubscriptionList struct {
+	exportedList[*Subscription]
+}
+
+func NewSubscriptionList() *SubscriptionList {
+	return &SubscriptionList{
+		exportedList: *newExportedList[*Subscription](),
+	}
+}
+
 type NetworkSpaceList struct {
 	exportedList[*NetworkSpace]
 }
@@ -422,6 +432,12 @@ type RedeemedBalanceCode struct {
 
 type RedeemedBalanceCodeList struct {
 	exportedList[*RedeemedBalanceCode]
+}
+
+func NewRedeemedBalanceCodeList() *RedeemedBalanceCodeList {
+	return &RedeemedBalanceCodeList{
+		exportedList: *newExportedList[*RedeemedBalanceCode](),
+	}
 }
 
 type PublicAccountApiKey struct {

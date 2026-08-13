@@ -74,7 +74,7 @@ func TestJwtRefreshTimeoutNeverHotLoops(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := jwtRefreshTimeout(testingJwt(c.claims), now)
+			got := apiTokenRefreshTimeout(testingJwt(c.claims), now)
 			if got < minRefreshTimeout {
 				t.Fatalf("timeout = %s, which is below the %s floor -- the loop can spin", got, minRefreshTimeout)
 			}
@@ -83,7 +83,7 @@ func TestJwtRefreshTimeoutNeverHotLoops(t *testing.T) {
 
 	// the degenerate inputs must not spin either
 	for _, jwt := range []string{"", "not-a-jwt", "a.b.c", "test-jwt"} {
-		if got := jwtRefreshTimeout(jwt, now); got < minRefreshTimeout {
+		if got := apiTokenRefreshTimeout(jwt, now); got < minRefreshTimeout {
 			t.Fatalf("timeout for %q = %s, below the %s floor", jwt, got, minRefreshTimeout)
 		}
 	}
@@ -105,7 +105,7 @@ func TestJwtRefreshTimeoutIsHalfLife(t *testing.T) {
 	}
 	for _, c := range cases {
 		jwt := testingJwt(map[string]any{"iat": now.Unix(), "exp": now.Add(c.lifetime).Unix()})
-		got := jwtRefreshTimeout(jwt, now)
+		got := apiTokenRefreshTimeout(jwt, now)
 		if got != c.want {
 			t.Fatalf("lifetime %s: timeout = %s, want %s", c.lifetime, got, c.want)
 		}
@@ -115,7 +115,7 @@ func TestJwtRefreshTimeoutIsHalfLife(t *testing.T) {
 	// otherwise repeated passes collapse the interval geometrically toward the
 	// floor. A 24h token read 6h in still refreshes at its 12h mark, i.e. in 6h.
 	jwt := testingJwt(map[string]any{"iat": now.Unix(), "exp": now.Add(24 * time.Hour).Unix()})
-	if got := jwtRefreshTimeout(jwt, now.Add(6*time.Hour)); got != 6*time.Hour {
+	if got := apiTokenRefreshTimeout(jwt, now.Add(6*time.Hour)); got != 6*time.Hour {
 		t.Fatalf("6h into a 24h token: timeout = %s, want 6h", got)
 	}
 }
@@ -130,6 +130,22 @@ func TestJwtRefreshTimeoutIsHalfLife(t *testing.T) {
 // refresh fired again. The tester's log shows this verbatim -- "Will retry in
 // 128.69s" followed by the next attempt in the SAME millisecond, 297 times in
 // 497ms against an already-cancelled client.
+// testingScheduleJwt builds a jwt the refresh loop will actually act on.
+//
+// jwtCanRefresh requires BOTH `client_id` and `device_id`; a token carrying only
+// `user_id` parks run() at the `!jwtCanRefresh` guard and refreshes nothing, so a
+// test written that way passes for the wrong reason.
+func testingScheduleJwt(lifetime time.Duration) string {
+	now := time.Now()
+	return testingJwt(map[string]any{
+		"iat":       now.Unix(),
+		"exp":       now.Add(lifetime).Unix(),
+		"client_id": "33333333-3333-3333-3333-333333333333",
+		"device_id": "44444444-4444-4444-4444-444444444444",
+		"user_id":   "11111111-1111-1111-1111-111111111111",
+	})
+}
+
 func TestTokenManagerRunStopsOnCancel(t *testing.T) {
 	// always fails, so the manager stays on the retry path where the bug lived
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -143,36 +159,24 @@ func TestTokenManagerRunStopsOnCancel(t *testing.T) {
 
 	log := &countingLogger{}
 	attempts := &log.refreshes
-	manager := testingNewTokenManager(ctx, server.URL, func(string) {}, func() error { return nil })
-	manager.log = log
+	// Api owns the worker now, and newApi already spawned run(); it parks until
+	// StartJwtRefresh sets active. Driving it any other way runs a second loop.
+	manager, api := testingNewTokenManager(ctx, server.URL, func(string) {}, func() error { return nil })
+	api.setLog(log)
 	// a real, current token: the schedule must not be what stops the loop
-	manager.api.SetByJwt(testingJwt(map[string]any{
-		"iat":     time.Now().Unix(),
-		"exp":     time.Now().Add(24 * time.Hour).Unix(),
-		"user_id": "11111111-1111-1111-1111-111111111111",
-	}))
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		manager.run()
-	}()
+	api.SetByJwt(testingScheduleJwt(24 * time.Hour))
+	api.StartJwtRefresh()
 
 	// let it get into the retry path
 	time.Sleep(300 * time.Millisecond)
-	manager.cancel()
+	manager.Close()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("run() did not return within 5s of cancellation -- it is spinning on a closed device")
-	}
-
-	// and it must not have burned through attempts on the way out
+	// run() is the Api's goroutine now, so observe the settle rather than a
+	// returned channel: after cancellation no further attempt may arrive.
 	settled := attempts.Load()
 	time.Sleep(200 * time.Millisecond)
 	if after := attempts.Load(); after != settled {
-		t.Fatalf("refresh attempts kept arriving after run() returned: %d -> %d", settled, after)
+		t.Fatalf("refresh attempts kept arriving after cancellation: %d -> %d", settled, after)
 	}
 	if 20 < settled {
 		t.Fatalf("%d refresh attempts in ~300ms -- the backoff is being discarded", settled)
@@ -224,29 +228,16 @@ func TestTokenManagerClosedDeviceDoesNotRefresh(t *testing.T) {
 	defer cancel()
 
 	log := &countingLogger{}
-	manager := testingNewTokenManager(ctx, server.URL, func(string) {}, func() error { return nil })
-	manager.log = log
-	manager.api.SetByJwt(testingJwt(map[string]any{
-		"iat":     time.Now().Unix(),
-		"exp":     time.Now().Add(24 * time.Hour).Unix(),
-		"user_id": "11111111-1111-1111-1111-111111111111",
-	}))
+	manager, api := testingNewTokenManager(ctx, server.URL, func(string) {}, func() error { return nil })
+	api.setLog(log)
+	api.SetByJwt(testingScheduleJwt(24 * time.Hour))
 
-	// the device is closed BEFORE the loop starts: nothing it does can succeed,
-	// so it must do nothing at all
-	manager.cancel()
+	// the device is closed BEFORE the worker is enabled: nothing it does can
+	// succeed, so it must do nothing at all
+	manager.Close()
+	api.StartJwtRefresh()
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		manager.run()
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("run() did not return on an already-cancelled ctx")
-	}
+	time.Sleep(500 * time.Millisecond)
 
 	if got := log.refreshes.Load(); got != 0 {
 		t.Fatalf("a closed device entered the refresh %d time(s); the zero-timeout path is not checking ctx", got)
@@ -263,41 +254,21 @@ func TestTokenManagerRunSchedulesAfterSuccess(t *testing.T) {
 	// mints a fresh 24h token every time, exactly like the live server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		refreshes.Add(1)
-		now := time.Now()
-		jwt := testingJwt(map[string]any{
-			"iat":     now.Unix(),
-			"exp":     now.Add(24 * time.Hour).Unix(),
-			"user_id": "11111111-1111-1111-1111-111111111111",
-		})
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"by_jwt":%q}`, jwt)
+		fmt.Fprintf(w, `{"by_jwt":%q}`, testingScheduleJwt(24*time.Hour))
 	}))
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var current atomic.Value
-	current.Store("")
-
-	manager := testingNewTokenManager(ctx, server.URL, func(jwt string) {}, func() error { return nil })
-	manager.api.SetByJwt(testingJwt(map[string]any{
-		"iat":     time.Now().Unix(),
-		"exp":     time.Now().Add(24 * time.Hour).Unix(),
-		"user_id": "11111111-1111-1111-1111-111111111111",
-	}))
-	_ = current
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		manager.run()
-	}()
+	manager, api := testingNewTokenManager(ctx, server.URL, func(jwt string) {}, func() error { return nil })
+	api.SetByJwt(testingScheduleJwt(24 * time.Hour))
+	api.StartJwtRefresh()
 
 	time.Sleep(1500 * time.Millisecond)
 	got := refreshes.Load()
-	manager.cancel()
-	<-done
+	manager.Close()
 
 	// exactly one: the immediate first refresh. The next is 12h away.
 	if got != 1 {
