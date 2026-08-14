@@ -14,6 +14,78 @@ import (
 	"github.com/urnetwork/connect"
 )
 
+// apiTokenManager is owned by Api, rather than by DeviceLocal/DeviceRemote.
+// Api is the single owner of the mutable bearer token, so headless users such
+// as the subnet miner and validator get exactly the same scheduling, retry,
+// rotation, and rejection behavior as the apps without constructing a device.
+type apiTokenManager struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	api    *Api
+
+	refreshMonitor *connect.Monitor
+	active         atomic.Bool
+
+	// refreshPending makes a refresh request LEVEL-triggered instead of edge-triggered.
+	//
+	// The monitor is a pure edge: NotifyAll closes the current channel and swaps in a
+	// fresh one. The run loop captures that channel at the TOP of each iteration -- so a
+	// RefreshToken() landing while the loop is inside the /auth/refresh http call closes
+	// a channel nobody is listening to any more. The request would be silently DROPPED,
+	// and the next scheduled refresh is half a token lifetime away. The flag survives
+	// across iterations, so a request made at any moment is honored on the next pass.
+	refreshPending atomic.Bool
+}
+
+func newApiTokenManager(ctx context.Context, api *Api) *apiTokenManager {
+	cancelCtx, cancel := context.WithCancel(ctx)
+	manager := &apiTokenManager{
+		ctx:            cancelCtx,
+		cancel:         cancel,
+		api:            api,
+		refreshMonitor: connect.NewMonitor(),
+	}
+	go connect.HandleError(manager.run)
+	return manager
+}
+
+// jwtCanRefresh is intentionally an unverified parse. It is only a local
+// scheduling predicate; /auth/refresh performs the authoritative signature,
+// claims, active-client, and network-ownership checks.
+func jwtCanRefresh(byJwt string) bool {
+	claims := gojwt.MapClaims{}
+	if _, _, err := gojwt.NewParser().ParseUnverified(byJwt, claims); err != nil {
+		return false
+	}
+	clientId, clientOk := claims["client_id"].(string)
+	deviceId, deviceOk := claims["device_id"].(string)
+	return clientOk && clientId != "" && deviceOk && deviceId != ""
+}
+
+func jwtExpiration(byJwt string) time.Time {
+	claims := gojwt.MapClaims{}
+	if _, _, err := gojwt.NewParser().ParseUnverified(byJwt, claims); err != nil {
+		return time.Time{}
+	}
+	expiration, err := claims.GetExpirationTime()
+	if err != nil || expiration == nil {
+		return time.Time{}
+	}
+	return expiration.Time
+}
+
+func jwtIssuedAt(byJwt string) time.Time {
+	claims := gojwt.MapClaims{}
+	if _, _, err := gojwt.NewParser().ParseUnverified(byJwt, claims); err != nil {
+		return time.Time{}
+	}
+	issuedAt, err := claims.GetIssuedAt()
+	if err != nil || issuedAt == nil {
+		return time.Time{}
+	}
+	return issuedAt.Time
+}
+
 // minRefreshTimeout is the floor on the scheduled refresh interval, and it is
 // the load-bearing half of the schedule.
 //
@@ -33,7 +105,9 @@ import (
 const minRefreshTimeout = 5 * time.Minute
 
 // noExpirationRefreshTimeout is the fallback when the stored jwt has no usable
-// `exp` -- including when it is empty or unparseable.
+// `exp` -- including when it is empty or unparseable. A refreshable legacy token
+// without an expiration must not become permanent, so it is revalidated on a
+// conservative weekly cadence.
 const noExpirationRefreshTimeout = 7 * 24 * time.Hour
 
 // jwtRefreshTimeout is the delay until the next SCHEDULED refresh of `byJwt`.
@@ -41,19 +115,11 @@ const noExpirationRefreshTimeout = 7 * 24 * time.Hour
 // Pure and total by design: it is the entire schedule, so it can be pinned
 // against real tokens without a network, a clock, or a running device. It never
 // returns less than minRefreshTimeout -- callers that want an immediate refresh
-// (the first pass, or an explicit RefreshToken request) override it deliberately.
+// (an explicit RefreshToken request, or the one Start arms at launch) override
+// it deliberately.
 func jwtRefreshTimeout(byJwt string, now time.Time) time.Duration {
-	var issuedTime time.Time
-	var expirationTime time.Time
-
-	if claims, err := parseJwtClaims(byJwt); err == nil {
-		if iat, ok := claims["iat"].(float64); ok {
-			issuedTime = time.Unix(int64(iat), 0)
-		}
-		if exp, ok := claims["exp"].(float64); ok {
-			expirationTime = time.Unix(int64(exp), 0)
-		}
-	}
+	issuedTime := jwtIssuedAt(byJwt)
+	expirationTime := jwtExpiration(byJwt)
 
 	var refreshTimeout time.Duration
 	if expirationTime.IsZero() {
@@ -72,7 +138,10 @@ func jwtRefreshTimeout(byJwt string, now time.Time) time.Duration {
 		// Prefer `iat` so the half-life is of the token's REAL lifetime rather than
 		// of whatever happens to remain right now -- halving the remainder on every
 		// pass would make the interval collapse geometrically toward the floor.
-		// Fall back to now when `iat` is absent or nonsensical.
+		// Fall back to now when `iat` is absent or nonsensical. (The no-`iat`
+		// fallback is deliberately NOT a fixed `exp - 12h` lead: that is the same
+		// shape as the 14-day lead that caused the storm, and it lands in the past
+		// for any token shorter than 12h.)
 		lifetimeStart := issuedTime
 		if lifetimeStart.IsZero() || !lifetimeStart.Before(expirationTime) {
 			lifetimeStart = now
@@ -108,113 +177,96 @@ func parseJwtClaims(jwt string) (gojwt.MapClaims, error) {
 	return claims, nil
 }
 
-type deviceTokenManager struct {
-	ctx              context.Context
-	cancel           context.CancelFunc
-	log              connect.Logger
-	api              *Api
-	refreshMonitor   *connect.Monitor
-	onTokenRefreshed func(newToken string)
-	logout           func() error
-
-	// refreshPending makes a refresh request LEVEL-triggered instead of edge-triggered.
-	//
-	// The monitor is a pure edge: NotifyAll closes the current channel and swaps in a
-	// fresh one. The run loop captures that channel at the TOP of each iteration — so a
-	// RefreshToken() landing while the loop is inside the /auth/refresh http call closes
-	// a channel nobody is listening to any more. The request is silently DROPPED, and
-	// the next scheduled refresh is ~16 days away.
-	//
-	// That is a real failure, not a theoretical one: an app asking for a refresh right
-	// after an upgrade (to pick up the new `pro` claim) would simply never get one, and
-	// nothing would say so. The flag survives across iterations, so a request made at any
-	// moment is honored on the next pass.
-	refreshPending atomic.Bool
-}
-
-func newDeviceTokenManager(
-	ctx context.Context,
-	log connect.Logger,
-	api *Api,
-	onTokenRefreshed func(newToken string),
-	logout func() error,
-) *deviceTokenManager {
-	cancelCtx, cancel := context.WithCancel(ctx)
-
-	manager := &deviceTokenManager{
-		ctx:              cancelCtx,
-		cancel:           cancel,
-		log:              log,
-		api:              api,
-		refreshMonitor:   connect.NewMonitor(),
-		onTokenRefreshed: onTokenRefreshed,
-		logout:           logout,
+func stopApiTokenTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
 	}
-
-	go connect.HandleError(manager.run)
-
-	return manager
 }
 
-func (self *deviceTokenManager) run() {
-	// the first refresh runs immediately: an app start with a stored jwt
-	// must find out right away when the jwt's client no longer exists on the
-	// server (see refreshToken), instead of silently running against a dead
-	// client until the scheduled refresh window
-	first := true
+func (self *apiTokenManager) Start() {
+	if self.active.CompareAndSwap(false, true) {
+		// the first refresh runs immediately: an app start with a stored jwt must
+		// find out right away when the jwt's client no longer exists on the server
+		// (see refreshToken), instead of silently running against a dead client
+		// until the scheduled refresh window
+		self.RefreshToken()
+	}
+}
+
+func (self *apiTokenManager) TokenChanged() {
+	if self.active.Load() {
+		self.RefreshToken()
+		return
+	}
+	// Wake the dormant loop as well. This matters when a network JWT is
+	// replaced with a client JWT immediately before Start.
+	self.refreshMonitor.NotifyAll()
+}
+
+func (self *apiTokenManager) run() {
 	for {
-		// Capture the notify channel BEFORE reading refreshPending, and use it for
-		// exactly ONE wait (the inner retry loop re-captures its own). Subscribe
-		// then check, never the reverse: a RefreshToken landing between the check
-		// and the capture would close a channel we had not taken yet, and we would
-		// sleep the full interval with the request still pending.
+		// Capture the notify channel BEFORE reading the token and refreshPending,
+		// and use it for exactly ONE wait (the inner retry loop re-captures its
+		// own). Subscribe then check, never the reverse: a RefreshToken landing
+		// between the check and the capture would close a channel we had not taken
+		// yet, and we would sleep the full interval with the request still pending.
 		//
 		// `Monitor.NotifyAll` CLOSES the current channel and swaps in a fresh one,
 		// so a captured channel that outlives its wait is a permanently-ready
 		// select arm -- a zero-backoff spin for the rest of the iteration.
 		refreshNotify := self.refreshMonitor.NotifyChannel()
-
 		byJwt := self.api.GetByJwt()
-		if self.log.V(1).Enabled() {
-			if claims, err := parseJwtClaims(byJwt); err == nil {
-				self.log.Infof("[dtm]JWT claims: %+v", claims)
-			}
-		}
 
-		refreshTimeout := jwtRefreshTimeout(byJwt, time.Now())
-
-		if first {
-			// the first refresh runs immediately: an app start with a stored jwt
-			// must find out right away when the jwt's client no longer exists on
-			// the server (see refreshToken)
-			first = false
-			refreshTimeout = 0
-		} else if self.refreshPending.Load() {
-			// A refresh was requested while we were busy (or while computing the
-			// timeout above), so the monitor's edge went to a channel we are no
-			// longer listening to. Honor the request instead of sleeping.
-			refreshTimeout = 0
-		}
-
-		if 0 < refreshTimeout {
-			self.log.Infof(
-				"[dtm]waiting %.2fs to refresh the jwt",
-				float64(refreshTimeout/time.Millisecond)/1000.0,
-			)
+		if !self.active.Load() || !jwtCanRefresh(byJwt) {
 			select {
 			case <-self.ctx.Done():
 				return
 			case <-refreshNotify:
-			case <-time.After(refreshTimeout):
+				continue
+			}
+		}
+
+		if self.api.logger().V(1).Enabled() {
+			if claims, err := parseJwtClaims(byJwt); err == nil {
+				self.api.logger().Infof("[api-token]JWT claims: %+v", claims)
+			}
+		}
+
+		refreshTimeout := time.Duration(0)
+		if !self.refreshPending.Load() {
+			// A refresh requested while we were busy (or while computing the
+			// timeout) sent the monitor's edge to a channel we are no longer
+			// listening to. The level-triggered flag above is what honors that
+			// request now instead of sleeping out the schedule.
+			refreshTimeout = jwtRefreshTimeout(byJwt, time.Now())
+		}
+
+		if 0 < refreshTimeout {
+			self.api.logger().Infof(
+				"[api-token]waiting %.2fs to refresh the jwt",
+				float64(refreshTimeout/time.Millisecond)/1000.0,
+			)
+			timer := time.NewTimer(refreshTimeout)
+			select {
+			case <-self.ctx.Done():
+				stopApiTokenTimer(timer)
+				return
+			case <-refreshNotify:
+				stopApiTokenTimer(timer)
+				continue
+			case <-timer.C:
 			}
 		} else {
-			// The wait above is the ONLY place the outer loop observed
-			// cancellation, and it is skipped whenever the timeout is
-			// non-positive. A closed device therefore kept re-entering
-			// refreshToken forever: 297 attempts in 497ms against a cancelled
-			// ClientStrategy in one observed teardown. Cancellation must be
-			// observed on this path too, and it must not depend on the schedule
-			// above being correct.
+			// The wait above is the ONLY place this branch of the outer loop would
+			// observe cancellation, and it is skipped whenever the timeout is
+			// non-positive. A closed device otherwise still enters refreshToken --
+			// 297 attempts in 497ms against a cancelled ClientStrategy in one
+			// observed teardown. The zero-timeout path stays legitimately reachable
+			// (the refresh Start arms, an explicit RefreshToken), so the guarantee
+			// must not depend on the schedule above being positive.
 			select {
 			case <-self.ctx.Done():
 				return
@@ -222,66 +274,64 @@ func (self *deviceTokenManager) run() {
 			}
 		}
 
-		// Consume the request BEFORE doing the work, not after. A RefreshToken() that
-		// lands *during* the refresh below must set the flag again and be serviced by the
-		// next iteration — clearing it afterwards would swallow exactly that request.
+		// Consume before the request. A manual request or new JWT installed
+		// while this HTTP call is in flight sets the flag again and is handled
+		// on the next outer iteration.
 		self.refreshPending.Store(false)
-
-		loggedOut := false
-		canceled := false
-		func() {
-			for {
-				self.log.Infof("[dtm]refreshing the jwt now")
-				var err error
-				loggedOut, err = self.refreshToken()
-				if err == nil {
-					return
-				}
-
-				randomTimeout := time.Duration(mathrand.Int63n(int64(15 * time.Minute)))
-
-				self.log.Infof(
-					"[dtm]jwt refresh failed. Will retry in %.2fs. err = %s",
-					float64(randomTimeout/time.Millisecond)/1000.0,
-					err,
-				)
-
-				// re-capture per wait: see the note at the outer capture. A
-				// NotifyAll during this iteration would otherwise leave the arm
-				// below permanently ready and defeat the backoff entirely.
-				retryNotify := self.refreshMonitor.NotifyChannel()
-
-				select {
-				case <-self.ctx.Done():
-					canceled = true
-					return
-				case <-retryNotify:
-				case <-time.After(randomTimeout):
-				}
-			}
-		}()
-		if canceled {
-			// This `return` USED TO BE the closure's, which exited only the
-			// closure -- `loggedOut` was false, so the check below did not stop
-			// the loop and the outer `for` immediately re-entered the refresh.
-			// That is how a correctly-computed backoff ("Will retry in 128.69s")
-			// was observed being discarded in the same millisecond, 297 times.
-			// Cancellation has to stop run(), not just the retry.
-			return
+		byJwt = self.api.GetByJwt()
+		if !jwtCanRefresh(byJwt) {
+			continue
 		}
-		if loggedOut {
-			// the local auth state is cleared; there is nothing left to
-			// refresh. Without stopping here, an already-expired stored jwt
-			// would hot loop refresh->logout.
-			return
+
+		for {
+			self.api.logger().Infof("[api-token]refreshing the jwt now")
+			loggedOut, stale, err := self.refreshToken(byJwt)
+			if loggedOut || stale || err == nil {
+				break
+			}
+
+			// A request arriving during the failed HTTP call must not sleep
+			// behind retry jitter. Return to the outer loop immediately.
+			if self.refreshPending.Load() {
+				break
+			}
+
+			randomTimeout := time.Duration(mathrand.Int63n(int64(15 * time.Minute)))
+			self.api.logger().Infof(
+				"[api-token]jwt refresh failed. Will retry in %.2fs. err = %s",
+				float64(randomTimeout/time.Millisecond)/1000.0,
+				err,
+			)
+
+			// re-capture per wait: see the note at the outer capture. A NotifyAll
+			// during this iteration would otherwise leave the arm below
+			// permanently ready and defeat the backoff entirely.
+			retryNotify := self.refreshMonitor.NotifyChannel()
+			timer := time.NewTimer(randomTimeout)
+			select {
+			case <-self.ctx.Done():
+				// Cancellation has to stop run(), not just the retry. This return
+				// used to sit inside an anonymous func, so it exited only the
+				// CLOSURE; the outer loop then immediately re-entered the refresh,
+				// discarding a correctly-computed backoff ("Will retry in
+				// 128.69s") in the same millisecond, 297 times.
+				stopApiTokenTimer(timer)
+				return
+			case <-retryNotify:
+				stopApiTokenTimer(timer)
+				// The token or refresh request changed; recalculate from the
+				// API's current state rather than retrying the captured JWT.
+			case <-timer.C:
+				continue
+			}
+			break
 		}
 	}
 }
 
-// refreshToken refreshes the jwt once. `loggedOut` is true when the api
-// confirmed the credential is invalid (an error result such as "client no
-// longer exists", or a 401) and the logout callback ran; `err` is a transient
-// failure the caller should retry.
+// refreshToken refreshes one captured JWT. loggedOut means that exact token
+// was authoritatively rejected and cleared. stale means a concurrent login or
+// token replacement won the compare-and-set, so this result was discarded.
 //
 // The logout decision is deliberately conservative: only a confirmed api
 // response that rejects the jwt logs out. Transport failures (offline
@@ -289,67 +339,63 @@ func (self *deviceTokenManager) run() {
 // retry forever without touching the auth state. Non-2xx responses surface as
 // a typed `connect.HttpStatusError` from the http layer, so an outage page
 // body can never be mistaken for a refresh result.
-func (self *deviceTokenManager) refreshToken() (loggedOut bool, returnErr error) {
+func (self *apiTokenManager) refreshToken(byJwt string) (loggedOut bool, stale bool, returnErr error) {
 	// bound the request to the manager ctx so a closed device does not leave
 	// the refresh (and its dialer evals) running to their own timeouts
-	result, err := self.api.refreshJwtSyncWithContext(self.ctx)
-
+	result, err := self.api.refreshJwtSyncWithContextAndJwt(self.ctx, byJwt)
 	if err != nil {
 		// a 401 over the api connection is the auth layer rejecting the jwt
 		// itself (expired or unparseable): confirmed invalid
 		var statusErr *connect.HttpStatusError
 		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusUnauthorized {
-			self.log.Errorf("[dtm]jwt rejected by the api (%d): logging out", statusErr.StatusCode)
-
-			self.logout()
-			loggedOut = true
+			self.api.logger().Errorf("[api-token]jwt rejected by the api (%d): logging out", statusErr.StatusCode)
+			if self.api.rejectByJwt(byJwt) {
+				loggedOut = true
+			} else {
+				stale = true
+			}
 			return
 		}
 
-		/*
-		 *  potentially API failed, try again
-		 */
-
-		self.log.Errorf("[dtm]failed to refresh JWT: %v", err)
-
+		self.api.logger().Errorf("[api-token]failed to refresh JWT: %v", err)
 		returnErr = err
 		return
 	}
 
 	if result.Error != nil {
-		/**
-		 * not a API error, but a token refresh error
-		 * for example, client no longer exists
-		 */
-
-		self.log.Errorf("[dtm]failed to refresh JWT: %v", result.Error.Message)
-
-		self.logout()
-		loggedOut = true
+		// not an api error, but a token refresh error -- for example, the client
+		// no longer exists
+		self.api.logger().Errorf("[api-token]failed to refresh JWT: %v", result.Error.Message)
+		if self.api.rejectByJwt(byJwt) {
+			loggedOut = true
+		} else {
+			stale = true
+		}
 		return
 	}
 
 	// guard against api logic errors that could mess up the client state
 	if result.ByJwt == "" {
-		returnErr = fmt.Errorf("Failed to refresh JWT: empty JWT returned")
+		returnErr = fmt.Errorf("failed to refresh JWT: empty JWT returned")
 		return
 	}
 
-	self.log.Infof("[dtm]successfully refreshed JWT")
-
-	self.onTokenRefreshed(result.ByJwt)
-
+	if !self.api.setRefreshedByJwt(byJwt, result.ByJwt) {
+		stale = true
+		return
+	}
+	self.api.logger().Infof("[api-token]successfully refreshed JWT")
 	return
 }
 
-// refreshes the token immediately
-func (self *deviceTokenManager) RefreshToken() {
-	// Record the request FIRST. The notify below is only a wake-up; the flag is what
-	// makes the request survive being made while the loop is busy refreshing.
+// RefreshToken records a level-triggered immediate refresh request.
+func (self *apiTokenManager) RefreshToken() {
+	// Record the request FIRST. The notify below is only a wake-up; the flag is
+	// what makes the request survive being made while the loop is busy refreshing.
 	self.refreshPending.Store(true)
 	self.refreshMonitor.NotifyAll()
 }
 
-func (self *deviceTokenManager) Close() {
+func (self *apiTokenManager) Close() {
 	self.cancel()
 }

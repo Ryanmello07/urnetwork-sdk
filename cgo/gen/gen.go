@@ -49,6 +49,7 @@ var behavioralTypes = map[string]bool{
 	"ProxyDevice":                true,
 	"Sub":                        true,
 	"IoLoop":                     true,
+	"PacketBatch":                true,
 	"Tunnel":                     true,
 	"ConnectGrid":                true,
 	"DeviceLocalKeyMaterial":     true,
@@ -61,6 +62,7 @@ var behavioralTypes = map[string]bool{
 	"BlockActionViewController":           true,
 	"ConnectViewController":               true,
 	"ContractViewController":              true,
+	"SubscriptionBalanceViewController":   true,
 	"ContractDetailsViewController":       true,
 	"DevicesViewController":               true,
 	"FeedbackViewController":              true,
@@ -71,6 +73,7 @@ var behavioralTypes = map[string]bool{
 	"PeerViewController":                  true,
 	"PostQuantumIdentityViewController":   true,
 	"ProvideViewController":               true,
+	"ProviderLocationsViewController":     true,
 	"ReferralCodeViewController":          true,
 	"WalletViewController":                true,
 }
@@ -117,6 +120,8 @@ var skipMethods = map[string]string{
 	"DeviceLocal.SetProviderSecurityPolicyGenerator": "func param (macOS parity: ignored)",
 	"DeviceLocal.AddReceivePacketCallback":           "func param (macOS parity: ignored); use urnet_device_local_add_receive_packet",
 	"DeviceLocal.SendPacketNoCopy":                   "pool ownership does not cross the abi; use urnet_device_local_send_packet",
+	"DeviceLocal.SendPacketsNoCopy":                  "pool ownership does not cross the abi; use urnet_device_local_send_packet_batch",
+	"PacketBatch.Get":                                "manual export urnet_packet_batch_get",
 	"WebsocketDeviceRpcDialer.Dial":                  "net.Conn internal; used by DeviceRemote internally",
 	"WebsocketDeviceRpcListener.Accept":              "net.Conn internal; used by DeviceLocal internally",
 
@@ -1709,6 +1714,9 @@ bool urnet_device_local_key_material_get_provide_tls_private_key_pem(uint64_t se
 bool urnet_render_identicon_png(const uint8_t* input, int32_t input_len, int32_t size, uint8_t* out, int32_t* inout_len, char** out_error);
 bool urnet_device_get_public_identity_key(uint64_t self, uint8_t* out, int32_t* inout_len);
 
+/* one borrowed packet from a receive batch */
+bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t* inout_len);
+
 `
 
 // manualExports scans the hand-written package files for //export directives
@@ -1718,7 +1726,7 @@ func manualExports() []string {
 	if err != nil {
 		return names
 	}
-	// tolerate CRLF: on a windows checkout the trailing  sits between the
+	// tolerate CRLF: on a windows checkout the trailing \r sits between the
 	// name and the line end, so an anchored `$` never matches and every
 	// hand-written export silently vanishes from the def -- the import lib
 	// then builds fine and the CONSUMER fails at link time with unresolved

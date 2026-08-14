@@ -109,6 +109,10 @@ void urnet_invoke_change_network_name(urnet_change_network_name_cb cb, void* use
 	cb(user_data, result_json, err_param);
 }
 
+void urnet_invoke_check_balance_code(urnet_check_balance_code_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
+}
+
 void urnet_invoke_claim_network_name(urnet_claim_network_name_cb cb, void* user_data, const char* result_json, const char* err_param) {
 	cb(user_data, result_json, err_param);
 }
@@ -421,8 +425,20 @@ void urnet_invoke_provider_identity_change(urnet_provider_identity_change_cb cb,
 	cb(user_data);
 }
 
+void urnet_invoke_purchase_confirmation(urnet_purchase_confirmation_cb cb, void* user_data, const char* state) {
+	cb(user_data, state);
+}
+
 void urnet_invoke_receive_packet(urnet_receive_packet_cb cb, void* user_data, int64_t ip_version, int64_t ip_protocol, const uint8_t* packet, int32_t packet_len) {
 	cb(user_data, ip_version, ip_protocol, packet, packet_len);
+}
+
+void urnet_invoke_receive_packet_batch(urnet_receive_packet_batch_cb cb, void* user_data, const uint8_t* packet_batch_bytes, int32_t packet_batch_bytes_len) {
+	cb(user_data, packet_batch_bytes, packet_batch_bytes_len);
+}
+
+void urnet_invoke_receive_packets(urnet_receive_packets_cb cb, void* user_data, uint64_t packet_batch) {
+	cb(user_data, packet_batch);
 }
 
 void urnet_invoke_redeem_balance_code(urnet_redeem_balance_code_cb cb, void* user_data, const char* result_json, const char* err_param) {
@@ -459,6 +475,10 @@ void urnet_invoke_route_local_change(urnet_route_local_change_cb cb, void* user_
 
 void urnet_invoke_selected_location(urnet_selected_location_cb cb, void* user_data, const char* location_json) {
 	cb(user_data, location_json);
+}
+
+void urnet_invoke_selected_provider_location_change(urnet_selected_provider_location_change_cb cb, void* user_data) {
+	cb(user_data);
 }
 
 void urnet_invoke_send_feedback(urnet_send_feedback_cb cb, void* user_data, const char* result_json, const char* err_param) {
@@ -501,8 +521,16 @@ void urnet_invoke_subscription_balance(urnet_subscription_balance_cb cb, void* u
 	cb(user_data, result_json, err_param);
 }
 
+void urnet_invoke_subscription_balance_change(urnet_subscription_balance_change_cb cb, void* user_data) {
+	cb(user_data);
+}
+
 void urnet_invoke_subscription_create_payment_id(urnet_subscription_create_payment_id_cb cb, void* user_data, const char* result_json, const char* err_param) {
 	cb(user_data, result_json, err_param);
+}
+
+void urnet_invoke_subscription_jwt_out_of_sync(urnet_subscription_jwt_out_of_sync_cb cb, void* user_data, bool server_is_pro) {
+	cb(user_data, server_is_pro);
 }
 
 void urnet_invoke_throughput(urnet_throughput_cb cb, void* user_data) {
@@ -538,6 +566,14 @@ void urnet_invoke_validate_address(urnet_validate_address_cb cb, void* user_data
 }
 
 void urnet_invoke_validate_referral_code(urnet_validate_referral_code_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
+}
+
+void urnet_invoke_verify_apple_transaction(urnet_verify_apple_transaction_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
+}
+
+void urnet_invoke_verify_play_purchase(urnet_verify_play_purchase_cb cb, void* user_data, const char* result_json, const char* err_param) {
 	cb(user_data, result_json, err_param);
 }
 

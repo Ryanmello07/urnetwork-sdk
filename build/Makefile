@@ -66,7 +66,29 @@ build_android:
 		cp URnetworkSdk-sources.jar validate/; \
 		cd validate; \
 			jar -xf URnetworkSdk-sources.jar; \
-			bad_exports=`grep -Ri '// skipped' . | grep -v DeviceLocalRpc | grep -ve 'DeviceRemote[A-Z]' | grep -ve 'DeviceRpcDialer' | grep -ve 'DeviceRpcListener' | grep -ve 'NewPlatformDeviceLocal' | grep -ve 'Proxy' | grep -ve 'DeviceLocal\.AddReceivePacketCallback' | grep -ve 'DeviceLocal\.Ctx' | grep -ve 'DeviceLocal\.Set[A-Za-z]*SecurityPolicyGenerator' | grep -ve 'SetUpgradeMuxSettings' | grep -ve 'DeviceLocalSettings' | grep -ve 'NewPlatformNetworkSpace' | grep -ve 'Testing_NewNetworkSpaceWithUrls' | grep -ve '[A-Za-z]Rpc' | grep -ve 'Sim[A-Z]' | grep -ve 'CollapseHostNames' || true`; \
+			: 'gobind omits anything it cannot bind and only leaves a'; \
+			: '"// skipped" comment, so this gate fails the build on an'; \
+			: 'UNEXPECTED omission. Everything below is a deliberate accept;'; \
+			: 'add an entry only with a reason, or the gate stops catching'; \
+			: 'real binding breaks.'; \
+			: '  rpc/proxy/platform/test surface: not part of the app api'; \
+			: '  *SyncWithContext, NewApi, NewNetworkSpaceWithUrls: take a'; \
+			: '    context.Context; apps use the NewPlatform*/non-ctx forms'; \
+			: '  Sn* (uint64, [][]byte) + VerifyKeysResult.Keys ([]*struct):'; \
+			: '    gomobile binds none of those. NOTE these fields are then'; \
+			: '    INVISIBLE to android/apple — if an app ever needs one it'; \
+			: '    needs an exportedList[T] wrapper or an int64/string form,'; \
+			: '    not another entry here.'; \
+			allow_skipped='DeviceLocalRpc'; \
+			allow_skipped="$$allow_skipped|DeviceRemote[A-Z]|DeviceRpcDialer|DeviceRpcListener|[A-Za-z]Rpc"; \
+			allow_skipped="$$allow_skipped|NewPlatformDeviceLocal|NewPlatformNetworkSpace|Proxy"; \
+			allow_skipped="$$allow_skipped|DeviceLocal\.AddReceivePacket(sCallback|Callback)|DeviceLocal\.SendPacketsNoCopy|DeviceLocal\.Ctx"; \
+			allow_skipped="$$allow_skipped|DeviceLocal\.Set[A-Za-z]*SecurityPolicyGenerator"; \
+			allow_skipped="$$allow_skipped|SetUpgradeMuxSettings|DeviceLocalSettings"; \
+			allow_skipped="$$allow_skipped|Testing_NewNetworkSpaceWithUrls|Sim[A-Z]|CollapseHostNames"; \
+			allow_skipped="$$allow_skipped|SyncWithContext|NewApi|NewNetworkSpaceWithUrls"; \
+			allow_skipped="$$allow_skipped|SnPoolClaim(Result|Args)|SnEpochResult|VerifyKeysResult\.Keys"; \
+			bad_exports=`grep -Ri '// skipped' . | grep -Ev "$$allow_skipped" || true`; \
 			if [ "$$bad_exports" ]; then \
 				echo "Some types could not be exported:"; \
 				echo "$$bad_exports"; \
@@ -121,14 +143,23 @@ build_linux:
 	$(MAKE) -C ../cgo build_linux
 
 
-init:
+GOMOBILE_VERSION ?= v0.0.0-20260611195102-4dd8f1dbf5d2
+CHECKSEC_VERSION ?= v3.1.0
+
+# Install only the pinned build tools. Platform setup scripts use this target
+# so acceptance builds do not install tools or clean shared Go caches.
+# gomobile init installs gobind@latest, so restore the matching version after it.
+.PHONY: init_tools init
+init_tools:
 	export PATH="$$PATH:/usr/local/go/bin:$$HOME/go/bin" && \
-	GOMOBILE_VERSION=v0.0.0-20260611195102-4dd8f1dbf5d2 && \
-	go install golang.org/x/mobile/cmd/gomobile@$$GOMOBILE_VERSION && \
-	go get golang.org/x/mobile/bind@$$GOMOBILE_VERSION && \
+	go install golang.org/x/mobile/cmd/gomobile@$(GOMOBILE_VERSION) && \
 	gomobile init && \
-	CHECKSEC_VERSION=v3.1.0 && \
-	go install github.com/slimm609/checksec/v3@$$CHECKSEC_VERSION && \
+	go install golang.org/x/mobile/cmd/gobind@$(GOMOBILE_VERSION) && \
+	go install github.com/slimm609/checksec/v3@$(CHECKSEC_VERSION)
+
+init: init_tools
+	export PATH="$$PATH:/usr/local/go/bin:$$HOME/go/bin" && \
+	go get golang.org/x/mobile/bind@$(GOMOBILE_VERSION) && \
 	go mod download "github.com/urnetwork/sdk" && \
 	go mod download "github.com/urnetwork/connect" && \
 	go clean -cache && \

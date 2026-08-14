@@ -53,7 +53,21 @@ func jsConnectLocation(location *sdk.ConnectLocation) js.Value {
 		"providerCount": location.ProviderCount,
 	}
 	if location.ConnectLocationId != nil {
+		// the composite id, the one to hand back to the sdk
 		m["connectLocationId"] = location.ConnectLocationId.String()
+		// ...and its parts, for callers that persist or forward a bare id
+		// (the web settings doc and the extension both carry a location id,
+		// not the composite). Exactly one of these is set.
+		if location.ConnectLocationId.LocationId != nil {
+			m["locationId"] = location.ConnectLocationId.LocationId.String()
+		}
+		if location.ConnectLocationId.LocationGroupId != nil {
+			m["locationGroupId"] = location.ConnectLocationId.LocationGroupId.String()
+		}
+		if location.ConnectLocationId.ClientId != nil {
+			m["clientId"] = location.ConnectLocationId.ClientId.String()
+		}
+		m["bestAvailable"] = location.ConnectLocationId.BestAvailable
 	}
 	return js.ValueOf(m)
 }
@@ -119,8 +133,9 @@ func jsConnectedProviderLocation(location *sdk.ConnectedProviderLocation) js.Val
 	return js.ValueOf(m)
 }
 
-// jsConnectedProviderLocations marshals the list, preserving the sdk's order
-// (oldest connected first).
+// jsConnectedProviderLocations marshals the list, preserving whatever order it
+// arrives in — the sdk's own (oldest connected first) from the device, display
+// order from `ProviderLocationsViewController.getProviderLocations`.
 func jsConnectedProviderLocations(locations *sdk.ConnectedProviderLocationList) js.Value {
 	out := []any{}
 	if locations != nil {
@@ -204,6 +219,12 @@ func jsDeviceRemote(device *sdk.DeviceRemote) js.Value {
 	})
 	m["setConnectLocation"] = js.FuncOf(func(this js.Value, args []js.Value) any {
 		device.SetConnectLocation(parseConnectLocation(args[0]))
+		return js.Null()
+	})
+	// the explicit "connect to this" action: rebuilds even when the location is
+	// already the installed destination (see Device.Reconnect)
+	m["reconnect"] = js.FuncOf(func(this js.Value, args []js.Value) any {
+		device.Reconnect(parseConnectLocation(args[0]))
 		return js.Null()
 	})
 	m["removeDestination"] = js.FuncOf(func(this js.Value, args []js.Value) any {
@@ -327,6 +348,12 @@ func jsDeviceRemote(device *sdk.DeviceRemote) js.Value {
 		vc := device.OpenDevicesViewController()
 		return jsDevicesViewController(vc, func() {
 			device.CloseDevicesViewController(vc)
+		})
+	})
+	m["openProviderLocationsViewController"] = js.FuncOf(func(this js.Value, args []js.Value) any {
+		vc := device.OpenProviderLocationsViewController()
+		return jsProviderLocationsViewController(vc, func() {
+			device.CloseProviderLocationsViewController(vc)
 		})
 	})
 

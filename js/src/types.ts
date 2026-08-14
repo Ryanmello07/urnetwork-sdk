@@ -169,6 +169,13 @@ export interface DeviceRemote {
   // connect location / destination
   getConnectLocation(): ConnectLocationInfo | null;
   setConnectLocation(location: ConnectLocationSpec | null): void;
+  /**
+   * The explicit "connect to this" action. Unlike setConnectLocation, this
+   * rebuilds the connection even when the location is already the installed
+   * destination — a new multi client and a fresh set of peers — so choosing the
+   * location you are already on reconnects instead of doing nothing.
+   */
+  reconnect(location: ConnectLocationSpec | null): void;
   removeDestination(): void;
   shuffle(): void;
   getConnectEnabled(): boolean;
@@ -176,9 +183,12 @@ export interface DeviceRemote {
   // peers
   getNetworkPeers(): NetworkPeersInfo | null;
 
-  // connected provider locations, sorted oldest-connected first. While the rpc
-  // is down the last readable list is retained rather than drained, so pair an
-  // empty result with getRemoteConnected before showing "none".
+  // connected provider locations, sorted oldest-connected first. The
+  // provider-locations screen renders ProviderLocationsViewController
+  // .getProviderLocations() instead, which is the same window in display order;
+  // this raw order is what an "oldest connected provider" consumer wants. While
+  // the rpc is down the last readable list is retained rather than drained, so
+  // pair an empty result with getRemoteConnected before showing "none".
   getConnectedProviderLocations(): ConnectedProviderLocationInfo[];
   // drop a provider and stop it being re-discovered for the rest of this
   // connection. Takes the egress client id
@@ -217,6 +227,7 @@ export interface DeviceRemote {
   openBlockActionViewController(): BlockActionViewController;
   openLocationsViewController(): LocationsViewController;
   openDevicesViewController(): DevicesViewController;
+  openProviderLocationsViewController(): ProviderLocationsViewController;
 }
 
 // ── view controllers ─────────────────────────────────────────────────────────
@@ -497,6 +508,47 @@ export interface DevicesViewController {
   stop(): void;
 
   addNetworkClientsListener(cb: (clients: NetworkClientInfo[]) => void): Unsubscribe;
+}
+
+/**
+ * ProviderLocationsViewController — the provider-locations screen's display
+ * order, selection and scroll wheel, shared by every URnetwork app so they all
+ * read and traverse the globe identically.
+ *
+ * `getProviderLocations` is the connected providers in DISPLAY ORDER: the ones
+ * with coordinates west to east relative to their centroid — so a cluster
+ * straddling the antimeridian stays contiguous — then the ones without. It is
+ * the list to render, and it is the order `stepSelection` walks; re-read it on
+ * the device's connectedProviderLocationsChanged. (The device's own
+ * getConnectedProviderLocations is the same window sorted by connected
+ * duration.)
+ *
+ * The wheel is the plottable head of that order, and `stepSelection` CLAMPS at
+ * its ends: stepping past the extreme west or east sticks there rather than
+ * cycling round the globe.
+ *
+ * The selection always points at a connected provider: the longest connected
+ * one by default, and when the selected provider leaves the window (removed,
+ * or rotated out) the NEAREST remaining one. `getSelectedClientId` is "" only
+ * when no providers are connected.
+ */
+export interface ProviderLocationsViewController {
+  close(): void;
+  start(): void;
+  stop(): void;
+
+  /** the connected providers in display order (west to east, then unplottable) */
+  getProviderLocations(): ConnectedProviderLocationInfo[];
+  /** the selected provider's egress client id, "" when none are connected */
+  getSelectedClientId(): string;
+  /** select explicitly (a dot tap or a list row); "" falls back to the default */
+  setSelectedClientId(clientId: string): void;
+  /** move `steps` providers along the wheel, positive east, clamped at the ends */
+  stepSelection(steps: number): void;
+  /** drop the provider, moving the selection to the nearest one if it was selected */
+  removeProvider(clientId: string): void;
+
+  addSelectedProviderLocationChangeListener(cb: () => void): Unsubscribe;
 }
 
 /**

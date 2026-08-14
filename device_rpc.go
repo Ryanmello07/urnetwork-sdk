@@ -154,9 +154,10 @@ type DeviceRemote struct {
 	log       connect.Logger
 	closeOnce sync.Once
 
-	networkSpace *NetworkSpace
-	byJwt        string
-	tokenManager *deviceTokenManager
+	networkSpace     *NetworkSpace
+	byJwt            string
+	apiJwtRefreshSub Sub
+	apiAuthLogoutSub Sub
 
 	settings *deviceRpcSettings
 
@@ -309,7 +310,14 @@ func NewPlatformDeviceRemote(
 ) (*DeviceRemote, error) {
 	clientId, err := parseByJwtClientId(byJwt)
 	if err != nil {
-		return nil, err
+		if err != errByJwtNoClientId {
+			return nil, err
+		}
+		// A NETWORK member jwt — the documented input here — carries no
+		// client_id claim. On the platform path the client id is display-only
+		// (rpc auth is signedProxyId, device pairing is instanceId), so use
+		// the zero id rather than refusing to construct the remote.
+		clientId = connect.Id{}
 	}
 	settings := defaultDeviceRpcSettings()
 	dialer := NewPlatformDeviceRpcDialer(proxyUrl, signedProxyId, settings)
@@ -349,7 +357,6 @@ func newDeviceRemoteWithOverrides(
 	ctx, cancel := context.WithCancel(context.Background())
 
 	api := networkSpace.GetApi()
-	api.SetByJwt(byJwt)
 
 	deviceRemote := &DeviceRemote{
 		ctx:                      ctx,
@@ -425,22 +432,24 @@ func newDeviceRemoteWithOverrides(
 		}
 	}
 
-	deviceRemote.tokenManager = newDeviceTokenManager(
-		ctx,
-		deviceRemote.log,
-		api,
-		deviceRemote.setByJwt,
-		// clear the local auth state, then propagate the logout to the app
-		// (`AddAuthLogoutListener`) so the ui can return to the login flow
-		func() error {
-			err := logout()
-			deviceRemote.authLogout()
-			return err
-		},
-	)
-
+	// Install the RPC HTTP functions before enabling the API-owned refresh
+	// worker, so its immediate startup validation follows the remote path.
 	api.setHttpPostRaw(deviceRemote.httpPostRaw)
 	api.setHttpGetRaw(deviceRemote.httpGetRaw)
+	api.setLog(deviceRemote.log)
+	deviceRemote.apiJwtRefreshSub = api.AddJwtRefreshListener(
+		jwtRefreshListenerFunc(deviceRemote.setByJwt),
+	)
+	deviceRemote.apiAuthLogoutSub = api.AddAuthLogoutListener(
+		authLogoutListenerFunc(func() {
+			if err := logout(); err != nil {
+				deviceRemote.log.Errorf("failed to clear local auth state: %v", err)
+			}
+			deviceRemote.handleApiAuthLogout()
+		}),
+	)
+	api.SetByJwt(byJwt)
+	api.StartJwtRefresh()
 
 	newSecurityPolicyMonitor(ctx, deviceRemote, settings.Verbose)
 
@@ -759,9 +768,16 @@ func (self *DeviceRemote) setByJwt(byJwt string) {
 	self.log.Infof("DeviceRemote onTokenRefreshSuccess complete, should have fired listeners")
 }
 
+func (self *DeviceRemote) handleApiAuthLogout() {
+	self.stateLock.Lock()
+	self.byJwt = ""
+	self.stateLock.Unlock()
+	self.authLogout()
+}
+
 func (self *DeviceRemote) RefreshToken(attempt int) error {
 	self.log.Infof("DeviceRemote RefreshToken attempt %d", attempt)
-	self.tokenManager.RefreshToken()
+	self.GetApi().RequestJwtRefresh()
 	return nil
 }
 
@@ -2463,8 +2479,28 @@ func deviceRemoteDestinationsEqual(a *DeviceRemoteDestination, b *DeviceRemoteDe
 		sdkProviderSpecsFingerprint(a.Specs) == sdkProviderSpecsFingerprint(b.Specs)
 }
 
+// Reconnect is `SetConnectLocation` for an explicit user action: it rebuilds
+// the connection even when `location` is already the installed destination.
+// See the `Device` interface.
+//
+// It suppresses nothing — suppressing is the whole thing being asked for here —
+// and falls back to the same pending state as `SetConnectLocation` when the rpc
+// is down: with no reachable device there is no live connection to rebuild, so
+// installing the location on the next sync is the right landing.
+func (self *DeviceRemote) Reconnect(location *ConnectLocation) {
+	self.setConnectLocation(location, true)
+}
+
 func (self *DeviceRemote) SetConnectLocation(location *ConnectLocation) {
+	self.setConnectLocation(location, false)
+}
+
+func (self *DeviceRemote) setConnectLocation(location *ConnectLocation, rebuild bool) {
 	deviceRemoteLocation := newDeviceRemoteConnectLocation(location)
+	rpcMethod := "DeviceLocalRpc.SetConnectLocation"
+	if rebuild {
+		rpcMethod = "DeviceLocalRpc.Reconnect"
+	}
 	event := false
 	func() {
 		self.stateLock.Lock()
@@ -2475,7 +2511,8 @@ func (self *DeviceRemote) SetConnectLocation(location *ConnectLocation) {
 		// SetDestination whose spec list differs despite the same display
 		// location; DeviceLocal performs the authoritative installed-
 		// destination fingerprint check.
-		if self.state.Location.IsSet &&
+		if !rebuild &&
+			self.state.Location.IsSet &&
 			self.state.Location.Value != nil &&
 			connectLocationValuesEqual(self.state.Location.Value.toConnectLocation(), location) {
 			return
@@ -2486,7 +2523,7 @@ func (self *DeviceRemote) SetConnectLocation(location *ConnectLocation) {
 				return false
 			}
 
-			err := rpcCallVoid(self.service, "DeviceLocalRpc.SetConnectLocation", deviceRemoteLocation, self.closeService)
+			err := rpcCallVoid(self.service, rpcMethod, deviceRemoteLocation, self.closeService)
 			if err != nil {
 				return false
 			}
@@ -2672,20 +2709,21 @@ func (self *DeviceRemote) Shuffle() {
 // RemoveConnectedProvider is an action on the hosted device (unlike the
 // read-only provider-locations surface, which derives from the bridged window
 // monitor), so it is a plain rpc call. It is dropped when the rpc is down —
-// the exclusion only lives as long as the connection anyway.
+// the exclusion only lives as long as the connection anyway. stateLock is held
+// across the call like every other forward rpc: the closeService cleanup
+// requires the lock.
 func (self *DeviceRemote) RemoveConnectedProvider(clientId *Id) {
 	if clientId == nil {
 		return
 	}
 
 	self.stateLock.Lock()
-	service := self.service
-	self.stateLock.Unlock()
+	defer self.stateLock.Unlock()
 
-	if service == nil {
+	if self.service == nil {
 		return
 	}
-	rpcCallVoid(service, "DeviceLocalRpc.RemoveConnectedProvider", clientId.toConnectId(), self.closeService)
+	rpcCallVoid(self.service, "DeviceLocalRpc.RemoveConnectedProvider", clientId.toConnectId(), self.closeService)
 }
 
 func (self *DeviceRemote) Cancel() {
@@ -2709,13 +2747,13 @@ func (self *DeviceRemote) Close() {
 		}()
 		self.cancel()
 
-		self.stateLock.Lock()
-		tokenManager := self.tokenManager
-		self.tokenManager = nil
-		self.stateLock.Unlock()
-
-		if tokenManager != nil {
-			tokenManager.Close()
+		if self.apiJwtRefreshSub != nil {
+			self.apiJwtRefreshSub.Close()
+			self.apiJwtRefreshSub = nil
+		}
+		if self.apiAuthLogoutSub != nil {
+			self.apiAuthLogoutSub.Close()
+			self.apiAuthLogoutSub = nil
 		}
 
 		api := self.networkSpace.GetApi()
@@ -3674,7 +3712,15 @@ func (self *DeviceRemote) httpPostRaw(ctx context.Context, requestUrl string, re
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
 
-			err = rpcCallVoid(service, "DeviceLocalRpc.HttpPostRaw", httpRequest, self.closeService)
+			// the capture above only chose the remote path. The run goroutine can
+			// tear down and replace the service between the capture and here, and
+			// a failed call on a stale client must not closeService the live one
+			if self.service == nil {
+				err = fmt.Errorf("rpc service is down")
+				close(httpResponseChannel)
+				return
+			}
+			err = rpcCallVoid(self.service, "DeviceLocalRpc.HttpPostRaw", httpRequest, self.closeService)
 			if err != nil {
 				close(httpResponseChannel)
 				return
@@ -3739,7 +3785,15 @@ func (self *DeviceRemote) httpGetRaw(ctx context.Context, requestUrl string, byJ
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
 
-			err = rpcCallVoid(service, "DeviceLocalRpc.HttpGetRaw", httpRequest, self.closeService)
+			// the capture above only chose the remote path. The run goroutine can
+			// tear down and replace the service between the capture and here, and
+			// a failed call on a stale client must not closeService the live one
+			if self.service == nil {
+				err = fmt.Errorf("rpc service is down")
+				close(httpResponseChannel)
+				return
+			}
+			err = rpcCallVoid(self.service, "DeviceLocalRpc.HttpGetRaw", httpRequest, self.closeService)
 			if err != nil {
 				close(httpResponseChannel)
 				return
@@ -5031,6 +5085,13 @@ func (self *DeviceRemote) UploadLogs(feedbackId string, callback UploadLogsCallb
 // we use a made-up annotation gomobile:noexport to try to document this
 // however, the types must be exported for net.rpc to work
 // this leads to some unfortunate gomobile warnings currently
+//
+//gomobile:noexport is the type-level equivalent of the gomobile:noexport
+// marker used elsewhere in the package, and it stands in for it here: gobind
+// does emit classes for these types and silently drops ~123 fields across
+// them (connect.Id, []string, netip.Addr, time.Duration, deviceRemoteValue[T],
+// slices of structs). None of that is a bug — nothing below is meant to reach
+// an app — so the omissions are deliberate and are not marked field by field.
 
 // *important* argument and return values from rpc fucntios CANNOT be nil
 // this is a limitation in net.rpc
@@ -10172,6 +10233,11 @@ func (self *DeviceLocalRpc) SetDestination(destination *DeviceRemoteDestination,
 
 func (self *DeviceLocalRpc) SetConnectLocation(location *DeviceRemoteConnectLocation, _ RpcVoid) error {
 	self.deviceLocal.SetConnectLocation(location.toConnectLocation())
+	return nil
+}
+
+func (self *DeviceLocalRpc) Reconnect(location *DeviceRemoteConnectLocation, _ RpcVoid) error {
+	self.deviceLocal.Reconnect(location.toConnectLocation())
 	return nil
 }
 

@@ -15,6 +15,8 @@ type ViewController interface {
 type ViewControllerManager interface {
 	OpenLocationsViewController() *LocationsViewController
 
+	OpenProviderLocationsViewController() *ProviderLocationsViewController
+
 	OpenConnectViewController() *ConnectViewController
 
 	OpenWalletViewController() *WalletViewController
@@ -40,6 +42,8 @@ type ViewControllerManager interface {
 	OpenPostQuantumIdentityViewController() *PostQuantumIdentityViewController
 
 	OpenContractViewController() *ContractViewController
+
+	OpenSubscriptionBalanceViewController() *SubscriptionBalanceViewController
 
 	// Deprecated: use the split client/provider entry points below.
 	OpenContractDetailsViewController() *ContractDetailsViewController
@@ -91,6 +95,12 @@ func (self *viewControllerManager) OpenLocationsViewController() *LocationsViewC
 	vm := newLocationsViewController(self.ctx, self.device)
 	self.openViewController(vm)
 	return vm
+}
+
+func (self *viewControllerManager) OpenProviderLocationsViewController() *ProviderLocationsViewController {
+	vc := newProviderLocationsViewController(self.ctx, self.device)
+	self.openViewController(vc)
+	return vc
 }
 
 func (self *viewControllerManager) OpenConnectViewController() *ConnectViewController {
@@ -167,6 +177,12 @@ func (self *viewControllerManager) OpenPostQuantumIdentityViewController() *Post
 
 func (self *viewControllerManager) OpenContractViewController() *ContractViewController {
 	vc := newContractViewController(self.ctx, self.device)
+	self.openViewController(vc)
+	return vc
+}
+
+func (self *viewControllerManager) OpenSubscriptionBalanceViewController() *SubscriptionBalanceViewController {
+	vc := newSubscriptionBalanceViewController(self.ctx, self.device.GetApi())
 	self.openViewController(vc)
 	return vc
 }

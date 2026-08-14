@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -21,9 +22,26 @@ type Api struct {
 
 	mutex sync.Mutex
 	byJwt string
+	log   connect.Logger
 
 	httpPostRaw connect.HttpPostRawFunction
 	httpGetRaw  connect.HttpGetRawFunction
+
+	jwtRefreshListeners *connect.CallbackList[JwtRefreshListener]
+	authLogoutListeners *connect.CallbackList[AuthLogoutListener]
+	tokenManager        *apiTokenManager
+}
+
+type jwtRefreshListenerFunc func(string)
+
+func (self jwtRefreshListenerFunc) JwtRefreshed(jwt string) {
+	self(jwt)
+}
+
+type authLogoutListenerFunc func()
+
+func (self authLogoutListenerFunc) AuthLogout() {
+	self()
 }
 
 func newApi(
@@ -33,22 +51,43 @@ func newApi(
 ) *Api {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	return &Api{
+	api := &Api{
 		ctx:            cancelCtx,
 		cancel:         cancel,
 		clientStrategy: clientStrategy,
 		apiUrl:         apiUrl,
+		log:            connect.DefaultLogger(),
 		httpPostRaw:    nil,
 		httpGetRaw:     nil,
+
+		jwtRefreshListeners: connect.NewCallbackList[JwtRefreshListener](),
+		authLogoutListeners: connect.NewCallbackList[AuthLogoutListener](),
 	}
+	api.tokenManager = newApiTokenManager(cancelCtx, api)
+	return api
+}
+
+// NewApi creates a standalone SDK API using the caller-owned client strategy.
+// The API owns the current JWT and its refresh worker; callers that install a
+// renewable client JWT should register refresh/logout listeners and then call
+// StartJwtRefresh. The worker shares the API lifetime and stops on Close.
+//
+//gomobile:noexport
+func NewApi(ctx context.Context, clientStrategy *connect.ClientStrategy, apiUrl string) *Api {
+	return newApi(ctx, clientStrategy, apiUrl)
 }
 
 // this gets attached to api calls that need it
 func (self *Api) SetByJwt(byJwt string) {
 	self.mutex.Lock()
-	defer self.mutex.Unlock()
-
+	changed := self.byJwt != byJwt
 	self.byJwt = byJwt
+	tokenManager := self.tokenManager
+	self.mutex.Unlock()
+
+	if changed && tokenManager != nil {
+		tokenManager.TokenChanged()
+	}
 }
 
 func (self *Api) GetByJwt() string {
@@ -56,6 +95,101 @@ func (self *Api) GetByJwt() string {
 	defer self.mutex.Unlock()
 
 	return self.byJwt
+}
+
+func (self *Api) setLog(log connect.Logger) {
+	if log == nil {
+		log = connect.DefaultLogger()
+	}
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	self.log = log
+}
+
+func (self *Api) logger() connect.Logger {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return self.log
+}
+
+// setRefreshedByJwt installs a refresh result only if the token used for the
+// request is still current. This prevents an in-flight refresh from replacing
+// a newer login/session installed concurrently.
+func (self *Api) setRefreshedByJwt(previousByJwt string, byJwt string) bool {
+	self.mutex.Lock()
+	if self.byJwt != previousByJwt {
+		self.mutex.Unlock()
+		return false
+	}
+	self.byJwt = byJwt
+	self.mutex.Unlock()
+
+	for _, listener := range self.jwtRefreshListeners.Get() {
+		listener := listener
+		connect.HandleError(func() {
+			listener.JwtRefreshed(byJwt)
+		})
+	}
+	return true
+}
+
+// rejectByJwt clears a token only if it is still the one rejected by the API.
+// Authentication-rejection listeners own persistence/UI/process policy.
+func (self *Api) rejectByJwt(rejectedByJwt string) bool {
+	self.mutex.Lock()
+	if self.byJwt != rejectedByJwt {
+		self.mutex.Unlock()
+		return false
+	}
+	self.byJwt = ""
+	self.mutex.Unlock()
+
+	for _, listener := range self.authLogoutListeners.Get() {
+		listener := listener
+		connect.HandleError(listener.AuthLogout)
+	}
+	return true
+}
+
+// AddJwtRefreshListener observes successfully installed refreshed JWTs. The
+// callback runs after Api.GetByJwt has begun returning the new value.
+//
+//gomobile:noexport
+func (self *Api) AddJwtRefreshListener(listener JwtRefreshListener) Sub {
+	callbackId := self.jwtRefreshListeners.Add(listener)
+	return newSub(func() {
+		self.jwtRefreshListeners.Remove(callbackId)
+	})
+}
+
+// AddAuthLogoutListener observes a confirmed server rejection of the current
+// client JWT. Transport failures and non-401 server failures never fire it.
+//
+//gomobile:noexport
+func (self *Api) AddAuthLogoutListener(listener AuthLogoutListener) Sub {
+	callbackId := self.authLogoutListeners.Add(listener)
+	return newSub(func() {
+		self.authLogoutListeners.Remove(callbackId)
+	})
+}
+
+// StartJwtRefresh idempotently enables the API-owned refresh worker. Network
+// login JWTs are not refreshable and remain dormant; a client JWT containing
+// client_id and device_id is validated/refreshed immediately and then ahead of
+// expiry.
+//
+//gomobile:noexport
+func (self *Api) StartJwtRefresh() {
+	self.tokenManager.Start()
+}
+
+// RequestJwtRefresh asks the API worker to refresh the current client JWT as
+// soon as possible. The request is level-triggered and cannot be lost behind
+// an in-flight refresh.
+//
+//gomobile:noexport
+func (self *Api) RequestJwtRefresh() {
+	self.tokenManager.RefreshToken()
 }
 
 func (self *Api) setHttpPostRaw(httpPostRaw connect.HttpPostRawFunction) {
@@ -238,6 +372,19 @@ func (self *Api) AuthLoginWithPassword(authLoginWithPassword *AuthLoginWithPassw
 			callback,
 		)
 	})
+}
+
+//gomobile:noexport
+func (self *Api) AuthLoginWithPasswordSyncWithContext(ctx context.Context, args *AuthLoginWithPasswordArgs) (*AuthLoginWithPasswordResult, error) {
+	return connect.HttpPostWithRawFunction(
+		ctx,
+		self.getHttpPostRaw(),
+		fmt.Sprintf("%s/auth/login-with-password", self.apiUrl),
+		args,
+		self.GetByJwt(),
+		&AuthLoginWithPasswordResult{},
+		connect.NewNoopApiCallback[*AuthLoginWithPasswordResult](),
+	)
 }
 
 type AuthVerifyCallback connect.ApiCallback[*AuthVerifyResult]
@@ -463,6 +610,30 @@ func (self *Api) AuthNetworkClient(authNetworkClient *AuthNetworkClientArgs, cal
 			callback,
 		)
 	})
+}
+
+// AuthNetworkClientSyncWithContext is the caller-bounded headless form used
+// to turn a network-login JWT into a renewable client JWT before starting a
+// long-lived service.
+//
+//gomobile:noexport
+func (self *Api) AuthNetworkClientSyncWithContext(ctx context.Context, authNetworkClient *AuthNetworkClientArgs) (*AuthNetworkClientResult, error) {
+	return connect.HttpPostWithRawFunction(
+		ctx,
+		self.getHttpPostRaw(),
+		fmt.Sprintf("%s/network/auth-client", self.apiUrl),
+		authNetworkClient,
+		self.GetByJwt(),
+		&AuthNetworkClientResult{},
+		connect.NewNoopApiCallback[*AuthNetworkClientResult](),
+	)
+}
+
+// AuthNetworkClientSync uses the API lifetime as its bound.
+//
+//gomobile:noexport
+func (self *Api) AuthNetworkClientSync(authNetworkClient *AuthNetworkClientArgs) (*AuthNetworkClientResult, error) {
+	return self.AuthNetworkClientSyncWithContext(self.ctx, authNetworkClient)
 }
 
 type GetNetworkClientsCallback connect.ApiCallback[*NetworkClientsResult]
@@ -707,6 +878,7 @@ type FindProviders2Args struct {
 	Specs            *ProviderSpecList `json:"specs"`
 	Count            int               `json:"count"`
 	ExcludeClientIds *IdList           `json:"exclude_client_ids"`
+	RankMode         string            `json:"rank_mode,omitempty"`
 }
 
 type FindProviders2Result struct {
@@ -730,6 +902,21 @@ func (self *Api) FindProviders2(findProviders2 *FindProviders2Args, callback Fin
 			callback,
 		)
 	})
+}
+
+// FindProviders2SyncWithContext is the caller-bounded Go/headless form.
+//
+//gomobile:noexport
+func (self *Api) FindProviders2SyncWithContext(ctx context.Context, args *FindProviders2Args) (*FindProviders2Result, error) {
+	return connect.HttpPostWithRawFunction(
+		ctx,
+		self.getHttpPostRaw(),
+		fmt.Sprintf("%s/network/find-providers2", self.apiUrl),
+		args,
+		self.GetByJwt(),
+		&FindProviders2Result{},
+		connect.NewNoopApiCallback[*FindProviders2Result](),
+	)
 }
 
 type WalletCircleInitCallback connect.ApiCallback[*WalletCircleInitResult]
@@ -1012,8 +1199,22 @@ type SubscriptionBalanceResult struct {
 	/**
 	 * OpenTransferByteCount - The total number of bytes tied up in open transfers
 	 */
-	OpenTransferByteCount     ByteCount            `json:"open_transfer_byte_count"`
-	CurrentSubscription       *Subscription        `json:"current_subscription,omitempty"`
+	OpenTransferByteCount ByteCount `json:"open_transfer_byte_count"`
+	/**
+	 * CurrentSubscription - ONE of the active subscriptions, or nil. Shipped apps
+	 * read this as the plan indicator, so it keeps its exact single-value meaning;
+	 * it cannot name more than one store. Use Subscriptions for the full set.
+	 */
+	CurrentSubscription *Subscription `json:"current_subscription,omitempty"`
+	/**
+	 * Subscriptions - EVERY store currently billing this network, one entry per
+	 * store, so each can be offered its own cancel path. Subscribing on two stores
+	 * means being charged by both, and each is cancelled only where it was bought.
+	 *
+	 * A list rather than a slice because gomobile binds neither slices of struct
+	 * pointers nor slices of slices (same reason as ActiveTransferBalances).
+	 */
+	Subscriptions             *SubscriptionList    `json:"subscriptions,omitempty"`
 	ActiveTransferBalances    *TransferBalanceList `json:"active_transfer_balances,omitempty"`
 	PendingPayoutUsdNanoCents NanoCents            `json:"pending_payout_usd_nano_cents"`
 	UpdateTime                string               `json:"update_time"`
@@ -1458,6 +1659,19 @@ func (self *Api) AuthCodeLogin(args *AuthCodeLoginArgs, callback AuthCodeLoginCa
 	})
 }
 
+//gomobile:noexport
+func (self *Api) AuthCodeLoginSyncWithContext(ctx context.Context, args *AuthCodeLoginArgs) (*AuthCodeLoginResult, error) {
+	return connect.HttpPostWithRawFunction(
+		ctx,
+		self.getHttpPostRaw(),
+		fmt.Sprintf("%s/auth/code-login", self.apiUrl),
+		args,
+		self.GetByJwt(),
+		&AuthCodeLoginResult{},
+		connect.NewNoopApiCallback[*AuthCodeLoginResult](),
+	)
+}
+
 /**
  * Auth code create
  */
@@ -1531,17 +1745,16 @@ type UpgradeGuesteResultError struct {
 	Message string `json:"message"`
 }
 
+// UpgradeGuest upgraded a guest network to a brand new named network.
+//
+// Deprecated: the server route POST /auth/upgrade-guest was removed (server
+// commit 340d828a, 2026-07-15) with no remaining handler, so every call
+// 404s. The method now fails immediately with a clear error instead of
+// making the doomed round-trip. It is kept only for ABI compatibility; there
+// is currently no supported guest-conversion path through the SDK.
 func (self *Api) UpgradeGuest(upgradeGuest *UpgradeGuestArgs, callback UpgradeGuestCallback) {
 	go connect.HandleError(func() {
-		connect.HttpPostWithRawFunction(
-			self.ctx,
-			self.getHttpPostRaw(),
-			fmt.Sprintf("%s/auth/upgrade-guest", self.apiUrl),
-			upgradeGuest,
-			self.GetByJwt(),
-			&UpgradeGuestResult{},
-			callback,
-		)
+		callback.Result(nil, errGuestUpgradeRouteRemoved)
 	})
 }
 
@@ -1577,17 +1790,25 @@ type UpgradeGuestExistingResult struct {
 	Error                *UpgradeGuesteExistingResultError       `json:"error,omitempty"`
 }
 
+// errGuestUpgradeRouteRemoved is the immediate failure for the deprecated
+// guest-upgrade methods, replacing the confusing 404 round-trip the removed
+// server routes would produce.
+var errGuestUpgradeRouteRemoved = errors.New(
+	"guest upgrade is no longer supported: the /auth/upgrade-guest and " +
+		"/auth/upgrade-guest-existing server routes were removed " +
+		"(server commit 340d828a); this call fails without contacting the server",
+)
+
+// UpgradeGuestExisting merged a guest network into an existing account.
+//
+// Deprecated: the server route POST /auth/upgrade-guest-existing was removed
+// (server commit 340d828a, 2026-07-15) with no remaining handler, so every
+// call 404s. The method now fails immediately with a clear error instead of
+// making the doomed round-trip. It is kept only for ABI compatibility; there
+// is currently no supported guest-conversion path through the SDK.
 func (self *Api) UpgradeGuestExisting(upgradeGuest *UpgradeGuestExistingArgs, callback UpgradeGuestExistingCallback) {
 	go connect.HandleError(func() {
-		connect.HttpPostWithRawFunction(
-			self.ctx,
-			self.getHttpPostRaw(),
-			fmt.Sprintf("%s/auth/upgrade-guest-existing", self.apiUrl),
-			upgradeGuest,
-			self.GetByJwt(),
-			&UpgradeGuestExistingResult{},
-			callback,
-		)
+		callback.Result(nil, errGuestUpgradeRouteRemoved)
 	})
 }
 
@@ -1904,10 +2125,20 @@ func (self *Api) GetNetworkReliability(callback GetNetworkReliabilityCallback) {
 
 type SolanaPaymentIntentArgs struct {
 	Reference string `json:"reference"`
+	// The plan the customer picked ("monthly" or "yearly"). REQUIRED: the server
+	// looks the price up from pro.yml by plan and rejects the intent with
+	// "Unknown plan." when this is empty, so an app that omits it cannot sell at
+	// all. The price is deliberately not a field here -- a client-supplied amount
+	// would let anyone quote themselves a year for a cent.
+	Plan string `json:"plan"`
 }
 
 type SolanaPaymentIntentResult struct {
-	Error *SolanaPaymentIntentError `json:"error,omitempty"`
+	// The price the SERVER quoted. Pass this to BuildSolanaPaymentUrl. The webhook
+	// checks the arriving payment against this same number, so a client-side price
+	// constant is how a customer pays and gets nothing.
+	AmountUsd float64                   `json:"amount_usd,omitempty"`
+	Error     *SolanaPaymentIntentError `json:"error,omitempty"`
 }
 
 type SolanaPaymentIntentError struct {
@@ -2001,11 +2232,18 @@ func (self *Api) StripeCreateCustomerPortal(args *StripeCreateCustomerPortalArgs
 
 type StripeCreateCheckoutSessionArgs struct {
 	ItemId string `json:"item_id"`
-	// "hosted" (default) or "embedded". A single Stripe session carries one shape
-	// or the other, never both: hosted returns checkout_url for a browser,
-	// embedded returns client_secret + publishable_key for Stripe.js Embedded
-	// Checkout (the desktop apps load ur.io/checkout in a webview with these).
+	// "hosted" (default) or "embedded" (StripeUiModeHosted /
+	// StripeUiModeEmbedded). A single Stripe session carries one shape or the
+	// other, never both: hosted returns checkout_url for a browser, embedded
+	// returns client_secret + publishable_key for Stripe.js Embedded Checkout
+	// (the desktop apps load ur.io/checkout in a webview with these).
 	UiMode string `json:"ui_mode,omitempty"`
+	// "never" (StripeRedirectOnCompletionNever) keeps an EMBEDDED checkout
+	// fully inline: Stripe fires the client's onComplete callback instead of
+	// redirecting anywhere, so the page the customer is on never navigates.
+	// Only valid with ui_mode "embedded". Empty means the embedded flow
+	// redirects to the configured return_url, and hosted behaves as always.
+	RedirectOnCompletion string `json:"redirect_on_completion,omitempty"`
 }
 
 type StripeCreateCheckoutSessionError struct {
@@ -2109,11 +2347,15 @@ func (self *Api) RefreshJwtSync() (*RefreshJwtResult, error) {
 // caller with a narrower lifetime than the api (e.g. the device token
 // manager) does not leave the request running after it closes
 func (self *Api) refreshJwtSyncWithContext(ctx context.Context) (*RefreshJwtResult, error) {
+	return self.refreshJwtSyncWithContextAndJwt(ctx, self.GetByJwt())
+}
+
+func (self *Api) refreshJwtSyncWithContextAndJwt(ctx context.Context, byJwt string) (*RefreshJwtResult, error) {
 	return connect.HttpGetWithRawFunction(
 		ctx,
 		self.getHttpGetRaw(),
 		fmt.Sprintf("%s/auth/refresh", self.apiUrl),
-		self.GetByJwt(),
+		byJwt,
 		&RefreshJwtResult{},
 		connect.NewNoopApiCallback[*RefreshJwtResult](),
 	)
@@ -2145,6 +2387,12 @@ type RedeemBalanceCodeError struct {
 
 type RedeemBalanceCodeCallback connect.ApiCallback[*RedeemBalanceCodeResult]
 
+// RedeemBalanceCode redeems a balance code into this network. Note the
+// server reports the SAME error payload ({"error":{"message":"Unknown
+// balance code."}}) for a nonexistent code and an already-redeemed one; use
+// ClassifyBalanceCodeRedeem (with GetNetworkRedeemedBalanceCodes) to
+// distinguish transport failure / invalid / already-redeemed before telling
+// the user anything.
 func (self *Api) RedeemBalanceCode(args *RedeemBalanceCodeArgs, callback RedeemBalanceCodeCallback) {
 	go connect.HandleError(func() {
 		connect.HttpPostWithRawFunction(
@@ -2157,6 +2405,179 @@ func (self *Api) RedeemBalanceCode(args *RedeemBalanceCodeArgs, callback RedeemB
 			callback,
 		)
 	})
+}
+
+/**
+ * check balance code (without redeeming it)
+ */
+
+type CheckBalanceCodeArgs struct {
+	Secret string `json:"secret"`
+}
+
+type CheckBalanceCodeBalance struct {
+	StartTime        *Time     `json:"start_time"`
+	EndTime          *Time     `json:"end_time"`
+	BalanceByteCount ByteCount `json:"balance_byte_count"`
+}
+
+type CheckBalanceCodeError struct {
+	Message string `json:"message"`
+}
+
+type CheckBalanceCodeResult struct {
+	Balance *CheckBalanceCodeBalance `json:"balance,omitempty"`
+	Error   *CheckBalanceCodeError   `json:"error,omitempty"`
+}
+
+type CheckBalanceCodeCallback connect.ApiCallback[*CheckBalanceCodeResult]
+
+// CheckBalanceCode looks a balance code up WITHOUT redeeming it, so a UI can
+// preview what the code grants before the user commits. Mirrors the server's
+// POST /subscription/check-balance-code (previously reached by raw HTTP from
+// the apps). Like RedeemBalanceCode, the server reports "Unknown balance
+// code." for both a nonexistent and an already-redeemed code.
+func (self *Api) CheckBalanceCode(args *CheckBalanceCodeArgs, callback CheckBalanceCodeCallback) {
+	go connect.HandleError(func() {
+		connect.HttpPostWithRawFunction(
+			self.ctx,
+			self.getHttpPostRaw(),
+			fmt.Sprintf("%s/subscription/check-balance-code", self.apiUrl),
+			args,
+			self.GetByJwt(),
+			&CheckBalanceCodeResult{},
+			callback,
+		)
+	})
+}
+
+/**
+ * purchase reporting (verify proof of purchase with the store)
+ *
+ * The wave-2 half of the lost-webhook fix: the app reports proof of purchase
+ * (Play purchase token, App Store transaction JWS) and the server verifies it
+ * with the store and credits through the same idempotency gates as the
+ * webhooks and the payment reconciler. See PurchaseReportBackoffMillis for
+ * the client retry contract (persist proof -> retry until terminal -> only
+ * then acknowledge/finish).
+ */
+
+type VerifyPlayPurchaseArgs struct {
+	// PackageName is optional; the server defaults to (and requires) the
+	// app's own package.
+	PackageName string `json:"package_name,omitempty"`
+	// ProductId is the sku the client believes it bought (e.g. "supporter").
+	ProductId     string `json:"product_id"`
+	PurchaseToken string `json:"purchase_token"`
+}
+
+type VerifyAppleTransactionArgs struct {
+	// SignedTransaction is the StoreKit transaction JWS
+	// (Transaction.jwsRepresentation).
+	SignedTransaction string `json:"signed_transaction"`
+}
+
+// VerifyStorePurchaseResult is the shared response of both verify endpoints.
+// Status is one of the PurchaseReportStatus* values; use
+// IsPurchaseReportTerminal to decide whether to keep retrying.
+type VerifyStorePurchaseResult struct {
+	Status     string `json:"status"`
+	ExpiryTime *Time  `json:"expiry_time,omitempty"`
+}
+
+// ExpiryTimeMillis is the store-side subscription expiry as unix millis, or 0
+// when the server sent none (pending/invalid/wrong_network answers).
+func (self *VerifyStorePurchaseResult) ExpiryTimeMillis() int64 {
+	if self.ExpiryTime == nil {
+		return 0
+	}
+	return self.ExpiryTime.UnixMilli()
+}
+
+type VerifyPlayPurchaseCallback connect.ApiCallback[*VerifyStorePurchaseResult]
+
+// VerifyPlayPurchase reports a Play purchase token to the server, which
+// verifies it with the Android Publisher API and credits it idempotently.
+// Call BEFORE acknowledging the purchase; acknowledge only once the status is
+// terminal (IsPurchaseReportTerminal).
+func (self *Api) VerifyPlayPurchase(args *VerifyPlayPurchaseArgs, callback VerifyPlayPurchaseCallback) {
+	go connect.HandleError(func() {
+		connect.HttpPostWithRawFunction(
+			self.ctx,
+			self.getHttpPostRaw(),
+			fmt.Sprintf("%s/subscription/verify-play-purchase", self.apiUrl),
+			args,
+			self.GetByJwt(),
+			&VerifyStorePurchaseResult{},
+			callback,
+		)
+	})
+}
+
+// VerifyPlayPurchaseSyncWithContext is the caller-bounded headless form, for
+// retry loops (e.g. a WorkManager job) that outlive no context of their own.
+//
+//gomobile:noexport
+func (self *Api) VerifyPlayPurchaseSyncWithContext(ctx context.Context, args *VerifyPlayPurchaseArgs) (*VerifyStorePurchaseResult, error) {
+	return connect.HttpPostWithRawFunction(
+		ctx,
+		self.getHttpPostRaw(),
+		fmt.Sprintf("%s/subscription/verify-play-purchase", self.apiUrl),
+		args,
+		self.GetByJwt(),
+		&VerifyStorePurchaseResult{},
+		connect.NewNoopApiCallback[*VerifyStorePurchaseResult](),
+	)
+}
+
+// VerifyPlayPurchaseSync uses the API lifetime as its bound.
+//
+//gomobile:noexport
+func (self *Api) VerifyPlayPurchaseSync(args *VerifyPlayPurchaseArgs) (*VerifyStorePurchaseResult, error) {
+	return self.VerifyPlayPurchaseSyncWithContext(self.ctx, args)
+}
+
+type VerifyAppleTransactionCallback connect.ApiCallback[*VerifyStorePurchaseResult]
+
+// VerifyAppleTransaction reports a StoreKit transaction JWS to the server,
+// which verifies it (full pinned-root verification, same as the App Store
+// webhook) and credits it idempotently. Call BEFORE Transaction.finish();
+// finish only once the status is terminal (IsPurchaseReportTerminal).
+func (self *Api) VerifyAppleTransaction(args *VerifyAppleTransactionArgs, callback VerifyAppleTransactionCallback) {
+	go connect.HandleError(func() {
+		connect.HttpPostWithRawFunction(
+			self.ctx,
+			self.getHttpPostRaw(),
+			fmt.Sprintf("%s/subscription/verify-apple-transaction", self.apiUrl),
+			args,
+			self.GetByJwt(),
+			&VerifyStorePurchaseResult{},
+			callback,
+		)
+	})
+}
+
+// VerifyAppleTransactionSyncWithContext is the caller-bounded headless form,
+// for retry loops with their own lifetime.
+//
+//gomobile:noexport
+func (self *Api) VerifyAppleTransactionSyncWithContext(ctx context.Context, args *VerifyAppleTransactionArgs) (*VerifyStorePurchaseResult, error) {
+	return connect.HttpPostWithRawFunction(
+		ctx,
+		self.getHttpPostRaw(),
+		fmt.Sprintf("%s/subscription/verify-apple-transaction", self.apiUrl),
+		args,
+		self.GetByJwt(),
+		&VerifyStorePurchaseResult{},
+		connect.NewNoopApiCallback[*VerifyStorePurchaseResult](),
+	)
+}
+
+// VerifyAppleTransactionSync uses the API lifetime as its bound.
+//
+//gomobile:noexport
+func (self *Api) VerifyAppleTransactionSync(args *VerifyAppleTransactionArgs) (*VerifyStorePurchaseResult, error) {
+	return self.VerifyAppleTransactionSyncWithContext(self.ctx, args)
 }
 
 /**

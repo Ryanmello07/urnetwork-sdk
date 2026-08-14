@@ -30,6 +30,7 @@ type deviceLocalProvider struct {
 	ctx context.Context
 	// this is the client for provide
 	client       *connect.Client
+	clientOob    *connect.ApiOutOfBandControl
 	localUserNat *connect.LocalUserNat
 
 	appVersion string
@@ -94,7 +95,7 @@ func newDeviceLocalProviderWithOverrides(
 	if clientSettings.EncryptionSettings == nil {
 		clientSettings.EncryptionSettings = connect.DefaultEncryptionSettings()
 	}
-	clientSettings.EncryptionSettings.Encrypt = true
+	clientSettings.EncryptionSettings.Mode = connect.EncryptionModeOpportunistic
 	// This top-level client exists to provide/relay traffic. Apply provide-mode
 	// reductions to every P2P stream direction, including stale companion
 	// return streams restored by StreamReset after a process restart. Window
@@ -140,6 +141,7 @@ func newDeviceLocalProviderWithOverrides(
 	provider := &deviceLocalProvider{
 		ctx:               ctx,
 		client:            client,
+		clientOob:         clientOob,
 		platformTransport: platformTransport,
 		localUserNat:      localUserNat,
 
@@ -326,6 +328,9 @@ func (self *deviceLocalProvider) SetByJwt(byJwt string) {
 	defer self.stateLock.Unlock()
 	self.auth = auth
 	self.authVersion += 1
+	if self.clientOob != nil {
+		self.clientOob.SetByJwt(byJwt)
+	}
 	self.platformTransport.SetAuth(auth)
 }
 

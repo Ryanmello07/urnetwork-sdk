@@ -443,6 +443,27 @@ func (self *cAdapterChangeNetworkNameCallback) Result(result *sdk.ChangeNetworkN
 	}
 }
 
+type cAdapterCheckBalanceCodeCallback struct {
+	cbResult C.urnet_check_balance_code_cb
+	userData unsafe.Pointer
+}
+
+func (self *cAdapterCheckBalanceCodeCallback) Result(result *sdk.CheckBalanceCodeResult, errParam error) {
+	defer cgoGuard("urnet_check_balance_code_cb")
+	result_ := cJson(result, "urnet_check_balance_code_cb")
+	var errParam_ *C.char
+	if errParam != nil {
+		errParam_ = cString(errParam.Error())
+	}
+	C.urnet_invoke_check_balance_code(self.cbResult, self.userData, result_, errParam_)
+	if result_ != nil {
+		cStringFree(result_)
+	}
+	if errParam_ != nil {
+		cStringFree(errParam_)
+	}
+}
+
 type cAdapterClaimNetworkNameCallback struct {
 	cbResult C.urnet_claim_network_name_cb
 	userData unsafe.Pointer
@@ -1634,6 +1655,18 @@ func (self *cAdapterProviderIdentityChangeListener) ProviderIdentitiesChanged() 
 	C.urnet_invoke_provider_identity_change(self.cbProviderIdentitiesChanged, self.userData)
 }
 
+type cAdapterPurchaseConfirmationListener struct {
+	cbPurchaseConfirmationStateChanged C.urnet_purchase_confirmation_cb
+	userData                           unsafe.Pointer
+}
+
+func (self *cAdapterPurchaseConfirmationListener) PurchaseConfirmationStateChanged(state string) {
+	defer cgoGuard("urnet_purchase_confirmation_cb")
+	state_ := cString(string(state))
+	C.urnet_invoke_purchase_confirmation(self.cbPurchaseConfirmationStateChanged, self.userData, state_)
+	cStringFree(state_)
+}
+
 type cAdapterReceivePacket struct {
 	cbReceivePacket C.urnet_receive_packet_cb
 	userData        unsafe.Pointer
@@ -1646,6 +1679,31 @@ func (self *cAdapterReceivePacket) ReceivePacket(ipVersion int, ipProtocol sdk.I
 		packet_ = (*C.uint8_t)(unsafe.Pointer(&packet[0]))
 	}
 	C.urnet_invoke_receive_packet(self.cbReceivePacket, self.userData, C.int64_t(int64(ipVersion)), C.int64_t(int64(ipProtocol)), packet_, C.int32_t(len(packet)))
+}
+
+type cAdapterReceivePacketBatch struct {
+	cbReceivePacketBatch C.urnet_receive_packet_batch_cb
+	userData             unsafe.Pointer
+}
+
+func (self *cAdapterReceivePacketBatch) ReceivePacketBatch(packetBatchBytes []byte) {
+	defer cgoGuard("urnet_receive_packet_batch_cb")
+	var packetBatchBytes_ *C.uint8_t
+	if 0 < len(packetBatchBytes) {
+		packetBatchBytes_ = (*C.uint8_t)(unsafe.Pointer(&packetBatchBytes[0]))
+	}
+	C.urnet_invoke_receive_packet_batch(self.cbReceivePacketBatch, self.userData, packetBatchBytes_, C.int32_t(len(packetBatchBytes)))
+}
+
+type cAdapterReceivePackets struct {
+	cbReceivePackets C.urnet_receive_packets_cb
+	userData         unsafe.Pointer
+}
+
+func (self *cAdapterReceivePackets) ReceivePackets(packetBatch *sdk.PacketBatch) {
+	defer cgoGuard("urnet_receive_packets_cb")
+	packetBatch_ := C.uint64_t(newHandle(packetBatch))
+	C.urnet_invoke_receive_packets(self.cbReceivePackets, self.userData, packetBatch_)
 }
 
 type cAdapterRedeemBalanceCodeCallback struct {
@@ -1797,6 +1855,16 @@ func (self *cAdapterSelectedLocationListener) SelectedLocationChanged(location *
 	if location_ != nil {
 		cStringFree(location_)
 	}
+}
+
+type cAdapterSelectedProviderLocationChangeListener struct {
+	cbSelectedProviderLocationChanged C.urnet_selected_provider_location_change_cb
+	userData                          unsafe.Pointer
+}
+
+func (self *cAdapterSelectedProviderLocationChangeListener) SelectedProviderLocationChanged() {
+	defer cgoGuard("urnet_selected_provider_location_change_cb")
+	C.urnet_invoke_selected_provider_location_change(self.cbSelectedProviderLocationChanged, self.userData)
 }
 
 type cAdapterSendFeedbackCallback struct {
@@ -2004,6 +2072,16 @@ func (self *cAdapterSubscriptionBalanceCallback) Result(result *sdk.Subscription
 	}
 }
 
+type cAdapterSubscriptionBalanceChangeListener struct {
+	cbSubscriptionBalanceChanged C.urnet_subscription_balance_change_cb
+	userData                     unsafe.Pointer
+}
+
+func (self *cAdapterSubscriptionBalanceChangeListener) SubscriptionBalanceChanged() {
+	defer cgoGuard("urnet_subscription_balance_change_cb")
+	C.urnet_invoke_subscription_balance_change(self.cbSubscriptionBalanceChanged, self.userData)
+}
+
 type cAdapterSubscriptionCreatePaymentIdCallback struct {
 	cbResult C.urnet_subscription_create_payment_id_cb
 	userData unsafe.Pointer
@@ -2023,6 +2101,16 @@ func (self *cAdapterSubscriptionCreatePaymentIdCallback) Result(result *sdk.Subs
 	if errParam_ != nil {
 		cStringFree(errParam_)
 	}
+}
+
+type cAdapterSubscriptionJwtOutOfSyncListener struct {
+	cbSubscriptionJwtOutOfSync C.urnet_subscription_jwt_out_of_sync_cb
+	userData                   unsafe.Pointer
+}
+
+func (self *cAdapterSubscriptionJwtOutOfSyncListener) SubscriptionJwtOutOfSync(serverIsPro bool) {
+	defer cgoGuard("urnet_subscription_jwt_out_of_sync_cb")
+	C.urnet_invoke_subscription_jwt_out_of_sync(self.cbSubscriptionJwtOutOfSync, self.userData, C.bool(bool(serverIsPro)))
 }
 
 type cAdapterThroughputListener struct {
@@ -2162,6 +2250,48 @@ func (self *cAdapterValidateReferralCodeCallback) Result(result *sdk.ValidateRef
 		errParam_ = cString(errParam.Error())
 	}
 	C.urnet_invoke_validate_referral_code(self.cbResult, self.userData, result_, errParam_)
+	if result_ != nil {
+		cStringFree(result_)
+	}
+	if errParam_ != nil {
+		cStringFree(errParam_)
+	}
+}
+
+type cAdapterVerifyAppleTransactionCallback struct {
+	cbResult C.urnet_verify_apple_transaction_cb
+	userData unsafe.Pointer
+}
+
+func (self *cAdapterVerifyAppleTransactionCallback) Result(result *sdk.VerifyStorePurchaseResult, errParam error) {
+	defer cgoGuard("urnet_verify_apple_transaction_cb")
+	result_ := cJson(result, "urnet_verify_apple_transaction_cb")
+	var errParam_ *C.char
+	if errParam != nil {
+		errParam_ = cString(errParam.Error())
+	}
+	C.urnet_invoke_verify_apple_transaction(self.cbResult, self.userData, result_, errParam_)
+	if result_ != nil {
+		cStringFree(result_)
+	}
+	if errParam_ != nil {
+		cStringFree(errParam_)
+	}
+}
+
+type cAdapterVerifyPlayPurchaseCallback struct {
+	cbResult C.urnet_verify_play_purchase_cb
+	userData unsafe.Pointer
+}
+
+func (self *cAdapterVerifyPlayPurchaseCallback) Result(result *sdk.VerifyStorePurchaseResult, errParam error) {
+	defer cgoGuard("urnet_verify_play_purchase_cb")
+	result_ := cJson(result, "urnet_verify_play_purchase_cb")
+	var errParam_ *C.char
+	if errParam != nil {
+		errParam_ = cString(errParam.Error())
+	}
+	C.urnet_invoke_verify_play_purchase(self.cbResult, self.userData, result_, errParam_)
 	if result_ != nil {
 		cStringFree(result_)
 	}
@@ -2487,6 +2617,36 @@ func urnet_api_add_auth(self C.uint64_t, args *C.char, callback_result C.urnet_a
 	self_.AddAuth(args_, callback_)
 }
 
+//export urnet_api_add_auth_logout_listener
+func urnet_api_add_auth_logout_listener(self C.uint64_t, listener_auth_logout C.urnet_auth_logout_cb, listener_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_api_add_auth_logout_listener")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_add_auth_logout_listener")
+	if !ok {
+		return 0
+	}
+	var listener_ sdk.AuthLogoutListener
+	if listener_auth_logout != nil {
+		listener_ = &cAdapterAuthLogoutListener{cbAuthLogout: listener_auth_logout, userData: listener_user_data}
+	}
+	r0 := self_.AddAuthLogoutListener(listener_)
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_api_add_jwt_refresh_listener
+func urnet_api_add_jwt_refresh_listener(self C.uint64_t, listener_jwt_refreshed C.urnet_jwt_refresh_cb, listener_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_api_add_jwt_refresh_listener")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_add_jwt_refresh_listener")
+	if !ok {
+		return 0
+	}
+	var listener_ sdk.JwtRefreshListener
+	if listener_jwt_refreshed != nil {
+		listener_ = &cAdapterJwtRefreshListener{cbJwtRefreshed: listener_jwt_refreshed, userData: listener_user_data}
+	}
+	r0 := self_.AddJwtRefreshListener(listener_)
+	return C.uint64_t(newHandle(r0))
+}
+
 //export urnet_api_auth_code_create
 func urnet_api_auth_code_create(self C.uint64_t, codeCreateArgs *C.char, callback_result C.urnet_auth_code_create_cb, callback_user_data unsafe.Pointer) {
 	defer cgoGuard("urnet_api_auth_code_create")
@@ -2592,6 +2752,31 @@ func urnet_api_auth_network_client(self C.uint64_t, authNetworkClient *C.char, c
 	self_.AuthNetworkClient(authNetworkClient_, callback_)
 }
 
+//export urnet_api_auth_network_client_sync
+func urnet_api_auth_network_client_sync(self C.uint64_t, authNetworkClient *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_api_auth_network_client_sync")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_auth_network_client_sync")
+	if !ok {
+		return nil
+	}
+	var authNetworkClient_ *sdk.AuthNetworkClientArgs
+	if authNetworkClient != nil {
+		authNetworkClient_ = &sdk.AuthNetworkClientArgs{}
+		if !goJson(authNetworkClient, authNetworkClient_, "urnet_api_auth_network_client_sync") {
+			return nil
+		}
+	}
+	r0, err := self_.AuthNetworkClientSync(authNetworkClient_)
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_api_auth_network_client_sync")
+}
+
 //export urnet_api_auth_password_reset
 func urnet_api_auth_password_reset(self C.uint64_t, authPasswordReset *C.char, callback_result C.urnet_auth_password_reset_cb, callback_user_data unsafe.Pointer) {
 	defer cgoGuard("urnet_api_auth_password_reset")
@@ -2695,6 +2880,27 @@ func urnet_api_change_network_name(self C.uint64_t, args *C.char, callback_resul
 		callback_ = &cAdapterChangeNetworkNameCallback{cbResult: callback_result, userData: callback_user_data}
 	}
 	self_.ChangeNetworkName(args_, callback_)
+}
+
+//export urnet_api_check_balance_code
+func urnet_api_check_balance_code(self C.uint64_t, args *C.char, callback_result C.urnet_check_balance_code_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_api_check_balance_code")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_check_balance_code")
+	if !ok {
+		return
+	}
+	var args_ *sdk.CheckBalanceCodeArgs
+	if args != nil {
+		args_ = &sdk.CheckBalanceCodeArgs{}
+		if !goJson(args, args_, "urnet_api_check_balance_code") {
+			return
+		}
+	}
+	var callback_ sdk.CheckBalanceCodeCallback
+	if callback_result != nil {
+		callback_ = &cAdapterCheckBalanceCodeCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.CheckBalanceCode(args_, callback_)
 }
 
 //export urnet_api_claim_network_name
@@ -3450,6 +3656,16 @@ func urnet_api_remove_wallet(self C.uint64_t, removeWallet *C.char, callback_res
 	self_.RemoveWallet(removeWallet_, callback_)
 }
 
+//export urnet_api_request_jwt_refresh
+func urnet_api_request_jwt_refresh(self C.uint64_t) {
+	defer cgoGuard("urnet_api_request_jwt_refresh")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_request_jwt_refresh")
+	if !ok {
+		return
+	}
+	self_.RequestJwtRefresh()
+}
+
 //export urnet_api_send_feedback
 func urnet_api_send_feedback(self C.uint64_t, sendFeedback *C.char, callback_result C.urnet_send_feedback_cb, callback_user_data unsafe.Pointer) {
 	defer cgoGuard("urnet_api_send_feedback")
@@ -3542,6 +3758,84 @@ func urnet_api_set_payout_wallet(self C.uint64_t, payoutWallet *C.char, callback
 		callback_ = &cAdapterSetPayoutWalletCallback{cbResult: callback_result, userData: callback_user_data}
 	}
 	self_.SetPayoutWallet(payoutWallet_, callback_)
+}
+
+//export urnet_api_sn_epoch_sync
+func urnet_api_sn_epoch_sync(self C.uint64_t, outError **C.char) *C.char {
+	defer cgoGuard("urnet_api_sn_epoch_sync")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_sn_epoch_sync")
+	if !ok {
+		return nil
+	}
+	r0, err := self_.SnEpochSync()
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_api_sn_epoch_sync")
+}
+
+//export urnet_api_sn_pool_claim_sync
+func urnet_api_sn_pool_claim_sync(self C.uint64_t, args *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_api_sn_pool_claim_sync")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_sn_pool_claim_sync")
+	if !ok {
+		return nil
+	}
+	var args_ *sdk.SnPoolClaimArgs
+	if args != nil {
+		args_ = &sdk.SnPoolClaimArgs{}
+		if !goJson(args, args_, "urnet_api_sn_pool_claim_sync") {
+			return nil
+		}
+	}
+	r0, err := self_.SnPoolClaimSync(args_)
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_api_sn_pool_claim_sync")
+}
+
+//export urnet_api_sn_set_wallet_sync
+func urnet_api_sn_set_wallet_sync(self C.uint64_t, args *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_api_sn_set_wallet_sync")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_sn_set_wallet_sync")
+	if !ok {
+		return nil
+	}
+	var args_ *sdk.SnSetWalletArgs
+	if args != nil {
+		args_ = &sdk.SnSetWalletArgs{}
+		if !goJson(args, args_, "urnet_api_sn_set_wallet_sync") {
+			return nil
+		}
+	}
+	r0, err := self_.SnSetWalletSync(args_)
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_api_sn_set_wallet_sync")
+}
+
+//export urnet_api_start_jwt_refresh
+func urnet_api_start_jwt_refresh(self C.uint64_t) {
+	defer cgoGuard("urnet_api_start_jwt_refresh")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_start_jwt_refresh")
+	if !ok {
+		return
+	}
+	self_.StartJwtRefresh()
 }
 
 //export urnet_api_stripe_create_customer_portal
@@ -3675,6 +3969,116 @@ func urnet_api_validate_referral_code(self C.uint64_t, validateReferralCode *C.c
 		callback_ = &cAdapterValidateReferralCodeCallback{cbResult: callback_result, userData: callback_user_data}
 	}
 	self_.ValidateReferralCode(validateReferralCode_, callback_)
+}
+
+//export urnet_api_verify_apple_transaction
+func urnet_api_verify_apple_transaction(self C.uint64_t, args *C.char, callback_result C.urnet_verify_apple_transaction_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_api_verify_apple_transaction")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_verify_apple_transaction")
+	if !ok {
+		return
+	}
+	var args_ *sdk.VerifyAppleTransactionArgs
+	if args != nil {
+		args_ = &sdk.VerifyAppleTransactionArgs{}
+		if !goJson(args, args_, "urnet_api_verify_apple_transaction") {
+			return
+		}
+	}
+	var callback_ sdk.VerifyAppleTransactionCallback
+	if callback_result != nil {
+		callback_ = &cAdapterVerifyAppleTransactionCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.VerifyAppleTransaction(args_, callback_)
+}
+
+//export urnet_api_verify_apple_transaction_sync
+func urnet_api_verify_apple_transaction_sync(self C.uint64_t, args *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_api_verify_apple_transaction_sync")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_verify_apple_transaction_sync")
+	if !ok {
+		return nil
+	}
+	var args_ *sdk.VerifyAppleTransactionArgs
+	if args != nil {
+		args_ = &sdk.VerifyAppleTransactionArgs{}
+		if !goJson(args, args_, "urnet_api_verify_apple_transaction_sync") {
+			return nil
+		}
+	}
+	r0, err := self_.VerifyAppleTransactionSync(args_)
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_api_verify_apple_transaction_sync")
+}
+
+//export urnet_api_verify_keys_sync
+func urnet_api_verify_keys_sync(self C.uint64_t, outError **C.char) *C.char {
+	defer cgoGuard("urnet_api_verify_keys_sync")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_verify_keys_sync")
+	if !ok {
+		return nil
+	}
+	r0, err := self_.VerifyKeysSync()
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_api_verify_keys_sync")
+}
+
+//export urnet_api_verify_play_purchase
+func urnet_api_verify_play_purchase(self C.uint64_t, args *C.char, callback_result C.urnet_verify_play_purchase_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_api_verify_play_purchase")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_verify_play_purchase")
+	if !ok {
+		return
+	}
+	var args_ *sdk.VerifyPlayPurchaseArgs
+	if args != nil {
+		args_ = &sdk.VerifyPlayPurchaseArgs{}
+		if !goJson(args, args_, "urnet_api_verify_play_purchase") {
+			return
+		}
+	}
+	var callback_ sdk.VerifyPlayPurchaseCallback
+	if callback_result != nil {
+		callback_ = &cAdapterVerifyPlayPurchaseCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.VerifyPlayPurchase(args_, callback_)
+}
+
+//export urnet_api_verify_play_purchase_sync
+func urnet_api_verify_play_purchase_sync(self C.uint64_t, args *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_api_verify_play_purchase_sync")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_verify_play_purchase_sync")
+	if !ok {
+		return nil
+	}
+	var args_ *sdk.VerifyPlayPurchaseArgs
+	if args != nil {
+		args_ = &sdk.VerifyPlayPurchaseArgs{}
+		if !goJson(args, args_, "urnet_api_verify_play_purchase_sync") {
+			return nil
+		}
+	}
+	r0, err := self_.VerifyPlayPurchaseSync(args_)
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_api_verify_play_purchase_sync")
 }
 
 //export urnet_api_verify_seeker_holder
@@ -4098,6 +4502,66 @@ func urnet_block_action_view_controller_stop(self C.uint64_t) {
 		return
 	}
 	self_.Stop()
+}
+
+//export urnet_build_checkout_bridge_url
+func urnet_build_checkout_bridge_url(clientSecret *C.char) *C.char {
+	defer cgoGuard("urnet_build_checkout_bridge_url")
+	r0 := sdk.BuildCheckoutBridgeUrl(goString(clientSecret))
+	return cString(string(r0))
+}
+
+//export urnet_build_checkout_bridge_url_with_redirect
+func urnet_build_checkout_bridge_url_with_redirect(clientSecret *C.char, redirectLink *C.char) *C.char {
+	defer cgoGuard("urnet_build_checkout_bridge_url_with_redirect")
+	r0 := sdk.BuildCheckoutBridgeUrlWithRedirect(goString(clientSecret), goString(redirectLink))
+	return cString(string(r0))
+}
+
+//export urnet_build_solana_payment_url
+func urnet_build_solana_payment_url(args *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_build_solana_payment_url")
+	var args_ *sdk.SolanaPaymentUrlArgs
+	if args != nil {
+		args_ = &sdk.SolanaPaymentUrlArgs{}
+		if !goJson(args, args_, "urnet_build_solana_payment_url") {
+			return nil
+		}
+	}
+	r0, err := sdk.BuildSolanaPaymentUrl(args_)
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	return cString(string(r0))
+}
+
+//export urnet_classify_balance_code_redeem
+func urnet_classify_balance_code_redeem(result *C.char, redeemedCodes *C.char, secret *C.char) *C.char {
+	defer cgoGuard("urnet_classify_balance_code_redeem")
+	var result_ *sdk.RedeemBalanceCodeResult
+	if result != nil {
+		result_ = &sdk.RedeemBalanceCodeResult{}
+		if !goJson(result, result_, "urnet_classify_balance_code_redeem") {
+			return nil
+		}
+	}
+	var redeemedCodes_ *sdk.RedeemedBalanceCodeList
+	if redeemedCodes != nil {
+		redeemedCodes_ = &sdk.RedeemedBalanceCodeList{}
+		if !goJson(redeemedCodes, redeemedCodes_, "urnet_classify_balance_code_redeem") {
+			return nil
+		}
+	}
+	r0 := sdk.ClassifyBalanceCodeRedeem(result_, redeemedCodes_, goString(secret))
+	return cString(string(r0))
+}
+
+//export urnet_classify_subscription_store
+func urnet_classify_subscription_store(store *C.char) *C.char {
+	defer cgoGuard("urnet_classify_subscription_store")
+	r0 := sdk.ClassifySubscriptionStore(goString(store))
+	return cString(string(r0))
 }
 
 //export urnet_collapse_host_names
@@ -4645,6 +5109,13 @@ func urnet_contract_view_controller_stop(self C.uint64_t) {
 		return
 	}
 	self_.Stop()
+}
+
+//export urnet_create_payment_reference
+func urnet_create_payment_reference() *C.char {
+	defer cgoGuard("urnet_create_payment_reference")
+	r0 := sdk.CreatePaymentReference()
+	return cString(string(r0))
 }
 
 //export urnet_default_device_local_settings
@@ -5935,6 +6406,23 @@ func urnet_device_load_provide_secret_keys(self C.uint64_t, provideSecretKeyList
 	self_.LoadProvideSecretKeys(provideSecretKeyList_)
 }
 
+//export urnet_device_reconnect
+func urnet_device_reconnect(self C.uint64_t, location *C.char) {
+	defer cgoGuard("urnet_device_reconnect")
+	self_, ok := resolveHandle[sdk.Device](uint64(self), "urnet_device_reconnect")
+	if !ok {
+		return
+	}
+	var location_ *sdk.ConnectLocation
+	if location != nil {
+		location_ = &sdk.ConnectLocation{}
+		if !goJson(location, location_, "urnet_device_reconnect") {
+			return
+		}
+	}
+	self_.Reconnect(location_)
+}
+
 //export urnet_device_refresh_token
 func urnet_device_refresh_token(self C.uint64_t, attempt C.int64_t, outError **C.char) C.bool {
 	defer cgoGuard("urnet_device_refresh_token")
@@ -6263,6 +6751,36 @@ func urnet_device_local_add_receive_packet(self C.uint64_t, receivePacket_receiv
 	return C.uint64_t(newHandle(r0))
 }
 
+//export urnet_device_local_add_receive_packet_batch
+func urnet_device_local_add_receive_packet_batch(self C.uint64_t, receivePacketBatch_receive_packet_batch C.urnet_receive_packet_batch_cb, receivePacketBatch_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_device_local_add_receive_packet_batch")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_add_receive_packet_batch")
+	if !ok {
+		return 0
+	}
+	var receivePacketBatch_ sdk.ReceivePacketBatch
+	if receivePacketBatch_receive_packet_batch != nil {
+		receivePacketBatch_ = &cAdapterReceivePacketBatch{cbReceivePacketBatch: receivePacketBatch_receive_packet_batch, userData: receivePacketBatch_user_data}
+	}
+	r0 := self_.AddReceivePacketBatch(receivePacketBatch_)
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_device_local_add_receive_packets
+func urnet_device_local_add_receive_packets(self C.uint64_t, receivePackets_receive_packets C.urnet_receive_packets_cb, receivePackets_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_device_local_add_receive_packets")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_add_receive_packets")
+	if !ok {
+		return 0
+	}
+	var receivePackets_ sdk.ReceivePackets
+	if receivePackets_receive_packets != nil {
+		receivePackets_ = &cAdapterReceivePackets{cbReceivePackets: receivePackets_receive_packets, userData: receivePackets_user_data}
+	}
+	r0 := self_.AddReceivePackets(receivePackets_)
+	return C.uint64_t(newHandle(r0))
+}
+
 //export urnet_device_local_close_block_action_view_controller
 func urnet_device_local_close_block_action_view_controller(self C.uint64_t, vc C.uint64_t) {
 	defer cgoGuard("urnet_device_local_close_block_action_view_controller")
@@ -6405,6 +6923,24 @@ func urnet_device_local_close_post_quantum_identity_view_controller(self C.uint6
 		}
 	}
 	self_.ClosePostQuantumIdentityViewController(vc_)
+}
+
+//export urnet_device_local_close_provider_locations_view_controller
+func urnet_device_local_close_provider_locations_view_controller(self C.uint64_t, vc C.uint64_t) {
+	defer cgoGuard("urnet_device_local_close_provider_locations_view_controller")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_close_provider_locations_view_controller")
+	if !ok {
+		return
+	}
+	var vc_ *sdk.ProviderLocationsViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.ProviderLocationsViewController](uint64(vc), "urnet_device_local_close_provider_locations_view_controller")
+		if !ok {
+			return
+		}
+	}
+	self_.CloseProviderLocationsViewController(vc_)
 }
 
 //export urnet_device_local_close_view_controller
@@ -6810,6 +7346,20 @@ func urnet_device_local_open_provider_contract_details_view_controller(self C.ui
 	return C.uint64_t(newHandle(r0))
 }
 
+//export urnet_device_local_open_provider_locations_view_controller
+func urnet_device_local_open_provider_locations_view_controller(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_device_local_open_provider_locations_view_controller")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_open_provider_locations_view_controller")
+	if !ok {
+		return 0
+	}
+	r0 := self_.OpenProviderLocationsViewController()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
 //export urnet_device_local_open_referral_code_view_controller
 func urnet_device_local_open_referral_code_view_controller(self C.uint64_t) C.uint64_t {
 	defer cgoGuard("urnet_device_local_open_referral_code_view_controller")
@@ -6818,6 +7368,20 @@ func urnet_device_local_open_referral_code_view_controller(self C.uint64_t) C.ui
 		return 0
 	}
 	r0 := self_.OpenReferralCodeViewController()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_device_local_open_subscription_balance_view_controller
+func urnet_device_local_open_subscription_balance_view_controller(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_device_local_open_subscription_balance_view_controller")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_open_subscription_balance_view_controller")
+	if !ok {
+		return 0
+	}
+	r0 := self_.OpenSubscriptionBalanceViewController()
 	if r0 == nil {
 		return 0
 	}
@@ -6891,6 +7455,17 @@ func urnet_device_local_send_packet(self C.uint64_t, packet *C.uint8_t, packet_l
 	return C.bool(r0)
 }
 
+//export urnet_device_local_send_packet_batch
+func urnet_device_local_send_packet_batch(self C.uint64_t, packetBatchBytes *C.uint8_t, packetBatchBytes_len C.int32_t) C.int64_t {
+	defer cgoGuard("urnet_device_local_send_packet_batch")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_send_packet_batch")
+	if !ok {
+		return 0
+	}
+	r0 := self_.SendPacketBatch(goBytes(packetBatchBytes, packetBatchBytes_len))
+	return C.int64_t(r0)
+}
+
 //export urnet_device_local_set_by_jwt
 func urnet_device_local_set_by_jwt(self C.uint64_t, byJwt *C.char) {
 	defer cgoGuard("urnet_device_local_set_by_jwt")
@@ -6958,6 +7533,16 @@ func urnet_device_local_set_reliability_settings(self C.uint64_t, reliabilitySet
 		}
 	}
 	self_.SetReliabilitySettings(reliabilitySettings_)
+}
+
+//export urnet_device_local_set_routing_tier
+func urnet_device_local_set_routing_tier(self C.uint64_t, tier C.int64_t) {
+	defer cgoGuard("urnet_device_local_set_routing_tier")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_set_routing_tier")
+	if !ok {
+		return
+	}
+	self_.SetRoutingTier(int(int64(tier)))
 }
 
 //export urnet_device_local_set_rpc_server
@@ -7287,6 +7872,24 @@ func urnet_device_remote_close_post_quantum_identity_view_controller(self C.uint
 		}
 	}
 	self_.ClosePostQuantumIdentityViewController(vc_)
+}
+
+//export urnet_device_remote_close_provider_locations_view_controller
+func urnet_device_remote_close_provider_locations_view_controller(self C.uint64_t, vc C.uint64_t) {
+	defer cgoGuard("urnet_device_remote_close_provider_locations_view_controller")
+	self_, ok := resolveHandle[*sdk.DeviceRemote](uint64(self), "urnet_device_remote_close_provider_locations_view_controller")
+	if !ok {
+		return
+	}
+	var vc_ *sdk.ProviderLocationsViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.ProviderLocationsViewController](uint64(vc), "urnet_device_remote_close_provider_locations_view_controller")
+		if !ok {
+			return
+		}
+	}
+	self_.CloseProviderLocationsViewController(vc_)
 }
 
 //export urnet_device_remote_close_view_controller
@@ -7627,6 +8230,20 @@ func urnet_device_remote_open_provider_contract_details_view_controller(self C.u
 	return C.uint64_t(newHandle(r0))
 }
 
+//export urnet_device_remote_open_provider_locations_view_controller
+func urnet_device_remote_open_provider_locations_view_controller(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_device_remote_open_provider_locations_view_controller")
+	self_, ok := resolveHandle[*sdk.DeviceRemote](uint64(self), "urnet_device_remote_open_provider_locations_view_controller")
+	if !ok {
+		return 0
+	}
+	r0 := self_.OpenProviderLocationsViewController()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
 //export urnet_device_remote_open_referral_code_view_controller
 func urnet_device_remote_open_referral_code_view_controller(self C.uint64_t) C.uint64_t {
 	defer cgoGuard("urnet_device_remote_open_referral_code_view_controller")
@@ -7635,6 +8252,20 @@ func urnet_device_remote_open_referral_code_view_controller(self C.uint64_t) C.u
 		return 0
 	}
 	r0 := self_.OpenReferralCodeViewController()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_device_remote_open_subscription_balance_view_controller
+func urnet_device_remote_open_subscription_balance_view_controller(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_device_remote_open_subscription_balance_view_controller")
+	self_, ok := resolveHandle[*sdk.DeviceRemote](uint64(self), "urnet_device_remote_open_subscription_balance_view_controller")
+	if !ok {
+		return 0
+	}
+	r0 := self_.OpenSubscriptionBalanceViewController()
 	if r0 == nil {
 		return 0
 	}
@@ -8227,6 +8858,34 @@ func urnet_id_from_bytes(idBytes *C.uint8_t, idBytes_len C.int32_t, outError **C
 	return cId(r0)
 }
 
+//export urnet_is_balance_code_format_valid
+func urnet_is_balance_code_format_valid(secret *C.char) C.bool {
+	defer cgoGuard("urnet_is_balance_code_format_valid")
+	r0 := sdk.IsBalanceCodeFormatValid(goString(secret))
+	return C.bool(r0)
+}
+
+//export urnet_is_checkout_redirect
+func urnet_is_checkout_redirect(uri *C.char) C.bool {
+	defer cgoGuard("urnet_is_checkout_redirect")
+	r0 := sdk.IsCheckoutRedirect(goString(uri))
+	return C.bool(r0)
+}
+
+//export urnet_is_purchase_report_terminal
+func urnet_is_purchase_report_terminal(status *C.char) C.bool {
+	defer cgoGuard("urnet_is_purchase_report_terminal")
+	r0 := sdk.IsPurchaseReportTerminal(goString(status))
+	return C.bool(r0)
+}
+
+//export urnet_is_valid_payment_reference
+func urnet_is_valid_payment_reference(s *C.char) C.bool {
+	defer cgoGuard("urnet_is_valid_payment_reference")
+	r0 := sdk.IsValidPaymentReference(goString(s))
+	return C.bool(r0)
+}
+
 //export urnet_local_state_close
 func urnet_local_state_close(self C.uint64_t) {
 	defer cgoGuard("urnet_local_state_close")
@@ -8465,6 +9124,17 @@ func urnet_local_state_get_route_local(self C.uint64_t) C.bool {
 	}
 	r0 := self_.GetRouteLocal()
 	return C.bool(r0)
+}
+
+//export urnet_local_state_get_routing_tier
+func urnet_local_state_get_routing_tier(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_local_state_get_routing_tier")
+	self_, ok := resolveHandle[*sdk.LocalState](uint64(self), "urnet_local_state_get_routing_tier")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetRoutingTier()
+	return C.int64_t(r0)
 }
 
 //export urnet_local_state_get_vpn_interface_while_offline
@@ -8854,6 +9524,21 @@ func urnet_local_state_set_route_local(self C.uint64_t, routeLocal C.bool, outEr
 		return C.bool(false)
 	}
 	err := self_.SetRouteLocal(bool(routeLocal))
+	if err != nil {
+		setErrorOut(outError, err)
+		return C.bool(false)
+	}
+	return C.bool(true)
+}
+
+//export urnet_local_state_set_routing_tier
+func urnet_local_state_set_routing_tier(self C.uint64_t, tier C.int64_t, outError **C.char) C.bool {
+	defer cgoGuard("urnet_local_state_set_routing_tier")
+	self_, ok := resolveHandle[*sdk.LocalState](uint64(self), "urnet_local_state_set_routing_tier")
+	if !ok {
+		return C.bool(false)
+	}
+	err := self_.SetRoutingTier(int(int64(tier)))
 	if err != nil {
 		setErrorOut(outError, err)
 		return C.bool(false)
@@ -9932,6 +10617,24 @@ func urnet_new_proxy_device_with_defaults(proxyConfig *C.char, setupNewDeviceCal
 	return C.uint64_t(newHandle(r0))
 }
 
+//export urnet_new_subscription_balance_view_controller
+func urnet_new_subscription_balance_view_controller(api C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_new_subscription_balance_view_controller")
+	var api_ *sdk.Api
+	if api != 0 {
+		var ok bool
+		api_, ok = resolveHandle[*sdk.Api](uint64(api), "urnet_new_subscription_balance_view_controller")
+		if !ok {
+			return 0
+		}
+	}
+	r0 := sdk.NewSubscriptionBalanceViewController(api_)
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
 //export urnet_new_time_unix_milli
 func urnet_new_time_unix_milli(unixMilli C.int64_t) C.int64_t {
 	defer cgoGuard("urnet_new_time_unix_milli")
@@ -9974,6 +10677,53 @@ func urnet_normal_env_name(envName *C.char) *C.char {
 	defer cgoGuard("urnet_normal_env_name")
 	r0 := sdk.NormalEnvName(goString(envName))
 	return cString(string(r0))
+}
+
+//export urnet_packet_batch_ip_protocol
+func urnet_packet_batch_ip_protocol(self C.uint64_t, index C.int64_t) C.int64_t {
+	defer cgoGuard("urnet_packet_batch_ip_protocol")
+	self_, ok := resolveHandle[*sdk.PacketBatch](uint64(self), "urnet_packet_batch_ip_protocol")
+	if !ok {
+		return 0
+	}
+	r0 := self_.IpProtocol(int(int64(index)))
+	return C.int64_t(r0)
+}
+
+//export urnet_packet_batch_ip_version
+func urnet_packet_batch_ip_version(self C.uint64_t, index C.int64_t) C.int64_t {
+	defer cgoGuard("urnet_packet_batch_ip_version")
+	self_, ok := resolveHandle[*sdk.PacketBatch](uint64(self), "urnet_packet_batch_ip_version")
+	if !ok {
+		return 0
+	}
+	r0 := self_.IpVersion(int(int64(index)))
+	return C.int64_t(r0)
+}
+
+//export urnet_packet_batch_len
+func urnet_packet_batch_len(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_packet_batch_len")
+	self_, ok := resolveHandle[*sdk.PacketBatch](uint64(self), "urnet_packet_batch_len")
+	if !ok {
+		return 0
+	}
+	r0 := self_.Len()
+	return C.int64_t(r0)
+}
+
+//export urnet_parse_checkout_redirect
+func urnet_parse_checkout_redirect(uri *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_parse_checkout_redirect")
+	r0, err := sdk.ParseCheckoutRedirect(goString(uri))
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_parse_checkout_redirect")
 }
 
 //export urnet_parse_id
@@ -10185,6 +10935,116 @@ func urnet_provide_view_controller_stop(self C.uint64_t) {
 	self_.Stop()
 }
 
+//export urnet_provider_locations_view_controller_add_selected_provider_location_change_listener
+func urnet_provider_locations_view_controller_add_selected_provider_location_change_listener(self C.uint64_t, listener_selected_provider_location_changed C.urnet_selected_provider_location_change_cb, listener_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_provider_locations_view_controller_add_selected_provider_location_change_listener")
+	self_, ok := resolveHandle[*sdk.ProviderLocationsViewController](uint64(self), "urnet_provider_locations_view_controller_add_selected_provider_location_change_listener")
+	if !ok {
+		return 0
+	}
+	var listener_ sdk.SelectedProviderLocationChangeListener
+	if listener_selected_provider_location_changed != nil {
+		listener_ = &cAdapterSelectedProviderLocationChangeListener{cbSelectedProviderLocationChanged: listener_selected_provider_location_changed, userData: listener_user_data}
+	}
+	r0 := self_.AddSelectedProviderLocationChangeListener(listener_)
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_provider_locations_view_controller_close
+func urnet_provider_locations_view_controller_close(self C.uint64_t) {
+	defer cgoGuard("urnet_provider_locations_view_controller_close")
+	self_, ok := resolveHandle[*sdk.ProviderLocationsViewController](uint64(self), "urnet_provider_locations_view_controller_close")
+	if !ok {
+		return
+	}
+	self_.Close()
+}
+
+//export urnet_provider_locations_view_controller_connected_provider_locations_changed
+func urnet_provider_locations_view_controller_connected_provider_locations_changed(self C.uint64_t) {
+	defer cgoGuard("urnet_provider_locations_view_controller_connected_provider_locations_changed")
+	self_, ok := resolveHandle[*sdk.ProviderLocationsViewController](uint64(self), "urnet_provider_locations_view_controller_connected_provider_locations_changed")
+	if !ok {
+		return
+	}
+	self_.ConnectedProviderLocationsChanged()
+}
+
+//export urnet_provider_locations_view_controller_get_provider_locations
+func urnet_provider_locations_view_controller_get_provider_locations(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_provider_locations_view_controller_get_provider_locations")
+	self_, ok := resolveHandle[*sdk.ProviderLocationsViewController](uint64(self), "urnet_provider_locations_view_controller_get_provider_locations")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetProviderLocations()
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_provider_locations_view_controller_get_provider_locations")
+}
+
+//export urnet_provider_locations_view_controller_get_selected_client_id
+func urnet_provider_locations_view_controller_get_selected_client_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_provider_locations_view_controller_get_selected_client_id")
+	self_, ok := resolveHandle[*sdk.ProviderLocationsViewController](uint64(self), "urnet_provider_locations_view_controller_get_selected_client_id")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetSelectedClientId()
+	return cString(string(r0))
+}
+
+//export urnet_provider_locations_view_controller_remove_provider
+func urnet_provider_locations_view_controller_remove_provider(self C.uint64_t, clientId *C.char) {
+	defer cgoGuard("urnet_provider_locations_view_controller_remove_provider")
+	self_, ok := resolveHandle[*sdk.ProviderLocationsViewController](uint64(self), "urnet_provider_locations_view_controller_remove_provider")
+	if !ok {
+		return
+	}
+	self_.RemoveProvider(goString(clientId))
+}
+
+//export urnet_provider_locations_view_controller_set_selected_client_id
+func urnet_provider_locations_view_controller_set_selected_client_id(self C.uint64_t, clientId *C.char) {
+	defer cgoGuard("urnet_provider_locations_view_controller_set_selected_client_id")
+	self_, ok := resolveHandle[*sdk.ProviderLocationsViewController](uint64(self), "urnet_provider_locations_view_controller_set_selected_client_id")
+	if !ok {
+		return
+	}
+	self_.SetSelectedClientId(goString(clientId))
+}
+
+//export urnet_provider_locations_view_controller_start
+func urnet_provider_locations_view_controller_start(self C.uint64_t) {
+	defer cgoGuard("urnet_provider_locations_view_controller_start")
+	self_, ok := resolveHandle[*sdk.ProviderLocationsViewController](uint64(self), "urnet_provider_locations_view_controller_start")
+	if !ok {
+		return
+	}
+	self_.Start()
+}
+
+//export urnet_provider_locations_view_controller_step_selection
+func urnet_provider_locations_view_controller_step_selection(self C.uint64_t, steps C.int64_t) {
+	defer cgoGuard("urnet_provider_locations_view_controller_step_selection")
+	self_, ok := resolveHandle[*sdk.ProviderLocationsViewController](uint64(self), "urnet_provider_locations_view_controller_step_selection")
+	if !ok {
+		return
+	}
+	self_.StepSelection(int32(int64(steps)))
+}
+
+//export urnet_provider_locations_view_controller_stop
+func urnet_provider_locations_view_controller_stop(self C.uint64_t) {
+	defer cgoGuard("urnet_provider_locations_view_controller_stop")
+	self_, ok := resolveHandle[*sdk.ProviderLocationsViewController](uint64(self), "urnet_provider_locations_view_controller_stop")
+	if !ok {
+		return
+	}
+	self_.Stop()
+}
+
 //export urnet_proxy_device_cancel
 func urnet_proxy_device_cancel(self C.uint64_t) {
 	defer cgoGuard("urnet_proxy_device_cancel")
@@ -10246,6 +11106,13 @@ func urnet_public_identity_key_hash(publicKey *C.uint8_t, publicKey_len C.int32_
 	defer cgoGuard("urnet_public_identity_key_hash")
 	r0 := sdk.PublicIdentityKeyHash(goBytes(publicKey, publicKey_len))
 	return cString(string(r0))
+}
+
+//export urnet_purchase_report_backoff_millis
+func urnet_purchase_report_backoff_millis(attempt C.int64_t) C.int64_t {
+	defer cgoGuard("urnet_purchase_report_backoff_millis")
+	r0 := sdk.PurchaseReportBackoffMillis(int32(int64(attempt)))
+	return C.int64_t(r0)
 }
 
 //export urnet_referral_code_view_controller_add_referral_code_listener
@@ -10351,6 +11218,332 @@ func urnet_sub_close(self C.uint64_t) {
 		return
 	}
 	self_.Close()
+}
+
+//export urnet_subscription_balance_view_controller_add_purchase_confirmation_listener
+func urnet_subscription_balance_view_controller_add_purchase_confirmation_listener(self C.uint64_t, listener_purchase_confirmation_state_changed C.urnet_purchase_confirmation_cb, listener_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_subscription_balance_view_controller_add_purchase_confirmation_listener")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_add_purchase_confirmation_listener")
+	if !ok {
+		return 0
+	}
+	var listener_ sdk.PurchaseConfirmationListener
+	if listener_purchase_confirmation_state_changed != nil {
+		listener_ = &cAdapterPurchaseConfirmationListener{cbPurchaseConfirmationStateChanged: listener_purchase_confirmation_state_changed, userData: listener_user_data}
+	}
+	r0 := self_.AddPurchaseConfirmationListener(listener_)
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_subscription_balance_view_controller_add_subscription_balance_change_listener
+func urnet_subscription_balance_view_controller_add_subscription_balance_change_listener(self C.uint64_t, listener_subscription_balance_changed C.urnet_subscription_balance_change_cb, listener_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_subscription_balance_view_controller_add_subscription_balance_change_listener")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_add_subscription_balance_change_listener")
+	if !ok {
+		return 0
+	}
+	var listener_ sdk.SubscriptionBalanceChangeListener
+	if listener_subscription_balance_changed != nil {
+		listener_ = &cAdapterSubscriptionBalanceChangeListener{cbSubscriptionBalanceChanged: listener_subscription_balance_changed, userData: listener_user_data}
+	}
+	r0 := self_.AddSubscriptionBalanceChangeListener(listener_)
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_subscription_balance_view_controller_add_subscription_jwt_out_of_sync_listener
+func urnet_subscription_balance_view_controller_add_subscription_jwt_out_of_sync_listener(self C.uint64_t, listener_subscription_jwt_out_of_sync C.urnet_subscription_jwt_out_of_sync_cb, listener_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_subscription_balance_view_controller_add_subscription_jwt_out_of_sync_listener")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_add_subscription_jwt_out_of_sync_listener")
+	if !ok {
+		return 0
+	}
+	var listener_ sdk.SubscriptionJwtOutOfSyncListener
+	if listener_subscription_jwt_out_of_sync != nil {
+		listener_ = &cAdapterSubscriptionJwtOutOfSyncListener{cbSubscriptionJwtOutOfSync: listener_subscription_jwt_out_of_sync, userData: listener_user_data}
+	}
+	r0 := self_.AddSubscriptionJwtOutOfSyncListener(listener_)
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_subscription_balance_view_controller_clear_purchase_confirmation
+func urnet_subscription_balance_view_controller_clear_purchase_confirmation(self C.uint64_t) {
+	defer cgoGuard("urnet_subscription_balance_view_controller_clear_purchase_confirmation")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_clear_purchase_confirmation")
+	if !ok {
+		return
+	}
+	self_.ClearPurchaseConfirmation()
+}
+
+//export urnet_subscription_balance_view_controller_close
+func urnet_subscription_balance_view_controller_close(self C.uint64_t) {
+	defer cgoGuard("urnet_subscription_balance_view_controller_close")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_close")
+	if !ok {
+		return
+	}
+	self_.Close()
+}
+
+//export urnet_subscription_balance_view_controller_get_available_byte_count
+func urnet_subscription_balance_view_controller_get_available_byte_count(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_available_byte_count")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_available_byte_count")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetAvailableByteCount()
+	return C.int64_t(r0)
+}
+
+//export urnet_subscription_balance_view_controller_get_background_poll_interval_millis
+func urnet_subscription_balance_view_controller_get_background_poll_interval_millis(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_background_poll_interval_millis")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_background_poll_interval_millis")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetBackgroundPollIntervalMillis()
+	return C.int64_t(r0)
+}
+
+//export urnet_subscription_balance_view_controller_get_confirmation_budget_millis
+func urnet_subscription_balance_view_controller_get_confirmation_budget_millis(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_confirmation_budget_millis")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_confirmation_budget_millis")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetConfirmationBudgetMillis()
+	return C.int64_t(r0)
+}
+
+//export urnet_subscription_balance_view_controller_get_confirmation_budget_remaining_millis
+func urnet_subscription_balance_view_controller_get_confirmation_budget_remaining_millis(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_confirmation_budget_remaining_millis")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_confirmation_budget_remaining_millis")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetConfirmationBudgetRemainingMillis()
+	return C.int64_t(r0)
+}
+
+//export urnet_subscription_balance_view_controller_get_confirmation_poll_interval_millis
+func urnet_subscription_balance_view_controller_get_confirmation_poll_interval_millis(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_confirmation_poll_interval_millis")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_confirmation_poll_interval_millis")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetConfirmationPollIntervalMillis()
+	return C.int64_t(r0)
+}
+
+//export urnet_subscription_balance_view_controller_get_current_store
+func urnet_subscription_balance_view_controller_get_current_store(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_current_store")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_current_store")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetCurrentStore()
+	return cString(string(r0))
+}
+
+//export urnet_subscription_balance_view_controller_get_current_subscription
+func urnet_subscription_balance_view_controller_get_current_subscription(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_current_subscription")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_current_subscription")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetCurrentSubscription()
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_subscription_balance_view_controller_get_current_subscription")
+}
+
+//export urnet_subscription_balance_view_controller_get_is_guest
+func urnet_subscription_balance_view_controller_get_is_guest(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_is_guest")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_is_guest")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetIsGuest()
+	return C.bool(r0)
+}
+
+//export urnet_subscription_balance_view_controller_get_is_loaded
+func urnet_subscription_balance_view_controller_get_is_loaded(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_is_loaded")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_is_loaded")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetIsLoaded()
+	return C.bool(r0)
+}
+
+//export urnet_subscription_balance_view_controller_get_is_pro
+func urnet_subscription_balance_view_controller_get_is_pro(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_is_pro")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_is_pro")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetIsPro()
+	return C.bool(r0)
+}
+
+//export urnet_subscription_balance_view_controller_get_pending_byte_count
+func urnet_subscription_balance_view_controller_get_pending_byte_count(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_pending_byte_count")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_pending_byte_count")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetPendingByteCount()
+	return C.int64_t(r0)
+}
+
+//export urnet_subscription_balance_view_controller_get_purchase_confirmation_state
+func urnet_subscription_balance_view_controller_get_purchase_confirmation_state(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_purchase_confirmation_state")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_purchase_confirmation_state")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetPurchaseConfirmationState()
+	return cString(string(r0))
+}
+
+//export urnet_subscription_balance_view_controller_get_start_balance_byte_count
+func urnet_subscription_balance_view_controller_get_start_balance_byte_count(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_start_balance_byte_count")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_start_balance_byte_count")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetStartBalanceByteCount()
+	return C.int64_t(r0)
+}
+
+//export urnet_subscription_balance_view_controller_get_subscriptions
+func urnet_subscription_balance_view_controller_get_subscriptions(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_subscriptions")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_subscriptions")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetSubscriptions()
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_subscription_balance_view_controller_get_subscriptions")
+}
+
+//export urnet_subscription_balance_view_controller_get_used_balance_byte_count
+func urnet_subscription_balance_view_controller_get_used_balance_byte_count(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_subscription_balance_view_controller_get_used_balance_byte_count")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_get_used_balance_byte_count")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetUsedBalanceByteCount()
+	return C.int64_t(r0)
+}
+
+//export urnet_subscription_balance_view_controller_jwt_refreshed
+func urnet_subscription_balance_view_controller_jwt_refreshed(self C.uint64_t) {
+	defer cgoGuard("urnet_subscription_balance_view_controller_jwt_refreshed")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_jwt_refreshed")
+	if !ok {
+		return
+	}
+	self_.JwtRefreshed()
+}
+
+//export urnet_subscription_balance_view_controller_refresh
+func urnet_subscription_balance_view_controller_refresh(self C.uint64_t) {
+	defer cgoGuard("urnet_subscription_balance_view_controller_refresh")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_refresh")
+	if !ok {
+		return
+	}
+	self_.Refresh()
+}
+
+//export urnet_subscription_balance_view_controller_set_background_poll_interval_millis
+func urnet_subscription_balance_view_controller_set_background_poll_interval_millis(self C.uint64_t, millis C.int64_t) {
+	defer cgoGuard("urnet_subscription_balance_view_controller_set_background_poll_interval_millis")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_set_background_poll_interval_millis")
+	if !ok {
+		return
+	}
+	self_.SetBackgroundPollIntervalMillis(int64(millis))
+}
+
+//export urnet_subscription_balance_view_controller_set_confirmation_budget_millis
+func urnet_subscription_balance_view_controller_set_confirmation_budget_millis(self C.uint64_t, millis C.int64_t) {
+	defer cgoGuard("urnet_subscription_balance_view_controller_set_confirmation_budget_millis")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_set_confirmation_budget_millis")
+	if !ok {
+		return
+	}
+	self_.SetConfirmationBudgetMillis(int64(millis))
+}
+
+//export urnet_subscription_balance_view_controller_set_confirmation_poll_interval_millis
+func urnet_subscription_balance_view_controller_set_confirmation_poll_interval_millis(self C.uint64_t, millis C.int64_t) {
+	defer cgoGuard("urnet_subscription_balance_view_controller_set_confirmation_poll_interval_millis")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_set_confirmation_poll_interval_millis")
+	if !ok {
+		return
+	}
+	self_.SetConfirmationPollIntervalMillis(int64(millis))
+}
+
+//export urnet_subscription_balance_view_controller_set_foreground
+func urnet_subscription_balance_view_controller_set_foreground(self C.uint64_t, foreground C.bool) {
+	defer cgoGuard("urnet_subscription_balance_view_controller_set_foreground")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_set_foreground")
+	if !ok {
+		return
+	}
+	self_.SetForeground(bool(foreground))
+}
+
+//export urnet_subscription_balance_view_controller_start
+func urnet_subscription_balance_view_controller_start(self C.uint64_t) {
+	defer cgoGuard("urnet_subscription_balance_view_controller_start")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_start")
+	if !ok {
+		return
+	}
+	self_.Start()
+}
+
+//export urnet_subscription_balance_view_controller_start_purchase_confirmation
+func urnet_subscription_balance_view_controller_start_purchase_confirmation(self C.uint64_t) {
+	defer cgoGuard("urnet_subscription_balance_view_controller_start_purchase_confirmation")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_start_purchase_confirmation")
+	if !ok {
+		return
+	}
+	self_.StartPurchaseConfirmation()
+}
+
+//export urnet_subscription_balance_view_controller_stop
+func urnet_subscription_balance_view_controller_stop(self C.uint64_t) {
+	defer cgoGuard("urnet_subscription_balance_view_controller_stop")
+	self_, ok := resolveHandle[*sdk.SubscriptionBalanceViewController](uint64(self), "urnet_subscription_balance_view_controller_stop")
+	if !ok {
+		return
+	}
+	self_.Stop()
 }
 
 //export urnet_tunnel_cancel

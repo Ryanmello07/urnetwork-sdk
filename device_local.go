@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -358,7 +359,70 @@ func (self *DeviceLocalSettings) logger() connect.Logger {
 	return connect.DefaultLogger()
 }
 
-//gomobile:noexport
+// ---- millisecond accessors for the time.Duration tunables ----------------
+//
+// Go always uses time.Duration; these exist purely as the Sdk translation,
+// because gomobile cannot bind time.Duration and the fields were therefore
+// silently unsettable from android/apple on a type apps do construct. The
+// bound name drops the redundant "Duration"/reads as "<thing>Millis", matching
+// BusyProbeBudgetMillis and friends elsewhere in the sdk.
+//
+// Millisecond granularity is not a narrowing in practice: every default here
+// is whole seconds (5s, 10s, 300s, 1s, 1s). A sub-millisecond value set from
+// Go still round-trips through the Go field untouched — only the bound view
+// truncates.
+
+func (self *DeviceLocalSettings) GetSendTimeoutMillis() int64 {
+	return self.SendTimeout.Milliseconds()
+}
+
+func (self *DeviceLocalSettings) SetSendTimeoutMillis(millis int64) {
+	self.SendTimeout = time.Duration(millis) * time.Millisecond
+}
+
+func (self *DeviceLocalSettings) GetNetContractStatusMillis() int64 {
+	return self.NetContractStatusDuration.Milliseconds()
+}
+
+func (self *DeviceLocalSettings) SetNetContractStatusMillis(millis int64) {
+	self.NetContractStatusDuration = time.Duration(millis) * time.Millisecond
+}
+
+func (self *DeviceLocalSettings) GetBlockActionWindowMillis() int64 {
+	return self.BlockActionWindowDuration.Milliseconds()
+}
+
+func (self *DeviceLocalSettings) SetBlockActionWindowMillis(millis int64) {
+	self.BlockActionWindowDuration = time.Duration(millis) * time.Millisecond
+}
+
+func (self *DeviceLocalSettings) GetContractStatsEpochMillis() int64 {
+	return self.ContractStatsEpoch.Milliseconds()
+}
+
+func (self *DeviceLocalSettings) SetContractStatsEpochMillis(millis int64) {
+	self.ContractStatsEpoch = time.Duration(millis) * time.Millisecond
+}
+
+func (self *DeviceLocalSettings) GetNetworkPeersEpochMillis() int64 {
+	return self.NetworkPeersEpoch.Milliseconds()
+}
+
+func (self *DeviceLocalSettings) SetNetworkPeersEpochMillis(millis int64) {
+	self.NetworkPeersEpoch = time.Duration(millis) * time.Millisecond
+}
+
+// DeviceLocalSettings is BOUND and app-facing, despite what a
+// `//gomobile:noexport` on this type used to claim: gobind emits the class
+// with ~50 working members, and Sdk exposes both defaultDeviceLocalSettings()
+// and newDeviceLocal(..., settings). Apps construct and mutate it.
+//
+// What gobind does drop is a handful of individual fields — the embedded
+// connect.ClientSettings, GeneratorFunc (a func value),
+// MultiClientIdentityStore (a foreign interface) and the time.Duration
+// tunables. Those carry their own field-level markers below. The durations
+// are reachable through the *Millis accessor pairs at the end of this file,
+// so an app can set them; the other three are Go-construction only.
 type DeviceLocalSettings struct {
 	// MemoryTargetByteCount is this device's memory target, split by ratio
 	// (dns 2 : client 14 : provider 4, see deviceMemoryShares) among dns
@@ -376,22 +440,31 @@ type DeviceLocalSettings struct {
 	MemoryTargetByteCount ByteCount
 
 	// time to give up (drop) sending a packet to a destination
+	//
+	//gomobile:noexport time.Duration — bound as GetSendTimeoutMillis/SetSendTimeoutMillis
 	SendTimeout time.Duration
 	// ClientDrainTimeout time.Duration
 	SequenceBufferSize int
 
+	//gomobile:noexport time.Duration — bound as GetNetContractStatusMillis/SetNetContractStatusMillis
 	NetContractStatusDuration time.Duration
 	NetContractStatusCount    int
 
 	// the time window and max count of retained block actions
+	//
+	//gomobile:noexport time.Duration — bound as GetBlockActionWindowMillis/SetBlockActionWindowMillis
 	BlockActionWindowDuration time.Duration
 	BlockActionWindowMaxCount int
 
 	// the contract stats/details listeners emit at most once per epoch across
 	// all window clients (a close event always emits)
+	//
+	//gomobile:noexport time.Duration — bound as GetContractStatsEpochMillis/SetContractStatsEpochMillis
 	ContractStatsEpoch time.Duration
 
 	// the network peers change listeners emit at most once per epoch
+	//
+	//gomobile:noexport time.Duration — bound as GetNetworkPeersEpochMillis/SetNetworkPeersEpochMillis
 	NetworkPeersEpoch time.Duration
 
 	DefaultRouteLocal          bool
@@ -419,11 +492,17 @@ type DeviceLocalSettings struct {
 	Verbose bool
 	// GeneratorFunc, when set, builds the multi client generator instead of
 	// the default api generator
+	//
+	//gomobile:noexport func value — gomobile cannot bind funcs (only interfaces).
+	// Go/headless hosts only; apps get the default api generator.
 	GeneratorFunc func(specs []*connect.ProviderSpec) connect.MultiClientGenerator
 	// MultiClientIdentityStore, when set, persists the api generator's
 	// window client identities so a process restart reuses them against the
 	// same destinations — keeping provider-side NAT flows resumable
 	// (PROXYDRAIN1.md §3.5). Only applies to the default api generator.
+	//
+	//gomobile:noexport connect.MultiClientIdentityStore is an interface from
+	// another package, which gomobile does not bind. Go/headless hosts only.
 	MultiClientIdentityStore connect.MultiClientIdentityStore
 	// FIXME remove EnableRpc. Turn on RPC when RPC connections are set (receive net.Conn, send net.Conn)
 	EnableRpc bool
@@ -451,6 +530,10 @@ type DeviceLocalSettings struct {
 	// EXPERIMENT: defaults true for now (testing).
 	UseExperimentalTunnelAddress bool
 
+	//gomobile:noexport connect.ClientSettings is a struct from another package,
+	// which gomobile does not bind — the whole embedded block (and every
+	// field promoted from it) is absent on android/apple. Apps configure the
+	// client through the constructors and the setters on DeviceLocal instead.
 	connect.ClientSettings
 }
 
@@ -465,8 +548,9 @@ type DeviceLocal struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	byJwt        string
-	tokenManager *deviceTokenManager
+	byJwt            string
+	apiJwtRefreshSub Sub
+	apiAuthLogoutSub Sub
 	// platformUrl string
 	// apiUrl      string
 
@@ -655,7 +739,9 @@ type DeviceLocal struct {
 	providerPacketStatsSub        func()
 	providerContractStatsEventSub func()
 
-	receiveCallbacks *connect.CallbackList[connect.ReceivePacketFunction]
+	receiveCallbacks            *connect.CallbackList[connect.ReceivePacketFunction]
+	receivePacketsCallbacks     *connect.CallbackList[connect.ReceivePacketsFunction]
+	receivePacketBatchCallbacks *connect.CallbackList[receivePacketBatchFunction]
 
 	// probeSuiteState owns the in-app test suite. It pumps its own userspace
 	// tun through this device, so probes take the same exits as real traffic
@@ -820,7 +906,7 @@ func NewDeviceLocal(
 	)
 }
 
-// gomobile:ignore
+//gomobile:noexport
 func NewPlatformDeviceLocalWithDefaults(
 	generatorFunc func(specs []*connect.ProviderSpec) connect.MultiClientGenerator,
 	networkSpace *NetworkSpace,
@@ -842,7 +928,7 @@ func NewPlatformDeviceLocalWithDefaults(
 	)
 }
 
-// gomobile:ignore
+//gomobile:noexport
 func NewPlatformDeviceLocalWithKeyMaterial(
 	generatorFunc func(specs []*connect.ProviderSpec) connect.MultiClientGenerator,
 	networkSpace *NetworkSpace,
@@ -869,7 +955,8 @@ func NewPlatformDeviceLocalWithKeyMaterial(
 
 // a local device that does not use the default platform transport
 // this device is typically embedded inside the platform
-// gomobile:ignore
+//
+//gomobile:noexport
 func NewPlatformDeviceLocal(
 	generatorFunc func(specs []*connect.ProviderSpec) connect.MultiClientGenerator,
 	networkSpace *NetworkSpace,
@@ -978,7 +1065,6 @@ func newDeviceLocalWithOverrides(
 
 	// api := newBringYourApiWithContext(cancelCtx, clientStrategy, apiUrl)
 	api := networkSpace.GetApi()
-	api.SetByJwt(byJwt)
 
 	defaultRouteLocal := settings.DefaultRouteLocal
 	defaultProvideControlMode := settings.DefaultProvideControlMode
@@ -1061,6 +1147,8 @@ func newDeviceLocalWithOverrides(
 		contracts:                                newDeviceContractTracker(),
 		providerContracts:                        newDeviceContractTracker(),
 		receiveCallbacks:                         connect.NewCallbackList[connect.ReceivePacketFunction](),
+		receivePacketsCallbacks:                  connect.NewCallbackList[connect.ReceivePacketsFunction](),
+		receivePacketBatchCallbacks:              connect.NewCallbackList[receivePacketBatchFunction](),
 		probeSuiteState:                          &probeSuite{},
 		canShowRatingDialogChangeListeners:       connect.NewCallbackList[CanShowRatingDialogChangeListener](),
 		canPromptIntroFunnelChangeListeners:      connect.NewCallbackList[CanPromptIntroFunnelChangeListener](),
@@ -1154,19 +1242,23 @@ func newDeviceLocalWithOverrides(
 		}
 	}
 
-	deviceLocal.tokenManager = newDeviceTokenManager(
-		ctx,
-		log,
-		api,
-		deviceLocal.SetByJwt,
-		// clear the local auth state, then propagate the logout to the app
-		// (`AddAuthLogoutListener`) so the ui can return to the login flow
-		func() error {
-			err := logout()
-			deviceLocal.authLogout()
-			return err
-		},
+	// Api is the credential owner. DeviceLocal subscribes to apply rotations
+	// to persistence and connect transports, while keeping its established
+	// device-level listener contract for the applications.
+	api.setLog(log)
+	deviceLocal.apiJwtRefreshSub = api.AddJwtRefreshListener(
+		jwtRefreshListenerFunc(deviceLocal.SetByJwt),
 	)
+	deviceLocal.apiAuthLogoutSub = api.AddAuthLogoutListener(
+		authLogoutListenerFunc(func() {
+			if err := logout(); err != nil {
+				log.Errorf("failed to clear local auth state: %v", err)
+			}
+			deviceLocal.handleApiAuthLogout()
+		}),
+	)
+	api.SetByJwt(byJwt)
+	api.StartJwtRefresh()
 
 	// set up with nil destination
 	if provider != nil {
@@ -1202,7 +1294,7 @@ func newDeviceLocalWithOverrides(
 	return deviceLocal, nil
 }
 
-// gomobile:ignore
+//gomobile:noexport
 func (self *DeviceLocal) Ctx() context.Context {
 	return self.ctx
 }
@@ -1349,10 +1441,10 @@ func tunnelDnsAddressesWithDefault(
 
 // SetUpgradeMuxSettings sets how the interposed mux resolves DNS and upgrades HTTP.
 // It takes effect when the remote client is next (re)created. nil disables the mux
-// (direct pass-through to the exit). gomobile:ignore until a platform-friendly
+// (direct pass-through to the exit). gomobile:noexport until a platform-friendly
 // settings surface lands with the per-use-case defaults.
 //
-// gomobile:ignore
+//gomobile:noexport
 func (self *DeviceLocal) SetUpgradeMuxSettings(settings *connect.UpgradeMuxSettings) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -1416,7 +1508,8 @@ func (self *DeviceLocal) MemoryUsed() *DeviceLocalMemoryUsage {
 }
 
 // SetClientSecurityPolicyGenerator sets the multi-client (the device's own traffic) security policy.
-// gomobile:ignore
+//
+//gomobile:noexport
 func (self *DeviceLocal) SetClientSecurityPolicyGenerator(g func(context.Context, *connect.SecurityPolicyStatsCollector) connect.SecurityPolicy) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -1425,7 +1518,8 @@ func (self *DeviceLocal) SetClientSecurityPolicyGenerator(g func(context.Context
 
 // SetProviderSecurityPolicyGenerator sets the provider (egressing remote clients' traffic) security
 // policy. Defaults to the reversed client policy (connect.DefaultProviderSecurityPolicyWithStats).
-// gomobile:ignore
+//
+//gomobile:noexport
 func (self *DeviceLocal) SetProviderSecurityPolicyGenerator(g func(context.Context, *connect.SecurityPolicyStatsCollector) connect.SecurityPolicy) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -1433,7 +1527,7 @@ func (self *DeviceLocal) SetProviderSecurityPolicyGenerator(g func(context.Conte
 }
 
 func (self *DeviceLocal) RefreshToken(attempt int) error {
-	self.tokenManager.RefreshToken()
+	self.GetApi().RequestJwtRefresh()
 	return nil
 }
 
@@ -1830,6 +1924,20 @@ func (self *DeviceLocal) SetByJwt(byJwt string) {
 
 	// fire listeners
 	self.jwtRefreshed(byJwt)
+}
+
+func (self *DeviceLocal) handleApiAuthLogout() {
+	var provider *deviceLocalProvider
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.byJwt = ""
+		provider = self.provider
+	}()
+	if provider != nil {
+		provider.SetByJwt("")
+	}
+	self.authLogout()
 }
 
 type contractStatusUpdate struct {
@@ -2731,8 +2839,66 @@ func (self *DeviceLocal) windowStatusChanged(windowStatus *WindowStatus) {
 func (self *DeviceLocal) receive(source connect.TransferPath, provideMode protocol.ProvideMode, ipPath *connect.IpPath, packet []byte) {
 	// self.assertNotLockOwner()
 	// deviceLog("GOT A PACKET %d", len(packet))
+	packetStorage := [1][]byte{packet}
+	self.receivePacketBatch(packetStorage[:])
+	for _, receivePacketsCallback := range self.receivePacketsCallbacks.Get() {
+		receivePacketsCallback(source, provideMode, ipPath, packetStorage[:])
+	}
 	for _, receiveCallback := range self.receiveCallbacks.Get() {
 		receiveCallback(source, provideMode, ipPath, packet)
+	}
+}
+
+// A common remote burst crosses the app boundary once. Singular observers
+// still receive every packet because callback subscriptions are independent.
+func (self *DeviceLocal) receivePackets(
+	source connect.TransferPath,
+	provideMode protocol.ProvideMode,
+	ipPath *connect.IpPath,
+	packets [][]byte,
+) {
+	self.receivePacketBatch(packets)
+	for _, receivePacketsCallback := range self.receivePacketsCallbacks.Get() {
+		receivePacketsCallback(source, provideMode, ipPath, packets)
+	}
+	for _, receiveCallback := range self.receiveCallbacks.Get() {
+		for _, packet := range packets {
+			receiveCallback(source, provideMode, ipPath, packet)
+		}
+	}
+}
+
+// Native adapters receive one borrowed buffer rather than crossing the ABI
+// once per packet. Framing matches SendPacketBatch in the reverse direction.
+func (self *DeviceLocal) receivePacketBatch(packets [][]byte) {
+	callbacks := self.receivePacketBatchCallbacks.Get()
+	if len(callbacks) == 0 {
+		return
+	}
+	packetBatchByteCount := 0
+	for _, packet := range packets {
+		if len(packet) == 0 || 65535 < len(packet) {
+			return
+		}
+		packetBatchByteCount += 2 + len(packet)
+	}
+	if packetBatchByteCount == 0 {
+		return
+	}
+	packetBatchBytes := connect.MessagePoolGet(packetBatchByteCount)
+	defer connect.MessagePoolReturn(packetBatchBytes)
+	offset := 0
+	for _, packet := range packets {
+		binary.BigEndian.PutUint16(
+			packetBatchBytes[offset:offset+2],
+			uint16(len(packet)),
+		)
+		offset += 2
+		copy(packetBatchBytes[offset:offset+len(packet)], packet)
+		offset += len(packet)
+	}
+	for _, callback := range callbacks {
+		callback(packetBatchBytes)
 	}
 }
 
@@ -3190,6 +3356,21 @@ func (self *DeviceLocal) GetFirstLoadTimelineJson() string {
 }
 
 func (self *DeviceLocal) SetDestination(location *ConnectLocation, specs *ProviderSpecList) {
+	self.setDestination(location, specs, false)
+}
+
+// setDestination installs the destination. An unchanged destination normally
+// keeps the live connection — the same transport, multi client and window —
+// because it is re-applied implicitly all the time (the rpc replays pending
+// state, and callers persist and restore it). `rebuild` is the explicit user
+// action asking for a fresh connection anyway: it tears the transport down and
+// builds a new one, so the same location gets a NEW multi client and a new set
+// of peers. See `Device.Reconnect`.
+func (self *DeviceLocal) setDestination(
+	location *ConnectLocation,
+	specs *ProviderSpecList,
+	rebuild bool,
+) {
 	location = cloneConnectLocation(location)
 	connectSpecs := []*connect.ProviderSpec{}
 	if specs != nil {
@@ -3208,7 +3389,8 @@ func (self *DeviceLocal) SetDestination(location *ConnectLocation, specs *Provid
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 
-		if self.destinationInitialized &&
+		if !rebuild &&
+			self.destinationInitialized &&
 			self.destinationSpecsFingerprint == specsFingerprint &&
 			connectLocationTransportEqual(self.connectLocation, location) {
 			locationChanged = !connectLocationValuesEqual(self.connectLocation, location)
@@ -3259,6 +3441,19 @@ func (self *DeviceLocal) SetDestination(location *ConnectLocation, specs *Provid
 				// self.log.Infof("[trace]receive packet\n")
 				self.stats.UpdateRemoteReceive(ByteCount(len(packet)))
 				self.receive(source, provideMode, ipPath, packet)
+			}
+			remoteReceivePackets := func(
+				source connect.TransferPath,
+				provideMode protocol.ProvideMode,
+				ipPath *connect.IpPath,
+				packets [][]byte,
+			) {
+				remoteReceiveByteCount := 0
+				for _, packet := range packets {
+					remoteReceiveByteCount += len(packet)
+				}
+				self.stats.UpdateRemoteReceive(ByteCount(remoteReceiveByteCount))
+				self.receivePackets(source, provideMode, ipPath, packets)
 			}
 			networkPeerDestination := location != nil && location.NetworkPeer
 			var networkPeerDestinationId *connect.Id
@@ -3406,6 +3601,7 @@ func (self *DeviceLocal) SetDestination(location *ConnectLocation, specs *Provid
 			// the rest flow on to remoteReceive), and the send path runs through the mux
 			// (it claims DNS/HTTP, else forwards to the multi-client).
 			muxReceive := connect.ReceivePacketFunction(remoteReceive)
+			muxReceivePackets := connect.ReceivePacketsFunction(remoteReceivePackets)
 			var upgradeMux *connect.UpgradeMux
 			if self.upgradeMuxSettings != nil {
 				if self.upgradeMuxSettings.Dns != nil {
@@ -3431,6 +3627,8 @@ func (self *DeviceLocal) SetDestination(location *ConnectLocation, specs *Provid
 					// carry the prior mux's learned server names across the rebuild
 					upgradeMux.AdoptServerNames(priorUpgradeMux)
 					muxReceive = m.Receive
+					muxReceivePackets = m.ReceivePackets
+					m.AddPacketsReceiver(remoteReceivePackets)
 				}
 			}
 
@@ -3450,6 +3648,7 @@ func (self *DeviceLocal) SetDestination(location *ConnectLocation, specs *Provid
 				peerProvideMode,
 				settings,
 			)
+			multi.SetReceivePacketsCallback(muxReceivePackets)
 			// carry the host's degraded-performance state into the fresh window
 			// (eases the liveness probe timings; see SetPerformanceDegraded)
 			multi.SetPerformanceDegraded(self.performanceDegraded.Load())
@@ -3457,7 +3656,7 @@ func (self *DeviceLocal) SetDestination(location *ConnectLocation, specs *Provid
 			self.peerIdentitySub = multi.AddPeerIdentityChangeCallback(self.providerIdentitiesChanged)
 			self.remoteUserNatClient = multi
 			if upgradeMux != nil {
-				upgradeMux.SetUpstream(multi.SendPacket)
+				upgradeMux.SetUpstreamBatchClient(multi)
 				// the mux's DNS reverse index drives ServerName path affinity (point 4)
 				multi.SetServerNameLookup(upgradeMux)
 				// the mux blocks ad/tracker hostnames at the dns layer
@@ -3609,6 +3808,17 @@ func toWindowStatus(monitor connect.MultiClientMonitor) *WindowStatus {
 }
 
 func (self *DeviceLocal) SetConnectLocation(location *ConnectLocation) {
+	self.setConnectLocation(location, false)
+}
+
+// Reconnect is `SetConnectLocation` for an explicit user action: it rebuilds
+// the connection even when `location` is already the installed destination.
+// See the `Device` interface.
+func (self *DeviceLocal) Reconnect(location *ConnectLocation) {
+	self.setConnectLocation(location, true)
+}
+
+func (self *DeviceLocal) setConnectLocation(location *ConnectLocation, rebuild bool) {
 	if location == nil {
 		self.RemoveDestination()
 	} else {
@@ -3619,7 +3829,7 @@ func (self *DeviceLocal) SetConnectLocation(location *ConnectLocation) {
 			ClientId:        location.ConnectLocationId.ClientId,
 			BestAvailable:   location.ConnectLocationId.BestAvailable,
 		})
-		self.SetDestination(location, specs)
+		self.setDestination(location, specs, rebuild)
 	}
 }
 
@@ -3701,6 +3911,48 @@ func (self *DeviceLocal) SendPacketNoCopy(packet []byte, n int32) bool {
 	return self.sendPacket(packet[:n])
 }
 
+// Go embedders hand over a complete pooled burst. The device consumes every
+// packet regardless of whether its selected route accepts it.
+//
+//gomobile:noexport
+func (self *DeviceLocal) SendPacketsNoCopy(packets [][]byte) int {
+	return self.sendPacketsNoCopy(packets)
+}
+
+// SendPacketBatch parses a compact sequence of uint16 length-prefixed packets
+// and crosses the Go/native boundary once. Invalid framing is rejected before
+// any packet is sent. The return value is the number accepted by the route.
+func (self *DeviceLocal) SendPacketBatch(packetBatchBytes []byte) int32 {
+	const maxPacketCount = 64
+	var packetRanges [maxPacketCount][2]int
+	packetCount := 0
+	offset := 0
+	for offset < len(packetBatchBytes) {
+		if len(packetBatchBytes)-offset < 2 || maxPacketCount <= packetCount {
+			return 0
+		}
+		packetByteCount := int(binary.BigEndian.Uint16(packetBatchBytes[offset : offset+2]))
+		offset += 2
+		if packetByteCount == 0 || len(packetBatchBytes)-offset < packetByteCount {
+			return 0
+		}
+		packetRanges[packetCount] = [2]int{offset, offset + packetByteCount}
+		packetCount += 1
+		offset += packetByteCount
+	}
+	if packetCount == 0 {
+		return 0
+	}
+	var packetStorage [maxPacketCount][]byte
+	packets := packetStorage[:packetCount]
+	for packetIndex, packetRange := range packetRanges[:packetCount] {
+		packets[packetIndex] = connect.MessagePoolCopy(
+			packetBatchBytes[packetRange[0]:packetRange[1]],
+		)
+	}
+	return int32(self.sendPacketsNoCopy(packets))
+}
+
 // deviceLocalSendRoute is an immutable snapshot of the routing fields read on
 // the per-packet send path. see `DeviceLocal.sendRoute`.
 type deviceLocalSendRoute struct {
@@ -3774,19 +4026,96 @@ func (self *DeviceLocal) sendPacket(packet []byte) bool {
 	}
 }
 
+// The batch send owns every pooled packet on entry. Accepted packets transfer
+// to the route; rejected packets are returned here. One immutable route and
+// one stats update cover the whole burst.
+func (self *DeviceLocal) sendPacketsNoCopy(packets [][]byte) int {
+	route := self.sendRoute.Load()
+	packetByteCount := 0
+	for _, packet := range packets {
+		packetByteCount += len(packet)
+	}
+	if route.upgradeMux != nil || route.remoteUserNatClient != nil {
+		self.stats.UpdateRemoteSend(ByteCount(packetByteCount))
+	}
+	source := connect.SourceId(self.clientId)
+	if route.upgradeMux != nil {
+		return route.upgradeMux.SendPacketBatch(
+			source,
+			protocol.ProvideMode_Network,
+			packets,
+			self.settings.SendTimeout,
+		)
+	}
+	if route.remoteUserNatClient != nil {
+		if batchClient, ok := route.remoteUserNatClient.(connect.UserNatBatchClient); ok {
+			return batchClient.SendPacketBatch(
+				source,
+				protocol.ProvideMode_Network,
+				packets,
+				self.settings.SendTimeout,
+			)
+		}
+	}
+	if route.routeLocal && route.provider != nil {
+		if localUserNat := route.provider.LocalUserNat(); localUserNat != nil {
+			sentPacketCount := localUserNat.SendPacketBatch(
+				source,
+				protocol.ProvideMode_Network,
+				packets,
+				self.settings.SendTimeout,
+			)
+			self.localFallbackEgressPacketCount.Add(int64(sentPacketCount))
+			if sentPacketCount == len(packets) {
+				self.localFallbackEgressByteCount.Add(int64(packetByteCount))
+			}
+			return sentPacketCount
+		}
+	}
+
+	// Compatibility fallback for a custom UserNatClient that implements only
+	// the original singular send contract. Production routes implement the
+	// batch capability above.
+	sentPacketCount := 0
+	for _, packet := range packets {
+		sent := false
+		switch {
+		case route.remoteUserNatClient != nil:
+			sent = route.remoteUserNatClient.SendPacket(
+				source,
+				protocol.ProvideMode_Network,
+				packet,
+				self.settings.SendTimeout,
+			)
+		}
+		if sent {
+			sentPacketCount += 1
+		} else {
+			connect.MessagePoolReturn(packet)
+		}
+	}
+	return sentPacketCount
+}
+
 func (self *DeviceLocal) AddReceivePacket(receivePacket ReceivePacket) Sub {
 	receive := func(source connect.TransferPath, provideMode protocol.ProvideMode, ipPath *connect.IpPath, packet []byte) {
-		var ipProtocol IpProtocol
-		switch ipPath.Protocol {
-		case connect.IpProtocolUdp:
-			ipProtocol = IpProtocolUdp
-		case connect.IpProtocolTcp:
-			ipProtocol = IpProtocolTcp
-		default:
-			ipProtocol = IpProtocolUnknown
+		packetStorage := [1][]byte{packet}
+		packetBatch := PacketBatch{packets: packetStorage[:]}
+		ipVersion := packetBatch.IpVersion(0)
+		ipProtocol := packetBatch.IpProtocol(0)
+		if ipPath != nil {
+			ipVersion = ipPath.Version
+			switch ipPath.Protocol {
+			case connect.IpProtocolUdp:
+				ipProtocol = IpProtocolUdp
+			case connect.IpProtocolTcp:
+				ipProtocol = IpProtocolTcp
+			default:
+				ipProtocol = IpProtocolUnknown
+			}
 		}
 
-		receivePacket.ReceivePacket(ipPath.Version, ipProtocol, packet)
+		receivePacket.ReceivePacket(ipVersion, ipProtocol, packet)
 	}
 	callbackId := self.receiveCallbacks.Add(receive)
 	return newSub(func() {
@@ -3794,11 +4123,45 @@ func (self *DeviceLocal) AddReceivePacket(receivePacket ReceivePacket) Sub {
 	})
 }
 
-// gomobile:ignore
+// A mobile callback receives one borrowed packet object per upstream burst.
+func (self *DeviceLocal) AddReceivePackets(receivePackets ReceivePackets) Sub {
+	receive := func(
+		source connect.TransferPath,
+		provideMode protocol.ProvideMode,
+		ipPath *connect.IpPath,
+		packets [][]byte,
+	) {
+		receivePackets.ReceivePackets(&PacketBatch{packets: packets})
+	}
+	callbackId := self.receivePacketsCallbacks.Add(receive)
+	return newSub(func() {
+		self.receivePacketsCallbacks.Remove(callbackId)
+	})
+}
+
+// A native callback receives the whole borrowed burst in compact framing.
+func (self *DeviceLocal) AddReceivePacketBatch(receivePacketBatch ReceivePacketBatch) Sub {
+	callbackId := self.receivePacketBatchCallbacks.Add(receivePacketBatch.ReceivePacketBatch)
+	return newSub(func() {
+		self.receivePacketBatchCallbacks.Remove(callbackId)
+	})
+}
+
+//gomobile:noexport
 func (self *DeviceLocal) AddReceivePacketCallback(callback func(source connect.TransferPath, provideMode protocol.ProvideMode, ipPath *connect.IpPath, packet []byte)) func() {
 	callbackId := self.receiveCallbacks.Add(callback)
 	return func() {
 		self.receiveCallbacks.Remove(callbackId)
+	}
+}
+
+// Internal adapters avoid constructing a mobile PacketBatch wrapper.
+//
+//gomobile:noexport
+func (self *DeviceLocal) AddReceivePacketsCallback(callback connect.ReceivePacketsFunction) func() {
+	callbackId := self.receivePacketsCallbacks.Add(callback)
+	return func() {
+		self.receivePacketsCallbacks.Remove(callbackId)
 	}
 }
 
@@ -3877,9 +4240,13 @@ func (self *DeviceLocal) close() {
 		self.deviceLocalRpcManager.Close()
 	}
 
-	if self.tokenManager != nil {
-		self.tokenManager.Close()
-		self.tokenManager = nil
+	if self.apiJwtRefreshSub != nil {
+		self.apiJwtRefreshSub.Close()
+		self.apiJwtRefreshSub = nil
+	}
+	if self.apiAuthLogoutSub != nil {
+		self.apiAuthLogoutSub.Close()
+		self.apiAuthLogoutSub = nil
 	}
 
 	api := self.networkSpace.GetApi()
@@ -3965,13 +4332,18 @@ func (self *DeviceLocal) StartHostedRpc(listener DeviceRpcListener, deviceGenera
 	self.deviceLocalRpcManager = newDeviceLocalRpcManager(self.ctx, self, settings, listener.(deviceRpcListener))
 }
 
+// Sentinel for a jwt with NO client_id claim at all (a network member jwt).
+// Callers that accept a network jwt (NewPlatformDeviceRemote) treat exactly
+// this case as non-fatal; a PRESENT-but-malformed claim still fails loudly.
+var errByJwtNoClientId = fmt.Errorf("byJwt does not contain claim client_id")
+
 func parseByJwtClientId(byJwt string) (connect.Id, error) {
 	claims := gojwt.MapClaims{}
 	gojwt.NewParser().ParseUnverified(byJwt, claims)
 
 	jwtClientId, ok := claims["client_id"]
 	if !ok {
-		return connect.Id{}, fmt.Errorf("byJwt does not contain claim client_id")
+		return connect.Id{}, errByJwtNoClientId
 	}
 	switch v := jwtClientId.(type) {
 	case string:
