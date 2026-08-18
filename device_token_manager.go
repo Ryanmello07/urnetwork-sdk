@@ -37,6 +37,50 @@ type apiTokenManager struct {
 	refreshPending atomic.Bool
 }
 
+type clientJwtIdentity struct {
+	clientId string
+	deviceId string
+}
+
+func parseClientJwtIdentity(byJwt string) (clientJwtIdentity, bool) {
+	claims := gojwt.MapClaims{}
+	if _, _, err := gojwt.NewParser().ParseUnverified(byJwt, claims); err != nil {
+		return clientJwtIdentity{}, false
+	}
+
+	clientId, clientOk := claims["client_id"].(string)
+	deviceId, deviceOk := claims["device_id"].(string)
+	if !clientOk || clientId == "" || !deviceOk || deviceId == "" {
+		return clientJwtIdentity{}, false
+	}
+
+	return clientJwtIdentity{
+		clientId: clientId,
+		deviceId: deviceId,
+	}, true
+}
+
+// validateRefreshedClientJwt prevents a refresh response from silently
+// replacing the live device identity. A genuine login/device change must build
+// a new Device and rotate its instance through LocalState's login setters.
+// Invalid legacy/test bearer strings remain accepted here for compatibility;
+// production client JWTs always have the identity claims because jwtCanRefresh
+// requires them before the refresh loop runs.
+func validateRefreshedClientJwt(previousByJwt string, refreshedByJwt string) error {
+	previousIdentity, previousOk := parseClientJwtIdentity(previousByJwt)
+	if !previousOk {
+		return nil
+	}
+	refreshedIdentity, refreshedOk := parseClientJwtIdentity(refreshedByJwt)
+	if !refreshedOk {
+		return errors.New("refreshed JWT is missing the client device identity")
+	}
+	if previousIdentity != refreshedIdentity {
+		return errors.New("refreshed JWT changed the client device identity")
+	}
+	return nil
+}
+
 func newApiTokenManager(ctx context.Context, api *Api) *apiTokenManager {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	manager := &apiTokenManager{
@@ -53,13 +97,8 @@ func newApiTokenManager(ctx context.Context, api *Api) *apiTokenManager {
 // scheduling predicate; /auth/refresh performs the authoritative signature,
 // claims, active-client, and network-ownership checks.
 func jwtCanRefresh(byJwt string) bool {
-	claims := gojwt.MapClaims{}
-	if _, _, err := gojwt.NewParser().ParseUnverified(byJwt, claims); err != nil {
-		return false
-	}
-	clientId, clientOk := claims["client_id"].(string)
-	deviceId, deviceOk := claims["device_id"].(string)
-	return clientOk && clientId != "" && deviceOk && deviceId != ""
+	_, ok := parseClientJwtIdentity(byJwt)
+	return ok
 }
 
 func jwtExpiration(byJwt string) time.Time {
@@ -159,24 +198,6 @@ func jwtRefreshTimeout(byJwt string, now time.Time) time.Duration {
 	return refreshTimeout
 }
 
-// parseJwtClaims reads a jwt's claims WITHOUT verifying it. The sdk only ever
-// reads claims from tokens the server already handed it; verification is the
-// server's job on the next call.
-func parseJwtClaims(jwt string) (gojwt.MapClaims, error) {
-	if jwt == "" {
-		return nil, errors.New("Empty jwt.")
-	}
-	token, _, err := gojwt.NewParser().ParseUnverified(jwt, gojwt.MapClaims{})
-	if err != nil {
-		return nil, err
-	}
-	claims, ok := token.Claims.(gojwt.MapClaims)
-	if !ok {
-		return nil, errors.New("Unexpected claims type.")
-	}
-	return claims, nil
-}
-
 func stopApiTokenTimer(timer *time.Timer) {
 	if !timer.Stop() {
 		select {
@@ -226,12 +247,6 @@ func (self *apiTokenManager) run() {
 				return
 			case <-refreshNotify:
 				continue
-			}
-		}
-
-		if self.api.logger().V(1).Enabled() {
-			if claims, err := parseJwtClaims(byJwt); err == nil {
-				self.api.logger().Infof("[api-token]JWT claims: %+v", claims)
 			}
 		}
 
@@ -377,6 +392,10 @@ func (self *apiTokenManager) refreshToken(byJwt string) (loggedOut bool, stale b
 	// guard against api logic errors that could mess up the client state
 	if result.ByJwt == "" {
 		returnErr = fmt.Errorf("failed to refresh JWT: empty JWT returned")
+		return
+	}
+	if err := validateRefreshedClientJwt(byJwt, result.ByJwt); err != nil {
+		returnErr = fmt.Errorf("failed to refresh JWT: %w", err)
 		return
 	}
 

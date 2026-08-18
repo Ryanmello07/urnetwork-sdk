@@ -8796,6 +8796,13 @@ func urnet_get_filtered_locations_from_result(result *C.char, filter *C.char) *C
 	return cJson(r0, "urnet_get_filtered_locations_from_result")
 }
 
+//export urnet_get_fips140_enabled
+func urnet_get_fips140_enabled() C.bool {
+	defer cgoGuard("urnet_get_fips140_enabled")
+	r0 := sdk.GetFips140Enabled()
+	return C.bool(r0)
+}
+
 //export urnet_get_log_dir
 func urnet_get_log_dir() *C.char {
 	defer cgoGuard("urnet_get_log_dir")

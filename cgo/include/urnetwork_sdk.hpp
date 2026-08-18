@@ -164,7 +164,8 @@ inline constexpr const char* Disconnected = "DISCONNECTED";
 inline constexpr int64_t IpProtocolTcp = 2;
 inline constexpr int64_t IpProtocolUdp = 1;
 inline constexpr int64_t IpProtocolUnknown = 0;
-inline constexpr int64_t LocalStorageFilePermissions = 448;
+inline constexpr int64_t LocalStorageDirectoryPermissions = 448;
+inline constexpr int64_t LocalStorageFilePermissions = 384;
 inline constexpr const char* LocationTypeCity = "city";
 inline constexpr const char* LocationTypeCountry = "country";
 inline constexpr const char* LocationTypeRegion = "region";
@@ -19764,6 +19765,10 @@ inline std::optional<FilteredLocations> getFilteredLocationsFromResult(const std
 		return std::nullopt;
 	}
 	return detail::parseJson<FilteredLocations>(r_s->c_str());
+}
+inline bool getFips140Enabled() {
+	bool r = urnet_get_fips140_enabled();
+	return r;
 }
 inline std::string getLogDir() {
 	char* r_c = urnet_get_log_dir();
