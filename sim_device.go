@@ -139,8 +139,7 @@ func NewSimProvider(ctx context.Context, config *SimProviderConfig) *SimProvider
 		protocol.ProvideMode_Public:  true,
 	})
 
-	platformTransportSettings := connect.DefaultPlatformTransportSettings()
-	platformTransportSettings.Log = log
+	platformTransportSettings := newSimProviderPlatformTransportSettings(log)
 
 	provider := &SimProvider{
 		ctx:            cancelCtx,
@@ -355,8 +354,8 @@ func NewSimClient(ctx context.Context, config *SimClientConfig) (*SimClient, err
 	// only on failure, so the bridge returns it exactly when the send fails —
 	// mirroring DeviceLocal.SendPacket. Returning unconditionally double-frees
 	// the pooled buffer on every successful send, corrupting the stream. A
-	// blocking send (-1) keeps the source lossless, and unblocks when the tun
-	// closes.
+	// blocking send (-1) keeps the source lossless, and unblocks when the
+	// simulation context is canceled.
 	source := connect.SourceId(config.ClientId)
 	simClient.bridgeWg.Add(1)
 	go connect.HandleError(func() {
@@ -384,7 +383,36 @@ func NewSimClient(ctx context.Context, config *SimClientConfig) (*SimClient, err
 func newSimClientGeneratorSettings() *connect.ApiMultiClientGeneratorSettings {
 	settings := connect.DefaultApiMultiClientGeneratorSettings()
 	settings.PlatformTransportMode = connect.TransportModeH1
+	// One headless client represents one independent device. Preserve the
+	// production budget within its window set without making every simulated
+	// device in this process compete for the same global transport slots.
+	if platformBudget := newSimPlatformTransportBudget(); platformBudget != nil {
+		settings.PlatformTransportSettingsGenerator = func() *connect.PlatformTransportSettings {
+			platformSettings := connect.DefaultPlatformTransportSettings()
+			platformSettings.PlatformTransportBudget = platformBudget
+			return platformSettings
+		}
+	}
 	return settings
+}
+
+func newSimProviderPlatformTransportSettings(log connect.Logger) *connect.PlatformTransportSettings {
+	settings := connect.DefaultPlatformTransportSettings()
+	settings.Log = log
+	settings.PlatformTransportBudget = newSimPlatformTransportBudget()
+	return settings
+}
+
+func newSimPlatformTransportBudget() *connect.PlatformTransportBudget {
+	defaultBudget := connect.DefaultPlatformTransportBudget()
+	if defaultBudget == nil {
+		return nil
+	}
+	budgetStats := defaultBudget.Stats()
+	return connect.NewPlatformTransportBudget(
+		budgetStats.TotalByteCount,
+		budgetStats.MaxTransportCount,
+	)
 }
 
 func cloneSimMultiClientSettings(settings *connect.MultiClientSettings) *connect.MultiClientSettings {
@@ -410,8 +438,21 @@ func (self *SimClient) MultiClient() *connect.RemoteUserNatMultiClient {
 }
 
 func (self *SimClient) Close() {
-	self.tun.Close() // unblocks ReadBatch -> bridge goroutine exits
-	self.bridgeWg.Wait()
+	closeSimClientBridge(
+		func() {
+			self.tun.Close()
+		},
+		self.cancel,
+		self.bridgeWg.Wait,
+	)
 	self.multiClient.Close()
-	self.cancel()
+}
+
+// closeSimClientBridge stops both places where the tunnel bridge can block
+// before joining it. Closing the tun releases ReadBatch, while canceling the
+// shared context releases an in-flight blocking multi-client SendPacket.
+func closeSimClientBridge(closeTun func(), cancel context.CancelFunc, waitBridge func()) {
+	closeTun()
+	cancel()
+	waitBridge()
 }

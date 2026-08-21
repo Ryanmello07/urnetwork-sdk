@@ -2,7 +2,9 @@ package sdk
 
 import (
 	"context"
+	"errors"
 	"math"
+	"net"
 	"runtime/debug"
 	"testing"
 
@@ -306,6 +308,20 @@ func TestProviderLocalUserNatSettings(t *testing.T) {
 	connect.AssertEqual(t, settings.TcpBufferSettings.GlobalLimit, 0)
 }
 
+func TestProviderLocalUserNatSettingsAppliesExitDialerOnlyToTCPAndUDP(t *testing.T) {
+	dial := &connect.DialContextSettings{DialContext: func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("test dial")
+	}}
+	settings := providerLocalUserNatSettings(0, connect.NewNoopLogger(), dial)
+	if settings.TcpBufferSettings.DialContextSettings != dial || settings.UdpBufferSettings.DialContextSettings != dial {
+		t.Fatal("provider exit dialer was not applied to TCP and UDP")
+	}
+	plain := providerLocalUserNatSettings(0, connect.NewNoopLogger())
+	if plain.TcpBufferSettings.DialContextSettings != nil || plain.UdpBufferSettings.DialContextSettings != nil {
+		t.Fatal("ordinary provider settings unexpectedly install a custom dialer")
+	}
+}
+
 // TestDeviceLocalProvideMemoryRealloc verifies the provider share of the
 // device memory target follows the provide state: while providing is off it
 // backs the client pair; enabling provide moves it to the provider pair and
@@ -336,6 +352,11 @@ func TestDeviceLocalProvideMemoryRealloc(t *testing.T) {
 		t.Fatalf("new device: %v", err)
 	}
 	defer device.Close()
+	connect.AssertEqual(
+		t,
+		device.provider.platformTransportSettings.PlatformTransportBudgetPriority,
+		connect.PlatformTransportBudgetPriorityBackground,
+	)
 
 	target := connect.ByteCount(defaultDeviceLocalMemoryTargetByteCount)
 	clientShare := target * deviceMemoryRatioClient / deviceMemoryRatioParts
