@@ -51,6 +51,16 @@ var (
 	// is the ORDINARY outcome of a crash mid-append; refusing it would leave a row no later
 	// process could open, on exactly the path the durability exists to survive. See
 	// classifyStreamRow for the three cases and the discriminator between them.
+	//
+	// IT IS A MIXED CLASS AND THE ADAPTER RULES THE WHOLE OF IT TRANSIENT, so a condition
+	// inside it that a retry can never clear retries forever. ONE sub-class carries its own
+	// discriminator rather than waiting on that ruling: a row that was present at open and
+	// whose body did not classify is raised with ErrStreamStoreConsumed beside this value, by
+	// persistedHighWater, because a store that could not read a row at open cannot read it
+	// later -- nothing in this store ever rewrites a row it refused. The REST of the class --
+	// a failed flush, a full disk, an unreadable row directory, a closed store -- is still
+	// ruled transient and is still, for the permanent members of it, an unbounded retry.
+	// That remainder is FILED, not ruled here: see streamStoreSentinelRulings.
 	ErrStreamStoreState = errors.New("stream store state")
 
 	// ErrStreamStoreRewound is PERSISTED STATE BEHIND AN INDEX THIS STORE HAS ALREADY HANDED
@@ -80,7 +90,8 @@ var (
 
 	// ErrStreamStoreConsumed is the store's PERMANENT refusal to allocate for a key: the next
 	// position is one it has already handed out and it has no way past it. Contract clause 3
-	// names two shapes of that and this store produces both.
+	// names two shapes of that and this store produces both, and a THIRD below is the store's
+	// own rather than a reading of the clause.
 	//
 	//  1. A stream that has spent the last index a u64 holds. persisted+1 does not exist, and
 	//     no later call can make it exist, so the refusal is forever.
@@ -92,6 +103,15 @@ var (
 	//     two seats: the reader's (the number moved) and the allocator's (I cannot go on).
 	//     streamindex.go's clause 3 says exactly this -- the permanent refusal is "what a row
 	//     that went backwards under a live process looks like from in here".
+	//
+	//  3. A row that was PRESENT when this store opened and whose body did not classify. The
+	//     indices it has already spent are not derivable from it, so no next position can be
+	//     proven unspent, and no later call in this store's life changes that. Shape 3 is
+	//     raised TOGETHER WITH ErrStreamStoreState, both findable by errors.Is off one value,
+	//     for the same reason shape 2 is raised with ErrStreamStoreRewound: one state, two
+	//     seats. It is the store supplying a discriminator the adapter cannot invent, and it
+	//     is the only part of the ErrStreamStoreState class whose permanence is knowable from
+	//     inside the store.
 	//
 	// It is never the answer for a condition a retry could clear. A transient filesystem error
 	// is returned as itself; calling it consumed would tell a ratchet to stop forever over a

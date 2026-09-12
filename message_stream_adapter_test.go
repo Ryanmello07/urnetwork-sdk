@@ -290,57 +290,97 @@ func streamAdapterTypeName(t *testing.T) string {
 //
 // THE COUNT IS NOT THE FINDING. A correct implementation writes the flattening once as a helper
 // and the class has one new member; a correct implementation that inlines it into each of Reserve
-// and HighWater has two. Both are correct, so the gate convicts a MEMBER and never a number: a
-// member is a finding unless it is a method of the adapter type, or it is inert -- it hands no
-// octets out through its results and it assigns to nothing that outlives the call.
+// and HighWater has two. Both are correct, so the gate convicts a MEMBER and never a number.
 //
-// WHAT THE INERTNESS NARROWING REMOVES is printed below rather than asserted away: the store's own
-// key derivations read the same fields and are not flattenings onto section 8.2's pair, because
-// what leaves them is a row name, a digest or a StreamKey. The residual this gate carries, named
-// rather than discovered: a second flattening that neither returns its octets nor stores them --
-// one that, say, passed them straight to a closure argument -- is inert to this gate and is also
-// inert to the program, because nothing outside it could observe the pair it built.
+// THE NARROWING, AND WHY IT IS NO LONGER "INERTNESS". Until 2026-09-12 a member was excused when
+// it returned no []byte and assigned to nothing that outlives the call, and the residual was
+// written down as "a second flattening that neither returns its octets nor stores them ... is
+// inert to this gate and IS ALSO INERT TO THE PROGRAM, because nothing outside it could observe
+// the pair it built". THAT REASON IS FALSE, and it is false in ordinary Go rather than in a
+// contrivance. A declaration can hand its octets out by
+//
+//	passing them to any call -- the callee can do anything with them;
+//	sending them on a channel, which is not an assignment;
+//	returning them inside a struct, an array or a named type, none of which is spelled []byte;
+//	closing over them in a func literal it returns or registers.
+//
+// None of those four is a result of type []byte and none is an assignment to a field or a
+// package-level variable, so all four were "inert" to that narrowing and every one of them is
+// observable outside the declaration. It was measured: a second flattening that sends the pair
+// down a package-level channel passes the old gate unchanged.
+//
+// WHAT REPLACES IT IS A NARROWING OVER WHAT THE DECLARATION TOUCHES RATHER THAN OVER WHERE THE
+// RESULT GOES, which is sound where an escape analysis over a syntax tree is not. A flattening
+// has to MOVE THE OCTETS of a key's fields, and reflect gives exactly four ways to do that:
+// Value.Bytes, Value.Slice, Value.Interface and reflect.Copy. A declaration that reads a
+// StreamKey's fields and calls NONE of them never obtained the octets at all, so it cannot have
+// flattened them, however its results are shaped and wherever they go. That exclusion is a
+// property of the code rather than a guess about it, and the complement it removes is printed.
+//
+// Every octet-moving member must then be a method of the adapter type or carry a RULING written
+// here, and a ruling naming a declaration the tree no longer has fails too. Over-reach is the
+// safe direction: a new declaration in package sdk that moves a key's octets fails this gate
+// until somebody rules on it, which is a decision being asked for rather than skipped.
+//
+// WHAT IS STILL RESIDUAL, stated so it is not discovered later: a second flattening that reaches
+// a StreamKey's contents WITHOUT reflection -- by spelling the field names -- is outside this
+// class entirely, and it is held at zero by a different gate,
+// TestNoProductionSourceOfPackageSdkSpellsAStreamKeyFieldName. A second flattening that moves the
+// octets and then reaches the store is caught twice over, here and by the call-site gate below.
+
+// streamAdapterOctetMovingRulings is the one place a declaration outside the adapter is excused
+// from being a second flattening, and each excuse is a sentence rather than a name on a list.
+var streamAdapterOctetMovingRulings = map[string]string{
+	"streamRowIdentityOf": "the store's ROW IDENTITY derivation. It moves a field's octets straight into a SHA-256, one field at a time, and what leaves it is a hex digest; it never assembles section 8.2's positional pair and no caller can recover the pair from what it returns. It is the derivation the adapter's flattening is keyed AGAINST rather than a second copy of it",
+	"streamKeyFromOctets": "THE INVERSE flattening -- section 8.2's positional pair back onto StreamKey -- which section 8.2 puts in the store, beside the two methods that take that pair. It moves octets INTO a key rather than out of one, so it cannot be a second derivation of which row a stream's indices land in: it consumes the one the adapter produced",
+}
+
 func TestEveryStreamKeyFlatteningInPackageSdkIsTheAdapters(t *testing.T) {
 	adapterType := streamAdapterTypeName(t)
 	_, parsed, declarations := streamAdapterParse(t)
 	packageVars := streamAdapterPackageVarNames(parsed)
 	reflectiveReads := map[string]bool{"Field": true, "FieldByName": true, "FieldByIndex": true}
+	octetMovers := map[string]bool{"Bytes": true, "Slice": true, "Interface": true, "Copy": true}
 
 	t.Logf("SCOPE: %d production file(s) of package sdk, %d function declaration(s)", len(parsed), len(declarations))
 	t.Logf("CLASS: declarations containing a reflective field read %v", slices.Sorted(maps.Keys(reflectiveReads)))
+	t.Logf("NARROWED TO: of those, the ones that also MOVE the octets, by %v -- the four ways reflect has of getting a field's bytes out of or into a value", slices.Sorted(maps.Keys(octetMovers)))
 	t.Logf("the adapter type, read by calling the producer rather than written down: %s", adapterType)
 
 	members := 0
-	inert := []string{}
+	readsOnly := []string{}
 	adapters := []string{}
+	ruled := []string{}
+	seen := map[string]bool{}
 	for _, declaration := range declarations {
 		reads := streamAdapterCallsSelector(declaration.node, reflectiveReads)
 		if len(reads) == 0 {
 			continue
 		}
 		members += 1
+		moves := streamAdapterCallsSelector(declaration.node, octetMovers)
 		results := streamAdapterResultTypes(declaration.node)
-		octetsOut := false
-		for _, result := range results {
-			if result == "[]byte" || result == "[][]byte" {
-				octetsOut = true
-			}
-		}
 		outward := streamAdapterAssignsOutward(declaration.node, packageVars)
-		isAdapter := declaration.receiver == adapterType
+		if len(moves) == 0 {
+			readsOnly = append(readsOnly, fmt.Sprintf("%s reads %v, moves no octets (results %v)", declaration.label(), reads, results))
+			continue
+		}
+		seen[declaration.name] = true
 		switch {
-		case isAdapter:
-			adapters = append(adapters, fmt.Sprintf("%s reads %v, results %v", declaration.label(), reads, results))
-		case !octetsOut && len(outward) == 0:
-			inert = append(inert, fmt.Sprintf("%s reads %v, results %v, assigns nothing outward", declaration.label(), reads, results))
+		case declaration.receiver == adapterType:
+			adapters = append(adapters, fmt.Sprintf("%s reads %v, moves %v, results %v", declaration.label(), reads, moves, results))
+		case streamAdapterOctetMovingRulings[declaration.name] != "":
+			ruled = append(ruled, fmt.Sprintf("%s moves %v, results %v, assigns outward %v\n      RULING: %s",
+				declaration.label(), moves, results, outward, streamAdapterOctetMovingRulings[declaration.name]))
 		default:
 			t.Errorf(
-				"%s reads a StreamKey's fields %v and lets octets out (results %v, outward assignments %v), and it is not a method of %s. That is a SECOND flattening of one mapping: two derivations of which row a stream's indices land in, and the day they disagree the second stream is handed indices the first has already spent",
+				"%s reads a StreamKey's fields %v and MOVES their octets %v, and it is neither a method of %s nor a declaration streamAdapterOctetMovingRulings rules on (results %v, outward assignments %v). That is a SECOND flattening of one mapping: two derivations of which row a stream's indices land in, and the day they disagree the second stream is handed indices the first has already spent. Where the octets GO is not the question -- a call argument, a channel send, a struct field of a result and a closure capture all carry them out of here and none of them is a []byte result",
 				declaration.label(),
 				reads,
+				moves,
+				adapterType,
 				results,
 				outward,
-				adapterType,
 			)
 		}
 	}
@@ -352,15 +392,29 @@ func TestEveryStreamKeyFlatteningInPackageSdkIsTheAdapters(t *testing.T) {
 	for _, line := range adapters {
 		t.Logf("    %s", line)
 	}
-	t.Logf("  COMPLEMENT the inertness narrowing removed (%d) -- these read the same fields and hand no octets out:", len(inert))
-	for _, line := range inert {
+	t.Logf("  RULED (%d) -- these move the octets and are not the adapter's:", len(ruled))
+	for _, line := range ruled {
+		t.Logf("    %s", line)
+	}
+	t.Logf("  COMPLEMENT the octet-moving narrowing removed (%d) -- these read a key's fields and never take their bytes:", len(readsOnly))
+	for _, line := range readsOnly {
 		t.Logf("    %s", line)
 	}
 	if len(adapters) == 0 {
-		t.Errorf("no method of %s reads a StreamKey's fields, so the flattening this task produces is not in the class this gate reads and the gate is holding nothing", adapterType)
+		t.Errorf("no method of %s reads a StreamKey's fields and moves their octets, so the flattening this task produces is not in the class this gate reads and the gate is holding nothing", adapterType)
 	}
-	if len(inert) == 0 {
-		t.Log("NOTE: the inertness narrowing removed nothing on this tree, so every member is an adapter method. The narrowing is still stated because the store's own key derivations are the members it was written for")
+	if len(readsOnly) == 0 {
+		t.Error("the complement is empty, so the octet-moving narrowing removed no declaration at all and this gate is not the gate it says it is")
+	}
+	stale := []string{}
+	for name := range streamAdapterOctetMovingRulings {
+		if !seen[name] {
+			stale = append(stale, name)
+		}
+	}
+	slices.Sort(stale)
+	if len(stale) != 0 {
+		t.Errorf("streamAdapterOctetMovingRulings excuses %d declaration(s) this tree does not have as octet-moving members: %v; an excuse nothing matches is an excuse the next declaration of that name inherits for free", len(stale), stale)
 	}
 }
 
@@ -602,15 +656,102 @@ func TestTheAdapterCopiesTheKeyAtTheBoundary(t *testing.T) {
 // Property 3 -- the sentinel mapping, and the class it must be total over.
 // ----------------------------------------------------------------------------------------------
 
-// streamAdapterSentinelDeclarations reads package sdk's production syntax tree for every
-// PACKAGE-LEVEL variable initialised by errors.New, and answers name -> message. It also answers
-// the COMPLEMENT that narrowing removed: every other errors.New call site in production.
-func streamAdapterSentinelDeclarations(t *testing.T) (map[string]string, []string) {
+// ----------------------------------------------------------------------------------------------
+// THE SENTINEL CLASS, AND WHY IT IS NO LONGER A SPELLING
+// ----------------------------------------------------------------------------------------------
+//
+// The class this gate must be total over is "A PACKAGE-LEVEL VALUE OF PACKAGE SDK THAT IS AN
+// ERROR". The previous derivation was total over one SPELLING of that -- an initialiser that is
+// literally errors.New("<string literal>") -- and a ninth sentinel spelled fmt.Errorf(...), or
+// errors.New(someConst), or &someErrorType{}, or a plain `var x error = ...` was INVISIBLE to it.
+// An invisible sentinel carries no ruling, and classify forwards an unruled error as TRANSIENT,
+// which is exactly the unbounded retry the adapter exists to stop. Two of three ordinary
+// spellings were planted against the old gate and forwarded silently; it caught one.
+//
+// THE SCOPE STAYS THE WHOLE PACKAGE. The previous derivation was right to take every production
+// file of package sdk rather than a name prefix, and that instinct is kept. What is widened is
+// the spelling, and it is widened by taking spelling out of the derivation entirely:
+//
+//	the ENUMERATION is over package-level var NAMES, off the syntax tree. No initialiser
+//	shape can hide a name, because a var declaration must spell the name it declares.
+//
+//	the CLASSIFICATION is over the DECLARED TYPE behind that name, at run time, through a
+//	pointer: a type either implements error or it does not, and reflect answers that. No
+//	list of spellings is consulted by anything.
+//
+// The two are joined by streamAdapterPackageVarCensus, which is the one thing here that must be
+// maintained by hand -- Go has no reflection over a package's variables, so a name cannot be
+// turned into a value any other way -- and the completeness check below is what stops it going
+// stale IN BOTH DIRECTIONS: a name the tree has and the census does not is a failure, and so is a
+// name the census has and the tree does not.
+
+// streamAdapterErrorType is the error interface itself, read off the language rather than spelled.
+var streamAdapterErrorType = reflect.TypeOf((*error)(nil)).Elem()
+
+// streamAdapterPackageVar is one package-level variable of package sdk, reached BY POINTER so
+// that nothing here copies the value it names: one of them is a sync.Mutex, and a census that
+// copied it would be one go vet refuses to let exist.
+type streamAdapterPackageVar struct {
+	declared reflect.Type
+	value    reflect.Value
+}
+
+// streamAdapterPackageVarOf takes the ADDRESS of a package-level variable and answers its
+// DECLARED type -- not the dynamic type of whatever is in it. For `var e = errors.New("x")` that
+// is the interface type error, and error implements error; for `var e = &rowError{}` it is
+// *rowError, which implements error too. Either way "is this an error" is answered by the type
+// system rather than by reading an initialiser.
+func streamAdapterPackageVarOf[T any](pointer *T) streamAdapterPackageVar {
+	return streamAdapterPackageVar{
+		declared: reflect.TypeOf((*T)(nil)).Elem(),
+		value:    reflect.ValueOf(pointer).Elem(),
+	}
+}
+
+// streamAdapterPackageVarCensus is every NAMED package-level variable of package sdk's production
+// files. It is hand-written because it cannot be anything else, and the gate below holds it
+// against the syntax tree in both directions so that "hand-written" does not mean "stale".
+//
+// A var added to package sdk in a file this platform does not build cannot appear here at all --
+// it would not compile. That is a loud failure, a build error or this gate reporting a name it
+// cannot see, and never a silent pass, which is the only property that residual has to have.
+// There is no such var on this tree: every name below is in a file carrying no build constraint.
+var streamAdapterPackageVarCensus = map[string]streamAdapterPackageVar{
+	"base58BigRadix":                streamAdapterPackageVarOf(&base58BigRadix),
+	"base58BigZero":                 streamAdapterPackageVarOf(&base58BigZero),
+	"base58Table":                   streamAdapterPackageVarOf(&base58Table),
+	"countryCodeColorHexes":         streamAdapterPackageVarOf(&countryCodeColorHexes),
+	"defaultTunnelDnsServersIpv4":   streamAdapterPackageVarOf(&defaultTunnelDnsServersIpv4),
+	"defaultTunnelDnsServersIpv6":   streamAdapterPackageVarOf(&defaultTunnelDnsServersIpv6),
+	"deviceRpcDefaultAddress":       streamAdapterPackageVarOf(&deviceRpcDefaultAddress),
+	"errStreamAppendInterrupted":    streamAdapterPackageVarOf(&errStreamAppendInterrupted),
+	"errStreamInjectedFlushFailure": streamAdapterPackageVarOf(&errStreamInjectedFlushFailure),
+	"ErrStreamKeySpace":             streamAdapterPackageVarOf(&ErrStreamKeySpace),
+	"ErrStreamKeyWidth":             streamAdapterPackageVarOf(&ErrStreamKeyWidth),
+	"ErrStreamStoreConsumed":        streamAdapterPackageVarOf(&ErrStreamStoreConsumed),
+	"ErrStreamStoreLocked":          streamAdapterPackageVarOf(&ErrStreamStoreLocked),
+	"ErrStreamStoreRewound":         streamAdapterPackageVarOf(&ErrStreamStoreRewound),
+	"ErrStreamStoreState":           streamAdapterPackageVarOf(&ErrStreamStoreState),
+	"multiPartPublicSuffixes":       streamAdapterPackageVarOf(&multiPartPublicSuffixes),
+	"probeDnsTargets":               streamAdapterPackageVarOf(&probeDnsTargets),
+	"probeHttpTargets":              streamAdapterPackageVarOf(&probeHttpTargets),
+	"publicIdentityKeyHashEncoding": streamAdapterPackageVarOf(&publicIdentityKeyHashEncoding),
+	"streamStoreHeldHere":           streamAdapterPackageVarOf(&streamStoreHeldHere),
+	"streamStoreHeldHereMutex":      streamAdapterPackageVarOf(&streamStoreHeldHereMutex),
+	"streamStoreSentinelRulings":    streamAdapterPackageVarOf(&streamStoreSentinelRulings),
+}
+
+// streamAdapterPackageVarPositions reads every package-level var of package sdk's production
+// files off the syntax tree: name -> where it is declared. The BLANK identifier is answered
+// separately, because it is excluded on a derivation rather than by taste -- a blank name cannot
+// be referenced, so no errors.Is can reach it, no ruling could name it and no census entry could
+// be written for it.
+func streamAdapterPackageVarPositions(t *testing.T) (map[string]string, []string) {
 	t.Helper()
 	fileSet, parsed, _ := streamAdapterParse(t)
-	declared := map[string]string{}
-	packageLevel := map[token.Pos]bool{}
-	for _, file := range parsed {
+	named := map[string]string{}
+	blanks := []string{}
+	for name, file := range parsed {
 		for _, declaration := range file.Decls {
 			general, ok := declaration.(*ast.GenDecl)
 			if !ok || general.Tok != token.VAR {
@@ -621,81 +762,99 @@ func streamAdapterSentinelDeclarations(t *testing.T) (map[string]string, []strin
 				if !ok {
 					continue
 				}
-				for i, name := range value.Names {
-					if len(value.Values) <= i {
+				for _, identifier := range value.Names {
+					position := fileSet.Position(identifier.Pos()).String()
+					if identifier.Name == "_" {
+						blanks = append(blanks, fmt.Sprintf("%s in %s", position, name))
 						continue
 					}
-					message, ok := streamAdapterErrorsNewMessage(value.Values[i])
-					if !ok {
-						continue
-					}
-					declared[name.Name] = message
-					packageLevel[value.Values[i].Pos()] = true
+					named[identifier.Name] = position
 				}
 			}
 		}
 	}
+	slices.Sort(blanks)
+	return named, blanks
+}
+
+// streamAdapterSentinelDeclarations answers name -> the declared error value, for every
+// package-level variable of package sdk WHOSE DECLARED TYPE IS AN ERROR, plus the COMPLEMENT that
+// narrowing removed: every other named package-level variable, with the type that excluded it,
+// and every blank one with the reason it cannot be a sentinel at all.
+//
+// It fails the test outright when the census and the syntax tree disagree, because a census that
+// has fallen behind the tree is a gate that has stopped reading the package.
+func streamAdapterSentinelDeclarations(t *testing.T) (map[string]error, []string) {
+	t.Helper()
+	named, blanks := streamAdapterPackageVarPositions(t)
+	if len(named) == 0 {
+		t.Fatal("this gate found no named package-level variable at all, so it is holding nothing")
+	}
+	missing := []string{}
+	for name, position := range named {
+		if _, censused := streamAdapterPackageVarCensus[name]; !censused {
+			missing = append(missing, fmt.Sprintf("%s (%s)", name, position))
+		}
+	}
+	stale := []string{}
+	for name := range streamAdapterPackageVarCensus {
+		if _, declared := named[name]; !declared {
+			stale = append(stale, name)
+		}
+	}
+	slices.Sort(missing)
+	slices.Sort(stale)
+	if len(missing) != 0 {
+		t.Errorf(
+			"%d package-level variable(s) of package sdk are not in streamAdapterPackageVarCensus, so this gate CANNOT SEE whether they are errors: %v. Add each one. If it is an error it then needs a ruling in streamStoreSentinelRulings; if it is not, it lands in the printed complement",
+			len(missing), missing,
+		)
+	}
+	if len(stale) != 0 {
+		t.Errorf("streamAdapterPackageVarCensus names %d variable(s) package sdk no longer declares: %v", len(stale), stale)
+	}
+	declared := map[string]error{}
 	complement := []string{}
-	for name, file := range parsed {
-		ast.Inspect(file, func(node ast.Node) bool {
-			expression, ok := node.(ast.Expr)
-			if !ok {
-				return true
-			}
-			message, ok := streamAdapterErrorsNewMessage(expression)
-			if !ok {
-				return true
-			}
-			if packageLevel[expression.Pos()] {
-				return true
-			}
-			complement = append(complement, fmt.Sprintf("%s: errors.New(%q) in %s",
-				fileSet.Position(expression.Pos()).String(), message, name))
-			return true
-		})
+	for name, entry := range streamAdapterPackageVarCensus {
+		if !entry.declared.Implements(streamAdapterErrorType) {
+			complement = append(complement, fmt.Sprintf("%s declared %s", name, entry.declared.String()))
+			continue
+		}
+		held, ok := entry.value.Interface().(error)
+		if !ok || held == nil {
+			t.Errorf("%s is declared %s, which implements error, and holds no error value", name, entry.declared.String())
+			continue
+		}
+		declared[name] = held
 	}
 	slices.Sort(complement)
+	for _, blank := range blanks {
+		complement = append(complement, fmt.Sprintf("a blank identifier at %s -- unreferenceable, so no errors.Is can reach it", blank))
+	}
 	return declared, complement
 }
 
-func streamAdapterErrorsNewMessage(expression ast.Expr) (string, bool) {
-	call, ok := expression.(*ast.CallExpr)
-	if !ok || len(call.Args) != 1 {
-		return "", false
-	}
-	selector, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || selector.Sel.Name != "New" {
-		return "", false
-	}
-	identifier, ok := selector.X.(*ast.Ident)
-	if !ok || identifier.Name != "errors" {
-		return "", false
-	}
-	literal, ok := call.Args[0].(*ast.BasicLit)
-	if !ok || literal.Kind != token.STRING {
-		return "", false
-	}
-	text, err := strconv.Unquote(literal.Value)
-	if err != nil {
-		return "", false
-	}
-	return text, true
-}
-
-// CLASS: every error sentinel package sdk DECLARES -- every package-level variable initialised by
-// errors.New, read off the syntax tree. It is deliberately the whole package and not a name
-// prefix: the brief asks that a THIRD sentinel added later must not silently pass through, and a
-// class narrowed to names containing "Stream" would let a sentinel spelled any other way do
-// exactly that. Over-reach is the safe direction here -- an unrelated sentinel added to sdk fails
-// this gate until somebody rules on it, which is a decision being asked for rather than skipped.
+// CLASS: every error sentinel package sdk DECLARES -- every package-level variable WHOSE DECLARED
+// TYPE IS AN ERROR. Not "initialised by errors.New with a string literal", which is what this
+// class used to be and which a sentinel spelled fmt.Errorf, errors.New(aConst), &aType{} or a
+// plain `var x error = ...` walks straight past. The enumeration is over var NAMES off the syntax
+// tree, which no initialiser shape can hide, and the classification is reflect's answer to
+// Type.Implements(error), which no initialiser shape can lie to. It is deliberately the whole
+// package and not a name prefix: the brief asks that a later sentinel must not silently pass
+// through, and a class narrowed to names containing "Stream" would let a sentinel spelled any
+// other way do exactly that. Over-reach is the safe direction here -- an unrelated sentinel added
+// to sdk fails this gate until somebody rules on it, which is a decision being asked for rather
+// than skipped.
 //
 // SCOPE, derived separately: the declarations, not the uses. What a gate over uses would answer is
 // which sentinels the store RAISES; what this has to answer is which sentinels EXIST, because the
 // one that reaches the adapter unclassified is the one nothing raised yet.
 func TestTheStoreSentinelClassIsTotalOverTheAdaptersMapping(t *testing.T) {
 	declared, complement := streamAdapterSentinelDeclarations(t)
-	t.Logf("CLASS: %d error sentinel(s) declared by package sdk: %v", len(declared), slices.Sorted(maps.Keys(declared)))
-	t.Logf("COMPLEMENT the package-level narrowing removed (%d errors.New call site(s) that are not sentinels):", len(complement))
+	named, _ := streamAdapterPackageVarPositions(t)
+	t.Logf("SCOPE: %d named package-level variable(s) of package sdk, enumerated off the syntax tree", len(named))
+	t.Logf("CLASS: %d of them are declared as an error: %v", len(declared), slices.Sorted(maps.Keys(declared)))
+	t.Logf("COMPLEMENT the is-an-error narrowing removed (%d):", len(complement))
 	for _, line := range complement {
 		t.Logf("    %s", line)
 	}
@@ -703,7 +862,13 @@ func TestTheStoreSentinelClassIsTotalOverTheAdaptersMapping(t *testing.T) {
 		t.Fatal("this gate found no error sentinel at all, so it is holding nothing")
 	}
 	if len(complement) == 0 {
-		t.Error("the complement is empty, which means the package-level narrowing removed no errors.New call at all and this gate is not the gate it says it is")
+		t.Error("the complement is empty, which means the is-an-error narrowing removed no package-level variable at all and this gate is not the gate it says it is")
+	}
+	if len(declared)+len(complement) < len(streamAdapterPackageVarCensus) {
+		t.Errorf(
+			"the class (%d) and the complement (%d) do not cover the census (%d); a named variable that is in neither is one this gate silently dropped",
+			len(declared), len(complement), len(streamAdapterPackageVarCensus),
+		)
 	}
 
 	ruled := map[string]streamStoreSentinelRuling{}
@@ -737,10 +902,13 @@ func TestTheStoreSentinelClassIsTotalOverTheAdaptersMapping(t *testing.T) {
 		t.Errorf("the adapter's mapping rules on %d name(s) package sdk no longer declares: %v", len(stale), stale)
 	}
 
-	// and the ruling is bound to the VALUE and not only to the name: the message the declaration
-	// carries must be the message the ruled sentinel answers.
+	// and the ruling is bound to the VALUE and not only to the name -- by IDENTITY now rather
+	// than by message. Two sentinels spelled errors.New with the same string are two distinct
+	// values that errors.Is tells apart and a message comparison does not, so a ruling can be
+	// attached to the wrong one of them and still read as correct. This compares the value the
+	// package declares under that name with the value the ruling holds.
 	for _, ruling := range streamStoreSentinelRulings {
-		message, ok := declared[ruling.name]
+		held, ok := declared[ruling.name]
 		if !ok {
 			continue
 		}
@@ -748,11 +916,14 @@ func TestTheStoreSentinelClassIsTotalOverTheAdaptersMapping(t *testing.T) {
 			t.Errorf("the ruling for %s carries a nil sentinel", ruling.name)
 			continue
 		}
-		if ruling.sentinel.Error() != message {
+		if ruling.sentinel != held {
 			t.Errorf(
-				"the ruling named %s holds a sentinel whose message is %q, and the declaration of that name is errors.New(%q); a ruling bound to the wrong value classifies a refusal nobody raises and leaves the one it was written for unclassified",
-				ruling.name, ruling.sentinel.Error(), message,
+				"the ruling named %s holds the value %q and package sdk declares %q under that name; they are not the same value, so the ruling classifies a refusal nobody raises and leaves the one it was written for unclassified",
+				ruling.name, ruling.sentinel, held,
 			)
+		}
+		if !errors.Is(held, ruling.sentinel) {
+			t.Errorf("errors.Is cannot find the ruling for %s in the value package sdk declares under that name", ruling.name)
 		}
 	}
 	permanent, transient, rewound := 0, 0, 0
@@ -1223,6 +1394,143 @@ func TestANilStoreAnswersNoReserverAndNewGroupSessionRefusesIt(t *testing.T) {
 		t.Fatalf("NewGroupSession over a nil reserver answered %v, want ErrNilStreamIndexReserver; section 5.6 has the constructor take the sink to make it explicit, and that refusal is what gates every seal", err)
 	}
 	t.Logf("the refusal a nil store lands on, and it is messagegroup's rather than a second one here: %v", err)
+}
+
+// ----------------------------------------------------------------------------------------------
+// Property 4 -- the forever-retry, stopped where the store can tell and measured where it cannot.
+// ----------------------------------------------------------------------------------------------
+
+// A CORRUPT ROW STOPS THE LADDER ON THE FIRST ATTEMPT, THROUGH THE ADAPTER.
+//
+// The adapter rules the whole ErrStreamStoreState class TRANSIENT, and that ruling is right for a
+// failed flush and a full disk: connect/messagegroup's own ratchet names those as the cases that
+// must stay a retry. It is wrong for a row whose body did not classify at open, and wrong in the
+// expensive direction -- SenderRatchet.Next would go on asking forever, paying a durable write per
+// attempt, against a row that will never accept one.
+//
+// The repair is the STORE's and not this file's: an adapter cannot invent a discriminator the
+// value does not carry, so the store raises ErrStreamStoreConsumed BESIDE ErrStreamStoreState for
+// exactly the sub-class whose permanence is knowable from inside it. classify's permanent||...
+// then finds it with no change to the ruling table, which is the shape of a correct repair here.
+//
+// THE 200 ATTEMPTS SPLIT 3 / 197 by design: the corrupt row's bytes are removed after attempt 3,
+// so attempts 1-3 are answered by the branch that reads them and attempts 4-200 by the branch that
+// has only the store's own entry left. Both branches are driven, and each mutation is measured in
+// a disposable copy against exactly its own share:
+//
+//	drop ErrStreamStoreConsumed where the bytes are still read  -> 3 of 200 lose it
+//	drop it where only the store's entry is left                -> 197 of 200 lose it
+//	delete repairRow's unreadable marker altogether              -> 197 of 200 ALLOCATE,
+//	                                                                starting again at index 1
+func TestACorruptRowIsPermanentThroughTheAdapterAndNotRetriedForever(t *testing.T) {
+	dir := t.TempDir()
+	parts := streamTestKeyOctets(t, 0x91)
+	rowName := streamTestRowName(t, parts)
+	key, err := streamKeyFromOctets(parts...)
+	if err != nil {
+		t.Fatalf("build the stream key: %v", err)
+	}
+	body := streamTestRowBody(rowName, 1, 2, 3)
+	streamTestCorruptRecord(body, 2)
+	path := streamTestPlantRow(t, dir, rowName, body)
+	reserver := NewStreamIndexReserver(streamTestOpen(t, dir))
+
+	const attempts = 200
+	permanent, allocated := 0, 0
+	for attempt := 1; attempt <= attempts; attempt += 1 {
+		index, err := reserver.Reserve(key)
+		if err == nil {
+			allocated += 1
+			t.Errorf("attempt %d allocated index %d on a row this store could not read at open", attempt, index)
+			continue
+		}
+		if index != 0 {
+			t.Errorf("attempt %d answered index %d beside its error", attempt, index)
+		}
+		if errors.Is(err, messagegroup.ErrStreamIndexConsumed) {
+			permanent += 1
+		}
+		if attempt == 1 {
+			t.Logf("attempt 1: %v", err)
+		}
+		// and the row's bytes go away under the store after three attempts, which is the
+		// state that used to read as a stream never seen.
+		if attempt == 3 {
+			if err := os.Remove(path); err != nil {
+				t.Fatalf("remove the corrupt row: %v", err)
+			}
+		}
+	}
+	if allocated != 0 {
+		t.Fatalf("%d of %d attempts ALLOCATED an index on a row this store could not read at open", allocated, attempts)
+	}
+	if permanent != attempts {
+		t.Errorf("%d of %d refusals carried messagegroup.ErrStreamIndexConsumed; the rest read as transient, and a ratchet reading a transient refusal asks again -- forever, against a row that will never accept a record", permanent, attempts)
+	}
+	if highWater, err := reserver.HighWater(key); !errors.Is(err, messagegroup.ErrStreamIndexConsumed) {
+		t.Errorf("the query answered (%d, %v), want the permanent sentinel; the reader's seat cannot be answered either, because the indices this row has spent are not derivable from it", highWater, err)
+	}
+	t.Logf("%d of %d attempts refused PERMANENTLY, before and after the corrupt row's bytes were removed. A ratchet stops on attempt 1", permanent, attempts)
+}
+
+// AND THE PART OF THE CLASS THAT IS STILL AN UNBOUNDED RETRY, MEASURED RATHER THAN ASSERTED.
+//
+// This is a RESIDUAL, executable, and it is FILED FOR THE OWNER rather than ruled here. The
+// remainder of the ErrStreamStoreState class -- a failed flush, a full disk, an unreadable row
+// directory, a CLOSED store -- is still forwarded as transient, and at least one member of it is
+// permanent: a closed store answers ErrStreamStoreState on every call for the rest of its life,
+// and a ratchet told to retry will ask it for the rest of the process's.
+//
+// WHY IT IS NOT RULED HERE. Flipping the verdict for the class would wedge a healthy ladder over
+// a full disk, which connect/messagegroup's ratchet names as the case that must stay a retry, so
+// the trade is a section 8.2 contract question about what the store owes a ratchet rather than an
+// implementation choice. The SHAPE of the repair is already demonstrated one case above -- give
+// each permanent member its own discriminator in the store, the way the unreadable row just got
+// one -- but WHICH members are permanent, and whether a closed store is a caller bug rather than
+// a store condition, is the owner's call. SPEC-LEDGER.md lives in a repository this pass must not
+// write to, so this case IS the filing: it fails the day the behaviour changes, in either
+// direction, and it prints the number it is about.
+func TestTheStateClassStillRetriesForeverForTheMembersThatAreNotDiscriminated(t *testing.T) {
+	reserver, store := streamAdapterTestReserver(t)
+	key, _ := streamAdapterTestKey(t, 0x92)
+
+	if index, err := reserver.Reserve(key); err != nil || index != 1 {
+		t.Fatalf("the ladder would not start: (%d, %v)", index, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close the store: %v", err)
+	}
+
+	const attempts = 200
+	refused, transient := 0, 0
+	var first error
+	for attempt := 1; attempt <= attempts; attempt += 1 {
+		index, err := reserver.Reserve(key)
+		if err == nil {
+			t.Fatalf("attempt %d allocated index %d against a closed store", attempt, index)
+		}
+		refused += 1
+		if !errors.Is(err, ErrStreamStoreState) {
+			t.Fatalf("attempt %d answered %v, want ErrStreamStoreState underneath", attempt, err)
+		}
+		if !errors.Is(err, messagegroup.ErrStreamIndexConsumed) {
+			transient += 1
+		}
+		if first == nil {
+			first = err
+		}
+	}
+	if refused != attempts {
+		t.Fatalf("%d of %d attempts were refused", refused, attempts)
+	}
+	if transient != attempts {
+		t.Fatalf(
+			"%d of %d refusals against a CLOSED store read as transient and %d read as permanent. This case is the filed residual and it is written against the behaviour as it is: if the ruling for the ErrStreamStoreState class has been changed, change this case with it and say so, because that ruling is what decides whether a full disk wedges a healthy ladder",
+			transient, attempts, attempts-transient,
+		)
+	}
+	t.Logf("FILED, NOT RULED: %d of %d refusals against a closed store carry no permanent sentinel, so a SenderRatchet reading them retries without bound. First refusal: %v", transient, attempts, first)
+	t.Log("the discriminated member of the same class is the contrast, one case above: a row whose body did not classify at open stops the ladder on attempt 1")
 }
 
 // ----------------------------------------------------------------------------------------------

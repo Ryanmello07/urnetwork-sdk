@@ -738,8 +738,19 @@ func (self *StreamStore) repairRow(rowName string) error {
 	}
 	highWater, truncateTo, err := classifyStreamRow(rowName, content)
 	if err != nil {
-		// a corrupt body: not repairable, and the refusal is the reader's. Nothing is
-		// remembered about it either: the next read re-derives the refusal from the bytes.
+		// A CORRUPT BODY: not repairable, and the row is left exactly as it was found. It
+		// is entered into the verified map ANYWAY, as class (5) of the partition above
+		// persistedHighWater, and that entry is the whole of what closes this class.
+		//
+		// An earlier version remembered NOTHING about it -- "the next read re-derives the
+		// refusal from the bytes" -- which is true for as long as the bytes are there. A
+		// row this store holds no record of is a row the rewind detector cannot see, so
+		// REMOVING the corrupt row made it a stream never seen: (0, nil), and the next
+		// allocation handed out index 1 on a key whose row had durably carried indices up
+		// to whatever the damage hid. Emptying it in place did the same. A row that could
+		// not be read at open must REFUSE, not allocate, and it must go on refusing when
+		// the evidence of it is taken away.
+		self.verified[rowName] = streamRowVerification{unreadable: true}
 		return nil
 	}
 	// The full read above is what seeds the verified prefix, so this row's first high-water
@@ -1016,11 +1027,59 @@ func (self *StreamStore) refuseIfClosed() error {
 // -- OpenStreamStore's scan seeds this from a full read -- so the miss lasts one store's lifetime
 // and not a row's. TestAnOutOfBandMutationOfAVerifiedPrefixIsMissedUntilTheStoreIsReopened is
 // that residual, executable, with both halves asserted.
+//
+// AND ITS THIRD FIELD IS THE ROW CLASS THE OPEN-TIME SCAN CANNOT READ. The scan seeds this map
+// from a full read of every row it could classify; a row whose body is a CORRUPT one classifies
+// as nothing, so before this field existed such a row was left OUT of the map entirely -- and a
+// row that is not in the map is a row the rewind detector above cannot see. It then had the
+// weakest state of any row in the directory: vanish it, and persistedHighWater answers contract
+// clause 4's error-free zero for a row that durably carried indices, and the very next allocation
+// hands out index 1 on a key that has already spent it. The partition the seeding is stated over,
+// and the complement this field closes, is written out above persistedHighWater.
 type streamRowVerification struct {
 	records   int
 	highWater uint64
+
+	// unreadable is a row that was PRESENT in the row directory when this store opened and
+	// whose body did not classify. Nothing about how many indices it has already spent is
+	// derivable from it, so it is entered here rather than omitted, and persistedHighWater
+	// refuses it -- present, shorter, or gone -- for the life of this store. records and
+	// highWater are meaningless when this is set and no path reads them.
+	unreadable bool
 }
 
+// THE PARTITION OpenStreamStore's SEEDING IS STATED OVER, and the complement of the class it can
+// read, written down so it is a derivation rather than an impression. Over the entries of the row
+// directory:
+//
+//	(1) not a regular file                       -> NOT SEEDED. rowDirectoryHolds refuses the
+//	                                                whole directory with ErrStreamStoreState on
+//	                                                every later call, so no key allocates.
+//	(2) a name of another key space              -> NOT SEEDED. rowDirectoryHolds refuses the
+//	                                                whole directory with ErrStreamKeySpace.
+//	(3) a name that is not a row at all          -> NOT SEEDED. rowDirectoryHolds refuses the
+//	                                                whole directory with ErrStreamStoreState.
+//	(4) this build's row, body classifies        -> SEEDED with the confirmed prefix and its
+//	                                                high water. This is the class the scan was
+//	                                                written for.
+//	(5) this build's row, body does NOT classify -> SEEDED UNREADABLE, since 2026-09-12. This
+//	                                                is the complement of (4) inside the rows
+//	                                                this build owns, and it is the one class
+//	                                                whose refusal is NOT carried by
+//	                                                rowDirectoryHolds: the directory is
+//	                                                well-formed, so every other key in it goes
+//	                                                on allocating, and only this row must stop.
+//	(6) this build's row, body cannot be READ    -> the store does not open at all; repairRow
+//	                                                returns ErrStreamStoreState and
+//	                                                OpenStreamStore propagates it.
+//
+// The member that matters is (5): (1), (2) and (3) are refused directory-wide, (4) is seeded and
+// (6) never produces a store. TestTheRowClassesTheOpenTimeSeedingCoversAndItsComplement is that
+// partition, executable, with FIVE of the six classes exercised and the complement printed. Class
+// (6) is the one it does not run and it says so in its own log line: the store carries no injected
+// failure point on the open-time read, and there is no portable way to make a regular file
+// unreadable to its owner on the GOOS set this ships to.
+//
 // persistedHighWater is the row read. It must be called with allocMutex held.
 //
 // IT ENUMERATES THE ROW DIRECTORY RATHER THAN STATTING ONE PATH, and the cost of that -- one
@@ -1034,6 +1093,34 @@ func (self *StreamStore) persistedHighWater(rowName string) (uint64, error) {
 		return 0, err
 	}
 	prior, seen := self.verified[rowName]
+	if !present && seen && prior.unreadable {
+		// CLASS (5) OF THE PARTITION ABOVE, IN ITS DANGEROUS SHAPE: a row that was present
+		// in this directory when this store opened, whose body did not classify, and whose
+		// bytes are now GONE. How many indices it had already spent is not derivable from
+		// it -- that is what "did not classify" means -- and there is nothing left to
+		// re-derive a refusal from, so the entry this store kept for it IS the refusal.
+		//
+		// Before that entry existed this row took the branch below: not present, nothing
+		// remembered, contract clause 4's error-free zero, and the very next allocation
+		// handed out index 1 on a key whose row had durably carried indices.
+		//
+		// IT CARRIES ErrStreamStoreConsumed BESIDE ErrStreamStoreState, which is the store
+		// supplying a discriminator the adapter cannot invent. The adapter rules the whole
+		// ErrStreamStoreState class TRANSIENT -- a failed flush and a full disk must stay a
+		// retry -- and a corrupt row forwarded as transient is an unbounded retry loop
+		// paying a durable write per attempt against a row that will never accept one. This
+		// is the sub-class where permanence is knowable HERE and nowhere else: a store that
+		// could not read this row at open cannot read it later, because nothing in this
+		// store ever rewrites a row it refused. See streamStoreSentinelRulings for the part
+		// of that class that is still ruled transient and the open question filed on it.
+		return 0, fmt.Errorf(
+			"%w: row %s was present in %s when this store opened and its body did not classify, and its bytes have since been removed; the indices it had already spent are not derivable from it and nothing is left to re-derive them from, so answering contract clause 4's error-free zero would restart the ladder at index 1 under a class key that has not moved, and a second record under a reused stream_index is a reused nonce under a reused record_key (%w)",
+			ErrStreamStoreState,
+			rowName,
+			self.rowDir,
+			ErrStreamStoreConsumed,
+		)
+	}
 	if !present {
 		if seen {
 			// THE ROW VANISHED UNDER THE ONLY WRITER. It is refused here rather than
@@ -1116,7 +1203,33 @@ func (self *StreamStore) persistedHighWater(rowName string) (uint64, error) {
 	}
 	highWater, verifiedTo, err := classifyStreamRowTail(rowName, prior.records, prior.highWater, tail)
 	if err != nil {
+		if prior.unreadable {
+			// CLASS (5) WHILE ITS BYTES ARE STILL THERE. The refusal is the ONE the
+			// bytes produce, not a second one written here, because the three shapes a
+			// corrupt body can take share one error value and a refusal that stopped
+			// naming its shape could no longer tell them apart --
+			// TestARowsThreeCasesAndTheDiscriminatorBetweenThem holds exactly that. What
+			// is added is the permanence, and nothing else.
+			return 0, fmt.Errorf(
+				"%w; row %s did not classify when this store opened either, and nothing in this store ever rewrites a row it refused, so no later call can clear it (%w)",
+				err,
+				rowName,
+				ErrStreamStoreConsumed,
+			)
+		}
 		return 0, err
+	}
+	if prior.unreadable {
+		// THE ROW CLASSIFIES NOW AND DID NOT AT OPEN, so its bytes changed under the only
+		// writer's exclusion. What it spent before that change is still not derivable, and
+		// re-deriving a high water from whatever replaced it is exactly the move that hands
+		// the next allocation a number this stream may already have used.
+		return 0, fmt.Errorf(
+			"%w: row %s did not classify when this store opened and classifies now, so its bytes changed under the only writer's exclusion; what it had already spent is still not derivable from it and allocating on what replaced it would hand out a number this stream may already have used (%w)",
+			ErrStreamStoreState,
+			rowName,
+			ErrStreamStoreConsumed,
+		)
 	}
 	self.verified[rowName] = streamRowVerification{
 		records:   int(verifiedTo / streamRecordWidth),
@@ -1273,6 +1386,19 @@ func (self *StreamStore) writeOneRecord(rowName string, index uint64) error {
 	// permanently by a failure a retry would have cleared.
 	// TestAnInterruptedAppendLeavesTheRowAllocatableByTheNextCall drives exactly that -- move
 	// this assignment above the write and it goes red.
+	//
+	// AND THE ASSIGNMENT ITSELF IS THE PROPERTY, NOT ONLY ITS POSITION. Every mutation this
+	// clause had ever been put through MOVED it; none DELETED it, and deleting it left the
+	// whole unfiltered root suite green at a1d55b1. What it removes is this: the prefix is the
+	// only record that an index was handed out for a row this call CREATED. On every later
+	// allocation persistedHighWater re-reads the row and re-seeds the prefix, so the deletion
+	// is invisible there -- but on the FIRST allocation of a row, persistedHighWater took the
+	// absent-row exit at (0, nil) and recorded nothing, so with this line gone the store
+	// returns index 1 having confirmed no part of the row. Remove that row, or empty it in
+	// place, and the next call reads a stream never seen and hands out index 1 a SECOND time,
+	// which section 5.6 calls a total break of both AEADs for that record.
+	// TestTheIndexTheStoreJustReturnedIsInsideItsConfirmedPrefix drives the deletion, on both
+	// shapes and on the prefix itself.
 	self.verified[rowName] = streamRowVerification{
 		records:   int(at/streamRecordWidth) + 1,
 		highWater: index,

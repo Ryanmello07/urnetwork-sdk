@@ -201,9 +201,29 @@ type streamStoreSentinelRuling struct {
 // healthy ladder forever over a full disk, which connect/messagegroup's own ratchet names as the
 // case that must stay a retry; calling a permanent one transient costs an unbounded retry loop
 // that pays a durable write per attempt against a row that will never accept one. This takes the
-// first cost, and the residual -- a corrupt row retried rather than wedged -- is named here
-// rather than hidden in a verdict. Splitting the class is the store's repair and not the
-// adapter's: an adapter cannot invent a discriminator the value does not carry.
+// first cost. Splitting the class is the store's repair and not the adapter's: an adapter cannot
+// invent a discriminator the value does not carry.
+//
+// AND THE STORE HAS NOW SUPPLIED ONE, FOR EXACTLY ONE SUB-CLASS. A row that was present when the
+// store opened and whose body did not classify is raised as ErrStreamStoreState WITH
+// ErrStreamStoreConsumed beside it, so classify's permanent||... finds it and the ladder stops.
+// That is the sub-class whose permanence is knowable inside the store: nothing in the store ever
+// rewrites a row it refused, so a body that did not classify at open never will. It required no
+// change to the ruling below, which is the point -- the store widened what it says, the adapter
+// went on reading it.
+//
+// WHAT IS STILL OPEN, AND IT IS FILED RATHER THAN RULED HERE. The remainder of the class -- a
+// failed flush, a full disk, an unreadable row directory, a CLOSED store -- is still ruled
+// transient, and two of those are not conditions a retry clears either. A closed store answers
+// ErrStreamStoreState forever, and a ratchet told to retry will ask it forever. The judgement
+// that trades a wedged healthy ladder against an unbounded retry loop is the OWNER's -- it is a
+// §8.2 contract question about what the store owes a ratchet, not an implementation choice -- and
+// the shape of the repair is the store's, not this file's: give each remaining permanent member
+// its own discriminator, the way the unreadable row just got one, rather than flipping the
+// verdict for the whole class. It is filed here, in the commit that added the sub-class above,
+// and in this pass's report; SPEC-LEDGER.md lives in a repository this pass must not write to.
+// TestTheStateClassStillRetriesForeverForTheMembersThatAreNotDiscriminated is that residual,
+// executable, so it is a measured open item and not a sentence.
 var streamStoreSentinelRulings = []streamStoreSentinelRuling{
 	{
 		name:      "ErrStreamKeyWidth",
@@ -221,7 +241,7 @@ var streamStoreSentinelRulings = []streamStoreSentinelRuling{
 		name:      "ErrStreamStoreState",
 		sentinel:  ErrStreamStoreState,
 		permanent: false,
-		ruling:    "the mixed class, ruled transient: a failed flush and a full disk must stay a retry, and the value carries no discriminator that would separate them from a corrupt row or a closed store",
+		ruling:    "the mixed class, ruled transient: a failed flush and a full disk must stay a retry, and the value carries no discriminator that would separate them from a closed store. The one member that HAS a discriminator -- a row whose body did not classify at open -- is raised with ErrStreamStoreConsumed beside it by the store, so it reaches this mapping as permanent without the verdict here moving. The rest is an open item filed for the owner, not ruled here",
 	},
 	{
 		name:     "ErrStreamStoreRewound",

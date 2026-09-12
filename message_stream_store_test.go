@@ -2754,3 +2754,351 @@ func BenchmarkStreamHighWaterAtDepth(b *testing.B) {
 		}
 	}
 }
+
+// ==============================================================================================
+// Wave 3 -- two of the three ways an index could still be handed out twice. The third is the
+// sentinel class the adapter's mapping must be total over, and it is in
+// message_stream_adapter_test.go beside the mapping it gates.
+// ==============================================================================================
+
+// ----------------------------------------------------------------------------------------------
+// Property A -- an index this store has RETURNED is inside the prefix it has CONFIRMED, at the
+// moment it returns it.
+// ----------------------------------------------------------------------------------------------
+
+// THE CLAUSE THIS DRIVES IS writeOneRecord's verified-prefix assignment, AND IT DRIVES ITS
+// DELETION rather than its position.
+//
+// Every mutation that clause had been put through before this MOVED it -- above the write, where
+// an interrupted append then leaves the row shorter than the prefix the store claims, which
+// TestAnInterruptedAppendLeavesTheRowAllocatableByTheNextCall catches. None DELETED it. Deleting
+// it left the whole unfiltered root suite green at a1d55b1, and what it removes is the property
+// this file exists for.
+//
+// WHY THE DELETION IS INVISIBLE EVERYWHERE ELSE. persistedHighWater re-reads the row on every
+// call and re-seeds the prefix from what it read, so on the SECOND and every later allocation of
+// a row the assignment is redundant -- the read has already put the prefix back. The one call it
+// is not redundant on is the FIRST allocation of a row, because persistedHighWater took the
+// absent-row exit, answered contract clause 4's error-free zero and recorded NOTHING. With the
+// assignment gone the store returns index 1 having confirmed no part of the row it just created,
+// and the rewind detector -- which is that prefix and there is no second one -- cannot see the row
+// at all. Take the row away and the next call reads a stream never seen: index 1, a second time,
+// under a class key that has not moved. Spec A section 5.6 calls a reused stream_index under a
+// reused record_key "a total break of both AEADs for that record".
+//
+// Every existing case that covers a vanished or emptied row allocates THREE times first, or
+// reopens the store, and both of those re-seed the prefix by another route. This one allocates
+// EXACTLY ONCE, which is the state the deletion is visible in.
+func TestTheIndexTheStoreJustReturnedIsInsideItsConfirmedPrefix(t *testing.T) {
+	confirmedPrefix := func(t *testing.T, store *StreamStore, rowName string) (streamRowVerification, bool) {
+		t.Helper()
+		store.allocMutex.Lock()
+		defer store.allocMutex.Unlock()
+		prefix, seen := store.verified[rowName]
+		return prefix, seen
+	}
+
+	t.Run("the prefix covers the index the first allocation returned", func(t *testing.T) {
+		dir := t.TempDir()
+		parts := streamTestKeyOctets(t, 0x71)
+		rowName := streamTestRowName(t, parts)
+		store := streamTestOpen(t, dir)
+
+		index, err := store.ReserveStreamIndex(parts[0], parts[1])
+		if err != nil || index != 1 {
+			t.Fatalf("the first allocation answered (%d, %v), want (1, nil)", index, err)
+		}
+		prefix, seen := confirmedPrefix(t, store, rowName)
+		if !seen {
+			t.Fatalf("the store returned index %d for row %s and holds NO confirmed prefix for it; the confirmed prefix is the rewind detector and there is no second one, so a row it does not hold is a row that reads as a stream never seen the moment its bytes go away", index, rowName)
+		}
+		if prefix.highWater != index {
+			t.Errorf("the store returned index %d and its confirmed prefix carries high water %d", index, prefix.highWater)
+		}
+		length := streamTestRowLength(t, filepath.Join(store.rowDir, rowName))
+		if int64(prefix.records)*streamRecordWidth != length {
+			t.Errorf("the confirmed prefix is %d record(s) = %d octets and the row is %d octets; a prefix narrower than the row it just wrote is a prefix a later read has to widen, and until it does the rewind detector is behind the disk",
+				prefix.records, int64(prefix.records)*streamRecordWidth, length)
+		}
+	})
+
+	t.Run("the row vanishes after exactly one allocation", func(t *testing.T) {
+		dir := t.TempDir()
+		parts := streamTestKeyOctets(t, 0x72)
+		rowName := streamTestRowName(t, parts)
+		store := streamTestOpen(t, dir)
+
+		if index, err := store.ReserveStreamIndex(parts[0], parts[1]); err != nil || index != 1 {
+			t.Fatalf("the first allocation answered (%d, %v), want (1, nil)", index, err)
+		}
+		path := filepath.Join(store.rowDir, rowName)
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("remove the row: %v", err)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the removal did not land: %v", err)
+		}
+		index, err := store.ReserveStreamIndex(parts[0], parts[1])
+		if index == 1 {
+			t.Fatalf("the allocation after the row vanished answered index 1 AGAIN (err %v); index 1 has already been returned to a caller for this key, and a second record under it is a reused nonce under a reused record_key", err)
+		}
+		if !errors.Is(err, ErrStreamStoreRewound) {
+			t.Errorf("the allocation answered (%d, %v), want ErrStreamStoreRewound", index, err)
+		}
+		if !errors.Is(err, ErrStreamStoreConsumed) {
+			t.Errorf("the allocation answered %v, which errors.Is does not find ErrStreamStoreConsumed in", err)
+		}
+		if index != 0 {
+			t.Errorf("a refused allocation answered index %d beside its error", index)
+		}
+	})
+
+	t.Run("the row is emptied in place after exactly one allocation", func(t *testing.T) {
+		dir := t.TempDir()
+		parts := streamTestKeyOctets(t, 0x73)
+		rowName := streamTestRowName(t, parts)
+		store := streamTestOpen(t, dir)
+
+		if index, err := store.ReserveStreamIndex(parts[0], parts[1]); err != nil || index != 1 {
+			t.Fatalf("the first allocation answered (%d, %v), want (1, nil)", index, err)
+		}
+		path := filepath.Join(store.rowDir, rowName)
+		if err := os.Truncate(path, 0); err != nil {
+			t.Fatalf("empty the row: %v", err)
+		}
+		if length := streamTestRowLength(t, path); length != 0 {
+			t.Fatalf("the truncation did not land: the row is %d octets, want 0", length)
+		}
+		index, err := store.ReserveStreamIndex(parts[0], parts[1])
+		if index == 1 {
+			t.Fatalf("the allocation after the row was emptied answered index 1 AGAIN (err %v)", err)
+		}
+		if !errors.Is(err, ErrStreamStoreRewound) {
+			t.Errorf("the allocation answered (%d, %v), want ErrStreamStoreRewound", index, err)
+		}
+		if !errors.Is(err, ErrStreamStoreConsumed) {
+			t.Errorf("the allocation answered %v, which errors.Is does not find ErrStreamStoreConsumed in", err)
+		}
+	})
+}
+
+// ----------------------------------------------------------------------------------------------
+// Property B -- the row classes the open-time seeding covers, and the complement it does not.
+// ----------------------------------------------------------------------------------------------
+
+// CLASS: every entry OpenStreamStore's scan can meet in the row directory, partitioned by the
+// scan's OWN two decisions -- entry.Type().IsRegular(), then classifyStreamRowName -- and then by
+// whether repairRow could classify the body. That is the partition written out above
+// persistedHighWater, and this case is it, executable, WITH THE COMPLEMENT PRINTED.
+//
+// THE FINDING THIS CLOSES is class (5): a row of this build's key space whose BODY was corrupt at
+// open. repairRow could not classify it, so before 2026-09-12 it entered nothing into the
+// verified map and returned nil. Every other class is refused DIRECTORY-WIDE by rowDirectoryHolds
+// -- a non-regular entry, a foreign tag, a name that is not a row -- so no key in the directory
+// can allocate while one of them is present. Class (5) is the only one where the directory stays
+// well-formed and every OTHER key goes on allocating normally, so the refusal has to be carried by
+// the row's own entry in the verified map, and a row that is in no entry has no refusal to carry.
+// Remove the corrupt row's bytes and it became a stream never seen: (0, nil), index 1, on a key
+// whose row had durably carried indices.
+//
+// Mutation, measured in a disposable copy: delete
+// `self.verified[rowName] = streamRowVerification{unreadable: true}` from repairRow and class (5)
+// below goes red on its first assertion -- the scan entered nothing for the row -- while
+// TestACorruptRowIsPermanentThroughTheAdapterAndNotRetriedForever goes red with 197 of its 200
+// attempts ALLOCATING on the removed corrupt row, starting again at index 1.
+func TestTheRowClassesTheOpenTimeSeedingCoversAndItsComplement(t *testing.T) {
+	type rowClass struct {
+		number    int
+		name      string
+		seeded    string
+		refusedBy string
+	}
+	partition := []rowClass{
+		{1, "an entry that is not a regular file", "NOT SEEDED", "rowDirectoryHolds, directory-wide, ErrStreamStoreState"},
+		{2, "a row name of another key space", "NOT SEEDED", "rowDirectoryHolds, directory-wide, ErrStreamKeySpace"},
+		{3, "a name that is not a row under any tag", "NOT SEEDED", "rowDirectoryHolds, directory-wide, ErrStreamStoreState"},
+		{4, "this build's row, body classifies", "SEEDED with the confirmed prefix", "nothing -- this is the class the scan was written for"},
+		{5, "this build's row, body does NOT classify", "SEEDED UNREADABLE", "persistedHighWater, this row only, ErrStreamStoreState with ErrStreamStoreConsumed"},
+		{6, "this build's row, body cannot be READ", "NOT SEEDED -- no store is produced", "OpenStreamStore itself, ErrStreamStoreState"},
+	}
+	t.Log("THE PARTITION OpenStreamStore's SEEDING IS STATED OVER:")
+	for _, class := range partition {
+		t.Logf("  (%d) %-44s %-34s refused by: %s", class.number, class.name, class.seeded, class.refusedBy)
+	}
+	t.Log("COMPLEMENT of the class the seeding can READ -- classes (1), (2), (3), (5) and (6). (1), (2) and (3) are refused directory-wide, so no key allocates while one is present; (6) never produces a store at all; (5) is the one that leaves the directory well-formed, and it is the class this property is about")
+
+	exercised := map[int]bool{}
+
+	t.Run("class 1 -- an entry that is not a regular file", func(t *testing.T) {
+		dir := t.TempDir()
+		parts := streamTestKeyOctets(t, 0x74)
+		if err := os.MkdirAll(filepath.Join(dir, streamRowDirName, "a-directory-is-not-a-row"), 0o700); err != nil {
+			t.Fatalf("plant a directory in the row directory: %v", err)
+		}
+		store := streamTestOpen(t, dir)
+		if _, err := store.StreamHighWater(parts[0], parts[1]); !errors.Is(err, ErrStreamStoreState) {
+			t.Errorf("the query answered %v, want ErrStreamStoreState", err)
+		}
+		if index, err := store.ReserveStreamIndex(parts[0], parts[1]); !errors.Is(err, ErrStreamStoreState) || index != 0 {
+			t.Errorf("the allocation answered (%d, %v), want (0, ErrStreamStoreState)", index, err)
+		}
+		exercised[1] = true
+	})
+
+	t.Run("class 2 -- a row of another key space", func(t *testing.T) {
+		dir := t.TempDir()
+		parts := streamTestKeyOctets(t, 0x75)
+		preA1 := streamKeyPreA1{}
+		copy(preA1.GroupId[:], parts[0])
+		copy(preA1.SenderHandle[:], parts[1])
+		foreign := streamRowNameOf(reflect.ValueOf(preA1))
+		if strings.HasPrefix(foreign, streamKeySpaceTagOf(streamKeyType())) {
+			t.Fatal("the pre-A1 field set derives this build's own tag, so this case cannot plant a foreign row")
+		}
+		streamTestPlantRow(t, dir, foreign, streamTestRowBody(foreign, 1, 2))
+		store := streamTestOpen(t, dir)
+		if _, err := store.StreamHighWater(parts[0], parts[1]); !errors.Is(err, ErrStreamKeySpace) {
+			t.Errorf("the query answered %v, want ErrStreamKeySpace", err)
+		}
+		exercised[2] = true
+	})
+
+	t.Run("class 3 -- a name that is not a row under any tag", func(t *testing.T) {
+		dir := t.TempDir()
+		parts := streamTestKeyOctets(t, 0x76)
+		streamTestPlantRow(t, dir, "this-is-not-a-row-name", []byte("nor is this a row body"))
+		store := streamTestOpen(t, dir)
+		if _, err := store.StreamHighWater(parts[0], parts[1]); !errors.Is(err, ErrStreamStoreState) {
+			t.Errorf("the query answered %v, want ErrStreamStoreState", err)
+		}
+		exercised[3] = true
+	})
+
+	t.Run("class 4 -- this build's row, body classifies", func(t *testing.T) {
+		dir := t.TempDir()
+		parts := streamTestKeyOctets(t, 0x77)
+		rowName := streamTestRowName(t, parts)
+		streamTestPlantRow(t, dir, rowName, streamTestRowBody(rowName, 1, 2, 3))
+		store := streamTestOpen(t, dir)
+		store.allocMutex.Lock()
+		prefix, seen := store.verified[rowName]
+		store.allocMutex.Unlock()
+		if !seen || prefix.unreadable || prefix.records != 3 || prefix.highWater != 3 {
+			t.Fatalf("the open-time scan seeded %+v (seen %v), want three records carrying high water 3 and not unreadable", prefix, seen)
+		}
+		if highWater, err := store.StreamHighWater(parts[0], parts[1]); err != nil || highWater != 3 {
+			t.Errorf("the query answered (%d, %v), want (3, nil)", highWater, err)
+		}
+		exercised[4] = true
+	})
+
+	t.Run("class 5 -- this build's row, body does not classify", func(t *testing.T) {
+		dir := t.TempDir()
+		corrupt := streamTestKeyOctets(t, 0x78)
+		corruptRow := streamTestRowName(t, corrupt)
+		healthy := streamTestKeyOctets(t, 0x79)
+		healthyRow := streamTestRowName(t, healthy)
+		if corruptRow == healthyRow {
+			t.Fatal("the two fixture keys name one row")
+		}
+		body := streamTestRowBody(corruptRow, 1, 2, 3)
+		// record 2 fails with a verifying record 3 after it: a corrupt body, and not a
+		// shape any interrupted append can leave.
+		streamTestCorruptRecord(body, 2)
+		corruptPath := streamTestPlantRow(t, dir, corruptRow, body)
+		streamTestPlantRow(t, dir, healthyRow, streamTestRowBody(healthyRow, 1, 2, 3, 4))
+
+		store := streamTestOpen(t, dir)
+		store.allocMutex.Lock()
+		prefix, seen := store.verified[corruptRow]
+		store.allocMutex.Unlock()
+		if !seen {
+			t.Fatalf("the open-time scan entered NOTHING for a row it could not classify; a row that is in no entry is a row the rewind detector cannot see, and taking its bytes away then makes it a stream never seen")
+		}
+		if !prefix.unreadable {
+			t.Errorf("the open-time scan seeded %+v for a row whose body did not classify, want the unreadable marker", prefix)
+		}
+
+		// it refuses while it is there, on both seats, and the refusal is PERMANENT rather
+		// than the transient the whole ErrStreamStoreState class is otherwise ruled.
+		for _, seat := range []struct {
+			name string
+			call func() (uint64, error)
+		}{
+			{"StreamHighWater", func() (uint64, error) { return store.StreamHighWater(corrupt[0], corrupt[1]) }},
+			{"ReserveStreamIndex", func() (uint64, error) { return store.ReserveStreamIndex(corrupt[0], corrupt[1]) }},
+		} {
+			answer, err := seat.call()
+			if !errors.Is(err, ErrStreamStoreState) {
+				t.Errorf("%s answered (%d, %v) for a corrupt row, want ErrStreamStoreState", seat.name, answer, err)
+			}
+			if !errors.Is(err, ErrStreamStoreConsumed) {
+				t.Errorf("%s answered %v, which errors.Is does not find ErrStreamStoreConsumed in; a store that could not read this row at open cannot read it later, because nothing in this store ever rewrites a row it refused, so a ratchet told to retry would ask forever and pay a durable write per attempt", seat.name, err)
+			}
+			if answer != 0 {
+				t.Errorf("%s answered %d beside its error", seat.name, answer)
+			}
+		}
+
+		// THE HOLE THIS CLOSES: the bytes go away and the refusal STAYS.
+		if err := os.Remove(corruptPath); err != nil {
+			t.Fatalf("remove the corrupt row: %v", err)
+		}
+		if _, err := os.Stat(corruptPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the removal did not land: %v", err)
+		}
+		for attempt := 1; attempt <= 3; attempt += 1 {
+			index, err := store.ReserveStreamIndex(corrupt[0], corrupt[1])
+			if err == nil {
+				t.Fatalf("attempt %d ALLOCATED index %d on a row this store could not read at open and whose bytes have since been removed; that is contract clause 4's error-free zero answered for a row that durably carried indices, and the ladder restarts at 1 under a class key that has not moved", attempt, index)
+			}
+			if index != 0 {
+				t.Errorf("attempt %d answered index %d beside its error", attempt, index)
+			}
+			if !errors.Is(err, ErrStreamStoreConsumed) {
+				t.Errorf("attempt %d answered %v, which errors.Is does not find ErrStreamStoreConsumed in", attempt, err)
+			}
+		}
+		if _, err := os.Stat(corruptPath); !errors.Is(err, os.ErrNotExist) {
+			t.Error("a refusal recreated the row it refused")
+		}
+
+		// and the refusal is THIS ROW'S and not the directory's: every other key goes on
+		// allocating, which is what separates class (5) from classes (1), (2) and (3).
+		if highWater, err := store.StreamHighWater(healthy[0], healthy[1]); err != nil || highWater != 4 {
+			t.Errorf("the healthy row in the same directory answered (%d, %v), want (4, nil); class (5) is refused per row and not directory-wide", highWater, err)
+		}
+		if index, err := store.ReserveStreamIndex(healthy[0], healthy[1]); err != nil || index != 5 {
+			t.Errorf("the healthy row allocated (%d, %v), want (5, nil)", index, err)
+		}
+
+		// THE HORIZON, priced rather than hidden: the marker lives as long as this store,
+		// exactly like the confirmed prefix it sits in. A store reopened over a directory
+		// the corrupt row has been REMOVED from has nothing left to read and answers a
+		// stream never seen. That is S2-23's residual -- nothing durable records what a
+		// previous process confirmed -- and it is not widened by this field.
+		if err := store.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		reopened := streamTestOpen(t, dir)
+		if index, err := reopened.ReserveStreamIndex(corrupt[0], corrupt[1]); err != nil || index != 1 {
+			t.Errorf("a store reopened over a directory the corrupt row was removed from answered (%d, %v); the residual this prices is that it answers (1, nil), so a change here is a change to that price and must be read as one", index, err)
+		} else {
+			t.Logf("RESIDUAL, S2-23: after a restart the removed corrupt row is indistinguishable from a row that never existed, so the reopened store allocates index %d for it. The unreadable marker's horizon is one store's lifetime, the same horizon the confirmed prefix has, and closing that would need a durable witness outside the row", index)
+		}
+		exercised[5] = true
+	})
+
+	t.Run("class 6 -- this build's row, body cannot be read", func(t *testing.T) {
+		t.Log("NOT EXERCISED, and the reason is stated rather than left out: this class is repairRow's os.ReadFile failing on a REGULAR file whose name is one of this build's rows. The store carries no injected failure point on the open-time read -- streamAppendInterrupt is the allocation path's -- and there is no portable way to make a regular file unreadable to its owner on the GOOS set this ships to. What is known about it without running it: OpenStreamStore returns repairRow's error, so NO STORE IS PRODUCED and no index can be handed out on any key of that directory, which is a strictly stronger refusal than class (5)'s")
+	})
+
+	for _, class := range partition {
+		if class.number == 6 {
+			continue
+		}
+		if !exercised[class.number] {
+			t.Errorf("class (%d) %q is in the partition and was not exercised, so this gate is not total over the partition it prints", class.number, class.name)
+		}
+	}
+}
