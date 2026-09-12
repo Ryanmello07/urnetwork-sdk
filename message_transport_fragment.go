@@ -255,23 +255,49 @@ func messageFragmentReturn(frames []*protocol.Frame) {
 // Every rule is asked before anything is created, so a refusal on the fragment
 // that would have opened a reassembly allocates nothing at all.
 //
+// A fragment whose `request_id` no waiter is waiting on opens NOTHING. See the
+// first branch below for why the waiter set is the only reassembly bound this
+// side has.
+//
 // It is called from inside connect's receive callback and holds the borrow rule:
 // `fragment` is a message of ours that `proto.Unmarshal` decoded — which copies
 // — and the part is appended into a buffer of our own. No frame and no frame
 // byte reaches this function.
 //
-// BOUNDARY, stated rather than left to be discovered: the only bound on a
-// reassembly here is §4.6's part ceiling times the `count` the opening fragment
-// declared. §4.3.1's `max_response_bytes` is advertised by the server and is NOT
-// read — Task 7 brings Capabilities and applies them to REQUESTS, which is what
-// §5.1 check 1 is about. A server that declared a count of four billion would be
-// bounded only by the bytes it actually sent, which is the bytes this binding is
-// already receiving. Filed rather than absorbed.
+// BOUNDARY, stated rather than left to be discovered. The bounds on ONE
+// reassembly here are §4.6's part ceiling and the `count` the opening fragment
+// declared; the bound on how MANY are open is the size of the waiter set, which
+// is how many Calls are in flight. §4.3.1's `max_response_bytes` is advertised
+// by the server and is NOT read — Task 7 brings Capabilities and applies them to
+// REQUESTS, which is what §5.1 check 1 is about — so a server that declared a
+// count of four billion is bounded only by the bytes it actually sends, which is
+// the bytes this binding is already receiving. Filed rather than absorbed.
 func (self *messageTransport) acceptFragment(fragment *protocol.MessageServerFragment) ([]byte, bool, error) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
 	requestId := fragment.GetRequestId()
+	if _, expected := self.waiting[requestId]; !expected {
+		// §4.6's reassembly is per (source client_id, request_id), and this
+		// binding opens one only for a request it MADE. A fragment carrying a
+		// request_id no waiter is waiting on has nowhere to go and nobody to
+		// tell, and BUFFERING it is how an unbounded reassembly map is built
+		// out of one number the sender chooses — the memory-exhaustion vector
+		// §4.6 is written against, arriving on the side of the wire where §4.6
+		// states no cap at all. §4.6 gives the server sixteen per client and
+		// thirty seconds; it gives a client nothing, and the waiter set is the
+		// bound this side already has.
+		//
+		// Counted rather than dropped in silence, for [messageTransport.deliver]'s
+		// reason: "nothing arrived" and "something arrived for nobody" have to
+		// be two readings. Whatever this request_id held goes with it — a
+		// waiter that timed out mid-reassembly took its buffer through
+		// [messageTransport.forget] already, and this is the arm that catches
+		// the buffer no Call ever owned.
+		delete(self.partial, requestId)
+		self.counts.Unmatched += 1
+		return nil, false, nil
+	}
 	current, open := self.partial[requestId]
 	state := messageFragmentState{fragment: fragment}
 	if open {

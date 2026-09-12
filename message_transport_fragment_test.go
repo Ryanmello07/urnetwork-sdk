@@ -184,12 +184,26 @@ func TestAFragmentedRequestReassemblesToTheSameBytes(t *testing.T) {
 
 			// and the same bytes through the JOIN this binding ships, not only
 			// through the concatenation this test just did
+			messageFragmentExpect(transport, request.GetRequestId())
 			joined := messageFragmentJoin(t, transport, frames)
 			if !bytes.Equal(joined, want) {
 				t.Fatalf("the binding's own reassembler produced %d bytes, want %d", len(joined), actual)
 			}
 		})
 	}
+}
+
+// A waiter for this request_id, registered the way Call registers one.
+//
+// It is here because the reassembler opens a buffer only for a request this
+// binding MADE -- see TestFragmentsForARequestThisBindingNeverMadeOpenNoBuffer
+// -- so a test that drives acceptFragment directly has to be a request that was
+// made. Reaching into the map is what makes that explicit instead of hiding it
+// behind a Call whose timeout the test would then be living inside.
+func messageFragmentExpect(transport *messageTransport, requestId uint64) {
+	transport.mutex.Lock()
+	defer transport.mutex.Unlock()
+	transport.waiting[requestId] = make(chan messageTransportAnswer, 1)
 }
 
 // Drive the shipped reassembler over frames the shipped cut produced.
@@ -403,6 +417,86 @@ func firstFewOf(value string) string {
 		return value
 	}
 	return value[:24] + "..."
+}
+
+
+// §4.6 caps the SERVER's reassembly state at sixteen per client and thirty
+// seconds. It caps a client's at nothing, and the client is the side that
+// cannot choose who addresses frames to it.
+//
+// So the bound here is derived rather than declared: this binding opens a
+// reassembly only for a request it MADE, and the waiter set is already exactly
+// that. A fragment carrying a request_id no waiter is waiting on is the fragment
+// analogue of the response nobody asked for -- counted, and dropped, and it
+// costs a buffer of nothing.
+//
+// Without it, one number the sender chooses opens one buffer, and as many
+// numbers as it cares to name open as many buffers: the memory-exhaustion vector
+// §4.6 exists to close, arriving on the side of the wire where §4.6 closed
+// nothing.
+func TestFragmentsForARequestThisBindingNeverMadeOpenNoBuffer(t *testing.T) {
+	fake := &messageTransportFake{}
+	transport := newTestMessageTransport(t, fake, 10*time.Second)
+
+	mine := callInBackground(transport, context.Background(), &protocol.HelloRequest{SupportedVersions: []uint32{1}})
+	awaitRequests(t, fake, 1)
+	requestId := fake.requestAt(0).GetRequestId()
+
+	// a hundred first-fragments under a hundred request_ids nobody asked for
+	strangers := 100
+	for stranger := 0; stranger < strangers; stranger += 1 {
+		fake.deliver(t, messageFragmentFrame(t, &protocol.MessageServerFragment{
+			RequestId: requestId + uint64(1000+stranger),
+			Index:     0,
+			Count:     4,
+			Part:      bytes.Repeat([]byte{0x5A}, messageFragmentPartBytes),
+		}))
+	}
+
+	counts := transport.Counts()
+	if counts.Reassembling != 0 {
+		t.Fatalf("Counts().Reassembling is %d after %d opening fragments under request_ids this binding "+
+			"never asked under, want 0 — one number the sender chooses would otherwise open one buffer, "+
+			"and §4.6 bounds a client's reassembly state at nothing at all",
+			counts.Reassembling, strangers)
+	}
+	if counts.Unmatched != uint64(strangers) {
+		t.Fatalf("Counts().Unmatched is %d after %d such fragments, want %d — dropped is right and "+
+			"dropped in SILENCE is not: \"nothing arrived\" and \"something arrived for nobody\" have to "+
+			"be two readings", counts.Unmatched, strangers, strangers)
+	}
+	if counts.Aborted != 0 {
+		t.Fatalf("Counts().Aborted is %d: a fragment for a request that was never made is not an abort — "+
+			"there is no reassembly to abandon and no waiter to tell", counts.Aborted)
+	}
+	if counts.FragmentFrames != uint64(strangers) {
+		t.Fatalf("Counts().FragmentFrames is %d, want %d — the frames arrived whatever became of them",
+			counts.FragmentFrames, strangers)
+	}
+	if counts.Waiting != 1 {
+		t.Fatalf("Counts().Waiting is %d, want 1 — the outstanding Call must still be outstanding", counts.Waiting)
+	}
+
+	// and the request this binding DID make still reassembles, so the refusal is
+	// a narrowing and not a wall
+	nonce := strings.Repeat("C", 3*messageFragmentPartBytes)
+	frames := messageFragmentCut(t, requestId,
+		encodeMessageResponse(t, helloResponse(requestId, nonce)), messageFragmentPartBytes)
+	fake.deliver(t, frames...)
+	select {
+	case result := <-mine:
+		if result.err != nil {
+			t.Fatalf("the call this binding actually made failed: %v", result.err)
+		}
+		if got := string(result.response.GetHello().GetServerNonce()); got != nonce {
+			t.Fatalf("the reassembled response carries %d nonce bytes, want %d", len(got), len(nonce))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the response to a request this binding DID make was refused along with the strangers")
+	}
+	if reassembling := transport.Counts().Reassembling; reassembling != 0 {
+		t.Fatalf("Counts().Reassembling is %d after the real reassembly completed, want 0", reassembling)
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
