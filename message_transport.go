@@ -210,6 +210,13 @@ type messageTransport struct {
 	waiting map[uint64]chan messageTransportAnswer
 	partial map[uint64]*messageFragmentPartial
 	counts  messageTransportCounts
+
+	// §4.3.1's per-CONNECTION state, replaced unconditionally by every Hello.
+	// See message_transport_hello.go, and S2-2 for what the replacement costs a
+	// GroupSession that copied the nonce at construction.
+	nonce        []byte
+	nonceEpoch   uint64
+	capabilities *protocol.Capabilities
 }
 
 func newMessageTransport(config *messageTransportConfig) (*messageTransport, error) {
@@ -353,6 +360,15 @@ func (self *messageTransport) Call(ctx context.Context, body proto.Message) (*pr
 		ProtocolVersion: self.protocolVersion,
 	}
 	if err := setMessageServerRequestBody(request, body); err != nil {
+		return nil, err
+	}
+	// §4.3.1's two local refusals, raised BEFORE a waiter is registered and
+	// before anything reaches a wire: a request refused here costs no round
+	// trip and leaves no correlation entry. See message_transport_hello.go.
+	if err := self.refuseBeforeHello(body); err != nil {
+		return nil, err
+	}
+	if err := self.refuseOverCapability(request); err != nil {
 		return nil, err
 	}
 

@@ -107,8 +107,14 @@ type messageTransportFake struct {
 	sent         []protocol.MessageType
 
 	// §4.6's fragments of a request too large for one frame, decoded in the
-	// order they were handed over.
+	// order they were handed over, and this side's own reassembly of them.
+	//
+	// The reassembly is deliberately written HERE and not borrowed from the
+	// binding: a fake that reassembled with the binding's reassembler would
+	// make a fragmented request answerable by the same code that cut it, and a
+	// mistake in the cutting would be undone by the same mistake in the joining.
 	fragments []*protocol.MessageServerFragment
+	joining   []byte
 
 	// Called inline from inside SendWithTimeout, with the transport's own
 	// goroutine still inside `send` and not yet in its select. Property 4's
@@ -165,8 +171,31 @@ func (self *messageTransportFake) SendWithTimeout(
 		}
 		self.mutex.Lock()
 		self.fragments = append(self.fragments, fragment)
+		self.joining = append(self.joining, fragment.GetPart()...)
+		complete := fragment.GetIndex()+1 == fragment.GetCount()
+		assembled := self.joining
+		if complete {
+			self.joining = nil
+		}
 		self.mutex.Unlock()
-		return !refuse
+		if refuse {
+			return false
+		}
+		if !complete {
+			return true
+		}
+		request := &protocol.MessageServerRequest{}
+		if proto.Unmarshal(assembled, request) != nil {
+			return false
+		}
+		self.mutex.Lock()
+		self.requests = append(self.requests, request)
+		onSend := self.onSend
+		self.mutex.Unlock()
+		if onSend != nil {
+			onSend(request)
+		}
+		return true
 	}
 	// a code point this binding has no business sending
 	return false
