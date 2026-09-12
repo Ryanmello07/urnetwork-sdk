@@ -311,6 +311,100 @@ func messageFragmentFrame(t *testing.T, fragment *protocol.MessageServerFragment
 	}
 }
 
+
+// §4.6: "Reassembly state is per (source client_id, request_id)". This binding
+// talks to ONE server, so the source is fixed and the key is the request_id
+// alone — and that is exactly the claim worth driving, because a reassembler
+// that held one buffer instead of a map answers every test above identically
+// and corrupts the moment two requests are outstanding.
+//
+// The two responses are delivered INTERLEAVED, which is the arrangement a
+// single buffer cannot survive: A's first part, B's first part, A's second, B's
+// second. §4.6's in-order rule is per reassembly and says nothing about the
+// order two different reassemblies arrive in.
+func TestTwoReassembliesInFlightDoNotReachIntoEachOther(t *testing.T) {
+	fake := &messageTransportFake{}
+	transport := newTestMessageTransport(t, fake, 10*time.Second)
+
+	first := callInBackground(transport, context.Background(), &protocol.HelloRequest{SupportedVersions: []uint32{1}})
+	awaitRequests(t, fake, 1)
+	second := callInBackground(transport, context.Background(), &protocol.HelloRequest{SupportedVersions: []uint32{2}})
+	awaitRequests(t, fake, 2)
+
+	firstId := fake.requestAt(0).GetRequestId()
+	secondId := fake.requestAt(1).GetRequestId()
+	if firstId == secondId {
+		t.Fatalf("both requests share request_id %d, so nothing here is keyed apart", firstId)
+	}
+
+	firstNonce := strings.Repeat("A", 3*messageFragmentPartBytes)
+	secondNonce := strings.Repeat("B", 3*messageFragmentPartBytes)
+	firstFrames := messageFragmentCut(t, firstId,
+		encodeMessageResponse(t, helloResponse(firstId, firstNonce)), messageFragmentPartBytes)
+	secondFrames := messageFragmentCut(t, secondId,
+		encodeMessageResponse(t, helloResponse(secondId, secondNonce)), messageFragmentPartBytes)
+	if len(firstFrames) != len(secondFrames) || len(firstFrames) < 3 {
+		t.Fatalf("this test needs two equal cuts of at least three frames and got %d and %d",
+			len(firstFrames), len(secondFrames))
+	}
+
+	for index := range firstFrames {
+		fake.deliver(t, firstFrames[index])
+		fake.deliver(t, secondFrames[index])
+		if index+1 < len(firstFrames) {
+			if open := transport.Counts().Reassembling; open != 2 {
+				t.Fatalf("Counts().Reassembling is %d after %d part(s) of each of two responses, want 2 — "+
+					"§4.6's reassembly state is per request_id and two of them are open", open, index+1)
+			}
+		}
+	}
+
+	for _, each := range []struct {
+		name    string
+		results chan messageTransportResult
+		id      uint64
+		nonce   string
+	}{
+		{"first", first, firstId, firstNonce},
+		{"second", second, secondId, secondNonce},
+	} {
+		select {
+		case result := <-each.results:
+			if result.err != nil {
+				t.Fatalf("the %s call failed: %v", each.name, result.err)
+			}
+			got := string(result.response.GetHello().GetServerNonce())
+			if got != each.nonce {
+				t.Fatalf("the %s call was reassembled into %d bytes starting %q, want %d bytes of %q — "+
+					"the two reassemblies were sharing a buffer",
+					each.name, len(got), firstFewOf(got), len(each.nonce), each.nonce[:1])
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the %s call was never answered, though every fragment of its response was delivered",
+				each.name)
+		}
+	}
+
+	counts := transport.Counts()
+	if counts.Reassembled != 2 {
+		t.Fatalf("Counts().Reassembled is %d, want 2", counts.Reassembled)
+	}
+	if counts.Aborted != 0 {
+		t.Fatalf("Counts().Aborted is %d: interleaving two reassemblies is not a §4.6 abort, because "+
+			"the in-order rule is per reassembly", counts.Aborted)
+	}
+	if counts.Reassembling != 0 {
+		t.Fatalf("Counts().Reassembling is %d after both completed, want 0", counts.Reassembling)
+	}
+}
+
+func firstFewOf(value string) string {
+	if len(value) <= 24 {
+		return value
+	}
+	return value[:24] + "..."
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Property 2 — an out-of-order, duplicated or short-counted fragment ABORTS.
 // ─────────────────────────────────────────────────────────────────────────────
