@@ -88,19 +88,35 @@ func (self *streamIndexReserver) HighWater(stream messagegroup.StreamKey) (uint6
 // keyOctets is THE flattening: a StreamKey onto section 8.2's positional []byte parameters, in
 // the key type's own declaration order.
 //
-// EVERY PART IS A COPY, and the copy is the point. StreamKey is comparable "deliberately twice
-// over" -- it can be a map key without a second encoding, and a group id that moved under a
-// ratchet cannot reserve indices against one row and use them against another -- and section
-// 8.2's []byte pair is neither comparable nor immutable. Handing the store a slice that aliases
-// anything this adapter keeps would put a row's identity in a buffer somebody else can write to,
-// and a row's identity is which indices a stream has already spent. No document asks for the
-// copy; TestTheAdapterCopiesTheKeyAtTheBoundary is what asks for it.
+// EVERY PART IS A COPY, AND THE COPY IS NOW THE ONLY CLAUSE THAT CARRIES THAT. StreamKey is
+// comparable "deliberately twice over" -- it can be a map key without a second encoding, and a
+// group id that moved under a ratchet cannot reserve indices against one row and use them against
+// another -- and section 8.2's []byte pair is neither comparable nor immutable. Handing the store
+// a slice that aliases anything this adapter keeps would put a row's identity in a buffer
+// somebody else can write to, and a row's identity is which indices a stream has already spent.
+//
+// IT USED TO BE TWO CLAUSES AND ONLY ONE OF THEM WAS DRIVEN, which is why this reads the way it
+// does now. The earlier version built an ADDRESSABLE image of the key with reflect.New -- the
+// language forces one, because Value.Slice and Value.Bytes refuse a non-addressable array -- then
+// sliced each field out of that image and copied the slice. The image was fresh per call, so the
+// image ALREADY made two calls disjoint, and `append([]byte(nil), octets...)` on top of it was
+// unobservable: delete it and each part aliases a heap object this call created and nothing else
+// references, so no caller, no test and no mutation of the store could tell. The case named
+// TestTheAdapterCopiesTheKeyAtTheBoundary drove the IMAGE and not the copy, and its name said
+// otherwise.
+//
+// reflect.Copy does not require an addressable source, so the image is gone and there is exactly
+// one clause left: a destination made per field per call, and the copy into it. Hoist that
+// destination onto the receiver, or out of the loop, and two calls or two parts alias -- which is
+// precisely what that case asserts, so it now drives the clause its name claims.
+//
+// reflect.Copy's return is deliberately not branched on. It is min(len(destination), source
+// length), the destination is made at exactly field.Type.Len() and the source IS that field, so
+// the two are equal by construction: a check on it would be a clause nothing could ever drive,
+// which is the defect this round was sent to stop adding.
 func (self *streamIndexReserver) keyOctets(stream messagegroup.StreamKey) ([][]byte, error) {
 	keyType := streamKeyType()
-	// a fresh addressable copy per call. A buffer hoisted onto the receiver would make two
-	// calls alias, which is the same defect as not copying at all.
-	addressable := reflect.New(keyType)
-	addressable.Elem().Set(reflect.ValueOf(stream))
+	key := reflect.ValueOf(stream)
 	parts := [][]byte{}
 	for i := range keyType.NumField() {
 		field := keyType.Field(i)
@@ -113,8 +129,12 @@ func (self *streamIndexReserver) keyOctets(stream messagegroup.StreamKey) ([][]b
 				field.Type.String(),
 			)
 		}
-		octets := addressable.Elem().Field(i).Slice(0, field.Type.Len()).Bytes()
-		parts = append(parts, append([]byte(nil), octets...))
+		// THE COPY. A fresh destination per field per call, and the octets moved into it:
+		// nothing this adapter keeps, and nothing two calls share, backs what the store is
+		// handed.
+		part := make([]byte, field.Type.Len())
+		reflect.Copy(reflect.ValueOf(part), key.Field(i))
+		parts = append(parts, part)
 	}
 	if err := self.refuseWrongWidth(parts); err != nil {
 		return nil, err
@@ -204,13 +224,21 @@ type streamStoreSentinelRuling struct {
 // first cost. Splitting the class is the store's repair and not the adapter's: an adapter cannot
 // invent a discriminator the value does not carry.
 //
-// AND THE STORE HAS NOW SUPPLIED ONE, FOR EXACTLY ONE SUB-CLASS. A row that was present when the
-// store opened and whose body did not classify is raised as ErrStreamStoreState WITH
-// ErrStreamStoreConsumed beside it, so classify's permanent||... finds it and the ladder stops.
-// That is the sub-class whose permanence is knowable inside the store: nothing in the store ever
-// rewrites a row it refused, so a body that did not classify at open never will. It required no
-// change to the ruling below, which is the point -- the store widened what it says, the adapter
-// went on reading it.
+// AND THE STORE HAS NOW SUPPLIED ONE, FOR EXACTLY ONE SUB-CLASS. A row THE STORE HAS READ AND
+// COULD NOT CLASSIFY is raised as ErrStreamStoreState WITH ErrStreamStoreConsumed beside it, so
+// classify's permanent||... finds it and the ladder stops. That is the sub-class whose permanence
+// is knowable inside the store: nothing in the store ever rewrites a row it refused, so a body it
+// could not classify it will go on being unable to classify.
+//
+// AND THAT SUB-CLASS IS KEYED ON THE CONDITION, NOT ON THE CLOCK, which it was not until
+// 2026-09-12. The discriminator used to be "present in the row directory when the store OPENED",
+// so the same octets in the same directory reaching persistedHighWater one call later under a
+// live store arrived here bare and were forwarded as transient -- the unbounded retry this file
+// exists to stop, reached by nothing more than the order in which the store looked. The line now
+// runs between OCTETS OBTAINED AND REFUSED, which is permanent, and OCTETS NOT OBTAINED -- an
+// os.Open or a ReadAt that failed -- which stays a retry and stays in the filed remainder below.
+// It required no change to the ruling below, which is the point -- the store widened what it
+// says, the adapter went on reading it.
 //
 // WHAT IS STILL OPEN, AND IT IS FILED RATHER THAN RULED HERE. The remainder of the class -- a
 // failed flush, a full disk, an unreadable row directory, a CLOSED store -- is still ruled
@@ -241,7 +269,7 @@ var streamStoreSentinelRulings = []streamStoreSentinelRuling{
 		name:      "ErrStreamStoreState",
 		sentinel:  ErrStreamStoreState,
 		permanent: false,
-		ruling:    "the mixed class, ruled transient: a failed flush and a full disk must stay a retry, and the value carries no discriminator that would separate them from a closed store. The one member that HAS a discriminator -- a row whose body did not classify at open -- is raised with ErrStreamStoreConsumed beside it by the store, so it reaches this mapping as permanent without the verdict here moving. The rest is an open item filed for the owner, not ruled here",
+		ruling:    "the mixed class, ruled transient: a failed flush and a full disk must stay a retry, and the value carries no discriminator that would separate them from a closed store. The one member that HAS a discriminator -- a row this store has READ AND COULD NOT CLASSIFY, whenever it found that out -- is raised with ErrStreamStoreConsumed beside it by the store, so it reaches this mapping as permanent without the verdict here moving. The rest is an open item filed for the owner, not ruled here",
 	},
 	{
 		name:     "ErrStreamStoreRewound",

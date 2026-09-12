@@ -54,10 +54,13 @@ var (
 	//
 	// IT IS A MIXED CLASS AND THE ADAPTER RULES THE WHOLE OF IT TRANSIENT, so a condition
 	// inside it that a retry can never clear retries forever. ONE sub-class carries its own
-	// discriminator rather than waiting on that ruling: a row that was present at open and
-	// whose body did not classify is raised with ErrStreamStoreConsumed beside this value, by
-	// persistedHighWater, because a store that could not read a row at open cannot read it
-	// later -- nothing in this store ever rewrites a row it refused. The REST of the class --
+	// discriminator rather than waiting on that ruling: A ROW THIS STORE HAS READ AND COULD NOT
+	// CLASSIFY is raised with ErrStreamStoreConsumed beside this value, by persistedHighWater,
+	// because nothing in this store ever rewrites a row it refused. That is keyed on the
+	// CONDITION and not on when the store found out -- at open, or one call later under a live
+	// store, it is the same bytes and the same refusal -- and the complement of it inside the
+	// same class is the row whose octets could NOT BE OBTAINED: an os.Open or a ReadAt that
+	// failed is a condition a retry can clear and stays this value alone. The REST of the class --
 	// a failed flush, a full disk, an unreadable row directory, a closed store -- is still
 	// ruled transient and is still, for the permanent members of it, an unbounded retry.
 	// That remainder is FILED, not ruled here: see streamStoreSentinelRulings.
@@ -104,9 +107,12 @@ var (
 	//     streamindex.go's clause 3 says exactly this -- the permanent refusal is "what a row
 	//     that went backwards under a live process looks like from in here".
 	//
-	//  3. A row that was PRESENT when this store opened and whose body did not classify. The
-	//     indices it has already spent are not derivable from it, so no next position can be
-	//     proven unspent, and no later call in this store's life changes that. Shape 3 is
+	//  3. A row THIS STORE HAS READ AND COULD NOT CLASSIFY -- found so by the open-time scan
+	//     or by a live read, which are the same condition met at two times. The indices it has
+	//     already spent are not derivable from it, so no next position can be proven unspent,
+	//     and no later call in this store's life changes that, because nothing in this store
+	//     ever rewrites a row it refused. Its complement inside the same class is the row whose
+	//     octets could not be OBTAINED, which stays transient. Shape 3 is
 	//     raised TOGETHER WITH ErrStreamStoreState, both findable by errors.Is off one value,
 	//     for the same reason shape 2 is raised with ErrStreamStoreRewound: one state, two
 	//     seats. It is the store supplying a discriminator the adapter cannot invent, and it

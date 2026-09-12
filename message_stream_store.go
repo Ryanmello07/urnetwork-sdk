@@ -1040,11 +1040,18 @@ type streamRowVerification struct {
 	records   int
 	highWater uint64
 
-	// unreadable is a row that was PRESENT in the row directory when this store opened and
-	// whose body did not classify. Nothing about how many indices it has already spent is
-	// derivable from it, so it is entered here rather than omitted, and persistedHighWater
-	// refuses it -- present, shorter, or gone -- for the life of this store. records and
-	// highWater are meaningless when this is set and no path reads them.
+	// unreadable is A ROW THIS STORE HAS READ AND COULD NOT CLASSIFY. It is keyed on that
+	// condition and on nothing else -- in particular NOT on when the store found out. The
+	// open-time scan sets it from repairRow and persistedHighWater sets it from a live read,
+	// because the same bytes in the same directory are the same refusal on either path:
+	// nothing in this store ever rewrites a row it refused, so a body it could not classify
+	// is a body it will go on being unable to classify.
+	//
+	// Nothing about how many indices such a row has already spent is derivable from it, so it
+	// is entered here rather than omitted -- a row the map has no entry for is a row the
+	// rewind detector cannot see -- and persistedHighWater refuses it PRESENT, SHORTER, GONE,
+	// or CLASSIFYING AGAIN, for the life of this store. records and highWater are meaningless
+	// when this is set and no path reads them.
 	unreadable bool
 }
 
@@ -1069,6 +1076,14 @@ type streamRowVerification struct {
 //	                                                rowDirectoryHolds: the directory is
 //	                                                well-formed, so every other key in it goes
 //	                                                on allocating, and only this row must stop.
+//	                                                THE SCAN IS NOT THE ONLY PLACE THE MARK IS
+//	                                                SET: persistedHighWater sets the same mark
+//	                                                when a LIVE read meets the same condition,
+//	                                                because the mark is keyed on the condition
+//	                                                and not on the clock. What the SCAN alone
+//	                                                buys is the row whose octets vanish before
+//	                                                any call reads them -- a live read cannot
+//	                                                mark what it never sees.
 //	(6) this build's row, body cannot be READ    -> the store does not open at all; repairRow
 //	                                                returns ErrStreamStoreState and
 //	                                                OpenStreamStore propagates it.
@@ -1094,15 +1109,19 @@ func (self *StreamStore) persistedHighWater(rowName string) (uint64, error) {
 	}
 	prior, seen := self.verified[rowName]
 	if !present && seen && prior.unreadable {
-		// CLASS (5) OF THE PARTITION ABOVE, IN ITS DANGEROUS SHAPE: a row that was present
-		// in this directory when this store opened, whose body did not classify, and whose
-		// bytes are now GONE. How many indices it had already spent is not derivable from
-		// it -- that is what "did not classify" means -- and there is nothing left to
-		// re-derive a refusal from, so the entry this store kept for it IS the refusal.
+		// CLASS (5) OF THE PARTITION ABOVE, IN ITS DANGEROUS SHAPE: a row THIS STORE READ AND
+		// COULD NOT CLASSIFY -- at open, or later under a live store, which is the same
+		// condition and not two -- and whose bytes are now GONE. How many indices it had
+		// already spent is not derivable from it -- that is what "did not classify" means --
+		// and there is nothing left to re-derive a refusal from, so the entry this store kept
+		// for it IS the refusal.
 		//
 		// Before that entry existed this row took the branch below: not present, nothing
 		// remembered, contract clause 4's error-free zero, and the very next allocation
-		// handed out index 1 on a key whose row had durably carried indices.
+		// handed out index 1 on a key whose row had durably carried indices. That was true of
+		// the open-time half until 2026-09-11 and of the LIVE half until 2026-09-12, and the
+		// second was reproduced before it was closed: plant a corrupt row under a running
+		// store, let one call meet it, remove it, and the next allocation answered 1.
 		//
 		// IT CARRIES ErrStreamStoreConsumed BESIDE ErrStreamStoreState, which is the store
 		// supplying a discriminator the adapter cannot invent. The adapter rules the whole
@@ -1110,11 +1129,11 @@ func (self *StreamStore) persistedHighWater(rowName string) (uint64, error) {
 		// retry -- and a corrupt row forwarded as transient is an unbounded retry loop
 		// paying a durable write per attempt against a row that will never accept one. This
 		// is the sub-class where permanence is knowable HERE and nowhere else: a store that
-		// could not read this row at open cannot read it later, because nothing in this
-		// store ever rewrites a row it refused. See streamStoreSentinelRulings for the part
+		// could not classify this row's octets cannot classify them later, because nothing in
+		// this store ever rewrites a row it refused. See streamStoreSentinelRulings for the part
 		// of that class that is still ruled transient and the open question filed on it.
 		return 0, fmt.Errorf(
-			"%w: row %s was present in %s when this store opened and its body did not classify, and its bytes have since been removed; the indices it had already spent are not derivable from it and nothing is left to re-derive them from, so answering contract clause 4's error-free zero would restart the ladder at index 1 under a class key that has not moved, and a second record under a reused stream_index is a reused nonce under a reused record_key (%w)",
+			"%w: row %s is one this store read in %s and could not classify, and its bytes have since been removed; the indices it had already spent are not derivable from it and nothing is left to re-derive them from, so answering contract clause 4's error-free zero would restart the ladder at index 1 under a class key that has not moved, and a second record under a reused stream_index is a reused nonce under a reused record_key (%w)",
 			ErrStreamStoreState,
 			rowName,
 			self.rowDir,
@@ -1203,29 +1222,69 @@ func (self *StreamStore) persistedHighWater(rowName string) (uint64, error) {
 	}
 	highWater, verifiedTo, err := classifyStreamRowTail(rowName, prior.records, prior.highWater, tail)
 	if err != nil {
-		if prior.unreadable {
-			// CLASS (5) WHILE ITS BYTES ARE STILL THERE. The refusal is the ONE the
-			// bytes produce, not a second one written here, because the three shapes a
-			// corrupt body can take share one error value and a refusal that stopped
-			// naming its shape could no longer tell them apart --
-			// TestARowsThreeCasesAndTheDiscriminatorBetweenThem holds exactly that. What
-			// is added is the permanence, and nothing else.
-			return 0, fmt.Errorf(
-				"%w; row %s did not classify when this store opened either, and nothing in this store ever rewrites a row it refused, so no later call can clear it (%w)",
-				err,
-				rowName,
-				ErrStreamStoreConsumed,
-			)
-		}
-		return 0, err
+		// CLASS (5), AND THE PERMANENCE IS KEYED ON THE CONDITION AND NOT ON THE CLOCK.
+		//
+		// THIS USED TO BE TWO CLAUSES and the discriminator between them was WHEN this store
+		// first met the row: a body that did not classify AT OPEN carried
+		// ErrStreamStoreConsumed, and the same bytes in the same directory reached one call
+		// later under a live store were forwarded bare -- ErrStreamStoreState, which the
+		// adapter rules TRANSIENT, which is the unbounded retry against a row that will never
+		// accept a record that the adapter exists to stop. The row was the same row. Only the
+		// observer's clock differed, and a clock is not what makes a refusal permanent.
+		//
+		// WHAT MAKES IT PERMANENT is a property of this store: NOTHING IN IT EVER REWRITES A
+		// ROW IT REFUSED. repairRow is the only code that truncates, it runs once per row
+		// inside OpenStreamStore, and it leaves a body that failed to classify exactly as it
+		// found it; writeOneRecord is the only code that appends, and it is unreachable until
+		// this function has ANSWERED. So a body this store has read and could not classify is
+		// a body this store will go on being unable to classify, whenever it first found out.
+		// The mark is set here for the same reason repairRow sets it at open -- so the
+		// refusal survives the bytes being taken away, which is the shape that used to read
+		// as a stream never seen -- and it is set HERE as well because the discovery time is
+		// not what the mark means.
+		//
+		// THE REFUSAL ITSELF IS THE ONE THE BYTES PRODUCE, not a second one written here: the
+		// three shapes a corrupt body can take share one error value and a refusal that
+		// stopped naming its shape could no longer tell them apart --
+		// TestARowsThreeCasesAndTheDiscriminatorBetweenThem holds exactly that. What is added
+		// is the permanence, and nothing else.
+		//
+		// WHAT IS GENUINELY OPEN-TIME-ONLY, because "state what, if anything, is" does not
+		// answer "nothing": the REPAIR, and the store's refusal to come into existence. A
+		// torn tail is truncated once, by repairRow, at open; under a live store the next
+		// append overwrites it in place instead. Those two paths differ in what they DO and
+		// not in how they classify. And class (6) -- a row whose octets could not be READ at
+		// all -- stops OpenStreamStore rather than marking anything, which is a refusal to
+		// open and not a permanence claim: an I/O failure is a condition a retry can clear,
+		// so on the live path it stays ErrStreamStoreState alone, raised by the os.Open and
+		// ReadAt sites above and never by this clause. That is the distinction this clause
+		// now turns on. OCTETS OBTAINED AND REFUSED is permanent; OCTETS NOT OBTAINED is
+		// transient. Neither is a statement about when.
+		self.verified[rowName] = streamRowVerification{unreadable: true}
+		return 0, fmt.Errorf(
+			"%w; row %s is a row this store has read and could not classify, and nothing in this store ever rewrites a row it refused, so no later call in this store's life can clear it (%w)",
+			err,
+			rowName,
+			ErrStreamStoreConsumed,
+		)
 	}
 	if prior.unreadable {
-		// THE ROW CLASSIFIES NOW AND DID NOT AT OPEN, so its bytes changed under the only
-		// writer's exclusion. What it spent before that change is still not derivable, and
-		// re-deriving a high water from whatever replaced it is exactly the move that hands
-		// the next allocation a number this stream may already have used.
+		// THE ROW CLASSIFIES NOW AND DID NOT WHEN THIS STORE LAST READ IT, so its bytes
+		// changed under the only writer's exclusion. What it spent before that change is
+		// still not derivable, and re-deriving a high water from whatever replaced it is
+		// exactly the move that hands the next allocation a number this stream may already
+		// have used.
+		//
+		// It is the only exit from the unreadable mark that the bytes do not already refuse
+		// on their own, so it is the clause that decides whether the mark is STICKY. It
+		// returns WITHOUT writing the verified map, and that omission is the stickiness: the
+		// row meets this same answer for the life of the store, and no later call can launder
+		// it by reading a prefix an earlier call recorded.
+		// TestARowThatClassifiesAfterItDidNotIsRefusedRatherThanReSeeded drives it, on both
+		// discovery orders -- marked at open, and marked by a live read -- and drives the
+		// stickiness and the allocator's seat as well as the reader's.
 		return 0, fmt.Errorf(
-			"%w: row %s did not classify when this store opened and classifies now, so its bytes changed under the only writer's exclusion; what it had already spent is still not derivable from it and allocating on what replaced it would hand out a number this stream may already have used (%w)",
+			"%w: row %s did not classify when this store read it and classifies now, so its bytes changed under the only writer's exclusion; what it had already spent is still not derivable from it and allocating on what replaced it would hand out a number this stream may already have used (%w)",
 			ErrStreamStoreState,
 			rowName,
 			ErrStreamStoreConsumed,

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"maps"
@@ -288,6 +289,17 @@ func streamAdapterTypeName(t *testing.T) string {
 // two files this task creates. A gate scoped to the adapter's file cannot see the second
 // flattening, which is the only thing it exists to see.
 //
+// AND THE MATCHING IS BY SELECTOR NAME, which is an over-reach and is stated rather than hidden.
+// A syntax tree without a type checker cannot tell reflect.Value.Field from reflect.Type.Field,
+// or reflect.Value.Fields from strings.Fields -- and this tree has one of each: goid in trace.go
+// calls strings.Fields and is carried into the class by the name alone. Over-reach can only
+// WIDEN the class, never narrow it, so it cannot hide a flattening; what it costs is a member in
+// the printed complement that never touched a key, which is why the complement prints what each
+// member actually calls. The sound-looking narrowing -- "only declarations in files that import
+// reflect" -- is NOT sound: a reflect.Value can be obtained from a helper in another file of the
+// same package without ever naming the reflect package, so that filter would acquit exactly the
+// declaration it most needs to convict.
+//
 // THE COUNT IS NOT THE FINDING. A correct implementation writes the flattening once as a helper
 // and the class has one new member; a correct implementation that inlines it into each of Reserve
 // and HighWater has two. Both are correct, so the gate convicts a MEMBER and never a number.
@@ -311,11 +323,18 @@ func streamAdapterTypeName(t *testing.T) string {
 //
 // WHAT REPLACES IT IS A NARROWING OVER WHAT THE DECLARATION TOUCHES RATHER THAN OVER WHERE THE
 // RESULT GOES, which is sound where an escape analysis over a syntax tree is not. A flattening
-// has to MOVE THE OCTETS of a key's fields, and reflect gives exactly four ways to do that:
-// Value.Bytes, Value.Slice, Value.Interface and reflect.Copy. A declaration that reads a
-// StreamKey's fields and calls NONE of them never obtained the octets at all, so it cannot have
-// flattened them, however its results are shaped and wherever they go. That exclusion is a
-// property of the code rather than a guess about it, and the complement it removes is printed.
+// has to MOVE THE OCTETS of a key's fields; a declaration that reads a StreamKey's fields and
+// moves none of them never obtained the octets at all, so it cannot have flattened them, however
+// its results are shaped and wherever they go.
+//
+// AND THE WAYS IT CAN MOVE THEM ARE DERIVED, NOT LISTED. This narrowing used to rest on the
+// sentence "reflect gives exactly four ways: Value.Bytes, Value.Slice, Value.Interface and
+// reflect.Copy". That was false -- Value.Index(j).Uint() reads a [32]byte an octet at a time and
+// is none of the four -- and a second flattening built on it passed the gate. Both sets are now
+// read off reflect.Value's own method set at run time and every method of it must carry a
+// verdict; see streamAdapterReflectValueMethods for the census, its soundness claim, its one
+// exception and the stated boundary for reflect's package-level functions, which no enumeration
+// can reach and which therefore fail closed.
 //
 // Every octet-moving member must then be a method of the adapter type or carry a RULING written
 // here, and a ruling naming a declaration the tree no longer has fails too. Over-reach is the
@@ -328,6 +347,307 @@ func streamAdapterTypeName(t *testing.T) string {
 // TestNoProductionSourceOfPackageSdkSpellsAStreamKeyFieldName. A second flattening that moves the
 // octets and then reaches the store is caught twice over, here and by the call-site gate below.
 
+// ----------------------------------------------------------------------------------------------
+// THE REFLECT CENSUS: the two sets the flattening gate narrows by, DERIVED rather than listed.
+// ----------------------------------------------------------------------------------------------
+//
+// WHAT WAS WRONG WITH THE LIST. Until 2026-09-12 the octet-moving narrowing rested on the
+// sentence "reflect gives exactly four ways to do that: Value.Bytes, Value.Slice, Value.Interface
+// and reflect.Copy". That is false, and it was falsified by planting a second flattening in
+// production sdk that reads the octets ONE AT A TIME --
+//
+//	for j := range field.Type.Len() { out[j] = byte(value.Index(j).Uint()) }
+//
+// -- with no unsafe, no package-level variable and no call into the store. It moved every octet
+// of a StreamKey's fields into a buffer of its own and the gate was green. A four-item list
+// presented as exhaustive is the shape this project has spent eleven rounds on, and the repair is
+// not a fifth item.
+//
+// THE ENUMERATION IS THE LANGUAGE'S. reflect.Value's method set is read off
+// reflect.TypeOf(reflect.Value{}) at run time, and every method of it must carry a ruling below.
+// A method this census does not name FAILS the gate rather than being skipped, so the day a Go
+// release adds one -- Go 1.26 added Fields, Methods, Seq and Seq2, three of which are new ways to
+// reach a struct's field values -- it arrives as a decision to make and not as a silent hole.
+// Nothing here is a list of "the ways": the list is the method set, and what is written by hand
+// is the VERDICT on each name, which is the part no derivation can supply.
+//
+// THE TWO QUESTIONS, and they are different questions:
+//
+//	reads -- called on a struct's Value, can this yield one of its FIELDS as a Value? This is
+//	         what puts a declaration in the class at all. It used to be three names; the method
+//	         set says six.
+//
+//	moves -- can this put a field's octets somewhere that is NOT another reflect.Value: into
+//	         ordinary Go storage the declaration can keep, pass, send, return or close over?
+//	         This is the narrowing, and the complement it removes is printed.
+//
+// THE SOUNDNESS CLAIM, stated so it can be attacked: every path by which a key field's octets can
+// leave a declaration passes through at least one method ruled moves. The methods ruled NOT
+// movers are exactly those that
+//
+//	(a) answer a DESCRIPTION of the value -- a bool, an int, a Kind, a Type -- and never its
+//	    contents; or
+//	(b) yield another reflect.Value, so the octets are still inside the graph and a mover is
+//	    still owed before they can leave it.
+//
+// Navigation is (b): Field, Index, Slice, Elem, Addr and MapIndex all hand back a Value, which is
+// why the planted per-octet flattening is convicted at Uint and not at Index. Scalar readers are
+// movers whether or not a [32]byte can reach their Kind today, because the class is StreamKey's
+// FIELDS and StreamKey's field set is connect's to change.
+//
+// THE ONE EXCEPTION, AND ITS BOUNDARY, because it is an exception and not an oversight.
+// Value.String is ruled NOT a mover. On a Value whose Kind is String it answers the contents, and
+// Kind String is reachable from a [32]byte -- Slice it, Convert the slice to string, read it --
+// so the honest ruling would be "mover". It is not ruled one because THIS GATE MATCHES SELECTOR
+// NAMES AND reflect.Type HAS A String METHOD TOO: ruling it a mover convicts every declaration
+// that formats a type into an error message, which is both of the declarations the octet-moving
+// narrowing currently removes, and an empty complement is a narrowing that has stopped narrowing.
+// What keeps the exception sound is that Convert IS ruled a mover: Kind String is not reachable
+// from an array of uint8 without Convert or Interface, and both convict one call earlier.
+// THE RESIDUAL, stated rather than discovered: if connect ever gives StreamKey a field whose Kind
+// is already String, a second flattening could read it with Value.String alone and this gate
+// would not see it. Every field of StreamKey today is an array of uint8 -- the adapter refuses
+// anything else, and TestAKeyOfTheWrongWidthIsRefusedAtTheBoundary holds that -- so the residual
+// is empty on this tree and it is not empty by construction.
+//
+// AND THE HALF THAT CANNOT BE ENUMERATED AT ALL, so it is a STATED BOUNDARY AND IT FAILS CLOSED:
+// reflect's package-level FUNCTIONS. Go has no reflection over a package's functions, so there is
+// no method set to read and no completeness check to run in the other direction. The gate
+// therefore treats EVERY call spelled reflect.Something(...) inside a class member as an octet
+// mover UNLESS that name carries a ruling below, and reports the unruled name. A function this
+// census has never heard of convicts; it does not pass.
+
+type streamAdapterReflectRuling struct {
+	// reads is: called on a struct's Value, can this yield one of its FIELDS as a Value?
+	reads bool
+	// moves is: can this put a field's octets somewhere that is not another reflect.Value?
+	moves bool
+	why   string
+}
+
+// streamAdapterReflectValueMethods must be TOTAL over reflect.Value's exported method set, and
+// streamAdapterReflectCensus holds it to that in both directions at run time.
+var streamAdapterReflectValueMethods = map[string]streamAdapterReflectRuling{
+	"Addr":            {why: "yields a pointer Value naming the field's storage -- still a reflect.Value, so a mover is still owed"},
+	"Bool":            {moves: true, why: "a scalar read of the value's contents"},
+	"Bytes":           {moves: true, why: "answers the octets as an ordinary []byte"},
+	"Call":            {moves: true, why: "calls a function Value with argument Values, and the callee keeps whatever it is handed"},
+	"CallSlice":       {moves: true, why: "Call with a variadic final argument; the callee keeps what it is handed"},
+	"CanAddr":         {why: "a bool about the Value"},
+	"CanComplex":      {why: "a bool about the Value's Kind"},
+	"CanConvert":      {why: "a bool about the Value's Kind"},
+	"CanFloat":        {why: "a bool about the Value's Kind"},
+	"CanInt":          {why: "a bool about the Value's Kind"},
+	"CanInterface":    {why: "a bool about the Value"},
+	"CanSet":          {why: "a bool about the Value"},
+	"CanUint":         {why: "a bool about the Value's Kind"},
+	"Cap":             {why: "an int describing the value"},
+	"Clear":           {why: "zeroes a map or a slice; it writes zeroes and answers nothing, so no source value's octets pass through it"},
+	"Close":           {why: "closes a channel and answers nothing"},
+	"Comparable":      {why: "a bool about the Value's type"},
+	"Complex":         {moves: true, why: "a scalar read of the value's contents"},
+	"Convert":         {moves: true, why: "THE ONE NAVIGATION METHOD RULED A MOVER. It is the only way to change a Value's Kind, and it is what makes Kind String -- whose reader is the exception above -- reachable from an array of uint8"},
+	"Elem":            {why: "dereferences a pointer or unwraps an interface into another reflect.Value"},
+	"Equal":           {why: "a bool comparing two Values"},
+	"Field":           {reads: true, why: "a struct's field, by position, as a Value"},
+	"FieldByIndex":    {reads: true, why: "a struct's field, by index path, as a Value"},
+	"FieldByIndexErr": {reads: true, why: "FieldByIndex answering an error instead of panicking on a nil embedded pointer"},
+	"FieldByName":     {reads: true, why: "a struct's field, by name, as a Value"},
+	"FieldByNameFunc": {reads: true, why: "a struct's field, by a predicate over names, as a Value"},
+	"Fields":          {reads: true, why: "iterates a struct's fields, yielding each as a Value. Added in Go 1.26, and invisible to the three-name class this gate used to carry"},
+	"Float":           {moves: true, why: "a scalar read of the value's contents"},
+	"Grow":            {why: "increases a slice's capacity; it moves no source value's octets"},
+	"Index":           {why: "one element of an array, slice or string as a Value. The per-octet flattening that falsified the old four-item list goes through here, and is convicted one call later at Uint"},
+	"Int":             {moves: true, why: "a scalar read of the value's contents"},
+	"Interface":       {moves: true, why: "answers the value as an ordinary any, contents and all"},
+	"InterfaceData":   {moves: true, why: "answers the interface's word pair, which is a pointer to the contents"},
+	"IsNil":           {why: "a bool about the Value"},
+	"IsValid":         {why: "a bool about the Value"},
+	"IsZero":          {why: "a bool about the Value"},
+	"Kind":            {why: "a Kind describing the value"},
+	"Len":             {why: "an int describing the value"},
+	"MapIndex":        {why: "a map entry as another reflect.Value"},
+	"MapKeys":         {why: "a map's keys as reflect.Values"},
+	"MapRange":        {why: "an iterator over reflect.Values"},
+	"Method":          {why: "a method as another reflect.Value"},
+	"MethodByName":    {why: "a method as another reflect.Value"},
+	"Methods":         {why: "iterates a type's methods as reflect.Values. Added in Go 1.26"},
+	"NumField":        {why: "an int describing the type"},
+	"NumMethod":       {why: "an int describing the type"},
+	"OverflowComplex": {why: "a bool about a candidate value"},
+	"OverflowFloat":   {why: "a bool about a candidate value"},
+	"OverflowInt":     {why: "a bool about a candidate value"},
+	"OverflowUint":    {why: "a bool about a candidate value"},
+	"Pointer":         {moves: true, why: "answers the data pointer as a uintptr, which names the octets"},
+	"Recv":            {why: "receives from a channel into another reflect.Value; it takes nothing out of the receiver"},
+	"Seq":             {why: "iterates a value's elements as reflect.Values"},
+	"Seq2":            {why: "iterates a value's index/element or key/value pairs as reflect.Values"},
+	"Send":            {moves: true, why: "sends a Value on a channel, and a channel is ordinary storage the declaration and its readers keep"},
+	"Set":             {moves: true, why: "copies one Value's contents into another's storage, which is the caller's variable"},
+	"SetBool":         {moves: true, why: "writes contents into a Value's storage; the inverse flattening's direction, and this gate convicts both"},
+	"SetBytes":        {moves: true, why: "writes octets into a Value's storage"},
+	"SetCap":          {why: "changes a slice header's capacity; it moves no contents"},
+	"SetComplex":      {moves: true, why: "writes contents into a Value's storage"},
+	"SetFloat":        {moves: true, why: "writes contents into a Value's storage"},
+	"SetInt":          {moves: true, why: "writes contents into a Value's storage"},
+	"SetIterKey":      {moves: true, why: "writes a map iterator's current key into a Value's storage"},
+	"SetIterValue":    {moves: true, why: "writes a map iterator's current value into a Value's storage"},
+	"SetLen":          {why: "changes a slice header's length; it moves no contents"},
+	"SetMapIndex":     {moves: true, why: "writes a Value into a map the caller keeps"},
+	"SetPointer":      {moves: true, why: "writes an unsafe.Pointer into a Value's storage"},
+	"SetString":       {moves: true, why: "writes contents into a Value's storage"},
+	"SetUint":         {moves: true, why: "writes contents into a Value's storage"},
+	"SetZero":         {why: "writes the zero value; no source value's octets pass through it"},
+	"Slice":           {why: "a sub-slice of an array or slice as another reflect.Value. It ALIASES the field's octets, and it was on the old four-item list, but on its own it hands nothing out: Bytes or Interface is still owed"},
+	"Slice3":          {why: "Slice with an explicit capacity; another reflect.Value"},
+	"String":          {why: "THE EXCEPTION, AND ITS BOUNDARY IS IN THE HEADER ABOVE. On Kind String it answers the contents, and Kind String is reachable from an array of uint8 only through Convert or Interface, both of which are movers. It is ruled here rather than as a mover because reflect.Type has a String method too and this gate matches names, so ruling it a mover empties the complement"},
+	"TryRecv":         {why: "a non-blocking Recv; it takes nothing out of the receiver"},
+	"TrySend":         {moves: true, why: "a non-blocking Send; the Value leaves on a channel"},
+	"Type":            {why: "a reflect.Type describing the value"},
+	"Uint":            {moves: true, why: "a scalar read of the value's contents. THIS IS THE ONE THE OLD FOUR-ITEM LIST MISSED: Index(j).Uint() reads a [32]byte one octet at a time and assembles the pair with neither Bytes, Slice, Interface nor Copy"},
+	"UnsafeAddr":      {moves: true, why: "answers the address of the octets as a uintptr"},
+	"UnsafePointer":   {moves: true, why: "answers a pointer to the octets"},
+}
+
+// streamAdapterReflectFunctions is the STATED BOUNDARY: reflect's package-level functions cannot
+// be enumerated, so this table can only be checked in one direction -- a name it does not hold
+// convicts. It is not a claim to be complete; it is a claim that incompleteness fails closed.
+var streamAdapterReflectFunctions = map[string]streamAdapterReflectRuling{
+	"Append":      {moves: true, why: "appends Values to a slice the caller keeps"},
+	"AppendSlice": {moves: true, why: "appends one slice Value's contents to another"},
+	"Copy":        {moves: true, why: "copies one Value's contents into another's storage"},
+	"DeepEqual":   {why: "a bool comparing two values"},
+	"Indirect":    {why: "dereferences into another reflect.Value"},
+	"MakeChan":    {why: "an empty channel Value"},
+	"MakeMap":     {why: "an empty map Value"},
+	"MakeSlice":   {why: "a zeroed slice Value"},
+	"New":         {why: "a zeroed addressable Value of a type; it reads nothing"},
+	"NewAt":       {moves: true, why: "builds a Value over memory named by an unsafe.Pointer"},
+	"PointerTo":   {why: "a reflect.Type"},
+	"Select":      {moves: true, why: "can carry a Value out on a send case"},
+	"SliceAt":     {moves: true, why: "builds a slice Value over memory named by an unsafe.Pointer"},
+	"TypeFor":     {why: "a reflect.Type"},
+	"TypeOf":      {why: "a reflect.Type"},
+	"ValueOf":     {why: "wraps an ordinary value INTO the reflect graph; it takes nothing out of one"},
+	"Zero":        {why: "a zero Value of a type"},
+}
+
+// streamAdapterReflectCensus holds the method table against reflect.Value's own method set, in
+// both directions, and answers the two derived sets plus the complement the moves narrowing
+// removes.
+func streamAdapterReflectCensus(t *testing.T) (map[string]bool, map[string]bool, []string) {
+	t.Helper()
+	valueType := reflect.TypeOf(reflect.Value{})
+	onTheType := map[string]bool{}
+	for i := range valueType.NumMethod() {
+		onTheType[valueType.Method(i).Name] = true
+	}
+	if len(onTheType) == 0 {
+		t.Fatal("reflect.Value answered no exported method, so this census read nothing and the narrowing below is derived from nothing")
+	}
+	unruled := []string{}
+	for name := range onTheType {
+		if _, ruled := streamAdapterReflectValueMethods[name]; !ruled {
+			unruled = append(unruled, name)
+		}
+	}
+	stale := []string{}
+	for name := range streamAdapterReflectValueMethods {
+		if !onTheType[name] {
+			stale = append(stale, name)
+		}
+	}
+	slices.Sort(unruled)
+	slices.Sort(stale)
+	if len(unruled) != 0 {
+		t.Errorf(
+			"reflect.Value has %d exported method(s) streamAdapterReflectValueMethods does not rule on: %v. Rule each one: can it yield a struct FIELD as a Value, and can it put that field's octets somewhere that is not another reflect.Value? Until then this gate's narrowing is a list again, and a list is what the per-octet flattening walked past",
+			len(unruled), unruled,
+		)
+	}
+	if len(stale) != 0 {
+		t.Errorf("streamAdapterReflectValueMethods rules on %d name(s) reflect.Value does not declare: %v", len(stale), stale)
+	}
+	reads := map[string]bool{}
+	moves := map[string]bool{}
+	complement := []string{}
+	for name, ruling := range streamAdapterReflectValueMethods {
+		if ruling.reads {
+			reads[name] = true
+		}
+		if ruling.moves {
+			moves[name] = true
+			continue
+		}
+		complement = append(complement, fmt.Sprintf("reflect.Value.%s -- %s", name, ruling.why))
+	}
+	for name, ruling := range streamAdapterReflectFunctions {
+		if ruling.moves {
+			moves[name] = true
+			continue
+		}
+		complement = append(complement, fmt.Sprintf("reflect.%s -- %s", name, ruling.why))
+	}
+	slices.Sort(complement)
+	if len(reads) == 0 {
+		t.Fatal("no method of reflect.Value is ruled as reading a struct's fields, so the flattening gate's class is empty")
+	}
+	if len(moves) == 0 {
+		t.Fatal("no method of reflect.Value is ruled as moving octets, so the flattening gate would convict nothing")
+	}
+	t.Logf("REFLECT CENSUS: reflect.Value declares %d exported method(s); every one of them carries a ruling", len(onTheType))
+	t.Logf("  the %d that can yield a struct's FIELD as a Value: %v", len(reads), slices.Sorted(maps.Keys(reads)))
+	t.Logf("  the %d that can put octets outside the reflect.Value graph (with reflect's own functions): %v", len(moves), slices.Sorted(maps.Keys(moves)))
+	return reads, moves, complement
+}
+
+// streamAdapterReflectPackageCalls answers every call spelled <reflect>.Name(...) inside a node,
+// where <reflect> is the local name of the reflect import in that file.
+func streamAdapterReflectPackageCalls(node ast.Node, local string) []string {
+	found := map[string]bool{}
+	if local == "" {
+		return nil
+	}
+	ast.Inspect(node, func(inner ast.Node) bool {
+		call, ok := inner.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		identifier, ok := selector.X.(*ast.Ident)
+		if !ok || identifier.Name != local {
+			return true
+		}
+		found[selector.Sel.Name] = true
+		return true
+	})
+	return slices.Sorted(maps.Keys(found))
+}
+
+// streamAdapterImportLocalNames answers, per production file, the local name the reflect package
+// is imported under -- read from each file's own import spec, so an aliased import cannot walk
+// past the boundary check.
+func streamAdapterImportLocalNames(parsed map[string]*ast.File, path string) map[string]string {
+	local := map[string]string{}
+	for name, file := range parsed {
+		for _, imported := range file.Imports {
+			quoted, err := strconv.Unquote(imported.Path.Value)
+			if err != nil || quoted != path {
+				continue
+			}
+			if imported.Name != nil {
+				local[name] = imported.Name.Name
+			} else {
+				local[name] = path[strings.LastIndex(path, "/")+1:]
+			}
+		}
+	}
+	return local
+}
+
 // streamAdapterOctetMovingRulings is the one place a declaration outside the adapter is excused
 // from being a second flattening, and each excuse is a sentence rather than a name on a list.
 var streamAdapterOctetMovingRulings = map[string]string{
@@ -339,12 +659,19 @@ func TestEveryStreamKeyFlatteningInPackageSdkIsTheAdapters(t *testing.T) {
 	adapterType := streamAdapterTypeName(t)
 	_, parsed, declarations := streamAdapterParse(t)
 	packageVars := streamAdapterPackageVarNames(parsed)
-	reflectiveReads := map[string]bool{"Field": true, "FieldByName": true, "FieldByIndex": true}
-	octetMovers := map[string]bool{"Bytes": true, "Slice": true, "Interface": true, "Copy": true}
+	reflectiveReads, octetMovers, reflectComplement := streamAdapterReflectCensus(t)
+	reflectLocal := streamAdapterImportLocalNames(parsed, "reflect")
 
-	t.Logf("SCOPE: %d production file(s) of package sdk, %d function declaration(s)", len(parsed), len(declarations))
-	t.Logf("CLASS: declarations containing a reflective field read %v", slices.Sorted(maps.Keys(reflectiveReads)))
-	t.Logf("NARROWED TO: of those, the ones that also MOVE the octets, by %v -- the four ways reflect has of getting a field's bytes out of or into a value", slices.Sorted(maps.Keys(octetMovers)))
+	t.Logf("SCOPE: %d production file(s) of package sdk, %d function declaration(s), %d importing reflect", len(parsed), len(declarations), len(reflectLocal))
+	t.Logf("CLASS: declarations containing a reflective field read %v -- read off reflect.Value's method set, not written down", slices.Sorted(maps.Keys(reflectiveReads)))
+	t.Logf("NARROWED TO: of those, the ones that also MOVE the octets %v", slices.Sorted(maps.Keys(octetMovers)))
+	t.Logf("COMPLEMENT the reflect census removed (%d operation(s) that cannot put a field's octets outside the reflect.Value graph):", len(reflectComplement))
+	for _, line := range reflectComplement {
+		t.Logf("    %s", line)
+	}
+	if len(reflectComplement) == 0 {
+		t.Error("the reflect census excluded no operation at all, so the octet-moving narrowing is not narrowing")
+	}
 	t.Logf("the adapter type, read by calling the producer rather than written down: %s", adapterType)
 
 	members := 0
@@ -359,6 +686,24 @@ func TestEveryStreamKeyFlatteningInPackageSdkIsTheAdapters(t *testing.T) {
 		}
 		members += 1
 		moves := streamAdapterCallsSelector(declaration.node, octetMovers)
+		// THE STATED BOUNDARY, FAILING CLOSED. reflect's package-level functions cannot be
+		// enumerated, so a call into the reflect package that this census has never heard of
+		// is treated as an octet mover AND reported, rather than passed over.
+		for _, called := range streamAdapterReflectPackageCalls(declaration.node, reflectLocal[declaration.file]) {
+			ruling, ruled := streamAdapterReflectFunctions[called]
+			if !ruled {
+				t.Errorf(
+					"%s reads a StreamKey's fields and calls reflect.%s, which streamAdapterReflectFunctions does not rule on. Go has no reflection over a package's functions, so this half of the narrowing cannot be enumerated and it fails CLOSED: rule reflect.%s -- can it put a field's octets somewhere that is not another reflect.Value? -- rather than leaving the gate to guess",
+					declaration.label(), called, called,
+				)
+				moves = append(moves, "reflect."+called)
+				continue
+			}
+			if ruling.moves && !slices.Contains(moves, called) {
+				moves = append(moves, called)
+			}
+		}
+		slices.Sort(moves)
 		results := streamAdapterResultTypes(declaration.node)
 		outward := streamAdapterAssignsOutward(declaration.node, packageVars)
 		if len(moves) == 0 {
@@ -396,7 +741,7 @@ func TestEveryStreamKeyFlatteningInPackageSdkIsTheAdapters(t *testing.T) {
 	for _, line := range ruled {
 		t.Logf("    %s", line)
 	}
-	t.Logf("  COMPLEMENT the octet-moving narrowing removed (%d) -- these read a key's fields and never take their bytes:", len(readsOnly))
+	t.Logf("  COMPLEMENT the octet-moving narrowing removed (%d) -- these call a field-reading name and move no octets:", len(readsOnly))
 	for _, line := range readsOnly {
 		t.Logf("    %s", line)
 	}
@@ -708,116 +1053,457 @@ func streamAdapterPackageVarOf[T any](pointer *T) streamAdapterPackageVar {
 	}
 }
 
-// streamAdapterPackageVarCensus is every NAMED package-level variable of package sdk's production
-// files. It is hand-written because it cannot be anything else, and the gate below holds it
-// against the syntax tree in both directions so that "hand-written" does not mean "stale".
+// streamAdapterPackageValueCensus is every NAMED package-level VALUE of package sdk's production
+// files that this gate's derivation cannot rule out as an error -- every variable, and every
+// constant whose declared type the syntax tree cannot prove methodless. It is hand-written because
+// it cannot be anything else: Go has no reflection over a package's variables or constants, so a
+// NAME can only become a TYPE by being written down once. The gate below holds it against the
+// syntax tree in both directions so that "hand-written" does not mean "stale".
 //
-// A var added to package sdk in a file this platform does not build cannot appear here at all --
-// it would not compile. That is a loud failure, a build error or this gate reporting a name it
-// cannot see, and never a silent pass, which is the only property that residual has to have.
-// There is no such var on this tree: every name below is in a file carrying no build constraint.
-var streamAdapterPackageVarCensus = map[string]streamAdapterPackageVar{
-	"base58BigRadix":                streamAdapterPackageVarOf(&base58BigRadix),
-	"base58BigZero":                 streamAdapterPackageVarOf(&base58BigZero),
-	"base58Table":                   streamAdapterPackageVarOf(&base58Table),
-	"countryCodeColorHexes":         streamAdapterPackageVarOf(&countryCodeColorHexes),
-	"defaultTunnelDnsServersIpv4":   streamAdapterPackageVarOf(&defaultTunnelDnsServersIpv4),
-	"defaultTunnelDnsServersIpv6":   streamAdapterPackageVarOf(&defaultTunnelDnsServersIpv6),
-	"deviceRpcDefaultAddress":       streamAdapterPackageVarOf(&deviceRpcDefaultAddress),
-	"errStreamAppendInterrupted":    streamAdapterPackageVarOf(&errStreamAppendInterrupted),
-	"errStreamInjectedFlushFailure": streamAdapterPackageVarOf(&errStreamInjectedFlushFailure),
-	"ErrStreamKeySpace":             streamAdapterPackageVarOf(&ErrStreamKeySpace),
-	"ErrStreamKeyWidth":             streamAdapterPackageVarOf(&ErrStreamKeyWidth),
-	"ErrStreamStoreConsumed":        streamAdapterPackageVarOf(&ErrStreamStoreConsumed),
-	"ErrStreamStoreLocked":          streamAdapterPackageVarOf(&ErrStreamStoreLocked),
-	"ErrStreamStoreRewound":         streamAdapterPackageVarOf(&ErrStreamStoreRewound),
-	"ErrStreamStoreState":           streamAdapterPackageVarOf(&ErrStreamStoreState),
-	"multiPartPublicSuffixes":       streamAdapterPackageVarOf(&multiPartPublicSuffixes),
-	"probeDnsTargets":               streamAdapterPackageVarOf(&probeDnsTargets),
-	"probeHttpTargets":              streamAdapterPackageVarOf(&probeHttpTargets),
-	"publicIdentityKeyHashEncoding": streamAdapterPackageVarOf(&publicIdentityKeyHashEncoding),
-	"streamStoreHeldHere":           streamAdapterPackageVarOf(&streamStoreHeldHere),
-	"streamStoreHeldHereMutex":      streamAdapterPackageVarOf(&streamStoreHeldHereMutex),
-	"streamStoreSentinelRulings":    streamAdapterPackageVarOf(&streamStoreSentinelRulings),
+// A value declared in a file THIS BUILD DOES NOT COMPILE cannot appear here at all -- naming it
+// would not compile -- so it is not demanded here: streamAdapterPackageValuePositions asks
+// go/build whether each file is in this build and lists the rest as out of scope, and the
+// platform's own fragment, streamAdapterPlatformValueCensus, carries the ones that are.
+var streamAdapterPackageValueCensus = map[string]streamAdapterPackageVar{
+	"blockActionEvictInterval":                 streamAdapterPackageConstOf(blockActionEvictInterval),
+	"contractEjectWindow":                      streamAdapterPackageConstOf(contractEjectWindow),
+	"defaultAccountCheckTimeout":               streamAdapterPackageConstOf(defaultAccountCheckTimeout),
+	"defaultBlockActionWindowDuration":         streamAdapterPackageConstOf(defaultBlockActionWindowDuration),
+	"defaultNetworkCheckTimeout":               streamAdapterPackageConstOf(defaultNetworkCheckTimeout),
+	"defaultThroughputSampleInterval":          streamAdapterPackageConstOf(defaultThroughputSampleInterval),
+	"defaultThroughputWindowDuration":          streamAdapterPackageConstOf(defaultThroughputWindowDuration),
+	"dohServerScoresStaleAfter":                streamAdapterPackageConstOf(dohServerScoresStaleAfter),
+	"platformTransportMigrateConnectTimeout":   streamAdapterPackageConstOf(platformTransportMigrateConnectTimeout),
+	"platformTransportMigrateMaxScheduleDelay": streamAdapterPackageConstOf(platformTransportMigrateMaxScheduleDelay),
+	"probeShutdownTimeout":                     streamAdapterPackageConstOf(probeShutdownTimeout),
+	"securityPolicyMonitorInterval":            streamAdapterPackageConstOf(securityPolicyMonitorInterval),
+	"streamRowIdentityLen":                     streamAdapterPackageConstOf(streamRowIdentityLen),
+	"streamRowNameLen":                         streamAdapterPackageConstOf(streamRowNameLen),
+	"windowIdentitiesStaleAfter":               streamAdapterPackageConstOf(windowIdentitiesStaleAfter),
+	"base58BigRadix":                           streamAdapterPackageVarOf(&base58BigRadix),
+	"base58BigZero":                            streamAdapterPackageVarOf(&base58BigZero),
+	"base58Table":                              streamAdapterPackageVarOf(&base58Table),
+	"countryCodeColorHexes":                    streamAdapterPackageVarOf(&countryCodeColorHexes),
+	"defaultTunnelDnsServersIpv4":              streamAdapterPackageVarOf(&defaultTunnelDnsServersIpv4),
+	"defaultTunnelDnsServersIpv6":              streamAdapterPackageVarOf(&defaultTunnelDnsServersIpv6),
+	"deviceRpcDefaultAddress":                  streamAdapterPackageVarOf(&deviceRpcDefaultAddress),
+	"errStreamAppendInterrupted":               streamAdapterPackageVarOf(&errStreamAppendInterrupted),
+	"errStreamInjectedFlushFailure":            streamAdapterPackageVarOf(&errStreamInjectedFlushFailure),
+	"ErrStreamKeySpace":                        streamAdapterPackageVarOf(&ErrStreamKeySpace),
+	"ErrStreamKeyWidth":                        streamAdapterPackageVarOf(&ErrStreamKeyWidth),
+	"ErrStreamStoreConsumed":                   streamAdapterPackageVarOf(&ErrStreamStoreConsumed),
+	"ErrStreamStoreLocked":                     streamAdapterPackageVarOf(&ErrStreamStoreLocked),
+	"ErrStreamStoreRewound":                    streamAdapterPackageVarOf(&ErrStreamStoreRewound),
+	"ErrStreamStoreState":                      streamAdapterPackageVarOf(&ErrStreamStoreState),
+	"multiPartPublicSuffixes":                  streamAdapterPackageVarOf(&multiPartPublicSuffixes),
+	"probeDnsTargets":                          streamAdapterPackageVarOf(&probeDnsTargets),
+	"probeHttpTargets":                         streamAdapterPackageVarOf(&probeHttpTargets),
+	"publicIdentityKeyHashEncoding":            streamAdapterPackageVarOf(&publicIdentityKeyHashEncoding),
+	"streamStoreHeldHere":                      streamAdapterPackageVarOf(&streamStoreHeldHere),
+	"streamStoreHeldHereMutex":                 streamAdapterPackageVarOf(&streamStoreHeldHereMutex),
+	"streamStoreSentinelRulings":               streamAdapterPackageVarOf(&streamStoreSentinelRulings),
 }
 
-// streamAdapterPackageVarPositions reads every package-level var of package sdk's production
-// files off the syntax tree: name -> where it is declared. The BLANK identifier is answered
-// separately, because it is excluded on a derivation rather than by taste -- a blank name cannot
-// be referenced, so no errors.Is can reach it, no ruling could name it and no census entry could
-// be written for it.
-func streamAdapterPackageVarPositions(t *testing.T) (map[string]string, []string) {
+// streamAdapterPackageConstOf answers a package-level CONSTANT's DECLARED type, the same way
+// streamAdapterPackageVarOf answers a variable's. It takes the value rather than its address,
+// because a constant has no address, and the type parameter is what carries the declaration's
+// type: for `const e errString = "x"` T is inferred as errString, and errString's method set --
+// not the spelling of the initialiser -- is what decides whether it is an error.
+func streamAdapterPackageConstOf[T any](value T) streamAdapterPackageVar {
+	return streamAdapterPackageVar{
+		declared: reflect.TypeOf((*T)(nil)).Elem(),
+		value:    reflect.ValueOf(value),
+	}
+}
+
+// streamAdapterCensus merges the portable census with this platform's fragment. The fragment
+// exists because a package-level value declared in a build-constrained file can only be NAMED by
+// source this build compiles: streamAdapterPlatformValueCensus lives beside the production
+// exclusion files' own constraints, and the scope check below is go/build's answer rather than a
+// reading of a comment.
+func streamAdapterCensus() map[string]streamAdapterPackageVar {
+	merged := map[string]streamAdapterPackageVar{}
+	maps.Copy(merged, streamAdapterPackageValueCensus)
+	maps.Copy(merged, streamAdapterPlatformValueCensus)
+	return merged
+}
+
+// streamAdapterNonSentinels merges the portable and platform halves of the ruling table for
+// package-level error values that are NOT the store's sentinels.
+func streamAdapterNonSentinels() map[string]string {
+	merged := map[string]string{}
+	maps.Copy(merged, streamAdapterNonSentinelRulings)
+	maps.Copy(merged, streamAdapterPlatformNonSentinelRulings)
+	return merged
+}
+
+// streamAdapterNonSentinelRulings is the second half of the class's totality, and it is here
+// rather than in production for one reason: a value ruled here is NOT something the adapter maps,
+// so putting it in streamStoreSentinelRulings would be claiming a verdict for a refusal
+// SenderRatchet.Next can never meet.
+//
+// EVERY ENTRY IS CHECKED, not taken on trust. The gate holds that a value ruled here is never
+// handed to fmt.Errorf anywhere in production sdk -- which is the only way this package puts a
+// value into an error chain, and therefore the only way one can reach classify. Wrap one with %w
+// tomorrow and this stops being a valid excuse and the gate says so.
+var streamAdapterNonSentinelRulings = map[string]string{}
+
+// streamAdapterPredeclaredTypeNames is the set of type names a CONSTANT's declared type can be
+// without being a defined type with a method set. The Go spec's constant types are boolean,
+// rune, integer, floating-point, complex and string; none of the predeclared spellings of those
+// has methods, so a constant declared with one cannot implement error.
+var streamAdapterPredeclaredTypeNames = map[string]bool{
+	"bool": true, "string": true, "int": true, "int8": true, "int16": true, "int32": true,
+	"int64": true, "uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+	"uintptr": true, "byte": true, "rune": true, "float32": true, "float64": true,
+	"complex64": true, "complex128": true,
+}
+
+// streamAdapterValueDecl is one package-level value declaration of package sdk, as the syntax
+// tree has it. spec is the EFFECTIVE ValueSpec: inside a const group a spec with neither a type
+// nor a value repeats the preceding one, and the type it inherits is that one's.
+type streamAdapterValueDecl struct {
+	file     string
+	constant bool
+	spec     *ast.ValueSpec
+	position string
+}
+
+// streamAdapterLocalTypes answers every type package sdk's production files DECLARE, and the
+// subset of them carrying an Error method. Both are read off the syntax tree, so "which of this
+// package's types is an error type" is derived and not listed.
+func streamAdapterLocalTypes(parsed map[string]*ast.File) (map[string]bool, map[string]bool) {
+	declared := map[string]bool{}
+	withError := map[string]bool{}
+	for _, file := range parsed {
+		for _, declaration := range file.Decls {
+			if general, ok := declaration.(*ast.GenDecl); ok && general.Tok == token.TYPE {
+				for _, spec := range general.Specs {
+					if typeSpec, ok := spec.(*ast.TypeSpec); ok {
+						declared[typeSpec.Name.Name] = true
+					}
+				}
+				continue
+			}
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Recv == nil || len(function.Recv.List) == 0 || function.Name.Name != "Error" {
+				continue
+			}
+			receiver := function.Recv.List[0].Type
+			if star, ok := receiver.(*ast.StarExpr); ok {
+				receiver = star.X
+			}
+			if identifier, ok := receiver.(*ast.Ident); ok {
+				withError[identifier.Name] = true
+			}
+		}
+	}
+	return declared, withError
+}
+
+// streamAdapterConstantNeedsCensus is THE DERIVATION over a package-level constant: can it be an
+// error at all, as far as the syntax tree can tell?
+//
+// A constant's type is a basic type or a DEFINED type whose underlying type is basic, and for it
+// to implement error that defined type must carry an Error method. So:
+//
+//	an explicit or inherited type that is PREDECLARED            -> cannot be an error
+//	an explicit or inherited type that package sdk declares and
+//	  which has no Error method                                  -> cannot be an error
+//	an explicit or inherited type that package sdk declares and
+//	  which HAS one                                              -> CENSUS IT
+//	no type at all, and every operand is a literal, iota, or
+//	  another constant of this package that is itself untyped     -> cannot be an error: an
+//	                                                                untyped constant takes one of
+//	                                                                Go's default types -- bool,
+//	                                                                rune, int, float64,
+//	                                                                complex128, string -- and
+//	                                                                none of them has methods
+//	anything else -- an IMPORTED type, a conversion or an
+//	  identifier from another package, a spec shape this walk
+//	  does not understand                                        -> CENSUS IT, fail closed
+//
+// The last line is the whole safety of it. This gate cannot see another package's method set, and
+// syscall.Errno -- which two of package sdk's own constants are -- implements error. A constant
+// whose type this walk cannot resolve is not assumed harmless; it is made to carry an entry, and
+// the entry's type parameter is the compiler's answer rather than this walk's.
+func streamAdapterConstantNeedsCensus(
+	spec *ast.ValueSpec,
+	decls map[string]streamAdapterValueDecl,
+	declared map[string]bool,
+	withError map[string]bool,
+	seen map[string]bool,
+) (bool, string) {
+	if spec.Type != nil {
+		switch typed := spec.Type.(type) {
+		case *ast.Ident:
+			switch {
+			case streamAdapterPredeclaredTypeNames[typed.Name]:
+				return false, "declared with the predeclared type " + typed.Name + ", which has no methods"
+			case withError[typed.Name]:
+				return true, "declared with " + typed.Name + ", a type package sdk declares WITH an Error method"
+			case declared[typed.Name]:
+				return false, "declared with " + typed.Name + ", a type package sdk declares and which has no Error method"
+			}
+			return true, "declared with the type " + typed.Name + ", which this gate cannot resolve"
+		case *ast.SelectorExpr:
+			return true, "declared with the IMPORTED type " + streamAdapterTypeText(typed) + ", whose method set this gate cannot see"
+		}
+		return true, fmt.Sprintf("declared with a type expression this gate does not understand (%T)", spec.Type)
+	}
+	if len(spec.Values) == 0 {
+		return true, "neither a type nor a value this gate could follow"
+	}
+	for _, value := range spec.Values {
+		if needs, why := streamAdapterConstantExprNeedsCensus(value, decls, declared, withError, seen); needs {
+			return true, why
+		}
+	}
+	return false, "untyped: every operand is a literal, iota, or another untyped constant of this package"
+}
+
+func streamAdapterConstantExprNeedsCensus(
+	expression ast.Expr,
+	decls map[string]streamAdapterValueDecl,
+	declared map[string]bool,
+	withError map[string]bool,
+	seen map[string]bool,
+) (bool, string) {
+	switch typed := expression.(type) {
+	case *ast.BasicLit:
+		return false, ""
+	case *ast.ParenExpr:
+		return streamAdapterConstantExprNeedsCensus(typed.X, decls, declared, withError, seen)
+	case *ast.UnaryExpr:
+		return streamAdapterConstantExprNeedsCensus(typed.X, decls, declared, withError, seen)
+	case *ast.BinaryExpr:
+		if needs, why := streamAdapterConstantExprNeedsCensus(typed.X, decls, declared, withError, seen); needs {
+			return true, why
+		}
+		return streamAdapterConstantExprNeedsCensus(typed.Y, decls, declared, withError, seen)
+	case *ast.Ident:
+		if typed.Name == "iota" || typed.Name == "true" || typed.Name == "false" {
+			return false, ""
+		}
+		other, ok := decls[typed.Name]
+		if !ok || !other.constant {
+			return true, "initialised from " + typed.Name + ", which this gate cannot resolve to a constant of this package"
+		}
+		if seen[typed.Name] {
+			return true, "a constant reference cycle this gate will not follow"
+		}
+		seen[typed.Name] = true
+		return streamAdapterConstantNeedsCensus(other.spec, decls, declared, withError, seen)
+	case *ast.CallExpr:
+		switch fun := typed.Fun.(type) {
+		case *ast.Ident:
+			switch {
+			case streamAdapterPredeclaredTypeNames[fun.Name]:
+				return false, ""
+			case withError[fun.Name]:
+				return true, "converted to " + fun.Name + ", a type package sdk declares WITH an Error method"
+			case declared[fun.Name]:
+				return false, ""
+			}
+			return true, "converted by " + fun.Name + ", which this gate cannot resolve"
+		case *ast.SelectorExpr:
+			return true, "converted to the IMPORTED type " + streamAdapterTypeText(fun) + ", whose method set this gate cannot see"
+		}
+		return true, "a call this gate does not understand"
+	case *ast.SelectorExpr:
+		return true, "initialised from the IMPORTED identifier " + streamAdapterTypeText(typed) + ", whose type this gate cannot see"
+	}
+	return true, fmt.Sprintf("an expression this gate does not understand (%T)", expression)
+}
+
+// streamAdapterBuiltUnder is go/build's OWN answer to each production file's build constraints,
+// under a context the caller chooses: does that build compile it? A file a build does not compile
+// declares names no source in that build can spell, so no census entry for one could exist there
+// -- and a gate that demanded one would be a gate that cannot pass on that platform.
+//
+// IT TAKES THE CONTEXT RATHER THAN READING build.Default, and that is not generality for its own
+// sake. On windows/amd64 the scope narrowing removes no NAME at all: every value this enumeration
+// classifies sits in a file this build compiles, so the clause would be inert here and defended by
+// nothing. Handing it a context lets TestTheValueCensusScopeIsThisBuildsOwnFileSet run the same
+// enumeration under GOOS=linux, where the two syscall.Errno constants of the Windows exclusion file
+// DO fall out of reach, and watch them move from the demanded set into the out-of-scope list. The
+// platform this clause exists for is reachable from the platform this suite runs on.
+func streamAdapterBuiltUnder(t *testing.T, parsed map[string]*ast.File, context build.Context) map[string]bool {
+	t.Helper()
+	built := map[string]bool{}
+	compiled := 0
+	for name := range parsed {
+		match, err := context.MatchFile(".", name)
+		if err != nil {
+			t.Fatalf("go/build could not answer whether a %s build compiles %s: %v", context.GOOS, name, err)
+		}
+		built[name] = match
+		if match {
+			compiled += 1
+		}
+	}
+	if compiled == 0 {
+		t.Fatalf("go/build says a %s build compiles none of package sdk's production files, so the census scope is empty", context.GOOS)
+	}
+	return built
+}
+
+// streamAdapterPackageValuePositions reads every package-level VALUE of package sdk's production
+// files off the syntax tree -- VAR and CONST alike -- and answers name -> position for the ones
+// the census has to hold, plus the complement, plus the names this platform's build puts out of
+// reach.
+//
+// THE CONST HALF IS NEW, AND IT IS WHY. The enumeration used to walk `general.Tok != token.VAR`
+// and skip everything else, so a sentinel spelled as a CONSTANT of a named string type with an
+// Error method was never enumerated, never censused, never ruled, and forwarded by classify as
+// TRANSIENT. Worse than missing it: adding such a constant to the census made the gate report it
+// as a name "package sdk no longer declares", so the failure message told the reader to DELETE the
+// entry -- and the gate went green on exactly the move that hid the sentinel. The enumeration is
+// over names off the syntax tree for constants for the same reason it is for variables: a
+// declaration must spell the name it declares, whatever shape its initialiser takes.
+//
+// The BLANK identifier is answered in the complement on a derivation rather than by taste -- a
+// blank name cannot be referenced, so no errors.Is can reach it, no ruling could name it and no
+// census entry could be written for it.
+func streamAdapterPackageValuePositions(t *testing.T) (map[string]string, []string, []string, map[string]string) {
+	t.Helper()
+	return streamAdapterValuePositionsUnder(t, build.Default)
+}
+
+func streamAdapterValuePositionsUnder(t *testing.T, context build.Context) (map[string]string, []string, []string, map[string]string) {
 	t.Helper()
 	fileSet, parsed, _ := streamAdapterParse(t)
-	named := map[string]string{}
-	blanks := []string{}
+	built := streamAdapterBuiltUnder(t, parsed, context)
+	declaredTypes, errorTypes := streamAdapterLocalTypes(parsed)
+
+	decls := map[string]streamAdapterValueDecl{}
+	complement := []string{}
 	for name, file := range parsed {
 		for _, declaration := range file.Decls {
 			general, ok := declaration.(*ast.GenDecl)
-			if !ok || general.Tok != token.VAR {
+			if !ok || (general.Tok != token.VAR && general.Tok != token.CONST) {
 				continue
 			}
+			var previous *ast.ValueSpec
 			for _, spec := range general.Specs {
 				value, ok := spec.(*ast.ValueSpec)
 				if !ok {
 					continue
 				}
+				effective := value
+				if general.Tok == token.CONST && value.Type == nil && len(value.Values) == 0 && previous != nil {
+					effective = previous
+				} else {
+					previous = value
+				}
 				for _, identifier := range value.Names {
 					position := fileSet.Position(identifier.Pos()).String()
 					if identifier.Name == "_" {
-						blanks = append(blanks, fmt.Sprintf("%s in %s", position, name))
+						complement = append(complement, fmt.Sprintf(
+							"a blank identifier at %s in %s -- unreferenceable, so no errors.Is can reach it", position, name))
 						continue
 					}
-					named[identifier.Name] = position
+					decls[identifier.Name] = streamAdapterValueDecl{
+						file:     name,
+						constant: general.Tok == token.CONST,
+						spec:     effective,
+						position: position,
+					}
 				}
 			}
 		}
 	}
-	slices.Sort(blanks)
-	return named, blanks
+
+	named := map[string]string{}
+	outOfScope := []string{}
+	excluded := map[string]string{}
+	for _, name := range slices.Sorted(maps.Keys(decls)) {
+		declaration := decls[name]
+		if declaration.constant {
+			needs, why := streamAdapterConstantNeedsCensus(
+				declaration.spec, decls, declaredTypes, errorTypes, map[string]bool{})
+			if !needs {
+				complement = append(complement, fmt.Sprintf("the constant %s -- %s", name, why))
+				excluded[name] = why
+				continue
+			}
+			if !built[declaration.file] {
+				outOfScope = append(outOfScope, fmt.Sprintf(
+					"the constant %s in %s (%s) -- this build does not compile that file, so no source here can name it", name, declaration.file, why))
+				continue
+			}
+			named[name] = declaration.position
+			continue
+		}
+		if !built[declaration.file] {
+			outOfScope = append(outOfScope, fmt.Sprintf(
+				"the variable %s in %s -- this build does not compile that file, so no source here can name it", name, declaration.file))
+			continue
+		}
+		named[name] = declaration.position
+	}
+	slices.Sort(complement)
+	slices.Sort(outOfScope)
+	return named, complement, outOfScope, excluded
 }
 
 // streamAdapterSentinelDeclarations answers name -> the declared error value, for every
-// package-level variable of package sdk WHOSE DECLARED TYPE IS AN ERROR, plus the COMPLEMENT that
-// narrowing removed: every other named package-level variable, with the type that excluded it,
-// and every blank one with the reason it cannot be a sentinel at all.
+// package-level value of package sdk WHOSE DECLARED TYPE IS AN ERROR, plus the COMPLEMENT the two
+// narrowings removed: the constants the syntax tree proves cannot be errors, the blanks, the
+// censused values whose declared type does not implement error, and the names this build puts out
+// of reach.
 //
 // It fails the test outright when the census and the syntax tree disagree, because a census that
 // has fallen behind the tree is a gate that has stopped reading the package.
 func streamAdapterSentinelDeclarations(t *testing.T) (map[string]error, []string) {
 	t.Helper()
-	named, blanks := streamAdapterPackageVarPositions(t)
+	named, complement, outOfScope, excluded := streamAdapterPackageValuePositions(t)
+	census := streamAdapterCensus()
 	if len(named) == 0 {
-		t.Fatal("this gate found no named package-level variable at all, so it is holding nothing")
+		t.Fatal("this gate found no named package-level value at all, so it is holding nothing")
 	}
 	missing := []string{}
 	for name, position := range named {
-		if _, censused := streamAdapterPackageVarCensus[name]; !censused {
+		if _, censused := census[name]; !censused {
 			missing = append(missing, fmt.Sprintf("%s (%s)", name, position))
 		}
 	}
+	// A CENSUS ENTRY THE ENUMERATION DID NOT REACH IS ONE OF TWO DIFFERENT THINGS, and the
+	// message SAYS WHICH, because the wrong answer to it is how a sentinel gets hidden. An entry
+	// for a name this gate's own derivation already excluded is merely REDUNDANT and safe to
+	// remove. An entry for a name the enumeration never saw at all is this gate having stopped
+	// reading the package, and removing that one is exactly the move that hides the sentinel it
+	// was added for. The reason is looked up rather than guessed, so the two can never be
+	// reported as one another.
 	stale := []string{}
-	for name := range streamAdapterPackageVarCensus {
-		if _, declared := named[name]; !declared {
-			stale = append(stale, name)
+	for name := range census {
+		if _, declared := named[name]; declared {
+			continue
 		}
+		if why, ok := excluded[name]; ok {
+			stale = append(stale, fmt.Sprintf("%s -- REDUNDANT, and safe to remove: this gate's own derivation already excluded it (%s)", name, why))
+			continue
+		}
+		stale = append(stale, name+" -- NOT ENUMERATED AT ALL, and NOT safe to remove")
 	}
 	slices.Sort(missing)
 	slices.Sort(stale)
 	if len(missing) != 0 {
 		t.Errorf(
-			"%d package-level variable(s) of package sdk are not in streamAdapterPackageVarCensus, so this gate CANNOT SEE whether they are errors: %v. Add each one. If it is an error it then needs a ruling in streamStoreSentinelRulings; if it is not, it lands in the printed complement",
+			"%d package-level value(s) of package sdk are not in the census, so this gate CANNOT SEE whether they are errors: %v. Add each one -- a variable with streamAdapterPackageVarOf, a constant with streamAdapterPackageConstOf. If it is an error it then needs a ruling; if it is not, it lands in the printed complement",
 			len(missing), missing,
 		)
 	}
 	if len(stale) != 0 {
-		t.Errorf("streamAdapterPackageVarCensus names %d variable(s) package sdk no longer declares: %v", len(stale), stale)
+		t.Errorf(
+			"the census names %d value(s) this gate did not enumerate: %v. READ THE REASON ON EACH ONE BEFORE DELETING IT. A name package sdk still declares and this enumeration did not reach is this gate having stopped reading the package, and deleting that entry is the move that hides the sentinel. The enumeration covers package-level var AND const declarations of every production file this build compiles; a name in a file this build does not compile is listed under OUT OF SCOPE and belongs in streamAdapterPlatformValueCensus, beside that file's own build constraint",
+			len(stale), stale,
+		)
 	}
 	declared := map[string]error{}
-	complement := []string{}
-	for name, entry := range streamAdapterPackageVarCensus {
+	for name, entry := range census {
 		if !entry.declared.Implements(streamAdapterErrorType) {
-			complement = append(complement, fmt.Sprintf("%s declared %s", name, entry.declared.String()))
+			complement = append(complement, fmt.Sprintf("%s declared %s, which does not implement error", name, entry.declared.String()))
 			continue
 		}
 		held, ok := entry.value.Interface().(error)
@@ -827,11 +1513,151 @@ func streamAdapterSentinelDeclarations(t *testing.T) (map[string]error, []string
 		}
 		declared[name] = held
 	}
-	slices.Sort(complement)
-	for _, blank := range blanks {
-		complement = append(complement, fmt.Sprintf("a blank identifier at %s -- unreferenceable, so no errors.Is can reach it", blank))
+	for _, line := range outOfScope {
+		complement = append(complement, "OUT OF SCOPE: "+line)
 	}
+	slices.Sort(complement)
 	return declared, complement
+}
+
+// streamAdapterNamesPassedOrReturned answers, for each name, the production positions at which it
+// is handed to a call or returned. Those are the two ways a value declared in this package becomes
+// an error a caller holds, and therefore the two ways one can reach the adapter's classify: a
+// value that is only ever COMPARED -- `err == windowsSharingViolation` -- cannot.
+func streamAdapterNamesPassedOrReturned(t *testing.T, names map[string]bool) map[string][]string {
+	t.Helper()
+	fileSet, parsed, _ := streamAdapterParse(t)
+	sites := map[string][]string{}
+	record := func(expression ast.Expr) {
+		ast.Inspect(expression, func(node ast.Node) bool {
+			identifier, ok := node.(*ast.Ident)
+			if ok && names[identifier.Name] {
+				sites[identifier.Name] = append(sites[identifier.Name], fileSet.Position(identifier.Pos()).String())
+			}
+			return true
+		})
+	}
+	for _, file := range parsed {
+		ast.Inspect(file, func(node ast.Node) bool {
+			switch typed := node.(type) {
+			case *ast.CallExpr:
+				for _, argument := range typed.Args {
+					record(argument)
+				}
+			case *ast.ReturnStmt:
+				for _, result := range typed.Results {
+					record(result)
+				}
+			}
+			return true
+		})
+	}
+	return sites
+}
+
+// THE SCOPE THE VALUE CENSUS IS DEMANDED OVER, AND THE PLATFORM IT IS THERE FOR.
+//
+// streamAdapterValuePositionsUnder only DEMANDS a census entry for a value declared in a file the
+// build compiles, because an entry NAMES the value and a name from a file this build does not
+// compile cannot be spelled at all. On windows/amd64 that narrowing removes no NAME: the two
+// syscall.Errno constants of the Windows exclusion file are in a file this build compiles, and no
+// other constrained production file declares a package-level value. A clause whose effect is
+// empty on the platform the suite runs on is a clause nothing drives, and four rounds running
+// have shipped one of those.
+//
+// SO THE PLATFORM IT IS FOR IS REACHED FROM HERE. go/build answers constraints for whatever
+// context it is handed, so this case runs the same enumeration under GOOS=linux and watches the
+// two Windows constants move OUT of the demanded set and INTO the out-of-scope list -- and watches
+// the flock exclusion file, which windows/amd64 does not compile, come into the scope in their
+// place. Neither half is asserted as a number; both are asserted as a MOVEMENT between two sets,
+// so the case fails if the scoping stops happening in either direction.
+//
+// Mutations, measured in a disposable copy:
+//
+//	make streamAdapterBuiltUnder answer true for every file  -> red here: the Windows constants
+//	                                                            are demanded under GOOS=linux,
+//	                                                            where nothing can name them
+//	drop the out-of-scope branch and demand every class member -> the same red
+func TestTheValueCensusScopeIsThisBuildsOwnFileSet(t *testing.T) {
+	_, parsed, _ := streamAdapterParse(t)
+	here := streamAdapterBuiltUnder(t, parsed, build.Default)
+	excludedHere := []string{}
+	for _, name := range slices.Sorted(maps.Keys(here)) {
+		if !here[name] {
+			excludedHere = append(excludedHere, name)
+		}
+	}
+	t.Logf("SCOPE: go/build says this %s/%s build compiles %d of package sdk's %d production files",
+		build.Default.GOOS, build.Default.GOARCH, len(parsed)-len(excludedHere), len(parsed))
+	t.Logf("COMPLEMENT the build narrowing removed (%d file(s) this build does not compile): %v", len(excludedHere), excludedHere)
+	if len(excludedHere) == 0 {
+		t.Fatal("go/build excludes no production file of package sdk, so the census scope narrows nothing and this case is measuring nothing")
+	}
+
+	// the Windows exclusion file is compiled HERE, so its two constants are demanded here.
+	const windowsFile = "message_stream_exclusion_windows.go"
+	const flockFile = "message_stream_exclusion_unix.go"
+	if _, parsedWindows := parsed[windowsFile]; !parsedWindows {
+		t.Fatalf("%s is not among the production files this gate parses, so this case is naming a file that is not there", windowsFile)
+	}
+	if _, parsedFlock := parsed[flockFile]; !parsedFlock {
+		t.Fatalf("%s is not among the production files this gate parses", flockFile)
+	}
+
+	namedHere, _, outOfScopeHere, _ := streamAdapterValuePositionsUnder(t, build.Default)
+	elsewhere := build.Default
+	elsewhere.GOOS = "linux"
+	elsewhere.GOARCH = "amd64"
+	namedThere, _, outOfScopeThere, _ := streamAdapterValuePositionsUnder(t, elsewhere)
+
+	if here[flockFile] {
+		t.Errorf("go/build says this %s build compiles %s; the two exclusion files' constraints are complements and exactly one of them is this build's", build.Default.GOOS, flockFile)
+	}
+	if !here[windowsFile] {
+		t.Errorf("go/build says this %s build does not compile %s", build.Default.GOOS, windowsFile)
+	}
+	there := streamAdapterBuiltUnder(t, parsed, elsewhere)
+	if there[windowsFile] {
+		t.Errorf("go/build says a linux build compiles %s", windowsFile)
+	}
+	if !there[flockFile] {
+		t.Errorf("go/build says a linux build does not compile %s", flockFile)
+	}
+
+	// THE MOVEMENT, and it is the property: a value declared in a file a build does not compile
+	// is REPORTED OUT OF REACH rather than demanded, and the same value is demanded on the build
+	// that does compile it.
+	moved := 0
+	for _, name := range []string{"windowsLockViolation", "windowsSharingViolation"} {
+		if _, demandedHere := namedHere[name]; !demandedHere {
+			t.Errorf("%s is declared in %s, which this build compiles, and the census is not asked for it here; a value this build can name and does not census is one this gate cannot see the type of", name, windowsFile)
+		}
+		if _, demandedThere := namedThere[name]; demandedThere {
+			t.Errorf(
+				"%s is still DEMANDED under a linux build, where no source can name it. A census entry for it could not compile there, so a gate that demands it is a gate that cannot pass on that platform",
+				name,
+			)
+			continue
+		}
+		found := false
+		for _, line := range outOfScopeThere {
+			if strings.Contains(line, name) {
+				found = true
+				t.Logf("  under GOOS=linux: %s", line)
+			}
+		}
+		if !found {
+			t.Errorf("%s is neither demanded nor reported out of scope under a linux build, so this gate dropped it silently, which is the one outcome a scope narrowing must never have", name)
+			continue
+		}
+		moved += 1
+	}
+	if moved == 0 {
+		t.Fatal("no value moved between the two builds' demanded sets, so the build scoping is inert and this case is holding nothing")
+	}
+	t.Logf("OUT OF THIS BUILD'S REACH: %d name(s) here, %d under GOOS=linux; %d value(s) moved between the two",
+		len(outOfScopeHere), len(outOfScopeThere), moved)
+	t.Log("the scope narrowing removes no NAME on windows/amd64 and removes two on every GOOS that does not build the Windows exclusion file. That is why it takes a context rather than reading build.Default: the platform it exists for is not the platform this suite runs on")
 }
 
 // CLASS: every error sentinel package sdk DECLARES -- every package-level variable WHOSE DECLARED
@@ -851,8 +1677,8 @@ func streamAdapterSentinelDeclarations(t *testing.T) (map[string]error, []string
 // one that reaches the adapter unclassified is the one nothing raised yet.
 func TestTheStoreSentinelClassIsTotalOverTheAdaptersMapping(t *testing.T) {
 	declared, complement := streamAdapterSentinelDeclarations(t)
-	named, _ := streamAdapterPackageVarPositions(t)
-	t.Logf("SCOPE: %d named package-level variable(s) of package sdk, enumerated off the syntax tree", len(named))
+	named, _, outOfScope, _ := streamAdapterPackageValuePositions(t)
+	t.Logf("SCOPE: %d named package-level value(s) of package sdk -- var AND const -- enumerated off the syntax tree, over the production files go/build says this build compiles; %d name(s) are out of this build's reach", len(named), len(outOfScope))
 	t.Logf("CLASS: %d of them are declared as an error: %v", len(declared), slices.Sorted(maps.Keys(declared)))
 	t.Logf("COMPLEMENT the is-an-error narrowing removed (%d):", len(complement))
 	for _, line := range complement {
@@ -864,10 +1690,10 @@ func TestTheStoreSentinelClassIsTotalOverTheAdaptersMapping(t *testing.T) {
 	if len(complement) == 0 {
 		t.Error("the complement is empty, which means the is-an-error narrowing removed no package-level variable at all and this gate is not the gate it says it is")
 	}
-	if len(declared)+len(complement) < len(streamAdapterPackageVarCensus) {
+	if len(declared)+len(complement) < len(streamAdapterCensus()) {
 		t.Errorf(
-			"the class (%d) and the complement (%d) do not cover the census (%d); a named variable that is in neither is one this gate silently dropped",
-			len(declared), len(complement), len(streamAdapterPackageVarCensus),
+			"the class (%d) and the complement (%d) do not cover the census (%d); a named value that is in neither is one this gate silently dropped",
+			len(declared), len(complement), len(streamAdapterCensus()),
 		)
 	}
 
@@ -878,9 +1704,20 @@ func TestTheStoreSentinelClassIsTotalOverTheAdaptersMapping(t *testing.T) {
 		}
 		ruled[ruling.name] = ruling
 	}
+	// THE CLASS IS TOTAL OVER TWO TABLES AND THEY ARE DISJOINT. The adapter's own mapping
+	// rules the sentinels a store failure can carry; the second table rules the package-level
+	// error values that are NOT the store's sentinels and cannot reach classify at all. The
+	// second is in this file rather than in production because a verdict in
+	// streamStoreSentinelRulings is a claim about a refusal SenderRatchet.Next can meet.
+	nonSentinels := streamAdapterNonSentinels()
 	unclassified := []string{}
 	for name := range declared {
-		if _, ok := ruled[name]; !ok {
+		_, isRuled := ruled[name]
+		_, isNonSentinel := nonSentinels[name]
+		if isRuled && isNonSentinel {
+			t.Errorf("%s is ruled BOTH as one of the adapter's sentinels and as a value that cannot reach it; the two tables must be disjoint", name)
+		}
+		if !isRuled && !isNonSentinel {
 			unclassified = append(unclassified, name)
 		}
 	}
@@ -890,16 +1727,47 @@ func TestTheStoreSentinelClassIsTotalOverTheAdaptersMapping(t *testing.T) {
 			stale = append(stale, name)
 		}
 	}
+	staleNonSentinels := []string{}
+	for name := range nonSentinels {
+		if _, ok := declared[name]; !ok {
+			staleNonSentinels = append(staleNonSentinels, name)
+		}
+	}
 	slices.Sort(unclassified)
 	slices.Sort(stale)
+	slices.Sort(staleNonSentinels)
 	if len(unclassified) != 0 {
 		t.Errorf(
-			"%d sentinel(s) package sdk declares carry no ruling in the adapter's mapping: %v. An unclassified sentinel is forwarded as TRANSIENT, so a permanent refusal spelled this way would tell SenderRatchet.Next to retry forever and pay a durable write per attempt",
+			"%d error value(s) package sdk declares carry no ruling at all: %v. An unclassified sentinel is forwarded as TRANSIENT, so a permanent refusal spelled this way would tell SenderRatchet.Next to retry forever and pay a durable write per attempt. Rule it in streamStoreSentinelRulings if a store failure can carry it, or in streamAdapterNonSentinelRulings if it cannot -- and the second table is CHECKED, not taken on trust",
 			len(unclassified), unclassified,
 		)
 	}
 	if len(stale) != 0 {
-		t.Errorf("the adapter's mapping rules on %d name(s) package sdk no longer declares: %v", len(stale), stale)
+		t.Errorf("the adapter's mapping rules on %d name(s) package sdk no longer declares as an error: %v", len(stale), stale)
+	}
+	if len(staleNonSentinels) != 0 {
+		t.Errorf("streamAdapterNonSentinelRulings rules on %d name(s) package sdk no longer declares as an error: %v", len(staleNonSentinels), staleNonSentinels)
+	}
+
+	// AND THE SECOND TABLE'S EXCUSE IS MEASURED. A value that cannot reach classify is a value
+	// this package never hands to a call and never returns -- those are the two ways a
+	// declared value becomes an error a caller holds. Comparing one with == does not.
+	watched := map[string]bool{}
+	for name := range nonSentinels {
+		watched[name] = true
+	}
+	if len(watched) != 0 {
+		escaped := streamAdapterNamesPassedOrReturned(t, watched)
+		for _, name := range slices.Sorted(maps.Keys(watched)) {
+			if sites := escaped[name]; len(sites) != 0 {
+				t.Errorf(
+					"%s is ruled as an error value that cannot reach the adapter, and production sdk passes or returns it at %v. A value this package hands to a call or returns is a value that can end up in an error chain, so that excuse no longer holds and it needs a real verdict in streamStoreSentinelRulings",
+					name, sites,
+				)
+				continue
+			}
+			t.Logf("  %-30s NOT A STORE SENTINEL, and measured so: package sdk never passes or returns it. %s", name, nonSentinels[name])
+		}
 	}
 
 	// and the ruling is bound to the VALUE and not only to the name -- by IDENTITY now rather
@@ -1722,8 +2590,15 @@ func TestAGroupSessionSealsADurableRecordOverTheProductionStore(t *testing.T) {
 		t.Fatalf("the row exists before the seal: %v", err)
 	}
 
+	// THE DURABILITY IS READ AT THE MOMENT THE SEAL RETURNS, not afterwards. A row that is on
+	// disk by the time a later Stat runs says nothing about whether the reservation was forced
+	// down before the record that rests on it existed; the store's forced-flush counter is
+	// taken AFTER Sync returns -- see forceFlush -- so an increment across this call is the
+	// flush having been PERFORMED inside it.
+	flushesBefore := store.rowFlushCount()
 	record, err := session.SealRecord(message.RetentionDurable, 0, false,
 		[]byte("head"), []byte("a real durable record"), 0, nil)
+	flushesAfter := store.rowFlushCount()
 	if err != nil {
 		t.Fatalf("SealRecord over a durable reserver: %v", err)
 	}
@@ -1735,6 +2610,13 @@ func TestAGroupSessionSealsADurableRecordOverTheProductionStore(t *testing.T) {
 	}
 	if len(record.CtBody) == 0 || record.WriteAuth == ([32]byte{}) {
 		t.Error("the record carries no ciphertext or no write_auth")
+	}
+
+	if flushesAfter <= flushesBefore {
+		t.Errorf(
+			"the seal returned with %d forced flush(es) counted and %d before it: the reservation this record's stream_index rests on had not been forced to disk when the record came into existence, so a crash here leaves a sealed record whose index no row records",
+			flushesAfter, flushesBefore,
+		)
 	}
 
 	// the reservation is DURABLE and it was durable before the record existed.
@@ -1776,6 +2658,8 @@ func TestAGroupSessionSealsADurableRecordOverTheProductionStore(t *testing.T) {
 	}
 	t.Logf("REACHED: a real MLS group at epoch %d, a real epoch write key of %d octets, a real record key ladder, and a DURABLE reservation at index %d on disk at %s",
 		epoch, len(writeKey), record.Header.StreamIndex, path)
+	t.Logf("THE RESERVATION WAS DURABLE BEFORE THE SEAL RETURNED: %d forced flush(es) before the call, %d after, and the row carried the index the record carries",
+		flushesBefore, flushesAfter)
 	t.Logf("WHAT STANDS BETWEEN THIS RECORD AND msgrepo's Submit, measured on this tree:")
 	t.Logf("  1. THE PROJECTION. api/submit.go takes a *protocol.SubmitRequest whose records are *protocol.Record, and re-projects ParseRecord(record_bytes) itself to compare with proto.Equal. Package sdk has ZERO production references to protocol.Record or protocol.SubmitRequest, so this sealed *message.Record has no wire form at all. This is the first missing piece and it is the plan's Task 8")
 	t.Logf("  2. THE TRANSPORT. There is no connect.Client binding in sdk at any section 10.1 code point, no request_id correlation and no section 4.6 fragmentation, so there is nothing to carry a request even once one exists")

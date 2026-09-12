@@ -2901,11 +2901,22 @@ func TestTheIndexTheStoreJustReturnedIsInsideItsConfirmedPrefix(t *testing.T) {
 // Remove the corrupt row's bytes and it became a stream never seen: (0, nil), index 1, on a key
 // whose row had durably carried indices.
 //
-// Mutation, measured in a disposable copy: delete
-// `self.verified[rowName] = streamRowVerification{unreadable: true}` from repairRow and class (5)
-// below goes red on its first assertion -- the scan entered nothing for the row -- while
-// TestACorruptRowIsPermanentThroughTheAdapterAndNotRetriedForever goes red with 197 of its 200
-// attempts ALLOCATING on the removed corrupt row, starting again at index 1.
+// Mutation, re-measured in a disposable copy on 2026-09-12 because the round that keyed the
+// permanence on the condition rather than on the clock CHANGED WHAT IT CATCHES, and the claim
+// that was written here before that is now false. Delete
+// `self.verified[rowName] = streamRowVerification{unreadable: true}` from repairRow and:
+//
+//	class (5) below goes red on its first assertion -- the scan entered nothing for the row;
+//	TestTheUnreadableRowsPermanenceIsKeyedOnTheConditionAndNotOnWhenItWasFound goes red on its
+//	  third seat, the store that never read the row before the bytes vanished, ALLOCATING index
+//	  1 on a key whose row had durably carried indices;
+//	TestACorruptRowIsPermanentThroughTheAdapterAndNotRetriedForever now PASSES, 200 of 200
+//	  refused permanently. It used to be the loud one. It no longer is, because
+//	  persistedHighWater marks the row on its own first READ of it, so by the time that case
+//	  removes the bytes on attempt 3 the mark already exists. THE SCAN'S MARK IS STILL
+//	  LOAD-BEARING, and what it is now the SOLE defence for is exactly the shape the third seat
+//	  drives: a row whose octets go away before any call reads them, which a live read cannot
+//	  mark because it never sees them.
 func TestTheRowClassesTheOpenTimeSeedingCoversAndItsComplement(t *testing.T) {
 	type rowClass struct {
 		number    int
@@ -3100,5 +3111,313 @@ func TestTheRowClassesTheOpenTimeSeedingCoversAndItsComplement(t *testing.T) {
 		if !exercised[class.number] {
 			t.Errorf("class (%d) %q is in the partition and was not exercised, so this gate is not total over the partition it prints", class.number, class.name)
 		}
+	}
+}
+
+// ----------------------------------------------------------------------------------------------
+// Property 15 -- an unreadable row's PERMANENCE is keyed on the condition and not on the clock.
+// ----------------------------------------------------------------------------------------------
+
+// THE TWO DISCOVERY ORDERS, DRIVEN AGAINST ONE ANOTHER RATHER THAN ASSERTED ONE AT A TIME.
+//
+// The defect this case exists for: streamRowVerification.unreadable was set in exactly one place,
+// inside repairRow, at open, and its own words were "a row that was PRESENT in the row directory
+// when this store opened". So THE SAME ROW, WITH THE SAME OCTETS, IN THE SAME DIRECTORY was
+// classified two different ways depending on which of the store's two readers met it first: a
+// corrupt body found at open carried ErrStreamStoreConsumed and stopped a ladder on attempt 1,
+// and the identical body reaching persistedHighWater one call later under a live store was
+// forwarded bare -- ErrStreamStoreState, which the adapter rules TRANSIENT, which is the
+// unbounded retry paying a durable write per attempt against a row that will never accept one.
+//
+// A refusal is permanent because of what the store CAN'T DO about the row, not because of when it
+// found out, and this case says that as an EQUALITY rather than as two separate assertions: two
+// stores, two directories, ONE row body byte for byte, met in the two possible orders, and the
+// same sentence out of both. An equality is what makes the property falsifiable by a one-sided
+// change -- re-key either path on the clock and the strings stop matching, whichever way it is
+// re-keyed.
+//
+// Mutation, measured in a disposable copy (unfiltered root suite, and it says so):
+//
+//	delete `self.verified[rowName] = streamRowVerification{unreadable: true}` and the
+//	ErrStreamStoreConsumed wrap from persistedHighWater's classify-failure clause -- that is,
+//	restore the bare `return 0, err` for a row not already marked -- and this case goes red on
+//	the live store's first refusal, which carries no permanent sentinel at all.
+func TestTheUnreadableRowsPermanenceIsKeyedOnTheConditionAndNotOnWhenItWasFound(t *testing.T) {
+	parts := streamTestKeyOctets(t, 0x7a)
+	rowName := streamTestRowName(t, parts)
+	key, err := streamKeyFromOctets(parts...)
+	if err != nil {
+		t.Fatalf("build the stream key: %v", err)
+	}
+	// record 2 fails with a verifying record 3 after it: a corrupt body, and not a shape any
+	// interrupted append can leave. One body, used twice.
+	body := streamTestRowBody(rowName, 1, 2, 3)
+	streamTestCorruptRecord(body, 2)
+
+	// DISCOVERY AT OPEN: the row is already in the directory when the store opens, so
+	// repairRow reads it and marks it.
+	atOpenDir := t.TempDir()
+	atOpenPath := streamTestPlantRow(t, atOpenDir, rowName, body)
+	atOpen := streamTestOpen(t, atOpenDir)
+
+	// DISCOVERY UNDER A LIVE STORE: the store opens over an empty directory, answers for the
+	// key, and only then do the same octets appear under the same name. Nothing about the row
+	// differs; only which of the store's two readers reached it first.
+	liveDir := t.TempDir()
+	live := streamTestOpen(t, liveDir)
+	if highWater, err := live.StreamHighWater(parts[0], parts[1]); err != nil || highWater != 0 {
+		t.Fatalf("the live store answered (%d, %v) before the row existed, want (0, nil)", highWater, err)
+	}
+	livePath := streamTestPlantRow(t, liveDir, rowName, body)
+
+	atOpenBytes, err := os.ReadFile(atOpenPath)
+	if err != nil {
+		t.Fatalf("read the row the store opened over: %v", err)
+	}
+	liveBytes, err := os.ReadFile(livePath)
+	if err != nil {
+		t.Fatalf("read the row that appeared under the live store: %v", err)
+	}
+	if !bytes.Equal(atOpenBytes, liveBytes) {
+		t.Fatalf("the two rows are %d and %d octets and are not the same body, so this case is comparing two conditions and not two clocks", len(atOpenBytes), len(liveBytes))
+	}
+	t.Logf("ONE body, %d octets, under one name %s, in two directories. The only difference between the two stores is WHEN each first read it", len(atOpenBytes), rowName)
+
+	type seat struct {
+		name  string
+		store *StreamStore
+	}
+	seats := []seat{{"found at open", atOpen}, {"found under a live store", live}}
+	sentences := map[string]string{}
+	for _, s := range seats {
+		highWater, queryErr := s.store.StreamHighWater(parts[0], parts[1])
+		if queryErr == nil {
+			t.Fatalf("%s: the query answered (%d, nil) for a body that does not classify", s.name, highWater)
+		}
+		if highWater != 0 {
+			t.Errorf("%s: the query answered high water %d beside its error", s.name, highWater)
+		}
+		if !errors.Is(queryErr, ErrStreamStoreState) {
+			t.Errorf("%s: the refusal does not carry ErrStreamStoreState: %v", s.name, queryErr)
+		}
+		if !errors.Is(queryErr, ErrStreamStoreConsumed) {
+			t.Errorf(
+				"%s: the refusal carries no ErrStreamStoreConsumed, so the adapter rules it TRANSIENT and a SenderRatchet asks again -- without bound, paying a durable write per attempt, against a row that will never accept a record: %v",
+				s.name, queryErr,
+			)
+		}
+		index, reserveErr := s.store.ReserveStreamIndex(parts[0], parts[1])
+		if reserveErr == nil {
+			t.Fatalf("%s: the allocation handed out index %d on a row whose spent indices are not derivable from it", s.name, index)
+		}
+		if index != 0 {
+			t.Errorf("%s: the allocation answered index %d beside its error", s.name, index)
+		}
+		if !errors.Is(reserveErr, ErrStreamStoreConsumed) {
+			t.Errorf("%s: the allocation's refusal carries no ErrStreamStoreConsumed: %v", s.name, reserveErr)
+		}
+		sentences[s.name] = queryErr.Error()
+		t.Logf("  %-26s %v", s.name, queryErr)
+	}
+	if sentences["found at open"] != sentences["found under a live store"] {
+		t.Errorf(
+			"the two discovery orders answer two different sentences for one body:\n  at open: %s\n  live:    %s\nA refusal that reads differently depending on when the store looked is a refusal keyed on the clock",
+			sentences["found at open"], sentences["found under a live store"],
+		)
+	}
+
+	// AND THE THIRD SEAT: A STORE THAT NEVER READ THE ROW AT ALL. It opened over the same
+	// octets and the bytes were taken away before any call reached them, so the only record of
+	// the row that ever existed is the one OpenStreamStore's scan made. This is the one shape
+	// repairRow's own mark is the sole defence for -- persistedHighWater cannot mark a row
+	// whose octets it never sees -- and it is driven here BEHAVIOURALLY rather than by reading
+	// the verified map, so deleting that mark is caught by an answer and not only by a probe.
+	neverReadDir := t.TempDir()
+	neverReadPath := streamTestPlantRow(t, neverReadDir, rowName, body)
+	neverRead := streamTestOpen(t, neverReadDir)
+	if err := os.Remove(neverReadPath); err != nil {
+		t.Fatalf("remove the row the store never read: %v", err)
+	}
+	if index, err := neverRead.ReserveStreamIndex(parts[0], parts[1]); err == nil {
+		t.Errorf("a store that opened over a corrupt row and never read it before the bytes vanished answered index %d; the scan's own record is the only thing that stops that restarting the ladder at 1 on a key whose row had durably carried indices", index)
+	} else if !errors.Is(err, ErrStreamStoreConsumed) {
+		t.Errorf("the never-read store's refusal carries no ErrStreamStoreConsumed: %v", err)
+	}
+
+	// AND THE MARK OUTLIVES THE BYTES ON BOTH PATHS, which is the whole reason it is a mark
+	// rather than a re-derivation: a row the store holds no record of is a row the rewind
+	// detector cannot see, and removing it used to make it a stream never seen -- (0, nil),
+	// and the next allocation hands out index 1 on a key that has durably spent it.
+	for _, removal := range []struct {
+		name string
+		path string
+	}{{"found at open", atOpenPath}, {"found under a live store", livePath}} {
+		if err := os.Remove(removal.path); err != nil {
+			t.Fatalf("%s: remove the corrupt row: %v", removal.name, err)
+		}
+	}
+	for _, s := range seats {
+		index, err := s.store.ReserveStreamIndex(parts[0], parts[1])
+		if err == nil {
+			t.Errorf("%s: after the corrupt row's bytes were removed the allocation answered index %d, restarting the ladder on a key whose row had durably carried indices", s.name, index)
+			continue
+		}
+		if !errors.Is(err, ErrStreamStoreConsumed) {
+			t.Errorf("%s: after the removal the refusal carries no ErrStreamStoreConsumed: %v", s.name, err)
+		}
+	}
+
+	// and the whole of it through the production adapter, which is the seat SenderRatchet.Next
+	// actually reads.
+	for _, s := range seats {
+		reserver := NewStreamIndexReserver(s.store)
+		if index, err := reserver.Reserve(key); !errors.Is(err, messagegroup.ErrStreamIndexConsumed) {
+			t.Errorf("%s: through the adapter the allocation answered (%d, %v), want messagegroup.ErrStreamIndexConsumed", s.name, index, err)
+		}
+		if highWater, err := reserver.HighWater(key); !errors.Is(err, messagegroup.ErrStreamIndexConsumed) {
+			t.Errorf("%s: through the adapter the query answered (%d, %v), want messagegroup.ErrStreamIndexConsumed", s.name, highWater, err)
+		}
+	}
+	t.Log("OCTETS OBTAINED AND REFUSED is permanent on both paths. The complement -- OCTETS NOT OBTAINED, an os.Open or a ReadAt that failed -- stays ErrStreamStoreState alone and stays a retry, and that is a condition and not a clock either")
+}
+
+// AND THE ONE EXIT FROM THE MARK THAT THE BYTES DO NOT REFUSE ON THEIR OWN.
+//
+// persistedHighWater's third `if prior.unreadable` clause is the row that CLASSIFIES NOW and did
+// not when this store read it. Every other shape the mark has to survive is refused by something
+// else -- the bytes refuse themselves while they are there, and the absent-row clause refuses them
+// once they are gone -- so this is the only one whose whole defence is that clause. It was added
+// by the round before this one with nothing driving it: replacing its condition with `false` left
+// the entire unfiltered root suite at 264 pass / 0 fail, to the test, including every case written
+// for the two sibling clauses ten lines above it.
+//
+// WHAT IT IS FOR. A row whose body did not classify has spent some number of indices and there is
+// no way to learn which. Bytes that DO classify appearing in its place do not answer that
+// question, they replace the evidence: the row's octets changed under the exclusion that makes
+// this store the only writer, so re-seeding a high water from them is exactly the move that hands
+// the next allocation a number this stream may already have used. The clause refuses instead, and
+// it refuses WITHOUT writing the verified map, which is what keeps the mark from being laundered
+// by the very call that met it.
+//
+// Mutations, each measured in a disposable copy against the unfiltered root suite:
+//
+//	replace the clause's condition with `false`         -> red here, on both discovery orders,
+//	                                                       with the query answering (3, nil)
+//	delete the clause entirely                          -> the same red
+//	move the verified-map write above the clause         -> red on the stickiness assertion
+func TestARowThatClassifiesAfterItDidNotIsRefusedRatherThanReSeeded(t *testing.T) {
+	orders := []struct {
+		name string
+		open func(t *testing.T, dir string, rowName string, body []byte) *StreamStore
+	}{
+		{
+			// the mark comes from repairRow, at open.
+			name: "the row did not classify when the store opened",
+			open: func(t *testing.T, dir string, rowName string, body []byte) *StreamStore {
+				streamTestPlantRow(t, dir, rowName, body)
+				return streamTestOpen(t, dir)
+			},
+		},
+		{
+			// the mark comes from persistedHighWater, under a live store. It exists at
+			// all only because the permanence is keyed on the condition; before that it
+			// was a transient refusal and left no mark to exit from.
+			name: "the row did not classify when a live store read it",
+			open: func(t *testing.T, dir string, rowName string, body []byte) *StreamStore {
+				store := streamTestOpen(t, dir)
+				streamTestPlantRow(t, dir, rowName, body)
+				return store
+			},
+		},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			parts := streamTestKeyOctets(t, 0x7b)
+			rowName := streamTestRowName(t, parts)
+			dir := t.TempDir()
+			corrupt := streamTestRowBody(rowName, 1, 2, 3)
+			streamTestCorruptRecord(corrupt, 2)
+			store := order.open(t, dir, rowName, corrupt)
+
+			if _, err := store.StreamHighWater(parts[0], parts[1]); !errors.Is(err, ErrStreamStoreConsumed) {
+				t.Fatalf("the row is not marked unreadable before the replacement: %v", err)
+			}
+
+			// THE REPLACEMENT: a perfectly well formed row, under the same name, in the
+			// same directory. Nothing about these octets is wrong; what is wrong is that
+			// they are not the octets this store refused.
+			path := filepath.Join(dir, streamRowDirName, rowName)
+			healthy := streamTestRowBody(rowName, 1, 2, 3)
+			if err := os.WriteFile(path, healthy, 0o600); err != nil {
+				t.Fatalf("replace the corrupt row with a well formed one: %v", err)
+			}
+			if _, _, err := classifyStreamRow(rowName, healthy); err != nil {
+				t.Fatalf("the replacement body does not classify, so this case is not driving the clause it says it is: %v", err)
+			}
+
+			// THE STICKINESS IS PART OF THE PROPERTY: the clause returns without writing
+			// the verified map, so a second call cannot read a prefix the first one left.
+			const attempts = 3
+			for attempt := 1; attempt <= attempts; attempt += 1 {
+				highWater, err := store.StreamHighWater(parts[0], parts[1])
+				if err == nil {
+					t.Fatalf(
+						"attempt %d: the query answered (%d, nil) by re-deriving a high water from octets that replaced the ones this store could not read; the indices the refused body had already spent are still not derivable, and allocating on the replacement hands out a number this stream may already have used",
+						attempt, highWater,
+					)
+				}
+				if highWater != 0 {
+					t.Errorf("attempt %d: the query answered high water %d beside its error", attempt, highWater)
+				}
+				if !errors.Is(err, ErrStreamStoreState) || !errors.Is(err, ErrStreamStoreConsumed) {
+					t.Errorf("attempt %d: the refusal is %v, want ErrStreamStoreState with ErrStreamStoreConsumed beside it", attempt, err)
+				}
+				if !strings.Contains(err.Error(), "classifies now") {
+					t.Errorf("attempt %d: the refusal is %q and is not the one this clause writes, so this case is being satisfied by some other refusal", attempt, err)
+				}
+				index, err := store.ReserveStreamIndex(parts[0], parts[1])
+				if err == nil {
+					t.Fatalf("attempt %d: the allocation handed out index %d on the replacement body", attempt, index)
+				}
+				if index != 0 {
+					t.Errorf("attempt %d: the allocation answered index %d beside its error", attempt, index)
+				}
+				if !errors.Is(err, ErrStreamStoreConsumed) {
+					t.Errorf("attempt %d: the allocation's refusal carries no ErrStreamStoreConsumed: %v", attempt, err)
+				}
+			}
+
+			// nothing was written, truncated, created or removed while the row was being
+			// refused: the refusal is a refusal and not a repair.
+			if length := streamTestRowLength(t, path); length != int64(len(healthy)) {
+				t.Errorf("the replacement row is %d octets and was planted at %d; a refusal that rewrote the row would be the store rewriting a row it refused", length, len(healthy))
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read the row back: %v", err)
+			}
+			if !bytes.Equal(after, healthy) {
+				t.Errorf("the replacement row's octets changed under %d refusals", attempts)
+			}
+			entries, err := os.ReadDir(filepath.Join(dir, streamRowDirName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 {
+				t.Errorf("the row directory holds %d entries after the refusals, want exactly 1", len(entries))
+			}
+
+			// and through the production adapter, which is the seat that decides whether a
+			// ladder stops or retries.
+			key, err := streamKeyFromOctets(parts...)
+			if err != nil {
+				t.Fatalf("build the stream key: %v", err)
+			}
+			reserver := NewStreamIndexReserver(store)
+			if index, err := reserver.Reserve(key); !errors.Is(err, messagegroup.ErrStreamIndexConsumed) {
+				t.Errorf("through the adapter the allocation answered (%d, %v), want messagegroup.ErrStreamIndexConsumed", index, err)
+			}
+			t.Logf("%d refusals, none of them a repair, and the well formed replacement never became a high water", attempts)
+		})
 	}
 }
