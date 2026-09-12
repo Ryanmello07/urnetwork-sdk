@@ -1,19 +1,26 @@
 package sdk
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"maps"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect/messagegroup"
 )
@@ -384,7 +391,7 @@ func TestARowOfAnotherKeySpaceIsRefusedAndNeverAnsweredZero(t *testing.T) {
 	store := streamTestOpen(t, dir)
 	planted += 1
 
-	highWater, err := store.streamHighWater(parts[0], parts[1])
+	highWater, err := store.StreamHighWater(parts[0], parts[1])
 	if !errors.Is(err, ErrStreamKeySpace) {
 		t.Errorf(
 			"a row written under the pre-A1 key derivation was answered (%d, %v); want ErrStreamKeySpace. A (0, nil) here is ledger item 170 reproduced in sdk: the ladder restarts at index 1 under a class key that has not moved, which is a reused nonce under a reused record_key",
@@ -415,7 +422,7 @@ func TestARowOfAnotherKeySpaceIsRefusedAndNeverAnsweredZero(t *testing.T) {
 		streamTestPlantRow(t, other, notARow, []byte("x"))
 		otherStore := streamTestOpen(t, other)
 		planted += 1
-		_, err := otherStore.streamHighWater(parts[0], parts[1])
+		_, err := otherStore.StreamHighWater(parts[0], parts[1])
 		if !errors.Is(err, ErrStreamStoreState) {
 			t.Errorf("%q in the row directory was answered %v; an entry that is not a row under any tag is ErrStreamStoreState", notARow, err)
 		}
@@ -432,7 +439,7 @@ func TestARowOfAnotherKeySpaceIsRefusedAndNeverAnsweredZero(t *testing.T) {
 	}
 	nestedStore := streamTestOpen(t, nested)
 	planted += 1
-	if _, err := nestedStore.streamHighWater(parts[0], parts[1]); !errors.Is(err, ErrStreamStoreState) {
+	if _, err := nestedStore.StreamHighWater(parts[0], parts[1]); !errors.Is(err, ErrStreamStoreState) {
 		t.Errorf("a directory inside the row directory was answered %v; want ErrStreamStoreState", err)
 	}
 
@@ -472,7 +479,7 @@ func TestARowOfAnotherKeySpaceIsRefusedAndNeverAnsweredZero(t *testing.T) {
 			t.Errorf("partition %s was exercised by no entry at all, so this gate judged only part of the class it derived", name)
 		}
 	}
-	if highWater, err := shapedStore.streamHighWater(parts[0], parts[1]); !errors.Is(err, ErrStreamStoreState) {
+	if highWater, err := shapedStore.StreamHighWater(parts[0], parts[1]); !errors.Is(err, ErrStreamStoreState) {
 		t.Errorf(
 			"a directory named %q in the row directory was answered (%d, %v); it is not a row, and skipping it answers a stream that may well have been written to with the error-free zero contract clause 4 reserves for a stream never seen",
 			shaped,
@@ -510,7 +517,7 @@ func TestAKeyOfTheWrongWidthIsRefusedAtTheBoundary(t *testing.T) {
 	good := streamTestKeyOctets(t, 5)
 	refusalsExercised := 0
 
-	if _, err := store.streamHighWater(good[0], good[1]); err != nil {
+	if _, err := store.StreamHighWater(good[0], good[1]); err != nil {
 		t.Fatalf("well-formed key octets were refused: %v", err)
 	}
 
@@ -525,7 +532,7 @@ func TestAKeyOfTheWrongWidthIsRefusedAtTheBoundary(t *testing.T) {
 			copy(offered, good)
 			offered[i] = streamTestOctets(offeredWidth, 7)
 			refusalsExercised += 1
-			_, err := store.streamHighWater(offered[0], offered[1])
+			_, err := store.StreamHighWater(offered[0], offered[1])
 			if !errors.Is(err, ErrStreamKeyWidth) {
 				t.Errorf(
 					"a %d-octet value offered for %s.%s (which holds %d) was answered %v; a short key silently padded or a long key silently truncated collides two streams onto one row, and the second stream is then handed indices the first has already used",
@@ -553,7 +560,7 @@ func TestAKeyOfTheWrongWidthIsRefusedAtTheBoundary(t *testing.T) {
 		copy(offered, good)
 		offered[i] = nil
 		refusalsExercised += 1
-		if _, err := store.streamHighWater(offered[0], offered[1]); !errors.Is(err, ErrStreamKeyWidth) {
+		if _, err := store.StreamHighWater(offered[0], offered[1]); !errors.Is(err, ErrStreamKeyWidth) {
 			t.Errorf("a nil value offered for %s.%s was answered %v; want ErrStreamKeyWidth", keyType.String(), field.Name, err)
 		}
 	}
@@ -759,7 +766,7 @@ func TestARowsThreeCasesAndTheDiscriminatorBetweenThem(t *testing.T) {
 			}
 
 			before := store.rowWriteCount()
-			highWater, err := store.streamHighWater(parts[0], parts[1])
+			highWater, err := store.StreamHighWater(parts[0], parts[1])
 			after := store.rowWriteCount()
 			t.Logf("the read path performed %d row write(s)", after-before)
 			if after != before {
@@ -842,7 +849,7 @@ func TestATornTailIsTruncatedBeforeTheNextAppendLands(t *testing.T) {
 	if got := streamTestRowLength(t, path); got != streamRecordWidth {
 		t.Errorf("after the open the row is %d octets, want %d; the discard is a truncation and not a skip", got, streamRecordWidth)
 	}
-	if highWater, err := store.streamHighWater(parts[0], parts[1]); err != nil || highWater != 1 {
+	if highWater, err := store.StreamHighWater(parts[0], parts[1]); err != nil || highWater != 1 {
 		t.Errorf("the repaired row answered (%d, %v), want (1, nil)", highWater, err)
 	}
 
@@ -860,7 +867,7 @@ func TestATornTailIsTruncatedBeforeTheNextAppendLands(t *testing.T) {
 	if got := reopened.rowWriteCount(); got != 0 {
 		t.Errorf("the reopen performed %d row write(s) on a row nothing had torn, want 0", got)
 	}
-	highWater, err := reopened.streamHighWater(parts[0], parts[1])
+	highWater, err := reopened.StreamHighWater(parts[0], parts[1])
 	if err != nil {
 		t.Fatalf(
 			"after a repair, one append and a restart the row answered %v; a store that skipped the discard leaves R1, half-R2, R2' on disk, which is one failing whole record with a partial after it",
@@ -887,7 +894,7 @@ func TestAClosedStoreRefusesRatherThanAnsweringZero(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	highWater, err := store.streamHighWater(parts[0], parts[1])
+	highWater, err := store.StreamHighWater(parts[0], parts[1])
 	if !errors.Is(err, ErrStreamStoreState) {
 		t.Errorf("a closed store answered (%d, %v), want ErrStreamStoreState", highWater, err)
 	}
@@ -915,9 +922,14 @@ func TestTheEnumeratedDirectoryIsNotTheStoresOwnDirectory(t *testing.T) {
 	if err := os.WriteFile(beside, []byte("held by the operating system"), 0o600); err != nil {
 		t.Fatalf("write an entry beside the row directory: %v", err)
 	}
+	// closed first, because Task 2a's exclusion now refuses a second opener of a live
+	// directory -- which is the point of it, and which this reopen is not testing.
+	if err := store.Close(); err != nil {
+		t.Fatalf("close the first store: %v", err)
+	}
 	reopened := streamTestOpen(t, dir)
 	parts := streamTestKeyOctets(t, 41)
-	if highWater, err := reopened.streamHighWater(parts[0], parts[1]); err != nil || highWater != 0 {
+	if highWater, err := reopened.StreamHighWater(parts[0], parts[1]); err != nil || highWater != 0 {
 		t.Errorf("an entry beside the row directory was answered (%d, %v); the enumeration reads the row directory and nothing else", highWater, err)
 	}
 }
@@ -942,7 +954,7 @@ func TestARowsRecordsDoNotVerifyUnderAnotherRowsName(t *testing.T) {
 	streamTestPlantRow(t, dir, rightName, streamTestRowBody(leftName, 1, 2, 3))
 	store := streamTestOpen(t, dir)
 
-	highWater, err := store.streamHighWater(right[0], right[1])
+	highWater, err := store.StreamHighWater(right[0], right[1])
 	if err == nil && highWater == 3 {
 		t.Fatalf(
 			"a row written for %s and placed under %s's name was adopted whole and answered high water 3; the record checksum must be bound to the row's own name, or a row moved between keys carries its counter with it",
@@ -975,6 +987,1569 @@ func TestTheConsumedStreamKeyIsTheOneConnectDeclares(t *testing.T) {
 				field.Name,
 				field.Type.String(),
 			)
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------------------------
+// The high-water defect: a stream high water that moved BACKWARDS inside one row.
+// ----------------------------------------------------------------------------------------------
+
+// streamTestPlantRecordAt overwrites the record at a 1-based position with a WELL-FORMED record
+// carrying index, and asserts at the byte level that the plant landed and landed once. A mutation
+// read before it is asserted is a mutation nobody ran.
+func streamTestPlantRecordAt(t *testing.T, path string, rowName string, position int, index uint64) {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s to plant a record: %v", path, err)
+	}
+	at := (position - 1) * streamRecordWidth
+	if len(body) < at+streamRecordWidth {
+		t.Fatalf("row %s is %d octets, too short to hold a record at position %d", path, len(body), position)
+	}
+	record := encodeStreamRecord(rowName, index)
+	before := append([]byte(nil), body[at:at+streamRecordWidth]...)
+	matchesBefore := bytes.Count(body, record[:])
+	copy(body[at:at+streamRecordWidth], record[:])
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatalf("write the planted row %s: %v", path, err)
+	}
+
+	landed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("re-read %s after planting: %v", path, err)
+	}
+	if len(landed) != len(body) {
+		t.Fatalf("the plant changed the row's length from %d to %d; this mutation is in place", len(body), len(landed))
+	}
+	if !bytes.Equal(landed[at:at+streamRecordWidth], record[:]) {
+		t.Fatalf("the planted record is not at offset %d of %s, so this mutation did not land", at, path)
+	}
+	if bytes.Equal(before, record[:]) {
+		t.Fatalf("the planted record equals what was already at position %d, so this mutation changed nothing", position)
+	}
+	matches := bytes.Count(landed, record[:])
+	if matches != matchesBefore+1 {
+		t.Fatalf("the planted record's octets occur %d times in %s and occurred %d times before the plant, want exactly one more; a mutation whose match count did not move by one is not the mutation this test reads", matches, path, matchesBefore)
+	}
+	if !verifyStreamRecord(rowName, landed[at:at+streamRecordWidth]) {
+		t.Fatalf("the planted record does not verify under %s, so the store would refuse it as a torn tail and this test would pass for the wrong reason", rowName)
+	}
+	t.Logf("planted a VERIFYING record carrying index %d at position %d (offset %d) of a %d-octet row; byte-level matches %d -> %d",
+		index, position, at, len(landed), matchesBefore, matches)
+}
+
+// TestAHighWaterThatMovedBackwardsInsideOneRowIsRefused is the review's HIGH finding, executable.
+//
+// CLASS: every sequence of verifying records one row can hold.
+// SCOPE, derived separately: the sequences reachable through the record checksum. The checksum
+// binds the index to the row's NAME and to nothing else, so the set of records that verify in a
+// given row is exactly {encodeStreamRecord(rowName, n) : n in u64} -- INDEPENDENT OF POSITION.
+// The scope is therefore every function from positions to u64, and the store's rule narrows it to
+// the strictly increasing ones that start at 1.
+//
+// THE COMPLEMENT OF THAT NARROWING, printed rather than asserted non-empty: every sequence that
+// is not strictly increasing from at least 1. The three shapes below are its representatives --
+// a lower index after a higher one, an index equal to the one before it, and a record carrying
+// the zero that clause 4 reserves for a stream never seen. Each is a row whose bytes every
+// per-record check in this file accepts.
+func TestAHighWaterThatMovedBackwardsInsideOneRowIsRefused(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		planted   []uint64
+		position  int
+		index     uint64
+		wasBefore uint64
+	}{
+		{
+			name:      "a lower index at a later offset",
+			planted:   []uint64{1, 2, 3},
+			position:  3,
+			index:     1,
+			wasBefore: 3,
+		},
+		{
+			name:      "the same index twice",
+			planted:   []uint64{1, 2, 3},
+			position:  3,
+			index:     2,
+			wasBefore: 3,
+		},
+		{
+			name:      "a record carrying the zero that means never seen",
+			planted:   []uint64{1},
+			position:  1,
+			index:     0,
+			wasBefore: 1,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			parts := streamTestKeyOctets(t, 0x40)
+			rowName := streamTestRowName(t, parts)
+			path := streamTestPlantRow(t, dir, rowName, streamTestRowBody(rowName, testCase.planted...))
+
+			// the row as written is answered, so the refusal below is the plant's.
+			before := streamTestOpen(t, dir)
+			answered, err := before.StreamHighWater(parts[0], parts[1])
+			if err != nil {
+				t.Fatalf("the unplanted row %v refused: %v", testCase.planted, err)
+			}
+			if answered != testCase.wasBefore {
+				t.Fatalf("the unplanted row %v answered %d, want %d", testCase.planted, answered, testCase.wasBefore)
+			}
+			before.Close()
+
+			streamTestPlantRecordAt(t, path, rowName, testCase.position, testCase.index)
+
+			// classifyStreamRow is the decision procedure; read it directly first, so a
+			// failure here is not confused with one in the store's plumbing.
+			body, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatalf("read the planted row: %v", readErr)
+			}
+			classified, _, classifyErr := classifyStreamRow(rowName, body)
+			if !errors.Is(classifyErr, ErrStreamStoreState) {
+				t.Errorf("classifyStreamRow answered high water %d and error %v for a row whose index sequence is %v with %d planted at position %d; want ErrStreamStoreState. A verifying record is accepted wherever it sits, so a sequence that is not strictly increasing is a high water that moved backwards inside one row",
+					classified, classifyErr, testCase.planted, testCase.index, testCase.position)
+			}
+
+			// and the store answers the same, through both stream methods, because a
+			// reserve built on a rewound high water is the reuse itself.
+			after := streamTestOpen(t, dir)
+			highWater, highWaterErr := after.StreamHighWater(parts[0], parts[1])
+			if !errors.Is(highWaterErr, ErrStreamStoreState) {
+				t.Errorf("StreamHighWater answered (%d, %v) for the planted row, want ErrStreamStoreState", highWater, highWaterErr)
+			}
+			reserved, reserveErr := after.ReserveStreamIndex(parts[0], parts[1])
+			if !errors.Is(reserveErr, ErrStreamStoreState) {
+				t.Errorf("ReserveStreamIndex answered (%d, %v) for the planted row, want ErrStreamStoreState; allocating on a row whose high water regressed hands out an index this store already handed out, and section 5.6 calls a reused stream_index under a reused record_key a total break of both AEADs for that record",
+					reserved, reserveErr)
+			}
+		})
+	}
+}
+
+// TestTheHighWaterRefusalSurvivesTheOpenTimeRepair pins that the planted row is not quietly
+// truncated away by OpenStreamStore's repair and then answered as a shorter, legal row. The
+// repair's own rule is that a corrupt body is left exactly as it was found, and a non-monotonic
+// sequence is a corrupt body.
+func TestTheHighWaterRefusalSurvivesTheOpenTimeRepair(t *testing.T) {
+	dir := t.TempDir()
+	parts := streamTestKeyOctets(t, 0x41)
+	rowName := streamTestRowName(t, parts)
+	path := streamTestPlantRow(t, dir, rowName, streamTestRowBody(rowName, 1, 2, 3))
+	streamTestPlantRecordAt(t, path, rowName, 3, 2)
+	lengthBefore := streamTestRowLength(t, path)
+
+	store := streamTestOpen(t, dir)
+	if length := streamTestRowLength(t, path); length != lengthBefore {
+		t.Errorf("the open-time repair changed the planted row's length from %d to %d; a corrupt body is left exactly as it was found, and a repair that shortened this one would answer a legal high water for a row that regressed",
+			lengthBefore, length)
+	}
+	if writes := store.rowWriteCount(); writes != 0 {
+		t.Errorf("opening over a corrupt body performed %d row writes, want 0", writes)
+	}
+	if _, err := store.StreamHighWater(parts[0], parts[1]); !errors.Is(err, ErrStreamStoreState) {
+		t.Errorf("after the open-time repair the planted row answered %v, want ErrStreamStoreState", err)
+	}
+}
+
+// ==============================================================================================
+// Task 2 -- Reserve, HighWater, the fsync boundary, and the two sentinels
+// ==============================================================================================
+
+// streamTestRowDirSnapshot records every entry in the row directory together with the identity
+// the PLATFORM gives that entry, so a later comparison can see a directory-entry mutation that
+// leaves the entry set unchanged.
+//
+// os.SameFile(info, info) is not a tautology here and it is not decoration: on Windows the file
+// identity behind a FileInfo is loaded LAZILY, by reopening the recorded PATH, so an identity
+// read after a rename-over would be the NEW file's. Forcing the load at snapshot time is what
+// makes the comparison a comparison of the entries that existed then. Measured on this machine:
+// without the forcing call a rename-over compares equal, with it the comparison is false.
+func streamTestRowDirSnapshot(t *testing.T, rowDir string) map[string]os.FileInfo {
+	t.Helper()
+	entries, err := os.ReadDir(rowDir)
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", rowDir, err)
+	}
+	snapshot := map[string]os.FileInfo{}
+	for _, entry := range entries {
+		info, err := os.Stat(filepath.Join(rowDir, entry.Name()))
+		if err != nil {
+			t.Fatalf("stat %s in %s: %v", entry.Name(), rowDir, err)
+		}
+		if !os.SameFile(info, info) {
+			t.Fatalf("the platform cannot identify %s, so a directory-entry mutation cannot be observed here", entry.Name())
+		}
+		snapshot[entry.Name()] = info
+	}
+	return snapshot
+}
+
+// streamTestDirEntryMutations is the SECOND of Property 1's two numbers, observed from OUTSIDE
+// the store. It is not a counter the store reports, because a self-reported number cannot see a
+// rename and a rename is exactly what the mutation this number exists to catch performs.
+func streamTestDirEntryMutations(
+	t *testing.T,
+	rowDir string,
+	before map[string]os.FileInfo,
+) (creates int, removes int, replacements int) {
+	t.Helper()
+	after := streamTestRowDirSnapshot(t, rowDir)
+	for name, afterInfo := range after {
+		beforeInfo, existed := before[name]
+		if !existed {
+			creates += 1
+			continue
+		}
+		if !os.SameFile(beforeInfo, afterInfo) {
+			replacements += 1
+		}
+	}
+	for name := range before {
+		if _, survived := after[name]; !survived {
+			removes += 1
+		}
+	}
+	return creates, removes, replacements
+}
+
+func streamTestSetInterrupt(t *testing.T, store *StreamStore, interrupt streamAppendInterrupt) {
+	t.Helper()
+	store.stateMutex.Lock()
+	defer store.stateMutex.Unlock()
+	store.interrupt = interrupt
+}
+
+// ----------------------------------------------------------------------------------------------
+// Property 1 -- Reserve returns only after the reservation is on stable storage by a mechanism
+// this platform can force.
+// ----------------------------------------------------------------------------------------------
+
+// CLASS: every forced flush on the allocation path, and every directory-entry mutation on it.
+// SCOPE, derived separately: the whole allocation path and everything it calls -- the gate wraps
+// the exported ReserveStreamIndex and reads the store's flush counter, which is incremented at
+// the flush SITE (TestEveryForcedFlushInTheStoreIsCounted holds that by reading this package's
+// syntax tree), so a flush moved into a helper still shows up here.
+//
+// THE GATE REPORTS TWO NUMBERS OVER TWO CASES, because a correct implementation cannot make the
+// second number zero in both. The row for a never-before-seen key does not exist until the store
+// creates it and the store has no key set at open time to pre-create from (S2-16), so the FIRST
+// allocation against a key necessarily creates a directory entry.
+//
+//	first allocation for a key   -> one create,  one forced flush
+//	every allocation after it    -> zero creates, one forced flush
+//
+// The second number is what makes the property platform-independent: on Windows the correct
+// implementation and a temp-file-and-rename implementation both force exactly ONE flush -- the
+// directory flush the rename would need answers "Access is denied" there -- so a gate that
+// counted only flushes would be unable to tell them apart on the platform this is written on.
+func TestTheAllocationPathsForcedFlushesAndDirectoryEntryMutations(t *testing.T) {
+	dir := t.TempDir()
+	store := streamTestOpen(t, dir)
+	parts := streamTestKeyOctets(t, 0x51)
+
+	for _, reading := range []struct {
+		name        string
+		wantIndex   uint64
+		wantCreates int
+	}{
+		{name: "first allocation for a key", wantIndex: 1, wantCreates: 1},
+		{name: "every allocation after it", wantIndex: 2, wantCreates: 0},
+		{name: "and the one after that", wantIndex: 3, wantCreates: 0},
+	} {
+		t.Run(reading.name, func(t *testing.T) {
+			before := streamTestRowDirSnapshot(t, store.rowDir)
+			flushesBefore := store.rowFlushCount()
+
+			index, err := store.ReserveStreamIndex(parts[0], parts[1])
+			if err != nil {
+				t.Fatalf("reserve: %v", err)
+			}
+			if index != reading.wantIndex {
+				t.Fatalf("reserve answered %d, want %d", index, reading.wantIndex)
+			}
+
+			flushes := store.rowFlushCount() - flushesBefore
+			creates, removes, replacements := streamTestDirEntryMutations(t, store.rowDir, before)
+			t.Logf("FORCED FLUSHES on the allocation path: %d; DIRECTORY-ENTRY MUTATIONS: %d (creates %d, removes %d, replacements %d)",
+				flushes, creates+removes+replacements, creates, removes, replacements)
+
+			if flushes != 1 {
+				t.Errorf("the allocation path forced %d flushes, want exactly 1; clause 1 is that Reserve returns only after the reservation is durable, and a platform-independent statement of it has exactly one member here because an allocation against an existing row mutates no directory entry",
+					flushes)
+			}
+			if creates != reading.wantCreates {
+				t.Errorf("the allocation path created %d directory entries, want %d", creates, reading.wantCreates)
+			}
+			if removes != 0 || replacements != 0 {
+				t.Errorf("the allocation path removed %d and replaced %d directory entries, want 0 and 0; a rename over the row is a directory-entry mutation whose durability Windows will not force, so a row written that way is a reservation this platform cannot prove it recorded",
+					removes, replacements)
+			}
+		})
+	}
+}
+
+// A flush error is RETURNED, never swallowed, and the index it failed to record is not handed
+// out. A Reserve that returned (n, nil) after a failed flush has handed out an index it cannot
+// prove it recorded.
+func TestAFailedFlushIsReturnedAndTheIndexIsNotHandedOut(t *testing.T) {
+	dir := t.TempDir()
+	store := streamTestOpen(t, dir)
+	parts := streamTestKeyOctets(t, 0x52)
+
+	streamTestSetInterrupt(t, store, streamAppendFailTheFlush)
+	index, err := store.ReserveStreamIndex(parts[0], parts[1])
+	if err == nil {
+		t.Fatalf("a failed flush answered (%d, nil)", index)
+	}
+	if !errors.Is(err, ErrStreamStoreState) {
+		t.Errorf("a failed flush answered %v, want ErrStreamStoreState", err)
+	}
+	if index != 0 {
+		t.Errorf("a failed flush answered index %d alongside its error; an index returned beside an error is an index a caller may use", index)
+	}
+
+	// and the number that failed is never answered by a later call, on this store or the next.
+	streamTestSetInterrupt(t, store, streamAppendUninterrupted)
+	next, err := store.ReserveStreamIndex(parts[0], parts[1])
+	if err != nil {
+		t.Fatalf("reserve after a failed flush: %v", err)
+	}
+	if next != 2 {
+		t.Errorf("the allocation after a failed flush answered %d, want 2; the index the failed flush wrote is BURNED -- the server enforces monotonicity and not contiguity, so a gap is legal and a reuse is not", next)
+	}
+}
+
+// ----------------------------------------------------------------------------------------------
+// Property 2 -- StreamHighWater is answered from persisted state and never rewinds.
+// ----------------------------------------------------------------------------------------------
+
+func TestStreamHighWaterIsAnsweredFromPersistedStateAcrossARestart(t *testing.T) {
+	dir := t.TempDir()
+	parts := streamTestKeyOctets(t, 0x53)
+
+	store := streamTestOpen(t, dir)
+	for want := uint64(1); want <= 3; want += 1 {
+		index, err := store.ReserveStreamIndex(parts[0], parts[1])
+		if err != nil {
+			t.Fatalf("reserve: %v", err)
+		}
+		if index != want {
+			t.Fatalf("reserve answered %d, want %d", index, want)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// the restart: a new store, over the same directory, with no memory of the old one.
+	reopened := streamTestOpen(t, dir)
+	highWater, err := reopened.StreamHighWater(parts[0], parts[1])
+	if err != nil {
+		t.Fatalf("high water after a restart: %v", err)
+	}
+	if highWater != 3 {
+		t.Errorf("the reopened store answered a high water of %d, want 3; NewSenderRatchet reads this in its CONSTRUCTOR and walks highWater+1 rungs, so a store that answered a recomputed number would place a live ladder under a counter nothing has recorded", highWater)
+	}
+	next, err := reopened.ReserveStreamIndex(parts[0], parts[1])
+	if err != nil {
+		t.Fatalf("reserve after a restart: %v", err)
+	}
+	if next != 4 {
+		t.Errorf("the first allocation after a restart answered %d, want 4; resuming at HighWater() rather than HighWater()+1 hands out an index already spent, and this is invisible without the restart", next)
+	}
+}
+
+// A crash BETWEEN the flush and Reserve's return burns the index and never reuses it. A crash
+// BEFORE the flush burns nothing. Both answers come from the reopened store, and neither of them
+// may be a refusal: the unflushed record is a torn tail and Task 1 Property 4 case 2 requires it
+// discarded, not refused.
+func TestACrashAroundTheFlushBurnsExactlyWhatTheFlushRecorded(t *testing.T) {
+	for _, testCase := range []struct {
+		name          string
+		interrupt     streamAppendInterrupt
+		wantHighWater uint64
+		wantNext      uint64
+	}{
+		{
+			name:          "a crash after the flush burns the index",
+			interrupt:     streamAppendDieAfterFlush,
+			wantHighWater: 3,
+			wantNext:      4,
+		},
+		{
+			name:          "a crash before the flush burns nothing",
+			interrupt:     streamAppendTearBeforeFlush,
+			wantHighWater: 2,
+			wantNext:      3,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			parts := streamTestKeyOctets(t, 0x54)
+			store := streamTestOpen(t, dir)
+			for want := uint64(1); want <= 2; want += 1 {
+				if index, err := store.ReserveStreamIndex(parts[0], parts[1]); err != nil || index != want {
+					t.Fatalf("reserve answered (%d, %v), want (%d, nil)", index, err, want)
+				}
+			}
+
+			streamTestSetInterrupt(t, store, testCase.interrupt)
+			index, err := store.ReserveStreamIndex(parts[0], parts[1])
+			if err == nil {
+				t.Fatalf("the interrupted allocation answered (%d, nil); a Reserve that did not return is a Reserve that handed out nothing", index)
+			}
+			if index != 0 {
+				t.Errorf("the interrupted allocation answered index %d beside its error", index)
+			}
+			// the crash: the store's process is gone, so nothing it remembered survives
+			// and nothing it held is closed.
+			store.Close()
+
+			reopened := streamTestOpen(t, dir)
+			highWater, err := reopened.StreamHighWater(parts[0], parts[1])
+			if err != nil {
+				t.Fatalf("the reopened store refused the crashed row: %v; the unflushed record is a torn tail and a torn tail is discarded, not refused", err)
+			}
+			if highWater != testCase.wantHighWater {
+				t.Errorf("the reopened store answered a high water of %d, want %d", highWater, testCase.wantHighWater)
+			}
+			next, err := reopened.ReserveStreamIndex(parts[0], parts[1])
+			if err != nil {
+				t.Fatalf("reserve after the crash: %v", err)
+			}
+			if next != testCase.wantNext {
+				t.Errorf("the first allocation after the crash answered %d, want %d; a burned index is a legal gap, a reused one is section 5.6's total break", next, testCase.wantNext)
+			}
+		})
+	}
+}
+
+// Persisted state BEHIND an index this store has already handed out is ErrStreamStoreRewound, on
+// both stream methods -- and on the allocator it is ALSO ErrStreamStoreConsumed, because the next
+// position is one this store has already returned to a caller and it has no way past it. Both
+// names come off one value.
+func TestPersistedStateBehindAnIndexAlreadyHandedOutIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	parts := streamTestKeyOctets(t, 0x55)
+	rowName := streamTestRowName(t, parts)
+	store := streamTestOpen(t, dir)
+	for want := uint64(1); want <= 3; want += 1 {
+		if index, err := store.ReserveStreamIndex(parts[0], parts[1]); err != nil || index != want {
+			t.Fatalf("reserve answered (%d, %v), want (%d, nil)", index, err, want)
+		}
+	}
+
+	// the row goes backwards under a live store: two of its three records are removed out of
+	// band. Asserted at the byte level before it is read.
+	path := filepath.Join(store.rowDir, rowName)
+	if length := streamTestRowLength(t, path); length != 3*streamRecordWidth {
+		t.Fatalf("the row is %d octets, want %d", length, 3*streamRecordWidth)
+	}
+	if err := os.Truncate(path, streamRecordWidth); err != nil {
+		t.Fatalf("truncate the row: %v", err)
+	}
+	if length := streamTestRowLength(t, path); length != streamRecordWidth {
+		t.Fatalf("the truncation did not land: the row is %d octets, want %d", length, streamRecordWidth)
+	}
+	t.Logf("the row went from %d to %d octets under a live store: 3 records to 1", 3*streamRecordWidth, streamRecordWidth)
+
+	highWater, err := store.StreamHighWater(parts[0], parts[1])
+	if !errors.Is(err, ErrStreamStoreRewound) {
+		t.Errorf("StreamHighWater answered (%d, %v) for a row that went backwards, want ErrStreamStoreRewound", highWater, err)
+	}
+	index, err := store.ReserveStreamIndex(parts[0], parts[1])
+	if !errors.Is(err, ErrStreamStoreRewound) {
+		t.Errorf("ReserveStreamIndex answered (%d, %v), want ErrStreamStoreRewound", index, err)
+	}
+	if !errors.Is(err, ErrStreamStoreConsumed) {
+		t.Errorf("ReserveStreamIndex answered %v, which errors.Is does not find ErrStreamStoreConsumed in; streamindex.go clause 3 says the permanent refusal is \"what a row that went backwards under a live process looks like from in here\", and SenderRatchet.Next branches on that name", err)
+	}
+	if index != 0 {
+		t.Errorf("a refused allocation answered index %d beside its error", index)
+	}
+}
+
+// ----------------------------------------------------------------------------------------------
+// Property 3 -- no index is ever handed out twice, and the store's PERMANENT refusal is typed.
+// ----------------------------------------------------------------------------------------------
+
+func TestAStreamThatHasSpentTheLastIndexAU64HoldsIsPermanentlyRefused(t *testing.T) {
+	dir := t.TempDir()
+	parts := streamTestKeyOctets(t, 0x56)
+	rowName := streamTestRowName(t, parts)
+	streamTestPlantRow(t, dir, rowName, streamTestRowBody(rowName, math.MaxUint64))
+
+	store := streamTestOpen(t, dir)
+	if highWater, err := store.StreamHighWater(parts[0], parts[1]); err != nil || highWater != math.MaxUint64 {
+		t.Fatalf("high water answered (%d, %v), want (%d, nil)", highWater, err, uint64(math.MaxUint64))
+	}
+	for attempt := 1; attempt <= 3; attempt += 1 {
+		index, err := store.ReserveStreamIndex(parts[0], parts[1])
+		if !errors.Is(err, ErrStreamStoreConsumed) {
+			t.Fatalf("attempt %d answered (%d, %v), want ErrStreamStoreConsumed; a typed fatal error per section 5.9 G7, never a bool and never a log line", attempt, index, err)
+		}
+		if index != 0 {
+			t.Errorf("attempt %d answered index %d beside its error", attempt, index)
+		}
+	}
+	t.Log("the refusal is PERMANENT: three attempts, three refusals, and no later call can make a next position exist")
+}
+
+// A transient filesystem failure is NOT the consumed sentinel. Calling it one would tell a
+// SenderRatchet to stop forever over a full disk. This is the control for the mutation that
+// returns a bare filesystem error where the store is permanently unable to allocate -- and for
+// the opposite one, which types every failure as permanent.
+func TestATransientFailureIsNotThePermanentRefusal(t *testing.T) {
+	dir := t.TempDir()
+	parts := streamTestKeyOctets(t, 0x57)
+	store := streamTestOpen(t, dir)
+
+	streamTestSetInterrupt(t, store, streamAppendFailTheFlush)
+	_, err := store.ReserveStreamIndex(parts[0], parts[1])
+	if err == nil {
+		t.Fatal("a failed flush was not refused")
+	}
+	if errors.Is(err, ErrStreamStoreConsumed) {
+		t.Errorf("a failed flush answered %v, which errors.Is finds ErrStreamStoreConsumed in; the consumed sentinel is the store's PERMANENT refusal and a flush that failed once is not one", err)
+	}
+	if errors.Is(err, ErrStreamStoreRewound) {
+		t.Errorf("a failed flush answered %v, which errors.Is finds ErrStreamStoreRewound in", err)
+	}
+}
+
+// ----------------------------------------------------------------------------------------------
+// Property 4 -- the store is total over its key space; Property 5 -- Reserve is not idempotent.
+// ----------------------------------------------------------------------------------------------
+
+func TestAStreamNeverSeenIsZeroWithNoErrorAndTheFirstAllocationIsOne(t *testing.T) {
+	dir := t.TempDir()
+	store := streamTestOpen(t, dir)
+	parts := streamTestKeyOctets(t, 0x58)
+
+	highWater, err := store.StreamHighWater(parts[0], parts[1])
+	if err != nil {
+		t.Fatalf("a stream never seen answered %v, want no error; the absence of an error here is what clause 4 requires", err)
+	}
+	if highWater != 0 {
+		t.Fatalf("a stream never seen answered %d, want 0", highWater)
+	}
+	if index, err := store.ReserveStreamIndex(parts[0], parts[1]); err != nil || index != 1 {
+		t.Errorf("the first allocation answered (%d, %v), want (1, nil); section 5.1 makes record_id = 0 the \"from the beginning\" cursor and the two must not disagree in shape", index, err)
+	}
+}
+
+func TestReserveIsNotIdempotentAndTwoCallsAreTwoIndices(t *testing.T) {
+	dir := t.TempDir()
+	store := streamTestOpen(t, dir)
+	parts := streamTestKeyOctets(t, 0x59)
+
+	seen := map[uint64]int{}
+	for call := 1; call <= 8; call += 1 {
+		index, err := store.ReserveStreamIndex(parts[0], parts[1])
+		if err != nil {
+			t.Fatalf("call %d: %v", call, err)
+		}
+		if previous, repeated := seen[index]; repeated {
+			t.Fatalf("call %d answered index %d, which call %d already answered; there is no call that answers an index a previous call answered", call, index, previous)
+		}
+		seen[index] = call
+		if uint64(call) != index {
+			t.Errorf("call %d answered %d; under allocation two calls are two indices and the ladder is contiguous while nothing fails", call, index)
+		}
+	}
+
+	// a second key is a second ladder: every field of the key separates a row.
+	other := streamTestKeyOctets(t, 0x77)
+	if index, err := store.ReserveStreamIndex(other[0], other[1]); err != nil || index != 1 {
+		t.Errorf("the first allocation of a second key answered (%d, %v), want (1, nil)", index, err)
+	}
+}
+
+// ==============================================================================================
+// Task 2a -- the single writer, and what a second opener must do
+// ==============================================================================================
+
+const streamExclusionHelperDirEnv = "SDK_STREAM_EXCLUSION_HELPER_DIR"
+const streamExclusionHelperHoldEnv = "SDK_STREAM_EXCLUSION_HELPER_HOLD"
+
+// TestStreamExclusionHelperProcess is the SECOND PROCESS. It is a helper rather than a test: the
+// parent re-executes this test binary with the environment below, because the class Property 1 is
+// stated over is "every path by which a second allocator over one directory can come to exist",
+// and a second process is a member no in-process gate can reach. A mutant holding the exclusion
+// with a package-level sync.Mutex passes every in-process gate there is.
+func TestStreamExclusionHelperProcess(t *testing.T) {
+	dir := os.Getenv(streamExclusionHelperDirEnv)
+	if dir == "" {
+		t.Skip("not the helper process: this test runs only when the parent re-executes this binary with " + streamExclusionHelperDirEnv)
+	}
+	store, err := OpenStreamStore(dir)
+	if err != nil {
+		fmt.Printf("HELPER-REFUSED %v\n", err)
+		os.Exit(0)
+	}
+	fmt.Println("HELPER-OPENED")
+	if os.Getenv(streamExclusionHelperHoldEnv) != "" {
+		// hold the exclusion until the parent closes this process's stdin, then die
+		// WITHOUT calling Close. Property 2 is that the death releases it and that
+		// nothing else does; os.Exit here is what makes the death the only release.
+		one := make([]byte, 1)
+		os.Stdin.Read(one)
+	}
+	_ = store
+	os.Exit(0)
+}
+
+// streamTestHelperProcess starts the helper and returns its stdin (to end it) and the first
+// marker line it printed.
+func streamTestHelperProcess(t *testing.T, dir string, hold bool) (io.WriteCloser, string, *exec.Cmd) {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=TestStreamExclusionHelperProcess", "-test.timeout=60s")
+	command.Env = append(os.Environ(), streamExclusionHelperDirEnv+"="+dir)
+	if hold {
+		command.Env = append(command.Env, streamExclusionHelperHoldEnv+"=1")
+	}
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		t.Fatalf("helper stdin: %v", err)
+	}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatalf("helper stdout: %v", err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatalf("start the helper: %v", err)
+	}
+	t.Cleanup(func() {
+		stdin.Close()
+		command.Wait()
+	})
+
+	lines := make(chan string, 1)
+	go func() {
+		reader := bufio.NewReader(stdout)
+		for {
+			line, err := reader.ReadString('\n')
+			if strings.HasPrefix(line, "HELPER-") {
+				lines <- strings.TrimSpace(line)
+				return
+			}
+			if err != nil {
+				lines <- "HELPER-NO-MARKER"
+				return
+			}
+		}
+	}()
+	select {
+	case marker := <-lines:
+		return stdin, marker, command
+	case <-time.After(60 * time.Second):
+		t.Fatal("the helper process printed no marker within 60s")
+		return nil, "", nil
+	}
+}
+
+// ----------------------------------------------------------------------------------------------
+// Property 1 -- at most one StreamStore allocates against one directory at a time, and a second
+// opener is REFUSED rather than admitted.
+// ----------------------------------------------------------------------------------------------
+
+// CLASS: every path by which a second allocator over one directory can come to exist.
+// SCOPE, derived separately: THE DIRECTORY, not the process. The class has two members here -- a
+// second OpenStreamStore inside this process, and a second process opening the same directory --
+// and this gate exercises both and reports the count. A gate that held only the first is
+// measuring a mutex, and a mutex is invisible to the second process, which is the case CP3b's
+// two clients actually create.
+//
+// AND THE FIFTH THING THIS GATE REPORTS, because it is what keeps this task from breaking Task 1:
+// WHERE THE GUARD ENTRY SITS. It reports the path the exclusion was acquired on together with the
+// path the enumeration reads, so a guard that moved into the enumerated directory is visible as
+// two numbers a reader can compare rather than as a StreamHighWater refusing three tasks later.
+func TestAtMostOneStoreAllocatesAgainstOneDirectory(t *testing.T) {
+	dir := t.TempDir()
+	store := streamTestOpen(t, dir)
+	parts := streamTestKeyOctets(t, 0x61)
+	if index, err := store.ReserveStreamIndex(parts[0], parts[1]); err != nil || index != 1 {
+		t.Fatalf("the holder's own allocation answered (%d, %v)", index, err)
+	}
+
+	guardPath := streamStoreGuardPath(dir)
+	t.Logf("EXCLUSION ACQUIRED ON: %s", guardPath)
+	t.Logf("ENUMERATION READS:     %s", store.rowDir)
+	if inside, err := filepath.Rel(store.rowDir, guardPath); err == nil && !strings.HasPrefix(inside, "..") {
+		t.Errorf("the guard entry %s is INSIDE the enumerated row directory %s; this store's rule that every entry there is a row is categorical, so the guard would be read as data and every StreamHighWater after a successful open would refuse",
+			guardPath, store.rowDir)
+	}
+	if filepath.Dir(guardPath) != filepath.Clean(dir) {
+		t.Errorf("the guard entry %s does not sit directly in the store's own directory %s", guardPath, dir)
+	}
+
+	paths := 0
+
+	// member 1 of the class: a second OpenStreamStore inside this process.
+	paths += 1
+	second, err := OpenStreamStore(dir)
+	if !errors.Is(err, ErrStreamStoreLocked) {
+		if err == nil {
+			// admitted. Say what that COSTS rather than only that it happened:
+			// both stores read the same persisted high water and allocate the
+			// same next index.
+			mine, mineErr := store.ReserveStreamIndex(parts[0], parts[1])
+			theirs, theirsErr := second.ReserveStreamIndex(parts[0], parts[1])
+			second.Close()
+			t.Errorf("a second OpenStreamStore in this process was ADMITTED; it then allocated %d (%v) while the first allocated %d (%v) -- equal: %v. A reused stream_index is a reused nonce under a reused record_key, which spec A section 5.6 calls a total break of both AEADs for that record",
+				theirs, theirsErr, mine, mineErr, mine == theirs)
+		}
+		t.Errorf("a second OpenStreamStore in this process answered %v, want ErrStreamStoreLocked; two stores over one directory each read the same persisted high water and each allocate the same next index", err)
+	} else if !strings.Contains(err.Error(), dir) {
+		t.Errorf("the refusal %v does not name the directory it refused", err)
+	}
+
+	// member 2 of the class: a second PROCESS.
+	paths += 1
+	_, marker, _ := streamTestHelperProcess(t, dir, false)
+	if !strings.HasPrefix(marker, "HELPER-REFUSED") {
+		t.Errorf("a second process answered %q, want a refusal; a package-level mutex is invisible to it", marker)
+	} else if !strings.Contains(marker, ErrStreamStoreLocked.Error()) {
+		t.Errorf("the second process's refusal %q is not ErrStreamStoreLocked", marker)
+	}
+
+	t.Logf("PATHS EXERCISED: %d of the 2 the class has -- a second OpenStreamStore in this process, and a second process", paths)
+	if paths != 2 {
+		t.Errorf("the gate exercised %d paths, want 2", paths)
+	}
+}
+
+// The exclusion is held for the LIFE OF THE STORE and released at Close, never at the end of an
+// allocation. A store that released it per call leaves every gap between two allocations open to
+// a second allocator.
+func TestTheExclusionIsHeldAcrossAllocationsAndReleasedAtClose(t *testing.T) {
+	dir := t.TempDir()
+	store := streamTestOpen(t, dir)
+	parts := streamTestKeyOctets(t, 0x62)
+	for want := uint64(1); want <= 3; want += 1 {
+		if index, err := store.ReserveStreamIndex(parts[0], parts[1]); err != nil || index != want {
+			t.Fatalf("reserve answered (%d, %v), want (%d, nil)", index, err, want)
+		}
+		if second, err := OpenStreamStore(dir); !errors.Is(err, ErrStreamStoreLocked) {
+			if err == nil {
+				second.Close()
+			}
+			t.Fatalf("after allocation %d a second opener answered %v, want ErrStreamStoreLocked", want, err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	reopened, err := OpenStreamStore(dir)
+	if err != nil {
+		t.Fatalf("after Close the directory is still refused: %v", err)
+	}
+	reopened.Close()
+}
+
+// ----------------------------------------------------------------------------------------------
+// Property 2 -- the exclusion is released by the death of the process that held it, and by
+// nothing else.
+// ----------------------------------------------------------------------------------------------
+
+func TestTheExclusionIsReleasedByProcessDeathAndByNothingElse(t *testing.T) {
+	dir := t.TempDir()
+
+	// a live holder in another process leaves a directory no other process can open.
+	stdin, marker, command := streamTestHelperProcess(t, dir, true)
+	if marker != "HELPER-OPENED" {
+		t.Fatalf("the holder process answered %q, want HELPER-OPENED", marker)
+	}
+	if second, err := OpenStreamStore(dir); !errors.Is(err, ErrStreamStoreLocked) {
+		if err == nil {
+			second.Close()
+		}
+		t.Fatalf("a directory a live process holds answered %v, want ErrStreamStoreLocked", err)
+	}
+
+	// the holder dies WITHOUT calling Close. The release is the death's.
+	stdin.Close()
+	if err := command.Wait(); err != nil {
+		t.Fatalf("the holder process: %v", err)
+	}
+	store, err := OpenStreamStore(dir)
+	if err != nil {
+		t.Fatalf("after the holder died the directory is still refused: %v; a lock that survives its holder's death wedges every later open of that directory, which is exactly what a pid-and-timestamp lock file does", err)
+	}
+	defer store.Close()
+	parts := streamTestKeyOctets(t, 0x63)
+	if index, err := store.ReserveStreamIndex(parts[0], parts[1]); err != nil || index != 1 {
+		t.Errorf("the store that took over answered (%d, %v), want (1, nil)", index, err)
+	}
+}
+
+// The finding Property 2 owes is a STALE-LOCK HEURISTIC: any code that decides whether the holder
+// is alive by reading a pid, a timestamp or a file's age. This reads the exclusion's own source
+// for the shapes such a heuristic is written in, and PRINTS what it looked for, so a reader can
+// see the complement rather than take "it passed" on trust.
+func TestTheExclusionCarriesNoStaleLockHeuristic(t *testing.T) {
+	// Every shape here must be MATCHABLE against what streamTestStripComments produces -- a
+	// space-separated stream of identifiers, selectors and literals with no punctuation in it
+	// -- and the assertion below is why that is stated rather than assumed. A first version of
+	// this list carried "Stat(", which cannot occur in a stream with no parentheses in it: a
+	// clause driven by nothing, passing forever, on a gate whose whole job is to notice
+	// something.
+	forbidden := []string{
+		"os.Getpid", "syscall.Getpid", "Getppid",
+		"time.Now", "time.Since", "ModTime", "time.Duration",
+		"os.ReadFile", "io.ReadAll", "os.Stat",
+	}
+	for _, shape := range forbidden {
+		if strings.ContainsAny(shape, "()[]{}\"") {
+			t.Errorf("the forbidden shape %q carries punctuation that streamTestStripComments never emits, so this clause can never fire", shape)
+		}
+	}
+	sources := []string{
+		"message_stream_exclusion_windows.go",
+		"message_stream_exclusion_unix.go",
+		"message_stream_exclusion_other.go",
+	}
+	read := 0
+	for _, source := range sources {
+		content, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatalf("read %s: %v", source, err)
+		}
+		read += 1
+		body := streamTestStripComments(t, source, content)
+		for _, shape := range forbidden {
+			if strings.Contains(body, shape) {
+				t.Errorf("%s names %q outside a comment; the exclusion has no liveness oracle -- it either survives a crash and wedges every later open of that directory, or it is stolen from a live writer on a heuristic, and the SDK cannot tell those apart",
+					source, shape)
+			}
+		}
+	}
+	if read != 3 {
+		t.Fatalf("this gate read %d exclusion sources, want 3; one declaration per GOOS class and a fallback", read)
+	}
+	t.Logf("read %d exclusion sources and looked for %d heuristic shapes: %v", read, len(forbidden), forbidden)
+}
+
+// streamTestStripComments returns a file's source with every comment removed, so a gate that
+// looks for a shape in code is not answered by a comment ABOUT that shape.
+func streamTestStripComments(t *testing.T, name string, content []byte) string {
+	t.Helper()
+	fileSet := token.NewFileSet()
+	parsed, err := parser.ParseFile(fileSet, name, content, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+	var body strings.Builder
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.Comment:
+			return false
+		case *ast.Ident:
+			body.WriteString(typed.Name)
+			body.WriteString(" ")
+		case *ast.SelectorExpr:
+			if pkg, ok := typed.X.(*ast.Ident); ok {
+				body.WriteString(pkg.Name + "." + typed.Sel.Name)
+				body.WriteString(" ")
+			}
+		case *ast.BasicLit:
+			body.WriteString(typed.Value)
+			body.WriteString(" ")
+		}
+		return true
+	})
+	return body.String()
+}
+
+// ----------------------------------------------------------------------------------------------
+// Property 3 -- Reserve is atomic against every other call on this store, across the read, the
+// increment AND the flush.
+// ----------------------------------------------------------------------------------------------
+
+// -race CANNOT RUN IN THIS SANDBOX -- CGO_ENABLED=0 and no C compiler -- so this gate holds the
+// OUTCOME (two goroutines never get one index, and no query observes an increment before the
+// flush that made it durable returned) and does NOT hold the torn-guard property a race build
+// would add. That half is not covered here and saying so is the point.
+func TestConcurrentReservesOnOneStoreNeverHandOutOneIndexTwice(t *testing.T) {
+	dir := t.TempDir()
+	store := streamTestOpen(t, dir)
+	parts := streamTestKeyOctets(t, 0x64)
+	rowName := streamTestRowName(t, parts)
+
+	const writers = 8
+	const each = 24
+	indices := make(chan uint64, writers*each)
+	queries := make(chan uint64, writers*each)
+	var started sync.WaitGroup
+	var done sync.WaitGroup
+	started.Add(writers)
+	done.Add(writers)
+	for writer := 0; writer < writers; writer += 1 {
+		go func() {
+			defer done.Done()
+			started.Done()
+			started.Wait()
+			for call := 0; call < each; call += 1 {
+				index, err := store.ReserveStreamIndex(parts[0], parts[1])
+				if err != nil {
+					t.Errorf("concurrent reserve: %v", err)
+					return
+				}
+				indices <- index
+				highWater, err := store.StreamHighWater(parts[0], parts[1])
+				if err != nil {
+					t.Errorf("concurrent high water: %v", err)
+					return
+				}
+				queries <- highWater
+			}
+		}()
+	}
+	done.Wait()
+	close(indices)
+	close(queries)
+
+	seen := map[uint64]bool{}
+	highest := uint64(0)
+	for index := range indices {
+		if seen[index] {
+			t.Fatalf("index %d was handed out twice; a reused stream_index is a reused nonce under a reused record_key", index)
+		}
+		seen[index] = true
+		if highest < index {
+			highest = index
+		}
+	}
+	if len(seen) != writers*each {
+		t.Fatalf("%d goroutines times %d calls produced %d distinct indices", writers, each, len(seen))
+	}
+	if highest != writers*each {
+		t.Errorf("the highest index handed out is %d, want %d; a gap means a read and an increment were not one statement", highest, writers*each)
+	}
+
+	// every query observed a high water that was already on the disk, which is what taking
+	// the row lock across the flush buys.
+	for observed := range queries {
+		if writers*each < int(observed) {
+			t.Fatalf("a query observed a high water of %d, above the %d indices ever allocated", observed, writers*each)
+		}
+	}
+
+	// and the row itself holds exactly one strictly increasing record per index.
+	body, err := os.ReadFile(filepath.Join(store.rowDir, rowName))
+	if err != nil {
+		t.Fatalf("read the row: %v", err)
+	}
+	if len(body) != writers*each*streamRecordWidth {
+		t.Fatalf("the row is %d octets, want %d; a row shorter than the indices handed out is a reservation that did not reach the disk", len(body), writers*each*streamRecordWidth)
+	}
+	highWater, _, err := classifyStreamRow(rowName, body)
+	if err != nil {
+		t.Fatalf("the row written concurrently does not classify: %v", err)
+	}
+	if highWater != uint64(writers*each) {
+		t.Errorf("the row's high water is %d, want %d", highWater, writers*each)
+	}
+}
+
+// ----------------------------------------------------------------------------------------------
+// The mutation that reproduces the 2026-09-09 collision, kept as a test: a guard entry INSIDE the
+// enumerated row directory is a finding under Task 1 Property 2's categorical rule, and the
+// exclusion still holds -- which is the point. The two properties are only mutually satisfiable
+// because the guard sits beside the row directory rather than in it.
+// ----------------------------------------------------------------------------------------------
+
+func TestAGuardEntryInsideTheRowDirectoryWouldBeAFinding(t *testing.T) {
+	dir := t.TempDir()
+	store := streamTestOpen(t, dir)
+	parts := streamTestKeyOctets(t, 0x65)
+	if _, err := store.StreamHighWater(parts[0], parts[1]); err != nil {
+		t.Fatalf("the store refuses before anything is planted: %v", err)
+	}
+
+	inside := filepath.Join(store.rowDir, streamGuardName)
+	if err := os.WriteFile(inside, nil, 0o600); err != nil {
+		t.Fatalf("plant a guard entry inside the row directory: %v", err)
+	}
+	if _, err := os.Stat(inside); err != nil {
+		t.Fatalf("the plant did not land: %v", err)
+	}
+	t.Logf("planted %q inside the enumerated directory %s", streamGuardName, store.rowDir)
+
+	_, err := store.StreamHighWater(parts[0], parts[1])
+	if !errors.Is(err, ErrStreamStoreState) {
+		t.Errorf("an entry in the row directory that is not a row answered %v, want ErrStreamStoreState; the rule is categorical with no name exempted from it, which is why the guard may not live there", err)
+	}
+	if !strings.Contains(err.Error(), streamGuardName) {
+		t.Errorf("the refusal %v does not name the entry it refused", err)
+	}
+}
+
+// ----------------------------------------------------------------------------------------------
+// gates over this package's own source
+// ----------------------------------------------------------------------------------------------
+
+// Every forced flush is counted at its call site. The flush counter is one of Property 1's two
+// numbers, and a counter that can drift from the flush it counts is a claim rather than a
+// measurement.
+func TestEveryForcedFlushInTheStoreIsCounted(t *testing.T) {
+	const source = "message_stream_store.go"
+
+	// every Sync call site in the package's production source, and the function it sits in.
+	sites := map[string]int{}
+	for _, name := range streamTestProductionSources(t) {
+		content, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		fileSet := token.NewFileSet()
+		parsed, err := parser.ParseFile(fileSet, name, content, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			function, ok := node.(*ast.FuncDecl)
+			if !ok {
+				return true
+			}
+			ast.Inspect(function.Body, func(inner ast.Node) bool {
+				call, ok := inner.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "Sync" {
+					sites[function.Name.Name] += 1
+				}
+				return true
+			})
+			return false
+		})
+	}
+	t.Logf("Sync call sites in this package's production source, by enclosing function: %v", sites)
+	if len(sites) != 1 || sites["forceFlush"] != 1 {
+		t.Errorf("this package has %v Sync call sites; there must be exactly one and it must be forceFlush, which is what makes the flush counter a count of flushes PERFORMED rather than of flushes intended -- a counter above a Sync counts the same whether the Sync is there or not, and that is how \"return from Reserve before the flush\" survived a whole suite once",
+			sites)
+	}
+
+	// and forceFlush counts, after the call returns.
+	content, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read %s: %v", source, err)
+	}
+	fileSet := token.NewFileSet()
+	parsed, err := parser.ParseFile(fileSet, source, content, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", source, err)
+	}
+	counted := false
+	sawSyncFirst := false
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		function, ok := node.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "forceFlush" {
+			return true
+		}
+		for _, statement := range function.Body.List {
+			if streamTestStatementCallsSync(statement) {
+				sawSyncFirst = true
+			}
+			if streamTestStatementAssigns(statement, "rowFlushes") {
+				counted = sawSyncFirst
+			}
+		}
+		return false
+	})
+	if !counted {
+		t.Error("forceFlush does not increment rowFlushes after its Sync returns")
+	}
+}
+
+// streamTestProductionSources is every non-test .go file in this package, whatever GOOS it is
+// constrained to: the gates below read source rather than compile it, so a file this build
+// excludes is still read.
+func streamTestProductionSources(t *testing.T) []string {
+	t.Helper()
+	names, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := []string{}
+	for _, name := range names {
+		if !strings.HasSuffix(name, "_test.go") {
+			sources = append(sources, name)
+		}
+	}
+	if len(sources) == 0 {
+		t.Fatal("this gate read no production source, so it is holding nothing")
+	}
+	return sources
+}
+
+func streamTestStatementAssigns(statement ast.Stmt, field string) bool {
+	found := false
+	ast.Inspect(statement, func(node ast.Node) bool {
+		assign, ok := node.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, target := range assign.Lhs {
+			if selector, ok := target.(*ast.SelectorExpr); ok && selector.Sel.Name == field {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func streamTestStatementCallsSync(statement ast.Stmt) bool {
+	found := false
+	ast.Inspect(statement, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if ok && selector.Sel.Name == "Sync" {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
+func streamTestStatementCalls(statement ast.Stmt, name string) bool {
+	found := false
+	ast.Inspect(statement, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == name {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
+// The injected failure point is a TEST hook. A hook production could set would be a durability
+// property with an off switch, so nothing outside a _test.go file may assign it.
+func TestNoProductionSourceSetsTheAppendInterrupt(t *testing.T) {
+	sources, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := 0
+	assignments := []string{}
+	for _, source := range sources {
+		if strings.HasSuffix(source, "_test.go") {
+			continue
+		}
+		content, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatalf("read %s: %v", source, err)
+		}
+		production += 1
+		fileSet := token.NewFileSet()
+		parsed, err := parser.ParseFile(fileSet, source, content, 0)
+		if err != nil {
+			// a file this build's constraints exclude still parses; a parse failure is a
+			// real one.
+			t.Fatalf("parse %s: %v", source, err)
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			assign, ok := node.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for _, target := range assign.Lhs {
+				selector, ok := target.(*ast.SelectorExpr)
+				if ok && selector.Sel.Name == "interrupt" {
+					assignments = append(assignments, fmt.Sprintf("%s", fileSet.Position(assign.Pos())))
+				}
+			}
+			return true
+		})
+	}
+	if production == 0 {
+		t.Fatal("this gate read no production source, so it is holding nothing")
+	}
+	t.Logf("read %d production sources in this package; assignments to an interrupt field: %d", production, len(assignments))
+	if 0 < len(assignments) {
+		t.Errorf("production source assigns the append interrupt at %v", assignments)
+	}
+}
+
+// The exclusion's build constraints are the GOOS set on which the PRIMITIVE is declared, and the
+// fallback's is that set's complement. The `unix` build term is the wrong constituency and this
+// gate says why in the number it prints: solaris and aix satisfy `unix` and declare no
+// syscall.Flock, so a file constrained with `unix` is a BUILD BREAK there rather than a fall
+// through to the refusal.
+func TestTheExclusionBuildConstraintsAreDerivedFromThePrimitive(t *testing.T) {
+	flockGoos := streamTestBuildTerms(t, "message_stream_exclusion_unix.go")
+	fallback := streamTestBuildTerms(t, "message_stream_exclusion_other.go")
+	windows := streamTestBuildTerms(t, "message_stream_exclusion_windows.go")
+
+	t.Logf("flock GOOS terms (%d): %v", len(flockGoos.positive), flockGoos.positive)
+	t.Logf("windows terms (%d): %v", len(windows.positive), windows.positive)
+	t.Logf("fallback NEGATED terms (%d): %v", len(fallback.negative), fallback.negative)
+
+	if slices.Contains(flockGoos.positive, "unix") {
+		t.Error("the flock file is constrained with the `unix` term; go/build's `unix` covers solaris and aix, and syscall.Flock is declared on neither, so this does not send them to the fail-closed file -- it makes them `undefined: syscall.Flock`")
+	}
+	for _, wrong := range []string{"solaris", "aix"} {
+		if slices.Contains(flockGoos.positive, wrong) {
+			t.Errorf("the flock file claims %s, which declares no syscall.Flock", wrong)
+		}
+	}
+	if len(flockGoos.positive) == 0 {
+		t.Fatal("the flock file names no GOOS at all")
+	}
+	if len(windows.positive) != 1 || windows.positive[0] != "windows" {
+		t.Errorf("the windows file's terms are %v, want exactly [windows]", windows.positive)
+	}
+
+	// the fallback's constraint must be the EXACT complement of the other two, so no GOOS
+	// gets two implementations and none gets zero.
+	covered := append(append([]string{}, flockGoos.positive...), windows.positive...)
+	slices.Sort(covered)
+	negated := append([]string{}, fallback.negative...)
+	slices.Sort(negated)
+	if !slices.Equal(covered, negated) {
+		t.Errorf("the fallback negates %v and the two implementations cover %v; a GOOS in neither gets no acquireStreamStoreExclusion at all and a GOOS in both gets two", negated, covered)
+	}
+	if 0 < len(fallback.positive) {
+		t.Errorf("the fallback carries positive terms %v; its constraint is a complement and nothing else", fallback.positive)
+	}
+
+	// AND THE FALLBACK'S BODY IS A REFUSAL, not a placeholder. A build tag that quietly
+	// compiled to a no-op returning a nil closer and a nil error is the single-writer
+	// property deleted by a build constraint, and no gate on any platform that HAS the
+	// primitive would ever run there to say so.
+	fallbackSource, err := os.ReadFile("message_stream_exclusion_other.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallbackBody := streamTestStripComments(t, "message_stream_exclusion_other.go", fallbackSource)
+	if !strings.Contains(fallbackBody, "ErrStreamStoreLocked") {
+		t.Error("the fail-closed file's body does not name ErrStreamStoreLocked; a platform this store cannot make safe is a platform it refuses to open on")
+	}
+	// read as SYNTAX rather than as text: every return in the fallback's acquire must carry a
+	// non-nil error, so a no-op cannot be smuggled in as a differently spelled nil.
+	fallbackSet := token.NewFileSet()
+	fallbackParsed, err := parser.ParseFile(fallbackSet, "message_stream_exclusion_other.go", fallbackSource, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	returns := 0
+	ast.Inspect(fallbackParsed, func(node ast.Node) bool {
+		function, ok := node.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "acquireStreamStoreExclusion" {
+			return true
+		}
+		ast.Inspect(function.Body, func(inner ast.Node) bool {
+			statement, ok := inner.(*ast.ReturnStmt)
+			if !ok {
+				return true
+			}
+			returns += 1
+			if len(statement.Results) != 2 {
+				t.Errorf("a return in the fail-closed acquire has %d results, want 2", len(statement.Results))
+				return true
+			}
+			if identifier, ok := statement.Results[1].(*ast.Ident); ok && identifier.Name == "nil" {
+				t.Errorf("the fail-closed acquire returns a nil error at %s; a platform this store cannot make safe is a platform it refuses to open on, and a build tag that quietly compiled to a no-op is the single-writer property deleted by a build constraint",
+					fallbackSet.Position(statement.Pos()))
+			}
+			return true
+		})
+		return false
+	})
+	if returns == 0 {
+		t.Fatal("the fail-closed file declares no acquireStreamStoreExclusion, so this gate read nothing")
+	}
+	t.Logf("the fail-closed acquire has %d return statement(s), none of them with a nil error", returns)
+
+	// THE COMPLEMENT, PRINTED. These are the platforms that get the refusal.
+	refused := []string{}
+	for _, goos := range []string{
+		"aix", "android", "darwin", "dragonfly", "freebsd", "illumos", "ios", "js",
+		"linux", "netbsd", "openbsd", "plan9", "solaris", "wasip1", "windows",
+	} {
+		implied := map[string][]string{"android": {"linux"}, "ios": {"darwin"}}[goos]
+		terms := append([]string{goos}, implied...)
+		held := false
+		for _, term := range terms {
+			if slices.Contains(covered, term) {
+				held = true
+			}
+		}
+		if !held {
+			refused = append(refused, goos)
+		}
+	}
+	t.Logf("THE COMPLEMENT -- GOOS values that get the fail-closed refusal (%d): %v", len(refused), refused)
+	if len(refused) == 0 {
+		t.Error("the fail-closed file has no constituency at all, so it is never compiled and its refusal is never anybody's answer; an empty complement here means the narrowing was read wrong")
+	}
+	for _, want := range []string{"js", "solaris", "aix", "plan9", "wasip1"} {
+		if !slices.Contains(refused, want) {
+			t.Errorf("%s is not in the fail-closed complement", want)
+		}
+	}
+}
+
+type streamBuildConstraint struct {
+	positive []string
+	negative []string
+}
+
+func streamTestBuildTerms(t *testing.T, name string) streamBuildConstraint {
+	t.Helper()
+	content, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	constraint := streamBuildConstraint{}
+	found := false
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "//go:build ") {
+			continue
+		}
+		found = true
+		for _, term := range strings.Fields(strings.TrimPrefix(line, "//go:build ")) {
+			switch {
+			case term == "||" || term == "&&":
+			case strings.HasPrefix(term, "!"):
+				constraint.negative = append(constraint.negative, strings.TrimPrefix(term, "!"))
+			default:
+				constraint.positive = append(constraint.positive, term)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("%s carries no //go:build line, so its constituency is whatever its filename implies", name)
+	}
+	return constraint
+}
+
+// ----------------------------------------------------------------------------------------------
+// the join between the two repos, stated mechanically rather than by eye
+// ----------------------------------------------------------------------------------------------
+
+// streamStoreMethodShape is a COMPILE-TIME assertion of the store's two stream methods, exactly
+// as this task produces them. It fails to build if either name or either signature moves.
+var streamStoreMethodShape = struct {
+	reserve   func(*StreamStore, []byte, []byte) (uint64, error)
+	highWater func(*StreamStore, []byte, []byte) (uint64, error)
+}{
+	reserve:   (*StreamStore).ReserveStreamIndex,
+	highWater: (*StreamStore).StreamHighWater,
+}
+
+// streamReserverMethodShape is a COMPILE-TIME assertion of the interface's two methods as
+// connect/messagegroup declares them TODAY. It fails to build if either name or either signature
+// moves there.
+var streamReserverMethodShape = func(reserver messagegroup.StreamIndexReserver) (
+	func(messagegroup.StreamKey) (uint64, error),
+	func(messagegroup.StreamKey) (uint64, error),
+) {
+	return reserver.Reserve, reserver.HighWater
+}
+
+// TestStreamStoreDoesNotYetSatisfyStreamIndexReserver reports the join between sdk and connect as
+// a fact rather than an impression. It is checked, not eyeballed: the two var declarations above
+// are compile-time assertions of the two method sets, and the reflection below reports the
+// difference between them mechanically.
+//
+// THE ANSWER IS NO, AND THAT IS THE PLAN'S DESIGN RATHER THAN A GAP. Spec A section 8.2 says the
+// flattening from these two []byte parameters to messagegroup's comparable StreamKey "is the
+// implementer's", and Task 3 declares its adapter "the only code that maps a store failure onto
+// messagegroup's sentinels" -- so a *StreamStore that satisfied the interface directly would put
+// a second flattening and a second mapping in this package, which is what Task 3 exists to
+// prevent. A compile-time `var _ messagegroup.StreamIndexReserver = (*StreamStore)(nil)` here
+// would not compile, on two counts at once, and the two counts are printed below.
+func TestStreamStoreDoesNotYetSatisfyStreamIndexReserver(t *testing.T) {
+	_ = streamStoreMethodShape
+	_ = streamReserverMethodShape
+
+	reserverType := reflect.TypeOf((*messagegroup.StreamIndexReserver)(nil)).Elem()
+	storeType := reflect.TypeOf((*StreamStore)(nil))
+	if reserverType.NumMethod() == 0 {
+		t.Fatal("messagegroup.StreamIndexReserver declares no method, so this gate compares nothing")
+	}
+
+	satisfied := storeType.Implements(reserverType)
+	missing := []string{}
+	for i := range reserverType.NumMethod() {
+		method := reserverType.Method(i)
+		have, ok := storeType.MethodByName(method.Name)
+		if !ok {
+			missing = append(missing, fmt.Sprintf("%s%s -- *StreamStore declares no method of that name",
+				method.Name, method.Type.String()))
+			continue
+		}
+		missing = append(missing, fmt.Sprintf("%s%s -- *StreamStore has %s%s",
+			method.Name, method.Type.String(), have.Name, have.Type.String()))
+	}
+	t.Logf("*sdk.StreamStore satisfies messagegroup.StreamIndexReserver: %v", satisfied)
+	t.Logf("THE COMPLEMENT -- what the interface asks for and what this task produces (%d methods):", reserverType.NumMethod())
+	for _, line := range missing {
+		t.Logf("  %s", line)
+	}
+	t.Logf("  and the store's own pair: ReserveStreamIndex(groupId, senderHandle []byte) (uint64, error), StreamHighWater(groupId, senderHandle []byte) (uint64, error)")
+
+	if satisfied {
+		t.Error("*StreamStore satisfies messagegroup.StreamIndexReserver directly. Task 3 declares its adapter the ONLY code in sdk that flattens a StreamKey and the ONLY code that maps a store failure onto messagegroup's sentinels; a store that satisfies the interface itself is a second one of each")
+	}
+	for _, name := range []string{"ReserveStreamIndex", "StreamHighWater"} {
+		if _, ok := storeType.MethodByName(name); !ok {
+			t.Errorf("*StreamStore has no %s; section 8.2 spells the store's two methods with these names", name)
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------------------------
+// the priced residual, executable
+// ----------------------------------------------------------------------------------------------
+
+// The verified prefix is what makes a high-water read cost the records appended since rather than
+// every record ever written. What it costs is stated here rather than absorbed: an out-of-band
+// IN-PLACE mutation of a record a live store has already checksummed is not seen by THAT store,
+// and IS seen by the next one to open the directory. Both halves are asserted, because a residual
+// with only its safe half asserted is a residual nobody has measured.
+func TestAnOutOfBandMutationOfAVerifiedPrefixIsMissedUntilTheStoreIsReopened(t *testing.T) {
+	dir := t.TempDir()
+	parts := streamTestKeyOctets(t, 0x66)
+	rowName := streamTestRowName(t, parts)
+	store := streamTestOpen(t, dir)
+	for want := uint64(1); want <= 3; want += 1 {
+		if index, err := store.ReserveStreamIndex(parts[0], parts[1]); err != nil || index != want {
+			t.Fatalf("reserve answered (%d, %v)", index, err)
+		}
+	}
+	path := filepath.Join(store.rowDir, rowName)
+
+	// a verifying record carrying a LOWER index, planted over the SECOND record -- inside the
+	// prefix this store has already checksummed.
+	streamTestPlantRecordAt(t, path, rowName, 2, 1)
+
+	highWater, err := store.StreamHighWater(parts[0], parts[1])
+	if err != nil || highWater != 3 {
+		t.Errorf("the live store answered (%d, %v) for a row whose verified prefix was mutated under it; the residual this test prices is that it answers 3 with no error, so a change here means the residual moved and the comment that prices it is stale",
+			highWater, err)
+	}
+	t.Logf("MISSED by the live store: it answers %d with error %v, because it does not re-checksum a prefix it has already verified under an exclusion it holds", highWater, err)
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	reopened := streamTestOpen(t, dir)
+	if _, err := reopened.StreamHighWater(parts[0], parts[1]); !errors.Is(err, ErrStreamStoreState) {
+		t.Errorf("the REOPENED store answered %v for the same row, want ErrStreamStoreState; the reopen re-verifies from record 1, which is what bounds this residual to one store's lifetime rather than a row's", err)
+	}
+	t.Log("CAUGHT by the next store to open the directory: the miss lasts one store's lifetime, not a row's")
+}
+
+// ----------------------------------------------------------------------------------------------
+// the cost of a high-water read, measured rather than asserted
+// ----------------------------------------------------------------------------------------------
+
+// BenchmarkStreamReserveAtDepth is the review's linear-rescan finding, measured. It reserves one
+// more index on a row that already carries depth records, with the verified prefix in place and
+// with it disabled, so the two costs are reported side by side rather than argued about.
+func BenchmarkStreamReserveAtDepth(b *testing.B) {
+	for _, depth := range []int{1, 1000, 10000, 100000} {
+		for _, prefix := range []bool{true, false} {
+			name := fmt.Sprintf("depth=%d/verifiedPrefix=%v", depth, prefix)
+			b.Run(name, func(b *testing.B) {
+				dir := b.TempDir()
+				store, err := OpenStreamStore(dir)
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer store.Close()
+				groupId := make([]byte, 32)
+				senderHandle := make([]byte, 16)
+				groupId[0] = 0x9a
+				key, err := streamKeyFromOctets(groupId, senderHandle)
+				if err != nil {
+					b.Fatal(err)
+				}
+				rowName := streamRowName(key)
+				body := make([]byte, 0, depth*streamRecordWidth)
+				for index := 1; index <= depth; index += 1 {
+					record := encodeStreamRecord(rowName, uint64(index))
+					body = append(body, record[:]...)
+				}
+				if err := os.WriteFile(filepath.Join(store.rowDir, rowName), body, 0o600); err != nil {
+					b.Fatal(err)
+				}
+				b.ResetTimer()
+				for range b.N {
+					if !prefix {
+						store.allocMutex.Lock()
+						store.verified = map[string]streamRowVerification{}
+						store.allocMutex.Unlock()
+					}
+					if _, err := store.ReserveStreamIndex(groupId, senderHandle); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkStreamHighWaterAtDepth isolates the REREAD from the flush. BenchmarkStreamReserveAtDepth
+// above measures the whole allocation, which on NTFS is dominated by the forced flush -- several
+// milliseconds, and noisy -- so the rescan the review found is only legible at the largest depth
+// there. This one performs no write at all, so what it reports is the cost of answering a high
+// water: constant with the verified prefix, linear in records ever written without it.
+func BenchmarkStreamHighWaterAtDepth(b *testing.B) {
+	for _, depth := range []int{1, 1000, 10000, 100000} {
+		for _, prefix := range []bool{true, false} {
+			b.Run(fmt.Sprintf("depth=%d/verifiedPrefix=%v", depth, prefix), func(b *testing.B) {
+				dir := b.TempDir()
+				store, err := OpenStreamStore(dir)
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer store.Close()
+				groupId := make([]byte, 32)
+				senderHandle := make([]byte, 16)
+				groupId[0] = 0x9b
+				key, err := streamKeyFromOctets(groupId, senderHandle)
+				if err != nil {
+					b.Fatal(err)
+				}
+				rowName := streamRowName(key)
+				body := make([]byte, 0, depth*streamRecordWidth)
+				for index := 1; index <= depth; index += 1 {
+					record := encodeStreamRecord(rowName, uint64(index))
+					body = append(body, record[:]...)
+				}
+				if err := os.WriteFile(filepath.Join(store.rowDir, rowName), body, 0o600); err != nil {
+					b.Fatal(err)
+				}
+				b.ResetTimer()
+				for range b.N {
+					if !prefix {
+						store.allocMutex.Lock()
+						store.verified = map[string]streamRowVerification{}
+						store.allocMutex.Unlock()
+					}
+					if _, err := store.StreamHighWater(groupId, senderHandle); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
 		}
 	}
 }

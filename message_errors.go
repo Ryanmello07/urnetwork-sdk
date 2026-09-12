@@ -52,4 +52,55 @@ var (
 	// process could open, on exactly the path the durability exists to survive. See
 	// classifyStreamRow for the three cases and the discriminator between them.
 	ErrStreamStoreState = errors.New("stream store state")
+
+	// ErrStreamStoreRewound is PERSISTED STATE BEHIND AN INDEX THIS STORE HAS ALREADY HANDED
+	// OUT. It is contract clause 2's condition -- "HighWater never rewinds. After a restart it
+	// is at least what it was, for every key, under every interleaving" -- and it is raised by
+	// BOTH stream methods, because a caller that only ever queried is still owed the answer
+	// that the number it saw is no longer on the disk.
+	//
+	// The condition is sdk's; the NAME messagegroup branches on is the adapter's, and the
+	// adapter is the only code that maps one onto the other. Nothing in this package imports
+	// messagegroup.ErrStreamIndexRewound.
+	//
+	// It is raised against WHAT THIS PROCESS HANDED OUT, never against a number a caller
+	// remembers: a store that took the caller's word for its own high water would be a store
+	// whose rewind detector a caller can turn off.
+	ErrStreamStoreRewound = errors.New("stream store rewound")
+
+	// ErrStreamStoreConsumed is the store's PERMANENT refusal to allocate for a key: the next
+	// position is one it has already handed out and it has no way past it. Contract clause 3
+	// names two shapes of that and this store produces both.
+	//
+	//  1. A stream that has spent the last index a u64 holds. persisted+1 does not exist, and
+	//     no later call can make it exist, so the refusal is forever.
+	//  2. A row that went backwards under a live process. The next position this store would
+	//     allocate is a number it has already returned to a caller, and a second AEAD record
+	//     under a reused stream_index is what spec A section 5.6 calls "a total break of both
+	//     AEADs for that record". Shape 2 is raised TOGETHER WITH ErrStreamStoreRewound, both
+	//     findable by errors.Is off one value, because the two names describe one state from
+	//     two seats: the reader's (the number moved) and the allocator's (I cannot go on).
+	//     streamindex.go's clause 3 says exactly this -- the permanent refusal is "what a row
+	//     that went backwards under a live process looks like from in here".
+	//
+	// It is never the answer for a condition a retry could clear. A transient filesystem error
+	// is returned as itself; calling it consumed would tell a ratchet to stop forever over a
+	// full disk.
+	ErrStreamStoreConsumed = errors.New("stream store consumed")
+
+	// ErrStreamStoreLocked is another StreamStore holding this directory.
+	//
+	// Two stores over one directory each read the same persisted high water and each allocate
+	// THE SAME NEXT INDEX -- section 5.6's total break, reached without a single corrupt byte.
+	// The exclusion that prevents it is held by the OPERATING SYSTEM and released by the death
+	// of the process that held it: dwShareMode=0 on Windows, LOCK_EX|LOCK_NB on the GOOS set
+	// where syscall.Flock is declared. There is deliberately NO liveness heuristic here -- no
+	// pid, no timestamp, no age threshold -- because a heuristic either wedges a directory
+	// forever after a crash or steals a lock from a live writer, and the SDK cannot tell those
+	// two apart.
+	//
+	// A GOOS with neither primitive gets this error unconditionally. A platform this store
+	// cannot make safe is a platform it refuses to open on; a build tag that quietly compiled
+	// to a no-op would be the single-writer property deleted by a build constraint.
+	ErrStreamStoreLocked = errors.New("stream store locked")
 )

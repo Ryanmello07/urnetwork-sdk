@@ -4,8 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,22 +20,26 @@ import (
 // StreamStore is the durable stream-index reservation store spec A section 8.2 assigns to sdk,
 // and the first one that has ever existed in any tree.
 //
-// What this file owns is the ROW: what identifies it, what key space it belongs to, what shape
-// its bytes have, and what the store answers for a row it cannot read. Allocation -- the
-// exported ReserveStreamIndex and StreamHighWater, the fsync boundary and the two allocation
-// sentinels -- is the next task's, and it is built on classifyStreamRow and streamKeyFromOctets
-// below.
+// What this file owns is the ROW -- what identifies it, what key space it belongs to, what shape
+// its bytes have, and what the store answers for a row it cannot read -- and the ALLOCATION built
+// on it: ReserveStreamIndex, StreamHighWater, the fsync boundary, and the two sentinels a caller
+// matches with errors.Is. The mapping from these two methods onto
+// connect/messagegroup.StreamIndexReserver is NOT here: section 8.2 makes the flattening from
+// two []byte parameters to that package's comparable StreamKey "the implementer's", and the
+// adapter that performs it is the only code in sdk that does -- so *StreamStore deliberately does
+// NOT satisfy that interface, and TestStreamStoreDoesNotYetSatisfyStreamIndexReserver reports
+// that as a checked fact rather than an impression.
 //
 // THE ROW IS ONE FILE PER STREAM KEY, INSIDE A DIRECTORY THAT HOLDS ROWS AND NOTHING ELSE.
 // dir is this store's own directory. Inside it OpenStreamStore creates the ROW DIRECTORY, and
-// the single-writer exclusion the next task adds sits BESIDE that directory in dir, never inside
-// it. That is a construction rather than an ignore-list: because nothing but a row is ever
-// written into the row directory, the rule "an entry in the row directory that is not a row is a
-// finding" can be categorical, with no name exempted from it. An exemption by name is the shape
-// that goes on silently ignoring the second non-row somebody writes there tomorrow.
+// the single-writer exclusion sits BESIDE that directory in dir, never inside it. That is a
+// construction rather than an ignore-list: because nothing but a row is ever written into the row
+// directory, the rule "an entry in the row directory that is not a row is a finding" can be
+// categorical, with no name exempted from it. An exemption by name is the shape that goes on
+// silently ignoring the second non-row somebody writes there tomorrow.
 //
 // One file per key rather than one file for every key is not a performance choice. It makes the
-// next task's flush a single-file flush, and it makes a damaged row cost one stream instead of
+// allocation's flush a single-file flush, and it makes a damaged row cost one stream instead of
 // every stream.
 type StreamStore struct {
 	dir    string
@@ -42,6 +49,38 @@ type StreamStore struct {
 	// PREFIX of every row name. See streamKeySpaceTagOf.
 	keySpaceTag string
 
+	// exclusion is the SINGLE-WRITER guard, held by the operating system on an entry that
+	// sits in dir BESIDE the row directory and never inside it. It is released by Close and
+	// by the death of this process, and by nothing else. See message_errors.go's
+	// ErrStreamStoreLocked for why there is no liveness heuristic here.
+	exclusion io.Closer
+
+	// allocMutex is the row lock. It is held across the READ, the INCREMENT and the FLUSH of
+	// one allocation, and across the read of one high-water query, so no query can observe an
+	// increment before the flush that made it durable returned. It is not the exclusion: a
+	// mutex is invisible to a second process, and a second process is the case CP3b's two
+	// clients actually create.
+	//
+	// LOCK ORDER: allocMutex then stateMutex, never the other way. stateMutex is only ever
+	// held across a field read or a counter increment.
+	allocMutex sync.Mutex
+
+	// verified is the prefix of each row this store has already checksummed. See
+	// streamRowVerification for what it buys and what it costs. Under allocMutex.
+	verified map[string]streamRowVerification
+
+	// handedOut is the highest index THIS STORE has returned to a caller, per row. It is the
+	// rewind detector: persisted state behind one of these numbers is ErrStreamStoreRewound.
+	// It is never seeded from a caller, so it cannot be turned off by one. Under allocMutex.
+	//
+	// ITS HORIZON IS THIS STORE'S LIFETIME AND NOT THE ROW'S, and that bound is the same one
+	// S2-23 prices from the format's side: nothing durable records what a previous process
+	// handed out, the format admits no second object that could, and a row rewound BETWEEN
+	// two opens is therefore indistinguishable from a row that was always that length. A
+	// rewind detector that spanned restarts would need a durable high-water witness outside
+	// the row, which is a format change and not a field here.
+	handedOut map[string]uint64
+
 	stateMutex sync.Mutex
 	closed     bool
 
@@ -50,6 +89,13 @@ type StreamStore struct {
 	// where somebody says it happens: a store that moved the open-time repair into the read
 	// path would move this counter with it.
 	rowWrites int
+
+	// rowFlushes counts every forced flush, at the flush site and nowhere else.
+	rowFlushes int
+
+	// interrupt is the injected failure point, set by tests in this package and by nothing
+	// else. See streamAppendInterrupt.
+	interrupt streamAppendInterrupt
 }
 
 const (
@@ -305,10 +351,10 @@ func (self *StreamStore) classifyStreamRowName(name string) streamRowClass {
 	return streamRowOfThisKeySpace
 }
 
-// classifyStreamRow is the decision procedure over the three cases a row's bytes can be in. It
-// is a function of the row's LENGTH, the record width and the per-record checksum verdicts, and
-// it has no other input -- which is a statement about the format rather than about this
-// implementation.
+// classifyStreamRowTail is the decision procedure over the three cases a row's bytes can be in.
+// It is a function of the row's LENGTH, the record width, the per-record checksum verdicts and --
+// since 2026-09-12, derived below -- the sequence the verifying records spell. It has no other
+// input, which is a statement about the format rather than about this implementation.
 //
 // Let W be the record width and L the row's length; k = L div W and r = L mod W, so the row is
 // records R_1 .. R_k at offsets 0, W, .., (k-1)W followed by an r-octet partial when r > 0. Let
@@ -344,20 +390,87 @@ func (self *StreamStore) classifyStreamRowName(name string) streamRowClass {
 //
 // truncateTo is the length the row must be repaired to; it equals the row's current length when
 // nothing is owed.
-func classifyStreamRow(rowName string, content []byte) (highWater uint64, truncateTo int64, err error) {
-	length := len(content)
-	wholeRecords := length / streamRecordWidth
-	partial := length % streamRecordWidth
+//
+// AND THE FOURTH INPUT, ADDED 2026-09-12 TO CLOSE A HIGH-WATER DEFECT THE REVIEW FOUND: THE
+// SEQUENCE THE VERIFYING RECORDS SPELL. The record checksum binds the index to the row's NAME and
+// to nothing else -- deliberately, so that a row copied under another name does not verify -- and
+// a checksum that binds only the name says nothing about WHERE in the row the record sits. So a
+// record that verifies was, before this, accepted wherever it sat: plant a correctly checksummed
+// record carrying index 2 over the third record of a row holding 1, 2, 3 and the store answered a
+// high water of 2. The number moved BACKWARDS inside one row, silently, with no error, and the
+// next allocation handed out 3 for the second time. Under spec A section 5.6 a reused
+// stream_index is a reused nonce under a reused record_key -- "a total break of both AEADs for
+// that record" -- so this is the hazard the whole store exists to prevent, reached through the
+// store rather than around it.
+//
+// THE REPAIR IS THE SCAN'S, NOT THE CHECKSUM'S, and the choice between the two is not a
+// preference. Binding the record's OFFSET into what it authenticates closes the same hole and
+// costs something this format cannot pay: a row whose first record was removed out of band then
+// has every surviving record at the wrong offset, so R_1 fails, f = 1, and the decision procedure
+// answers (0, nil) and TRUNCATES THE ROW TO ZERO -- a rewind to nothing, and a destructive one,
+// in place of the surviving-high-water answer name-only binding gives. Offset binding also
+// destroys the one thing that makes case 2 decidable: with the offset out of the checksum a
+// failing final record can only be a torn append, and with it in, a failing final record is torn
+// OR shifted and the procedure has no way to tell. So the binding stays on the name and the
+// SEQUENCE carries the obligation:
+//
+//	the indices of R_1 .. R_{f-1} are STRICTLY INCREASING, and R_1's is at least 1.
+//
+// It is refused outright rather than repaired, and that follows from the same append discipline
+// case 2's bound is derived from. One interrupted append leaves exactly two shapes -- a trailing
+// partial, or a final whole record torn within its own octets -- and a lower index sitting under a
+// verifying checksum at a later offset is neither of them. It is not a shape a correct writer can
+// produce at all, so there is no correct repair for it and ErrStreamStoreState is the answer.
+// "At least 1" falls out of the same statement with the walk seeded at zero, and it is not
+// decoration: index 0 is the answer clause 4 reserves for a stream never seen, so a record
+// CARRYING zero is a durable claim that the store has allocated the value that means it has not.
+//
+// What this does NOT reach, said plainly because a reader will look for it: a row whose records
+// were rewritten as a whole, consistently, in increasing order. That is not a regression inside a
+// row, it is a forged row, and nothing a per-record checksum bound to a name can do would see it.
+// It is the same residual as S2-23 and it is priced there.
+//
+// priorRecords and priorHighWater are the length of an ALREADY-VERIFIED PREFIX and the index its
+// last record carries; tail is the row's octets from that prefix's end. A caller with nothing
+// verified passes (0, 0, the whole row), which is what classifyStreamRow does. The split exists
+// so a store that has already verified a row's first n records does not re-checksum them on every
+// later read; see streamRowVerification for what that costs and what it buys.
+func classifyStreamRowTail(
+	rowName string,
+	priorRecords int,
+	priorHighWater uint64,
+	tail []byte,
+) (highWater uint64, truncateTo int64, err error) {
+	tailRecords := len(tail) / streamRecordWidth
+	partial := len(tail) % streamRecordWidth
+	wholeRecords := priorRecords + tailRecords
 
 	firstFailing := wholeRecords + 1
-	for j := 1; j <= wholeRecords; j += 1 {
-		if !verifyStreamRecord(rowName, content[(j-1)*streamRecordWidth:j*streamRecordWidth]) {
+	previousIndex := priorHighWater
+	for j := priorRecords + 1; j <= wholeRecords; j += 1 {
+		offset := (j - priorRecords - 1) * streamRecordWidth
+		record := tail[offset : offset+streamRecordWidth]
+		if !verifyStreamRecord(rowName, record) {
 			firstFailing = j
 			break
 		}
+		index := streamRecordIndex(record)
+		if index <= previousIndex {
+			return 0, 0, fmt.Errorf(
+				"%w: row %s carries index %d at position %d and index %d at position %d after it; a stream index ladder inside one row is strictly increasing and starts at 1, so an index that is not above the one before it is a high water that moved backwards, which no interrupted append can leave and which hands the next allocation a number already spent",
+				ErrStreamStoreState,
+				rowName,
+				previousIndex,
+				j-1,
+				index,
+				j,
+			)
+		}
+		previousIndex = index
 	}
 	for j := firstFailing + 1; j <= wholeRecords; j += 1 {
-		if verifyStreamRecord(rowName, content[(j-1)*streamRecordWidth:j*streamRecordWidth]) {
+		offset := (j - priorRecords - 1) * streamRecordWidth
+		if verifyStreamRecord(rowName, tail[offset:offset+streamRecordWidth]) {
 			return 0, 0, fmt.Errorf(
 				"%w: row %s holds a record at position %d that does not verify and a verifying record at position %d after it; a failure with a verifying record after it is a corrupt body however small it is, and no interrupted append can leave one",
 				ErrStreamStoreState,
@@ -390,13 +503,19 @@ func classifyStreamRow(rowName string, content []byte) (highWater uint64, trunca
 	}
 
 	truncateTo = int64(firstFailing-1) * streamRecordWidth
-	if firstFailing == 1 {
-		// A row carrying no verifying record is the state a row is in before an index for
-		// its key has been handed out, which is the same state a stream never seen is in.
-		return 0, truncateTo, nil
+	if firstFailing == priorRecords+1 {
+		// Nothing past the verified prefix survives. With an empty prefix that is the
+		// state a row is in before an index for its key has been handed out, which is the
+		// same state a stream never seen is in: 0, and no error.
+		return priorHighWater, truncateTo, nil
 	}
-	lastVerifying := content[(firstFailing-2)*streamRecordWidth : (firstFailing-1)*streamRecordWidth]
-	return streamRecordIndex(lastVerifying), truncateTo, nil
+	lastOffset := (firstFailing - priorRecords - 2) * streamRecordWidth
+	return streamRecordIndex(tail[lastOffset : lastOffset+streamRecordWidth]), truncateTo, nil
+}
+
+// classifyStreamRow is classifyStreamRowTail over a row with no verified prefix.
+func classifyStreamRow(rowName string, content []byte) (highWater uint64, truncateTo int64, err error) {
+	return classifyStreamRowTail(rowName, 0, 0, content)
 }
 
 // OpenStreamStore opens, and if necessary repairs, the durable stream store rooted at dir.
@@ -414,7 +533,7 @@ func classifyStreamRow(rowName string, content []byte) (highWater uint64, trunca
 //     already a whole multiple of the record width and writes nothing. A repair performed lazily
 //     inside the read path makes a read a write, puts a second writer to one row inside one
 //     store beside a live allocation, and makes the repair's timing data-dependent.
-//  2. It is on the open path, so it moves neither of the next task's two allocation-path
+//  2. It is on the open path, so it moves neither of the two allocation-path
 //     numbers. It is not a forced flush on the allocation path and it is not a directory-entry
 //     mutation at all: it is a truncation of a file that already exists.
 //  3. Its own durability is not load-bearing, which is what makes it safe to do at open at all.
@@ -440,7 +559,41 @@ func classifyStreamRow(rowName string, content []byte) (highWater uint64, trunca
 //
 // Whether this repair is a sixth section 8.2 contract clause on OpenStreamStore is filed rather
 // than assumed: S2-24.
+// AND IT IS PERFORMED UNDER THE SINGLE-WRITER EXCLUSION, which is what makes it safe to perform
+// at all. The exclusion is acquired before the scan and released only by Close or by this
+// process's death, so the repair is never concurrent with anything and StreamHighWater stays a
+// read for the life of the store. Without it the repair would be a second writer to a row a live
+// store is appending to -- which is not a hypothetical, because OpenStreamStore is itself a
+// WRITER, and before the exclusion existed a second opener against a directory a live store was
+// using destroyed that store's in-flight append.
 func OpenStreamStore(dir string) (*StreamStore, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf(
+			"%w: the store directory %s could not be created: %v",
+			ErrStreamStoreState,
+			dir,
+			err,
+		)
+	}
+	// THE EXCLUSION IS ACQUIRED BEFORE ANYTHING IS READ AND BEFORE ANYTHING IS WRITTEN. The
+	// guard entry sits in dir, BESIDE the row directory and never inside it, so the
+	// enumerated object and the excluded object are different directories, one nested inside
+	// the other. That is a construction rather than an exemption: the rule "an entry in the
+	// row directory that is not a row is a finding" stays categorical, with no name exempted
+	// from it, and a later reader does not have to know the guard's name.
+	platformExclusion, err := acquireStreamStoreExclusion(dir)
+	if err != nil {
+		return nil, err
+	}
+	streamStoreNoteHeld(dir)
+	exclusion := &streamStoreHeldExclusion{inner: platformExclusion, dir: dir}
+	released := false
+	defer func() {
+		if !released {
+			exclusion.Close()
+		}
+	}()
+
 	rowDir := filepath.Join(dir, streamRowDirName)
 	if err := os.MkdirAll(rowDir, 0o700); err != nil {
 		return nil, fmt.Errorf(
@@ -454,6 +607,9 @@ func OpenStreamStore(dir string) (*StreamStore, error) {
 		dir:         dir,
 		rowDir:      rowDir,
 		keySpaceTag: streamKeySpaceTagOf(streamKeyType()),
+		exclusion:   exclusion,
+		verified:    map[string]streamRowVerification{},
+		handedOut:   map[string]uint64{},
 	}
 	entries, err := os.ReadDir(rowDir)
 	if err != nil {
@@ -475,7 +631,94 @@ func OpenStreamStore(dir string) (*StreamStore, error) {
 			return nil, err
 		}
 	}
+	released = true
 	return store, nil
+}
+
+// streamGuardName is the single-writer guard entry. It sits in dir, beside the row directory.
+//
+// Its spelling is not normative and nothing reads it as data -- the exclusion is the operating
+// system's hold on the handle, not anything written in the file, which stays empty forever. What
+// IS normative is where it sits: see streamStoreGuardPath.
+const streamGuardName = "single-writer.lock"
+
+// streamStoreGuardPath is the ONE place the guard entry's location is decided, so there is no
+// second spelling of it to drift. It is filepath.Join(dir, ...) and never
+// filepath.Join(dir, streamRowDirName, ...): a guard inside the enumerated directory IS a finding
+// under this store's own categorical rule, and every StreamHighWater after a successful open
+// would refuse with ErrStreamStoreState.
+func streamStoreGuardPath(dir string) string {
+	return filepath.Join(dir, streamGuardName)
+}
+
+// ----------------------------------------------------------------------------------------------
+// the single-writer exclusion's DIAGNOSTIC, which is not the exclusion
+// ----------------------------------------------------------------------------------------------
+
+// streamStoreHeldHere records which directories THIS PROCESS holds an exclusion on, so the
+// refusal a second opener gets can say whether the holder is this process or another one --
+// Property 1 asks for that "where the platform can tell", and neither dwShareMode nor flock tells
+// you who the holder is.
+//
+// IT IS A MESSAGE DECORATOR AND IT IS NOT THE EXCLUSION, and the difference is the whole of why
+// it is safe to have. It is consulted only AFTER the operating system has already refused, it is
+// never consulted to decide whether to refuse, and an empty map changes no decision this package
+// makes. An exclusion held here instead would be a package-level mutex: invisible to a second
+// process, which is the case CP3b's two clients actually create, and
+// TestASecondProcessIsRefusedTheSameDirectory is what a mutant that tried it fails on.
+//
+// It is also not a liveness oracle. It records nothing durable, it survives no process, and it
+// never decides that a holder is dead.
+var streamStoreHeldHereMutex sync.Mutex
+var streamStoreHeldHere = map[string]bool{}
+
+func streamStoreHolderKey(dir string) string {
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return filepath.Clean(dir)
+	}
+	return filepath.Clean(absolute)
+}
+
+func streamStoreNoteHeld(dir string) {
+	streamStoreHeldHereMutex.Lock()
+	defer streamStoreHeldHereMutex.Unlock()
+	streamStoreHeldHere[streamStoreHolderKey(dir)] = true
+}
+
+func streamStoreNoteReleased(dir string) {
+	streamStoreHeldHereMutex.Lock()
+	defer streamStoreHeldHereMutex.Unlock()
+	delete(streamStoreHeldHere, streamStoreHolderKey(dir))
+}
+
+// streamStoreExclusionHolder is best-effort and says so in the words it produces: it can only
+// distinguish "a store in this process" from "something outside this process", and it does that
+// from a map this process keeps rather than from anything the platform reports.
+func streamStoreExclusionHolder(dir string) string {
+	streamStoreHeldHereMutex.Lock()
+	defer streamStoreHeldHereMutex.Unlock()
+	if streamStoreHeldHere[streamStoreHolderKey(dir)] {
+		return "another StreamStore in this process"
+	}
+	return "a StreamStore in another process"
+}
+
+// streamStoreHeldExclusion pairs the platform's hold with the diagnostic note, so the note cannot
+// outlive the hold. Close is idempotent through the sync.Once.
+type streamStoreHeldExclusion struct {
+	inner io.Closer
+	dir   string
+	once  sync.Once
+}
+
+func (self *streamStoreHeldExclusion) Close() error {
+	var err error
+	self.once.Do(func() {
+		err = self.inner.Close()
+		streamStoreNoteReleased(self.dir)
+	})
+	return err
 }
 
 // repairRow truncates away a torn tail, once, and only when one is owed.
@@ -485,10 +728,19 @@ func (self *StreamStore) repairRow(rowName string) error {
 	if err != nil {
 		return fmt.Errorf("%w: row %s could not be read: %v", ErrStreamStoreState, rowName, err)
 	}
-	_, truncateTo, err := classifyStreamRow(rowName, content)
+	highWater, truncateTo, err := classifyStreamRow(rowName, content)
 	if err != nil {
-		// a corrupt body: not repairable, and the refusal is the reader's.
+		// a corrupt body: not repairable, and the refusal is the reader's. Nothing is
+		// remembered about it either: the next read re-derives the refusal from the bytes.
 		return nil
+	}
+	// The full read above is what seeds the verified prefix, so this row's first high-water
+	// query in this store's life costs no second pass over it and every query after that
+	// costs the records appended since. A store that is reopened re-verifies from record 1,
+	// which is what bounds streamRowVerification's residual to one store's lifetime.
+	self.verified[rowName] = streamRowVerification{
+		records:   int(truncateTo / streamRecordWidth),
+		highWater: highWater,
 	}
 	if truncateTo == int64(len(content)) {
 		return nil
@@ -513,7 +765,7 @@ func (self *StreamStore) repairRow(rowName string) error {
 			err,
 		)
 	}
-	if err := file.Sync(); err != nil {
+	if err := self.forceFlush(file); err != nil {
 		return fmt.Errorf(
 			"%w: row %s could not be flushed after repair: %v",
 			ErrStreamStoreState,
@@ -531,6 +783,25 @@ func (self *StreamStore) countRowWrite() {
 	self.rowWrites += 1
 }
 
+// forceFlush is THE ONLY PLACE THIS PACKAGE CALLS Sync, and the count is taken AFTER the call
+// returns rather than before it, so the number is flushes PERFORMED and not flushes intended.
+//
+// That distinction is not pedantry, it is the mutation this whole wave exists for. A first
+// version of this counted at the call site with the increment ABOVE the Sync, and the mutation
+// "return from Reserve before the flush" -- written as deleting the Sync and leaving everything
+// around it -- SURVIVED the entire suite, because the counter still said one. The count now
+// cannot be reached without the flush having been attempted, and
+// TestEveryForcedFlushInTheStoreIsCounted holds that there is exactly one Sync call site in this
+// package's production source and that it is this one, so a second flush cannot appear anywhere
+// uncounted and this one cannot be removed without the number going to zero.
+func (self *StreamStore) forceFlush(file *os.File) error {
+	err := file.Sync()
+	self.stateMutex.Lock()
+	self.rowFlushes += 1
+	self.stateMutex.Unlock()
+	return err
+}
+
 // rowWriteCount is the number of writes this store has performed against a row file. It is the
 // observable that separates an open-time repair from a lazy one, because every ANSWER the two
 // give is identical.
@@ -540,25 +811,292 @@ func (self *StreamStore) rowWriteCount() int {
 	return self.rowWrites
 }
 
-// Close releases the store. The next task's single-writer exclusion is released here; at this
-// task the only thing Close owns is that the store stops answering, because a closed store that
-// answered (0, nil) would be exactly the silent zero this file exists to make unreachable.
-func (self *StreamStore) Close() error {
+// rowFlushCount is the first of the two numbers section 8.2's durability property is stated over:
+// the forced flushes observed on the allocation path. The second -- directory-entry mutations --
+// is deliberately NOT a counter here. It is observed from outside, by comparing the row
+// directory's entry set and each surviving entry's file identity across the call, because a
+// self-reported number cannot see a rename and a rename is exactly what mutation 2 performs.
+func (self *StreamStore) rowFlushCount() int {
 	self.stateMutex.Lock()
 	defer self.stateMutex.Unlock()
-	self.closed = true
+	return self.rowFlushes
+}
+
+// ----------------------------------------------------------------------------------------------
+// the allocation path
+// ----------------------------------------------------------------------------------------------
+
+// streamAppendInterrupt is the INJECTED FAILURE POINT the durability property cannot be stated
+// without. The observable difference between a durable write and a buffered one is only visible
+// if the process can be stopped between them, and a test cannot stop this one -- so the append
+// carries the three places a real interruption lands, and a test selects one.
+//
+// It is unexported, it is per store rather than per package so two parallel tests cannot see each
+// other's, and NO PRODUCTION SOURCE IN THIS PACKAGE ASSIGNS IT --
+// TestNoProductionSourceSetsTheAppendInterrupt reads the package's syntax tree to hold that. A
+// hook that production could set is a durability property with an off switch.
+type streamAppendInterrupt int
+
+const (
+	// the ordinary path: write the whole record, flush it, return.
+	streamAppendUninterrupted streamAppendInterrupt = iota
+	// the process dies after part of the record has reached the disk and before the flush.
+	// This is the shape an interrupted append actually leaves, and the reason a test cannot
+	// model it by simply skipping the flush: an unflushed write is still in the page cache
+	// and a later read in the same machine's lifetime sees it, so "did not flush" and "did
+	// not survive" are not the same experiment.
+	streamAppendTearBeforeFlush
+	// the flush itself fails. The index must not be handed out: a Reserve that returned after
+	// a failed flush has handed out an index it cannot prove it recorded.
+	streamAppendFailTheFlush
+	// the flush returned and the process dies before Reserve does. The index is BURNED --
+	// durable, never handed out, never reused -- and a burned index is a legal gap, because
+	// the server enforces monotonicity and not contiguity.
+	streamAppendDieAfterFlush
+)
+
+// errStreamAppendInterrupted is the synthetic death the injected failure point raises. It is not
+// one of the store's four typed refusals and it is deliberately unexported: nothing outside this
+// package can produce it, so nothing outside this package can branch on it.
+var errStreamAppendInterrupted = errors.New("stream append interrupted")
+
+// errStreamInjectedFlushFailure is the synthetic flush failure. Real flush failures arrive from
+// the filesystem; this one lets the "never swallowed" half of the property be exercised without
+// one.
+var errStreamInjectedFlushFailure = errors.New("stream flush failed")
+
+func (self *StreamStore) appendInterrupt() streamAppendInterrupt {
+	self.stateMutex.Lock()
+	defer self.stateMutex.Unlock()
+	return self.interrupt
+}
+
+// ReserveStreamIndex is spec A section 8.2's allocator: it takes no index and returns one.
+//
+// IT IS ONE STATEMENT UNDER ONE LOCK -- the read, the increment and the flush -- and that is the
+// whole of why this shape was chosen over one where a caller picks the number.
+// connect/messagegroup/streamindex.go says it: the store that owes the persistence "cannot
+// implement it atomically: a read, then a caller's decision, then a write with an fsync in it is
+// a window that an allocation done in one statement does not have". allocMutex closes that window
+// inside this process; the exclusion acquired at open closes it against every other one, because
+// a mutex is invisible to a second process and a second process is the case CP3b's two clients
+// actually create.
+//
+// THE FSYNC BOUNDARY, and why it is ONE forced flush and not two. The recipe a reader will expect
+// -- write a temp file, Sync it, rename it over the row, Sync the DIRECTORY -- cannot be run on
+// Windows: os.File.Sync on a directory handle answers "Access is denied", measured on this
+// machine with this toolchain, and FlushFileBuffers on a volume handle needs administrator
+// privilege and flushes the whole volume, which is not something a client SDK may do. So the
+// design is constrained instead of the platform: an allocation against a row that already exists
+// performs NO DIRECTORY-ENTRY MUTATION AT ALL -- no create, no rename, no remove -- and is an
+// in-place durable write of a file that already exists, which os.File.Sync forces everywhere this
+// ships. The one exception is exactly once per key and is the CREATE itself, inside that key's
+// first ReserveStreamIndex, at a point where no index has been handed out for it. Its durability
+// is the residual S2-16 prices, and it is not closed here.
+//
+// WHY THE RECORD GOES AT AN OFFSET THIS CALL COMPUTED rather than at EOF. The offset is the end
+// of the prefix the high-water read just VERIFIED, so the record lands where the number it
+// carries was derived from, as a property of the code rather than of where the file happens to
+// end. It also makes the one shape a live writer can leave -- a torn tail from an interrupted
+// append, strictly shorter than one record and starting at exactly this offset -- repairable by
+// the next append overwriting it in place, with no second writer and no read that writes.
+func (self *StreamStore) ReserveStreamIndex(groupId []byte, senderHandle []byte) (uint64, error) {
+	key, err := streamKeyFromOctets(groupId, senderHandle)
+	if err != nil {
+		return 0, err
+	}
+	rowName := streamRowName(key)
+
+	self.allocMutex.Lock()
+	defer self.allocMutex.Unlock()
+
+	if err := self.refuseIfClosed(); err != nil {
+		return 0, err
+	}
+	persisted, err := self.persistedHighWater(rowName)
+	if err != nil {
+		return 0, err
+	}
+	if handed, ok := self.handedOut[rowName]; ok && persisted < handed {
+		// Both names, off one value, because this is one state seen from two seats: the
+		// reader's -- the number moved -- and the allocator's -- the next position is one I
+		// have already returned, and I have no way past it.
+		return 0, fmt.Errorf(
+			"%w: row %s answers a high water of %d and this store has already handed out %d for it; the next index this store would allocate is one it has already returned to a caller, and a second record under a reused stream_index is a reused nonce under a reused record_key (%w)",
+			ErrStreamStoreRewound,
+			rowName,
+			persisted,
+			handed,
+			ErrStreamStoreConsumed,
+		)
+	}
+	if persisted == math.MaxUint64 {
+		return 0, fmt.Errorf(
+			"%w: row %s has spent the last index a u64 holds, so there is no next position and no later call can make one",
+			ErrStreamStoreConsumed,
+			rowName,
+		)
+	}
+
+	next := persisted + 1
+	if err := self.writeOneRecord(rowName, next); err != nil {
+		return 0, err
+	}
+	// only now: an index is handed out when the call returns it, and not before. The flush
+	// above has returned, so what this remembers is what is on the disk.
+	self.handedOut[rowName] = next
+	return next, nil
+}
+
+// StreamHighWater is section 8.2's query: the highest index this store has ever allocated for the
+// stream, or 0 for a stream it has never seen.
+//
+// IT IS ANSWERED FROM PERSISTED STATE, never from a recomputed value and never from anything a
+// ratchet remembers. NewSenderRatchet reads it in its CONSTRUCTOR and walks highWater + 1 rungs,
+// so a store that answered a recomputed number would place a live ladder under a counter nothing
+// has recorded. It takes allocMutex, so it can never observe an increment before the flush that
+// made it durable returned.
+func (self *StreamStore) StreamHighWater(groupId []byte, senderHandle []byte) (uint64, error) {
+	key, err := streamKeyFromOctets(groupId, senderHandle)
+	if err != nil {
+		return 0, err
+	}
+	rowName := streamRowName(key)
+
+	self.allocMutex.Lock()
+	defer self.allocMutex.Unlock()
+
+	if err := self.refuseIfClosed(); err != nil {
+		return 0, err
+	}
+	persisted, err := self.persistedHighWater(rowName)
+	if err != nil {
+		return 0, err
+	}
+	if handed, ok := self.handedOut[rowName]; ok && persisted < handed {
+		return 0, fmt.Errorf(
+			"%w: row %s answers a high water of %d and this store has already handed out %d for it; a caller that resumed at the smaller number would encrypt a second record at an index already spent",
+			ErrStreamStoreRewound,
+			rowName,
+			persisted,
+			handed,
+		)
+	}
+	return persisted, nil
+}
+
+func (self *StreamStore) refuseIfClosed() error {
+	self.stateMutex.Lock()
+	defer self.stateMutex.Unlock()
+	if self.closed {
+		return fmt.Errorf("%w: the store at %s is closed", ErrStreamStoreState, self.dir)
+	}
 	return nil
 }
 
-// streamHighWater is the highest index this store has ever allocated for the stream, or 0 for a
-// stream it has never seen. The exported StreamHighWater of section 8.2 is the next task's, and
-// it is this plus that task's sentinels.
+// streamRowVerification is the prefix of a row this store has ALREADY checksummed: how many whole
+// records from the row's start, and the index the last of them carries.
+//
+// IT EXISTS BECAUSE THE COST OF NOT HAVING IT IS LINEAR IN MESSAGES EVER SENT. Without it every
+// high-water read re-checksums from record 1, so reserving the n-th index of a stream costs n
+// SHA-256 blocks and sending m messages costs O(m^2). Measured on this machine with this
+// toolchain -- see BenchmarkStreamReserveAtDepth, whose numbers are quoted in the commit rather
+// than in a comment that can go stale -- the full rescan is the dominant cost by four digits at a
+// hundred thousand records.
+//
+// WHAT IT COSTS, priced rather than absorbed. A row's already-verified prefix is not re-read, so
+// an out-of-band IN-PLACE mutation of a record this store has already checksummed is not seen by
+// THIS store until it is reopened. That is not a new residual class: S2-23 already prices
+// out-of-band mutation of a row, because no function of the row's length, the record width and
+// the checksum verdicts can distinguish an out-of-band truncation from an interrupted append
+// either. What the prefix widens it from is "removes whole flushed records" to "mutates the row
+// at all while this store holds it open". Two things bound that. The exclusion this store
+// acquires at open makes it the only writer for the life of the directory, so the mutation has to
+// come from something that bypassed the exclusion. And a REOPENED store re-verifies from record 1
+// -- OpenStreamStore's scan seeds this from a full read -- so the miss lasts one store's lifetime
+// and not a row's. TestAnOutOfBandMutationOfAVerifiedPrefixIsMissedUntilTheStoreIsReopened is
+// that residual, executable, with both halves asserted.
+type streamRowVerification struct {
+	records   int
+	highWater uint64
+}
+
+// persistedHighWater is the row read. It must be called with allocMutex held.
 //
 // IT ENUMERATES THE ROW DIRECTORY RATHER THAN STATTING ONE PATH, and the cost of that -- one
-// directory read per call -- is priced here rather than discovered. Statting one path cannot see
-// a row this build cannot NAME, and a row this build cannot name is exactly ledger item 170: a
-// pre-A1 row, indistinguishable from an absent one, answered (0, nil), restarting the ladder at
-// index 1 under a class key that has not moved.
+// directory read per call, linear in ROWS and not in messages -- is priced here rather than
+// discovered. Statting one path cannot see a row this build cannot NAME, and a row this build
+// cannot name is exactly ledger item 170: a pre-A1 row, indistinguishable from an absent one,
+// answered (0, nil), restarting the ladder at index 1 under a class key that has not moved.
+func (self *StreamStore) persistedHighWater(rowName string) (uint64, error) {
+	present, err := self.rowDirectoryHolds(rowName)
+	if err != nil {
+		return 0, err
+	}
+	if !present {
+		// contract clause 4: a stream never seen is 0 with no error, so the first
+		// allocation is 1.
+		//
+		// A verified prefix for this row is deliberately NOT cleared here, and that is a
+		// safety choice rather than an oversight. A row that this store verified and that
+		// is now absent was removed out of band; clearing the prefix would let the next
+		// allocation start the ladder again at 1 under a key that has already spent
+		// indices, which is ledger item 170's hazard reached by a different route. Left in
+		// place, the offset check in writeOneRecord refuses instead -- and where this store
+		// has actually handed an index out, the rewind check above the caller names it
+		// first and more precisely.
+		return 0, nil
+	}
+
+	path := filepath.Join(self.rowDir, rowName)
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"%w: row %s is present and could not be opened: %v",
+			ErrStreamStoreState,
+			rowName,
+			err,
+		)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("%w: row %s could not be sized: %v", ErrStreamStoreState, rowName, err)
+	}
+
+	prior := self.verified[rowName]
+	priorLength := int64(prior.records) * streamRecordWidth
+	if info.Size() < priorLength {
+		// The row is SHORTER than the prefix this store verified, which is the out-of-band
+		// truncation S2-23 prices. Re-verify the whole of what is left rather than trusting
+		// a prefix that is no longer there; the caller's rewind check is what names it.
+		prior = streamRowVerification{}
+		priorLength = 0
+	}
+	tail := make([]byte, info.Size()-priorLength)
+	if 0 < len(tail) {
+		if _, err := file.ReadAt(tail, priorLength); err != nil {
+			return 0, fmt.Errorf(
+				"%w: row %s could not be read from offset %d: %v",
+				ErrStreamStoreState,
+				rowName,
+				priorLength,
+				err,
+			)
+		}
+	}
+	highWater, verifiedTo, err := classifyStreamRowTail(rowName, prior.records, prior.highWater, tail)
+	if err != nil {
+		return 0, err
+	}
+	self.verified[rowName] = streamRowVerification{
+		records:   int(verifiedTo / streamRecordWidth),
+		highWater: highWater,
+	}
+	return highWater, nil
+}
+
+// rowDirectoryHolds enumerates the row directory and answers whether rowName is in it.
 //
 // THE REFUSAL IS DELIBERATELY COARSE. One foreign-tagged row refuses every key in the directory,
 // not just the key whose identity that row might hold -- because the identity under a foreign
@@ -571,22 +1109,10 @@ func (self *StreamStore) Close() error {
 // migration written for one is dead code on the day it ships. A version tag also closes the
 // hazard's PROPERTY rather than its instance: a future ruling that changes row identity again,
 // and a row left by a build nobody has, are refused identically.
-func (self *StreamStore) streamHighWater(groupId []byte, senderHandle []byte) (uint64, error) {
-	key, err := streamKeyFromOctets(groupId, senderHandle)
-	if err != nil {
-		return 0, err
-	}
-	self.stateMutex.Lock()
-	closed := self.closed
-	self.stateMutex.Unlock()
-	if closed {
-		return 0, fmt.Errorf("%w: the store at %s is closed", ErrStreamStoreState, self.dir)
-	}
-
-	rowName := streamRowName(key)
+func (self *StreamStore) rowDirectoryHolds(rowName string) (bool, error) {
 	entries, err := os.ReadDir(self.rowDir)
 	if err != nil {
-		return 0, fmt.Errorf(
+		return false, fmt.Errorf(
 			"%w: the row directory %s could not be read: %v",
 			ErrStreamStoreState,
 			self.rowDir,
@@ -596,7 +1122,7 @@ func (self *StreamStore) streamHighWater(groupId []byte, senderHandle []byte) (u
 	present := false
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() {
-			return 0, fmt.Errorf(
+			return false, fmt.Errorf(
 				"%w: %q in the row directory %s is not a regular file, and that directory holds rows and nothing else",
 				ErrStreamStoreState,
 				entry.Name(),
@@ -605,7 +1131,7 @@ func (self *StreamStore) streamHighWater(groupId []byte, senderHandle []byte) (u
 		}
 		switch self.classifyStreamRowName(entry.Name()) {
 		case streamRowOfAnotherKeySpace:
-			return 0, fmt.Errorf(
+			return false, fmt.Errorf(
 				"%w: row %q in %s carries key-space tag %q and this build produces %q; answering this key with a silent zero would restart the stream index ladder at 1 under a class key that has not moved",
 				ErrStreamKeySpace,
 				entry.Name(),
@@ -614,7 +1140,7 @@ func (self *StreamStore) streamHighWater(groupId []byte, senderHandle []byte) (u
 				self.keySpaceTag,
 			)
 		case streamRowNotARow:
-			return 0, fmt.Errorf(
+			return false, fmt.Errorf(
 				"%w: %q in the row directory %s is not a row under any key-space tag",
 				ErrStreamStoreState,
 				entry.Name(),
@@ -625,23 +1151,134 @@ func (self *StreamStore) streamHighWater(groupId []byte, senderHandle []byte) (u
 			present = true
 		}
 	}
-	if !present {
-		// contract clause 4: a stream never seen is 0 with no error, so the first
-		// allocation is 1.
-		return 0, nil
-	}
-	content, err := os.ReadFile(filepath.Join(self.rowDir, rowName))
+	return present, nil
+}
+
+// writeOneRecord is the whole durable half of an allocation: ONE write of ONE whole record at the
+// offset the high-water read verified up to, then ONE forced flush. It must be called with
+// allocMutex held, and only after persistedHighWater has answered for this row in this call.
+func (self *StreamStore) writeOneRecord(rowName string, index uint64) error {
+	path := filepath.Join(self.rowDir, rowName)
+	at := int64(self.verified[rowName].records) * streamRecordWidth
+
+	// os.O_CREATE and NOT os.O_APPEND. The create is the one directory-entry mutation this
+	// design admits, it happens once per key inside that key's first allocation, and it is
+	// S2-16. O_APPEND would put the record wherever the file ends, which is not the same
+	// place as where the number it carries was derived from.
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
-		return 0, fmt.Errorf(
-			"%w: row %s is present and could not be read: %v",
+		return fmt.Errorf(
+			"%w: row %s could not be opened to record index %d: %v",
 			ErrStreamStoreState,
 			rowName,
+			index,
 			err,
 		)
 	}
-	highWater, _, err := classifyStreamRow(rowName, content)
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
-		return 0, err
+		return fmt.Errorf("%w: row %s could not be sized: %v", ErrStreamStoreState, rowName, err)
 	}
-	return highWater, nil
+	// The row's length may exceed the verified prefix by at most one record, and only by the
+	// two shapes one interrupted append leaves: a partial, or one whole record that does not
+	// verify. Writing a whole record at `at` overwrites either of them entirely, so the live
+	// writer repairs its own torn tail in the same write that allocates -- no second writer,
+	// no read that writes, and the length is a whole multiple of the record width again.
+	// Anything outside that window is a row this call did not read, and allocating into one
+	// is how an index gets handed out twice.
+	if info.Size() < at || at+streamRecordWidth < info.Size() {
+		return fmt.Errorf(
+			"%w: row %s is %d octets and the high water just read off it ends at %d, which is not within one record of it; the row changed under a store that holds the only writer's exclusion on it",
+			ErrStreamStoreState,
+			rowName,
+			info.Size(),
+			at,
+		)
+	}
+
+	record := encodeStreamRecord(rowName, index)
+	octets := record[:]
+	interrupt := self.appendInterrupt()
+	if interrupt == streamAppendTearBeforeFlush {
+		octets = octets[:streamRecordWidth/2]
+	}
+	self.countRowWrite()
+	if _, err := file.WriteAt(octets, at); err != nil {
+		return fmt.Errorf(
+			"%w: row %s could not be written at offset %d: %v",
+			ErrStreamStoreState,
+			rowName,
+			at,
+			err,
+		)
+	}
+	if interrupt == streamAppendTearBeforeFlush {
+		return fmt.Errorf(
+			"%w: the append to row %s stopped after %d of %d octets and before the flush",
+			errStreamAppendInterrupted,
+			rowName,
+			len(octets),
+			streamRecordWidth,
+		)
+	}
+
+	syncErr := self.forceFlush(file)
+	if interrupt == streamAppendFailTheFlush && syncErr == nil {
+		syncErr = errStreamInjectedFlushFailure
+	}
+	if syncErr != nil {
+		// never swallowed. A Reserve that returned after a failed flush has handed out an
+		// index it cannot prove it recorded.
+		return fmt.Errorf(
+			"%w: row %s could not be flushed after recording index %d, so that index is not durable and must not be handed out: %v",
+			ErrStreamStoreState,
+			rowName,
+			index,
+			syncErr,
+		)
+	}
+
+	// The flush returned, so the record is on stable storage and the verified prefix grows by
+	// exactly the record that was just written.
+	self.verified[rowName] = streamRowVerification{
+		records:   int(at/streamRecordWidth) + 1,
+		highWater: index,
+	}
+	if interrupt == streamAppendDieAfterFlush {
+		return fmt.Errorf(
+			"%w: row %s recorded index %d durably and the process died before it was returned; the index is burned",
+			errStreamAppendInterrupted,
+			rowName,
+			index,
+		)
+	}
+	return nil
+}
+
+// Close releases the store, and with it the single-writer exclusion, which is the only thing that
+// releases it other than the death of this process.
+//
+// A closed store stops answering, because a closed store that answered (0, nil) would be exactly
+// the silent zero this file exists to make unreachable. It is idempotent: a second Close releases
+// nothing a second time.
+func (self *StreamStore) Close() error {
+	self.stateMutex.Lock()
+	alreadyClosed := self.closed
+	self.closed = true
+	exclusion := self.exclusion
+	self.exclusion = nil
+	self.stateMutex.Unlock()
+	if alreadyClosed || exclusion == nil {
+		return nil
+	}
+	if err := exclusion.Close(); err != nil {
+		return fmt.Errorf(
+			"%w: the single-writer exclusion on %s could not be released: %v",
+			ErrStreamStoreState,
+			self.dir,
+			err,
+		)
+	}
+	return nil
 }
