@@ -11,6 +11,7 @@ require (
 	github.com/urnetwork/goidenticons v0.0.0-00010101000000-000000000000
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.57.0
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -39,7 +40,6 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 	gvisor.dev/gvisor v0.0.0-20260805230438-8eba670122c5 // indirect
 	src.agwa.name/tlshacks v0.0.4 // indirect
 )

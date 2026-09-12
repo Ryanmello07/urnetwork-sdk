@@ -1,0 +1,401 @@
+package sdk
+
+// The message-server binding: §4.2 frames over an existing connect.Client,
+// §4.3 request/response correlation by `request_id`, and the borrow rule.
+//
+// This file is the transport and nothing else. It holds no key, no group and no
+// session, and it never looks inside a request body: every body it carries is a
+// `proto.Message` the caller built, and every response it returns is the one the
+// server answered. Spec A §10.1's four code points are the whole vocabulary.
+//
+// ── The one rule in `connect` that is normative here ──────────────────────────
+//
+// Quoted from connect/transfer.go's own declaration of `ReceiveFunction`, rather
+// than paraphrased, because paraphrasing it is how it gets broken:
+//
+//	"The frames, frame objects, and their message bytes are borrowed and valid
+//	 only until the callback returns. Decode, copy, or MessagePoolShareReadOnly
+//	 any data that must outlive the callback; never hand a borrowed Frame to an
+//	 asynchronous send, goroutine, or channel."
+//
+// and:
+//
+//	"ReceiveFunction is invoked inline by the receive path. A blocked callback
+//	 intentionally backpressures that path."
+//
+// Both halves bind this file. The first says what may cross the callback
+// boundary — [messageTransport.receive] below unmarshals, which copies, and
+// keeps a reference to neither a frame nor its bytes. The second says the
+// callback may not block on a waiter — [messageTransport.deliver] removes the
+// waiter from the correlation map under the same hold of the lock that found it
+// and sends on a channel buffered by one, so the send has a free slot by
+// construction and there is no second sender that could have taken it.
+//
+// ── There is no server push, and the receive path is a poll ───────────────────
+//
+// Verified against msgrepo at 0590aa3 rather than taken from a document:
+// `Peer.buildRoutes` serves exactly four arms of §4.3's request oneof — Hello,
+// CreateGroup, Submit and Fetch — and `grep -rn MessageMessageServerPush
+// --include=*.go` over the whole of msgrepo returns nothing, so the push code
+// point at 1002 has no emitter. `Peer.receive` answers only on the connection a
+// request arrived over. A binding that registered a subscription and waited to
+// be told things would wait forever; fetching is the only receive there is.
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+)
+
+// The refusals this binding raises itself. None of them is a `protocol.Reason`:
+// a Reason is something a server decided, and everything below was decided on
+// this side of the wire without one.
+var (
+	errMessageTransportNoClient = errors.New("message transport: this binding speaks over a connect client and there is none here to speak over")
+	errMessageTransportNoServer = errors.New("message transport: every frame is addressed to the server's client_id and this one names no server")
+	errMessageTransportNoArm    = errors.New("message transport: this message is not an arm of the request body oneof, so §4.3 gives it nowhere to travel")
+	errMessageTransportRefused  = errors.New("message transport: the connect client would not take the frame, so the request is on no wire at all")
+
+	// Property 3's typed timeout. A Call that gave up says so with this and with
+	// a nil response; it never answers (nil, nil), which is the one answer a
+	// caller cannot tell from success.
+	errMessageTransportTimeout = errors.New("message transport: no response carrying this request_id arrived before the deadline")
+
+	// Property 2's impossible case, asserted anyway: the correlator keys on
+	// `request_id`, so a waiter cannot be handed an answer to another request
+	// unless the correlator itself is wrong, and that is the one failure a
+	// caller has no other way to see.
+	errMessageTransportMiscorrelated = errors.New("message transport: a request was answered under another request's request_id")
+)
+
+// How long a Call waits when the config names no timeout.
+//
+// Generous, because what it protects against is a dispatcher that lost
+// `request_id` — which is a hang rather than a slow answer, and a caller that
+// hangs reports nothing at all.
+const messageTransportDefaultTimeout = 30 * time.Second
+
+// What this binding needs of a `*connect.Client`, and nothing more.
+//
+// It is an interface rather than the concrete client for one reason, and the
+// reason is a ledger item rather than a test convenience: S2-7 is open — how a
+// client actually reaches the message server is specified nowhere — so the
+// client is INJECTED here and this file stands nothing up. Nothing in `sdk`
+// constructs the connect client this binding runs on, and this task does not
+// resolve that.
+//
+// The methods are spelled to connect's own signatures; `connect.ReceiveFunction`
+// is the type alias itself, so a parameter added to it upstream is a compile
+// error here and not a silent widening.
+type messageTransportClient interface {
+	SendWithTimeout(
+		frame *protocol.Frame,
+		destination connect.TransferPath,
+		ackCallback connect.AckFunction,
+		timeout time.Duration,
+		opts ...any,
+	) bool
+	AddReceiveCallback(receiveCallback connect.ReceiveFunction) func()
+}
+
+// The real one satisfies it. A compile-time assertion rather than a comment,
+// because the whole point of the seam is that production runs on the shipped
+// client.
+var _ messageTransportClient = (*connect.Client)(nil)
+
+// This binding's collaborators. Everything whose zero value would be a silent
+// hole is refused by [newMessageTransport].
+type messageTransportConfig struct {
+	// The connect client this binding speaks over. It stays the caller's:
+	// [messageTransport.Close] unsubscribes and does not close it.
+	Client messageTransportClient
+
+	// The message server's client_id, which is the destination of every frame
+	// this binding sends.
+	Server connect.Id
+
+	// The version offered at Hello and stamped on every later request. Zero
+	// sends no version at all, which §4.3.1 reads as a client that did not
+	// negotiate.
+	ProtocolVersion uint32
+
+	// §4.6's part size for the requests this binding fragments. Task 6 owns the
+	// cut and owns the one declaration of the bound; this task carries the
+	// number and sends every request whole.
+	PartBytes int
+
+	// How long a Call waits. Zero takes [messageTransportDefaultTimeout].
+	Timeout time.Duration
+}
+
+// What crossed the wire and what became of it, counted on this side.
+//
+// Declared here, with the transport that owns them, because the counters are
+// what Properties 2 and 3 are readable through and a type named in a return
+// signature and declared nowhere is how a plan ships an unbuildable task.
+type messageTransportCounts struct {
+	// §4.2 frames handed to connect for requests.
+	RequestFrames uint64
+
+	// Frames that arrived at the §10.1 response code point. Frames of any other
+	// type are not counted, because connect's own traffic is not this binding's.
+	ResponseFrames uint64
+
+	// Responses that decoded and reached the waiter that asked for them.
+	Responses uint64
+
+	// Responses that decoded and carried a `request_id` no waiter is waiting on
+	// — because it never was one, or because its waiter has already timed out.
+	// Counted rather than dropped in silence, so that "nothing arrived" and
+	// "something arrived for nobody" are two readings and not one.
+	Unmatched uint64
+
+	// Calls that gave up. Property 3's other half: a timeout is a thing that
+	// happened, not an absence.
+	Timeouts uint64
+
+	// The size of the correlation map right now, not a cumulative count. It is
+	// how "a timed-out request left nothing behind" is read: a leak shows up
+	// here as a number that never comes back down.
+	Waiting uint64
+}
+
+// A binding to one message server, over one connect client.
+type messageTransport struct {
+	client          messageTransportClient
+	server          connect.Id
+	protocolVersion uint32
+	partBytes       int
+	timeout         time.Duration
+
+	unsubscribe func()
+	closed      sync.Once
+
+	nextRequestId atomic.Uint64
+
+	mutex   sync.Mutex
+	waiting map[uint64]chan *protocol.MessageServerResponse
+	counts  messageTransportCounts
+}
+
+func newMessageTransport(config *messageTransportConfig) (*messageTransport, error) {
+	if config == nil || config.Client == nil {
+		return nil, errMessageTransportNoClient
+	}
+	if config.Server == (connect.Id{}) {
+		return nil, errMessageTransportNoServer
+	}
+	self := &messageTransport{
+		client:          config.Client,
+		server:          config.Server,
+		protocolVersion: config.ProtocolVersion,
+		partBytes:       config.PartBytes,
+		timeout:         config.Timeout,
+		waiting:         map[uint64]chan *protocol.MessageServerResponse{},
+	}
+	if self.timeout <= 0 {
+		self.timeout = messageTransportDefaultTimeout
+	}
+	self.unsubscribe = config.Client.AddReceiveCallback(self.receive)
+	return self, nil
+}
+
+// Stop receiving. The connect client is the caller's and is not closed here.
+func (self *messageTransport) Close() {
+	self.closed.Do(func() {
+		self.unsubscribe()
+	})
+}
+
+func (self *messageTransport) Counts() messageTransportCounts {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	counts := self.counts
+	counts.Waiting = uint64(len(self.waiting))
+	return counts
+}
+
+// ── the receive path ─────────────────────────────────────────────────────────
+
+// connect's receive callback.
+//
+// Every value here is borrowed for the duration of this call — the source, the
+// frame slice with every frame and byte inside it, and the peer — so nothing
+// below keeps a reference to any of them. The response is unmarshaled, which
+// copies into a message of our own; the frame and its bytes are read and left
+// behind.
+//
+// Nothing is handed to a goroutine or a channel from here. `deliver` sends on a
+// waiter's channel, and the value it sends is the unmarshaled response, which is
+// borrowed from nothing.
+func (self *messageTransport) receive(source connect.TransferPath, frames []*protocol.Frame, from connect.Peer) {
+	for _, frame := range frames {
+		if frame.GetMessageType() != protocol.MessageType_MessageMessageServerResponse {
+			// §4.6's fragment code point is Task 6's; every other type on this
+			// client belongs to somebody else's binding
+			continue
+		}
+		self.countResponseFrame()
+		response := &protocol.MessageServerResponse{}
+		if proto.Unmarshal(frame.GetMessageBytes(), response) != nil {
+			// a response that did not decode carries no `request_id` to
+			// correlate, so there is no waiter to tell and nothing to answer
+			continue
+		}
+		self.deliver(response)
+	}
+}
+
+func (self *messageTransport) countResponseFrame() {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	self.counts.ResponseFrames++
+}
+
+// Property 2 and Property 4, in eleven lines.
+//
+// The waiter is found and removed under one hold of the lock, so the channel
+// this sends on has no other sender and a free slot in its buffer of one. The
+// send is therefore non-blocking by construction rather than by timing, which is
+// what "the callback never blocks on a waiter" has to mean on a path connect
+// calls inline.
+//
+// A response nobody is waiting for is counted and dropped. It is never given to
+// another waiter: the map is keyed on `request_id` and there is no fallback arm.
+func (self *messageTransport) deliver(response *protocol.MessageServerResponse) {
+	self.mutex.Lock()
+	waiter, found := self.waiting[response.GetRequestId()]
+	if found {
+		delete(self.waiting, response.GetRequestId())
+		self.counts.Responses += 1
+	} else {
+		self.counts.Unmatched += 1
+	}
+	self.mutex.Unlock()
+	if found {
+		waiter <- response
+	}
+}
+
+// ── the send path ────────────────────────────────────────────────────────────
+
+// One request, sent and answered.
+//
+// The waiter is registered BEFORE the send, because a response that arrives
+// before its waiter does is a response this binding would file as uncorrelated —
+// a correlation failure invented on this side of the wire, and exactly the
+// number Property 2 is written to make visible.
+func (self *messageTransport) Call(ctx context.Context, body proto.Message) (*protocol.MessageServerResponse, error) {
+	request := &protocol.MessageServerRequest{
+		RequestId:       self.nextRequestId.Add(1),
+		ProtocolVersion: self.protocolVersion,
+	}
+	if err := setMessageServerRequestBody(request, body); err != nil {
+		return nil, err
+	}
+
+	// buffered by one: see [messageTransport.deliver] for why one is enough and
+	// why it is what keeps connect's receive path unblocked
+	waiter := make(chan *protocol.MessageServerResponse, 1)
+	self.mutex.Lock()
+	self.waiting[request.GetRequestId()] = waiter
+	self.mutex.Unlock()
+
+	if err := self.send(request); err != nil {
+		self.forget(request.GetRequestId())
+		return nil, err
+	}
+
+	timer := time.NewTimer(self.timeout)
+	defer timer.Stop()
+	select {
+	case response := <-waiter:
+		if response.GetRequestId() != request.GetRequestId() {
+			return nil, fmt.Errorf("%w: request %d was answered under request_id %d",
+				errMessageTransportMiscorrelated, request.GetRequestId(), response.GetRequestId())
+		}
+		return response, nil
+	case <-ctx.Done():
+		self.forget(request.GetRequestId())
+		return nil, fmt.Errorf("message transport: request %d abandoned: %w", request.GetRequestId(), ctx.Err())
+	case <-timer.C:
+		self.forget(request.GetRequestId())
+		self.countTimeout()
+		return nil, fmt.Errorf("%w: request %d, after %v",
+			errMessageTransportTimeout, request.GetRequestId(), self.timeout)
+	}
+}
+
+// The map entry, and nothing else, because there is nothing else: no goroutine
+// was started for this request, and the waiter channel is unreferenced once the
+// entry is gone.
+func (self *messageTransport) forget(requestId uint64) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	delete(self.waiting, requestId)
+}
+
+func (self *messageTransport) countTimeout() {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	self.counts.Timeouts += 1
+}
+
+// The request on the wire: one §4.2 frame at §10.1's request code point.
+//
+// Task 6 adds §4.6's cut, and `partBytes` is carried for it rather than read
+// here — this task writes no fragmenter and declares no part size, because the
+// part size gets exactly ONE declaration in `sdk` and it is Task 6's.
+func (self *messageTransport) send(request *protocol.MessageServerRequest) error {
+	body, err := connect.ProtoMarshal(request)
+	if err != nil {
+		return err
+	}
+	frame := &protocol.Frame{
+		MessageType:  protocol.MessageType_MessageMessageServerRequest,
+		MessageBytes: body,
+	}
+	if !self.client.SendWithTimeout(frame, connect.DestinationId(self.server), nil, -1) {
+		// the frame is on no wire, so the buffer is ours to give back
+		connect.MessagePoolReturn(body)
+		return fmt.Errorf("%w: request %d", errMessageTransportRefused, request.GetRequestId())
+	}
+	self.mutex.Lock()
+	self.counts.RequestFrames += 1
+	self.mutex.Unlock()
+	return nil
+}
+
+// The arm of the request's `body` oneof that carries this type, read out of the
+// compiled descriptor.
+//
+// A switch listing fourteen typed wrappers is where a copy-paste puts a Fetch
+// body in the Submit arm, and §4.3.8's op byte is the arm's field number, so a
+// binding that wrote the arms down twice would have two places to disagree.
+func setMessageServerRequestBody(request *protocol.MessageServerRequest, body proto.Message) error {
+	if body == nil {
+		return errMessageTransportNoArm
+	}
+	oneof := request.ProtoReflect().Descriptor().Oneofs().ByName("body")
+	if oneof == nil {
+		return errMessageTransportNoArm
+	}
+	want := body.ProtoReflect().Descriptor().FullName()
+	for index := 0; index < oneof.Fields().Len(); index += 1 {
+		field := oneof.Fields().Get(index)
+		if field.Kind() != protoreflect.MessageKind || field.Message().FullName() != want {
+			continue
+		}
+		request.ProtoReflect().Set(field, protoreflect.ValueOfMessage(body.ProtoReflect()))
+		return nil
+	}
+	return fmt.Errorf("%w: %s", errMessageTransportNoArm, want)
+}

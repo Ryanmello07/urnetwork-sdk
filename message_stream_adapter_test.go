@@ -651,8 +651,9 @@ func streamAdapterImportLocalNames(parsed map[string]*ast.File, path string) map
 // streamAdapterOctetMovingRulings is the one place a declaration outside the adapter is excused
 // from being a second flattening, and each excuse is a sentence rather than a name on a list.
 var streamAdapterOctetMovingRulings = map[string]string{
-	"streamRowIdentityOf": "the store's ROW IDENTITY derivation. It moves a field's octets straight into a SHA-256, one field at a time, and what leaves it is a hex digest; it never assembles section 8.2's positional pair and no caller can recover the pair from what it returns. It is the derivation the adapter's flattening is keyed AGAINST rather than a second copy of it",
-	"streamKeyFromOctets": "THE INVERSE flattening -- section 8.2's positional pair back onto StreamKey -- which section 8.2 puts in the store, beside the two methods that take that pair. It moves octets INTO a key rather than out of one, so it cannot be a second derivation of which row a stream's indices land in: it consumes the one the adapter produced",
+	"streamRowIdentityOf":         "the store's ROW IDENTITY derivation. It moves a field's octets straight into a SHA-256, one field at a time, and what leaves it is a hex digest; it never assembles section 8.2's positional pair and no caller can recover the pair from what it returns. It is the derivation the adapter's flattening is keyed AGAINST rather than a second copy of it",
+	"setMessageServerRequestBody": "NOT A StreamKey FLATTENING AT ALL, and this is the first false positive the name-matched half of this class has produced. The two names it trips on are protobuf's, not reflect's: `Fields` is protoreflect.OneofDescriptor.Fields, which enumerates the arms of §4.3's request body oneof, and `Set` is protoreflect.Message.Set, which puts a body into the arm that carries its type. No messagegroup.StreamKey, no stream, no row and no index is in reach of it -- it moves a request body's octets into a protobuf message and nothing else. The gate matches SELECTOR NAMES because a receiver's type is not knowable off the syntax tree, so protoreflect's Fields/Set and reflect.Value's Fields/Set are one name to it; over-reach is the safe direction and this is what over-reach costs, paid once, in a sentence, rather than by narrowing the class",
+	"streamKeyFromOctets":         "THE INVERSE flattening -- section 8.2's positional pair back onto StreamKey -- which section 8.2 puts in the store, beside the two methods that take that pair. It moves octets INTO a key rather than out of one, so it cannot be a second derivation of which row a stream's indices land in: it consumes the one the adapter produced",
 }
 
 func TestEveryStreamKeyFlatteningInPackageSdkIsTheAdapters(t *testing.T) {
@@ -1079,6 +1080,7 @@ var streamAdapterPackageValueCensus = map[string]streamAdapterPackageVar{
 	"securityPolicyMonitorInterval":            streamAdapterPackageConstOf(securityPolicyMonitorInterval),
 	"streamRowIdentityLen":                     streamAdapterPackageConstOf(streamRowIdentityLen),
 	"streamRowNameLen":                         streamAdapterPackageConstOf(streamRowNameLen),
+	"messageTransportDefaultTimeout":           streamAdapterPackageConstOf(messageTransportDefaultTimeout),
 	"windowIdentitiesStaleAfter":               streamAdapterPackageConstOf(windowIdentitiesStaleAfter),
 	"base58BigRadix":                           streamAdapterPackageVarOf(&base58BigRadix),
 	"base58BigZero":                            streamAdapterPackageVarOf(&base58BigZero),
@@ -1095,6 +1097,12 @@ var streamAdapterPackageValueCensus = map[string]streamAdapterPackageVar{
 	"ErrStreamStoreLocked":                     streamAdapterPackageVarOf(&ErrStreamStoreLocked),
 	"ErrStreamStoreRewound":                    streamAdapterPackageVarOf(&ErrStreamStoreRewound),
 	"ErrStreamStoreState":                      streamAdapterPackageVarOf(&ErrStreamStoreState),
+	"errMessageTransportMiscorrelated":         streamAdapterPackageVarOf(&errMessageTransportMiscorrelated),
+	"errMessageTransportNoArm":                 streamAdapterPackageVarOf(&errMessageTransportNoArm),
+	"errMessageTransportNoClient":              streamAdapterPackageVarOf(&errMessageTransportNoClient),
+	"errMessageTransportNoServer":              streamAdapterPackageVarOf(&errMessageTransportNoServer),
+	"errMessageTransportRefused":               streamAdapterPackageVarOf(&errMessageTransportRefused),
+	"errMessageTransportTimeout":               streamAdapterPackageVarOf(&errMessageTransportTimeout),
 	"multiPartPublicSuffixes":                  streamAdapterPackageVarOf(&multiPartPublicSuffixes),
 	"probeDnsTargets":                          streamAdapterPackageVarOf(&probeDnsTargets),
 	"probeHttpTargets":                         streamAdapterPackageVarOf(&probeHttpTargets),
@@ -1146,7 +1154,14 @@ func streamAdapterNonSentinels() map[string]string {
 // handed to fmt.Errorf anywhere in production sdk -- which is the only way this package puts a
 // value into an error chain, and therefore the only way one can reach classify. Wrap one with %w
 // tomorrow and this stops being a valid excuse and the gate says so.
-var streamAdapterNonSentinelRulings = map[string]string{}
+var streamAdapterNonSentinelRulings = map[string]string{
+	"errMessageTransportNoClient":      "the message-server binding's refusal that its config named no connect client. It is raised by newMessageTransport, which the reserver's call graph does not reach; a store failure cannot carry it because the store never constructs a transport",
+	"errMessageTransportNoServer":      "the same construction refusal for a config that named no server client_id. Same seat, same reason",
+	"errMessageTransportNoArm":         "the binding's refusal that a request body is not an arm of §4.3's body oneof. It is decided off the compiled descriptor inside the transport's own send path and reaches no store call",
+	"errMessageTransportRefused":       "the binding's refusal that connect would not take the frame. It is raised on the transport's send path, which the reserver cannot reach: a reserver talks to a StreamStore and a StreamStore opens files",
+	"errMessageTransportMiscorrelated": "the binding's refusal that a response arrived under another request's request_id. It is raised inside messageTransport.Call and nothing in the store's chain can carry it",
+	"errMessageTransportTimeout":       "the binding's typed timeout, raised when no response carrying a request_id arrived before the deadline. It is a TRANSPORT deadline and not a store refusal; SenderRatchet.Next never meets it, because the reserver's error chain comes from a StreamStore and a StreamStore has no deadline",
+}
 
 // streamAdapterPredeclaredTypeNames is the set of type names a CONSTANT's declared type can be
 // without being a defined type with a method set. The Go spec's constant types are boolean,
@@ -1520,24 +1535,58 @@ func streamAdapterSentinelDeclarations(t *testing.T) (map[string]error, []string
 	return declared, complement
 }
 
-// streamAdapterNamesPassedOrReturned answers, for each name, the production positions at which it
-// is handed to a call or returned. Those are the two ways a value declared in this package becomes
-// an error a caller holds, and therefore the two ways one can reach the adapter's classify: a
-// value that is only ever COMPARED -- `err == windowsSharingViolation` -- cannot.
-func streamAdapterNamesPassedOrReturned(t *testing.T, names map[string]bool) map[string][]string {
+// streamAdapterNameSite is one production site at which package sdk passes a watched name to a
+// call or returns it, together with the declaration that site sits in. A site at file scope -- a
+// package-level initialiser -- carries no declaration and is treated as reachable, because a gate
+// that cannot place a site must not excuse it.
+type streamAdapterNameSite struct {
+	position    string
+	declaration string
+}
+
+// streamAdapterNameSitesByDeclaration answers, for each watched name, every production site at
+// which package sdk hands it to a call or returns it -- the two ways a declared value becomes an
+// error a caller holds -- with the DECLARATION each site sits in recorded beside it, so the
+// excuse below can ask WHERE a site is and not only whether one exists. Comparing a value with
+// == is not a site: it takes nothing out of this package.
+func streamAdapterNameSitesByDeclaration(t *testing.T, names map[string]bool) map[string][]streamAdapterNameSite {
 	t.Helper()
-	fileSet, parsed, _ := streamAdapterParse(t)
-	sites := map[string][]string{}
-	record := func(expression ast.Expr) {
-		ast.Inspect(expression, func(node ast.Node) bool {
-			identifier, ok := node.(*ast.Ident)
-			if ok && names[identifier.Name] {
-				sites[identifier.Name] = append(sites[identifier.Name], fileSet.Position(identifier.Pos()).String())
-			}
-			return true
-		})
+	fileSet, parsed, declarations := streamAdapterParse(t)
+	enclosing := map[string][]*ast.FuncDecl{}
+	positions := map[*ast.FuncDecl]string{}
+	for _, declaration := range declarations {
+		enclosing[declaration.file] = append(enclosing[declaration.file], declaration.node)
+		positions[declaration.node] = declaration.position
 	}
-	for _, file := range parsed {
+	sites := map[string][]streamAdapterNameSite{}
+	// one site per SOURCE POSITION: a `return fmt.Errorf("%w", e)` is both a call argument and a
+	// return result, and the same octets counted twice read as two escapes
+	seen := map[string]bool{}
+	for fileName, file := range parsed {
+		record := func(expression ast.Expr) {
+			ast.Inspect(expression, func(node ast.Node) bool {
+				identifier, ok := node.(*ast.Ident)
+				if !ok || !names[identifier.Name] {
+					return true
+				}
+				if seen[fileSet.Position(identifier.Pos()).String()] {
+					return true
+				}
+				seen[fileSet.Position(identifier.Pos()).String()] = true
+				within := ""
+				for _, function := range enclosing[fileName] {
+					if function.Pos() <= identifier.Pos() && identifier.Pos() < function.End() {
+						within = positions[function]
+						break
+					}
+				}
+				sites[identifier.Name] = append(sites[identifier.Name], streamAdapterNameSite{
+					position:    fileSet.Position(identifier.Pos()).String(),
+					declaration: within,
+				})
+				return true
+			})
+		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			switch typed := node.(type) {
 			case *ast.CallExpr:
@@ -1553,6 +1602,147 @@ func streamAdapterNamesPassedOrReturned(t *testing.T, names map[string]bool) map
 		})
 	}
 	return sites
+}
+
+// THE EXCUSE'S OWN NARROWING, AND WHY IT IS NOT "PASSED OR RETURNED NOWHERE".
+//
+// streamAdapterNonSentinelRulings claims exactly one thing: no error chain the adapter's classify
+// can read reaches this value. Until 2026-09-12 that claim was measured as "package sdk passes or
+// returns it NOWHERE", which is SUFFICIENT for the claim and is not NECESSARY for it -- and the
+// difference is not academic. It is unsatisfiable for every error value of any subsystem that is
+// actually used, and the first such subsystem to land in this package (the message-server
+// transport) declares six sentinels that are raised, wrapped and returned on a path no store call
+// takes. Under the old measurement neither table had a seat for them: not
+// streamStoreSentinelRulings, because a verdict there is a claim about a refusal
+// SenderRatchet.Next can meet, and not this one, because they are returned. Two sentences that
+// cannot both be satisfied, which is the shape this project's own plan tables as unsatisfiable
+// AS A PAIR; the repair is to restate the constraint over what the deciding party can read.
+//
+// WHAT classify CAN READ, derived rather than listed. classify is handed the error a call on the
+// adapter's STORE answered, so a value can reach it only if it is raised by a method of a type
+// the adapter holds -- the adapter's own type, the store type in its field, and the type of every
+// field those declare, transitively -- or by a free function one of those methods calls,
+// transitively through free functions. Both sets are read off the syntax tree and both are
+// PRINTED with their complements, so the boundary is auditable rather than asserted.
+//
+// AND THE BOUNDARY IS NAMED RATHER THAN HIDDEN: a method call on a type that is NOT held -- an
+// interface field, a value returned by a call -- is not followed. Those calls are counted and
+// reported, because an excuse whose measurement has an edge should say where the edge is.
+
+// streamAdapterTypeNamesIn answers every type name an expression mentions, with pointers, slices,
+// maps, channels and array element types unwrapped, so that a field declared *StreamStore or
+// []streamStoreExclusion is read as the type it holds.
+func streamAdapterTypeNamesIn(expression ast.Expr) []string {
+	names := []string{}
+	ast.Inspect(expression, func(node ast.Node) bool {
+		if identifier, ok := node.(*ast.Ident); ok {
+			names = append(names, identifier.Name)
+		}
+		return true
+	})
+	return names
+}
+
+// streamAdapterHeldTypes is the transitive closure of "a type the adapter holds": the adapter
+// itself, and the type of every field reachable from it through struct declarations of this
+// package.
+func streamAdapterHeldTypes(parsed map[string]*ast.File, root string) map[string]bool {
+	structs := map[string]*ast.StructType{}
+	for _, file := range parsed {
+		for _, declaration := range file.Decls {
+			general, ok := declaration.(*ast.GenDecl)
+			if !ok || general.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range general.Specs {
+				typeSpec, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				if structType, ok := typeSpec.Type.(*ast.StructType); ok {
+					structs[typeSpec.Name.Name] = structType
+				}
+			}
+		}
+	}
+	held := map[string]bool{}
+	queue := []string{root}
+	for 0 < len(queue) {
+		name := queue[0]
+		queue = queue[1:]
+		if held[name] {
+			continue
+		}
+		held[name] = true
+		structType := structs[name]
+		if structType == nil || structType.Fields == nil {
+			continue
+		}
+		for _, field := range structType.Fields.List {
+			for _, mentioned := range streamAdapterTypeNamesIn(field.Type) {
+				if _, isStruct := structs[mentioned]; isStruct {
+					queue = append(queue, mentioned)
+				}
+			}
+		}
+	}
+	return held
+}
+
+// streamAdapterFreeFunctionsFrom is the set of package free functions the methods of the held
+// types can call, transitively through free functions. It also answers how many method calls on
+// types that are NOT held were passed over, which is this measurement's own edge.
+func streamAdapterFreeFunctionsFrom(declarations []streamAdapterDeclaration, held map[string]bool) (map[string]bool, int) {
+	free := map[string]streamAdapterDeclaration{}
+	for _, declaration := range declarations {
+		if declaration.receiver == "" {
+			free[declaration.name] = declaration
+		}
+	}
+	reached := map[string]bool{}
+	notFollowed := 0
+	queue := []streamAdapterDeclaration{}
+	for _, declaration := range declarations {
+		if held[declaration.receiver] {
+			queue = append(queue, declaration)
+		}
+	}
+	seen := map[string]bool{}
+	for 0 < len(queue) {
+		declaration := queue[0]
+		queue = queue[1:]
+		if seen[declaration.position] {
+			continue
+		}
+		seen[declaration.position] = true
+		ast.Inspect(declaration.node, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch function := call.Fun.(type) {
+			case *ast.Ident:
+				if next, isFree := free[function.Name]; isFree && !reached[function.Name] {
+					reached[function.Name] = true
+					queue = append(queue, next)
+				}
+			case *ast.SelectorExpr:
+				// a method call. Followed when it lands on a type this closure already
+				// holds -- those declarations are roots already -- and counted otherwise.
+				followed := false
+				for _, candidate := range declarations {
+					if candidate.name == function.Sel.Name && held[candidate.receiver] {
+						followed = true
+					}
+				}
+				if !followed {
+					notFollowed += 1
+				}
+			}
+			return true
+		})
+	}
+	return reached, notFollowed
 }
 
 // THE SCOPE THE VALUE CENSUS IS DEMANDED OVER, AND THE PLATFORM IT IS THERE FOR.
@@ -1757,16 +1947,75 @@ func TestTheStoreSentinelClassIsTotalOverTheAdaptersMapping(t *testing.T) {
 		watched[name] = true
 	}
 	if len(watched) != 0 {
-		escaped := streamAdapterNamesPassedOrReturned(t, watched)
+		_, allFiles, allDeclarations := streamAdapterParse(t)
+		adapterType := streamAdapterTypeName(t)
+		held := streamAdapterHeldTypes(allFiles, adapterType)
+		reachableFree, notFollowed := streamAdapterFreeFunctionsFrom(allDeclarations, held)
+
+		receivers := map[string]bool{}
+		freeCount := 0
+		for _, declaration := range allDeclarations {
+			if declaration.receiver == "" {
+				freeCount += 1
+				continue
+			}
+			receivers[declaration.receiver] = true
+		}
+		otherReceivers := []string{}
+		for name := range receivers {
+			if !held[name] {
+				otherReceivers = append(otherReceivers, name)
+			}
+		}
+		slices.Sort(otherReceivers)
+		t.Logf("WHAT classify CAN READ, derived: %d type(s) the adapter holds, transitively through struct fields from %s: %v",
+			len(held), adapterType, slices.Sorted(maps.Keys(held)))
+		t.Logf("    and %d free function(s) their methods call, transitively: %v", len(reachableFree), slices.Sorted(maps.Keys(reachableFree)))
+		t.Logf("COMPLEMENT the held-type narrowing removed: %d receiver type(s) package sdk declares methods on that the adapter does not hold: %v",
+			len(otherReceivers), otherReceivers)
+		t.Logf("COMPLEMENT the free-function narrowing removed: %d of %d free function(s) no held type calls", freeCount-len(reachableFree), freeCount)
+		t.Logf("THIS MEASUREMENT'S OWN EDGE, named rather than hidden: %d method call(s) inside held types land on a type that is not held and are not followed", notFollowed)
+		if len(held) == 0 || len(otherReceivers) == 0 {
+			t.Error("the held-type narrowing removed no receiver type at all, so every excuse below is measured against a set that excludes nobody")
+		}
+		if len(reachableFree) == 0 {
+			t.Error("no free function at all is reachable from the held types, which means the call walk found nothing and the free-function half of this measurement is inert")
+		}
+
+		byPosition := map[string]streamAdapterDeclaration{}
+		for _, declaration := range allDeclarations {
+			byPosition[declaration.position] = declaration
+		}
+		escaped := streamAdapterNameSitesByDeclaration(t, watched)
 		for _, name := range slices.Sorted(maps.Keys(watched)) {
-			if sites := escaped[name]; len(sites) != 0 {
+			within := []string{}
+			beyond := []string{}
+			for _, site := range escaped[name] {
+				declaration, placed := byPosition[site.declaration]
+				reads := !placed ||
+					held[declaration.receiver] ||
+					(declaration.receiver == "" && reachableFree[declaration.name])
+				if reads {
+					within = append(within, site.position)
+					continue
+				}
+				beyond = append(beyond, fmt.Sprintf("%s in %s", site.position, declaration.label()))
+			}
+			slices.Sort(within)
+			slices.Sort(beyond)
+			if len(within) != 0 {
 				t.Errorf(
-					"%s is ruled as an error value that cannot reach the adapter, and production sdk passes or returns it at %v. A value this package hands to a call or returns is a value that can end up in an error chain, so that excuse no longer holds and it needs a real verdict in streamStoreSentinelRulings",
-					name, sites,
+					"%s is ruled as an error value that cannot reach the adapter, and production sdk passes or returns it at %v, which classify CAN read: those sites sit in a method of a type the adapter holds, in a free function its methods call, or at file scope where this gate cannot place them. That excuse no longer holds and it needs a real verdict in streamStoreSentinelRulings",
+					name, within,
 				)
 				continue
 			}
-			t.Logf("  %-30s NOT A STORE SENTINEL, and measured so: package sdk never passes or returns it. %s", name, nonSentinels[name])
+			if len(beyond) == 0 {
+				t.Logf("  %-32s NOT A STORE SENTINEL, and measured so: package sdk never passes or returns it. %s", name, nonSentinels[name])
+				continue
+			}
+			t.Logf("  %-32s NOT A STORE SENTINEL, and measured so: passed or returned at %d site(s) %v, not one of them anywhere classify can read. %s",
+				name, len(beyond), beyond, nonSentinels[name])
 		}
 	}
 
