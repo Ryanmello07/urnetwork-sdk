@@ -238,19 +238,25 @@ func (self *messageTransport) Counts() messageTransportCounts {
 // borrowed from nothing.
 func (self *messageTransport) receive(source connect.TransferPath, frames []*protocol.Frame, from connect.Peer) {
 	for _, frame := range frames {
-		if frame.GetMessageType() != protocol.MessageType_MessageMessageServerResponse {
-			// §4.6's fragment code point is Task 6's; every other type on this
-			// client belongs to somebody else's binding
+		switch frame.GetMessageType() {
+		case protocol.MessageType_MessageMessageServerResponse:
+			self.countResponseFrame()
+			response := &protocol.MessageServerResponse{}
+			if proto.Unmarshal(frame.GetMessageBytes(), response) != nil {
+				// a response that did not decode carries no `request_id` to
+				// correlate, so there is no waiter to tell and nothing to answer
+				continue
+			}
+			self.deliver(response)
+		default:
+			// connect carries every binding's traffic over one callback, so the
+			// code point is the only thing that says a frame is this binding's.
+			// The case list above is the WHOLE read set and is what
+			// TestMessageTransportReadsOnlyTheCodePointsThatAreItsOwn derives
+			// its class from, so a code point read here without a case is not
+			// expressible.
 			continue
 		}
-		self.countResponseFrame()
-		response := &protocol.MessageServerResponse{}
-		if proto.Unmarshal(frame.GetMessageBytes(), response) != nil {
-			// a response that did not decode carries no `request_id` to
-			// correlate, so there is no waiter to tell and nothing to answer
-			continue
-		}
-		self.deliver(response)
 	}
 }
 

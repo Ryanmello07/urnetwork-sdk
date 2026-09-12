@@ -37,6 +37,28 @@ package sdk
 // What it does establish is correlation, copying, refusal typing and
 // non-blocking delivery, and every one of those is observable by driving the
 // receive callback directly, which is what these tests do.
+//
+// WHAT WAS IN REACH AND WAS NOT LOOKED AT, added after the Task 5 review,
+// because the list above reads as exhaustive and was not. None of these was
+// blocked by the missing server; the injected client already received all of
+// them. Each now has an assertion, named here so the next reader can tell a
+// boundary from a horizon:
+//
+//   - the frame's ADDRESS. `TestMessageTransportAddressesEveryFrameToTheConfiguredServer`
+//     reads every destination the client was handed. Before it, `SendWithTimeout`
+//     took `destination` and dropped it, and `connect.DestinationId(self.server)`
+//     could be the zero id with the whole suite green.
+//   - the SEND-side code point, which was pinned only incidentally by a fake that
+//     refused everything else.
+//   - the RECEIVE-side code-point filter, which was untested because the fake
+//     only ever delivered response frames. The class of "not ours" is now read
+//     off protocol's compiled enum.
+//   - `config.ProtocolVersion`, which is documented as stamped on every request
+//     and was never read back.
+//   - `Counts().RequestFrames` and `Counts().ResponseFrames`, two of the six
+//     counters, which no test read.
+//   - the `ctx.Done()` arm of `Call`, which no test reached: no test in the suite
+//     constructed a cancellable context.
 
 import (
 	"context"
@@ -76,6 +98,18 @@ type messageTransportFake struct {
 	requests   []*protocol.MessageServerRequest
 	refuse     bool
 
+	// Every frame's ADDRESS and CODE POINT, recorded rather than taken and
+	// dropped. Review finding F4: this fake already RECEIVED `destination` and
+	// never looked at it, so `connect.DestinationId(self.server)` could be
+	// replaced by the zero id with the whole suite green — a gap that was
+	// inside the fake's reach rather than behind the missing server.
+	destinations []connect.TransferPath
+	sent         []protocol.MessageType
+
+	// §4.6's fragments of a request too large for one frame, decoded in the
+	// order they were handed over.
+	fragments []*protocol.MessageServerFragment
+
 	// Called inline from inside SendWithTimeout, with the transport's own
 	// goroutine still inside `send` and not yet in its select. Property 4's
 	// whole construction.
@@ -101,25 +135,62 @@ func (self *messageTransportFake) SendWithTimeout(
 	timeout time.Duration,
 	opts ...any,
 ) bool {
-	if frame.GetMessageType() != protocol.MessageType_MessageMessageServerRequest {
-		return false
-	}
-	request := &protocol.MessageServerRequest{}
-	if proto.Unmarshal(frame.GetMessageBytes(), request) != nil {
-		return false
-	}
 	self.mutex.Lock()
-	self.requests = append(self.requests, request)
+	self.destinations = append(self.destinations, destination)
+	self.sent = append(self.sent, frame.GetMessageType())
 	refuse := self.refuse
-	onSend := self.onSend
 	self.mutex.Unlock()
-	if refuse {
-		return false
+
+	switch frame.GetMessageType() {
+	case protocol.MessageType_MessageMessageServerRequest:
+		request := &protocol.MessageServerRequest{}
+		if proto.Unmarshal(frame.GetMessageBytes(), request) != nil {
+			return false
+		}
+		self.mutex.Lock()
+		self.requests = append(self.requests, request)
+		onSend := self.onSend
+		self.mutex.Unlock()
+		if refuse {
+			return false
+		}
+		if onSend != nil {
+			onSend(request)
+		}
+		return true
+	case protocol.MessageType_MessageMessageServerFragment:
+		fragment := &protocol.MessageServerFragment{}
+		if proto.Unmarshal(frame.GetMessageBytes(), fragment) != nil {
+			return false
+		}
+		self.mutex.Lock()
+		self.fragments = append(self.fragments, fragment)
+		self.mutex.Unlock()
+		return !refuse
 	}
-	if onSend != nil {
-		onSend(request)
-	}
-	return true
+	// a code point this binding has no business sending
+	return false
+}
+
+// Every destination this fake was handed, in order.
+func (self *messageTransportFake) addressed() []connect.TransferPath {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return append([]connect.TransferPath(nil), self.destinations...)
+}
+
+// Every code point this fake was handed, in order.
+func (self *messageTransportFake) codePoints() []protocol.MessageType {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return append([]protocol.MessageType(nil), self.sent...)
+}
+
+// The §4.6 fragments this fake was handed, in order.
+func (self *messageTransportFake) cutFragments() []*protocol.MessageServerFragment {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return append([]*protocol.MessageServerFragment(nil), self.fragments...)
 }
 
 func (self *messageTransportFake) requestCount() int {
@@ -135,27 +206,34 @@ func (self *messageTransportFake) requestAt(index int) *protocol.MessageServerRe
 }
 
 // Drive the binding's receive callback the way connect does: inline, with
-// borrowed frames.
+// borrowed frames, whatever the frames are.
+func (self *messageTransportFake) deliver(t *testing.T, frames ...*protocol.Frame) {
+	t.Helper()
+	self.mutex.Lock()
+	receive := self.receive
+	self.mutex.Unlock()
+	if receive == nil {
+		t.Fatal("the transport registered no receive callback, so no frame can reach it")
+	}
+	receive(connect.TransferPath{}, frames, connect.Peer{})
+}
+
+// One response, at §10.1's response code point.
 func (self *messageTransportFake) answer(t *testing.T, response *protocol.MessageServerResponse) {
+	t.Helper()
+	self.deliver(t, &protocol.Frame{
+		MessageType:  protocol.MessageType_MessageMessageServerResponse,
+		MessageBytes: encodeMessageResponse(t, response),
+	})
+}
+
+func encodeMessageResponse(t *testing.T, response *protocol.MessageServerResponse) []byte {
 	t.Helper()
 	encoded, err := proto.Marshal(response)
 	if err != nil {
 		t.Fatalf("could not encode the response: %v", err)
 	}
-	self.mutex.Lock()
-	receive := self.receive
-	self.mutex.Unlock()
-	if receive == nil {
-		t.Fatal("the transport registered no receive callback, so no response can reach it")
-	}
-	receive(
-		connect.TransferPath{},
-		[]*protocol.Frame{{
-			MessageType:  protocol.MessageType_MessageMessageServerResponse,
-			MessageBytes: encoded,
-		}},
-		connect.Peer{},
-	)
+	return encoded
 }
 
 func helloResponse(requestId uint64, nonce string) *protocol.MessageServerResponse {
@@ -451,6 +529,254 @@ func TestMessageTransportRefusesWhatItCannotDo(t *testing.T) {
 	}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// What the frame carries and where it goes. Review findings F4 and F6: all of
+// this was inside the fake's reach and none of it was asserted, so the boundary
+// paragraph's list of what this file cannot see read as exhaustive when three
+// locally checkable things were simply not looked at.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestMessageTransportAddressesEveryFrameToTheConfiguredServer(t *testing.T) {
+	fake := &messageTransportFake{}
+	server := connect.Id{0x51, 0xE2, 0xA7, 0x03}
+	transport, err := newMessageTransport(&messageTransportConfig{
+		Client:          fake,
+		Server:          server,
+		ProtocolVersion: 7,
+		Timeout:         150 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("the transport would not construct: %v", err)
+	}
+	t.Cleanup(transport.Close)
+
+	// it will time out, and the timeout is not what this test is about
+	transport.Call(context.Background(), &protocol.HelloRequest{SupportedVersions: []uint32{7}})
+
+	addressed := fake.addressed()
+	if len(addressed) == 0 {
+		t.Fatal("no frame reached the client at all, so nothing here is an assertion about its address")
+	}
+	want := connect.DestinationId(server)
+	for index, destination := range addressed {
+		if destination != want {
+			t.Fatalf("frame %d was addressed to %v, want %v -- errMessageTransportNoServer says "+
+				"that every frame is addressed to the server's client_id, and the server is a value "+
+				"the caller configured rather than a value the send path invents",
+				index, destination, want)
+		}
+	}
+
+	// the SEND-side code point, asserted rather than inferred from a fake that
+	// happens to refuse everything else
+	for index, codePoint := range fake.codePoints() {
+		if codePoint != protocol.MessageType_MessageMessageServerRequest {
+			t.Fatalf("frame %d went out at code point %d (%s), want %d (%s)",
+				index, codePoint, codePoint,
+				protocol.MessageType_MessageMessageServerRequest,
+				protocol.MessageType_MessageMessageServerRequest)
+		}
+	}
+
+	// the configured version is stamped on the request rather than dropped on
+	// the way
+	if got := fake.requestAt(0).GetProtocolVersion(); got != 7 {
+		t.Fatalf("the request carries protocol_version %d, want the configured 7 -- "+
+			"messageTransportConfig.ProtocolVersion says it is stamped on every later request", got)
+	}
+
+	// and the frame counter moved, which is a counter Property 2 owes and which
+	// no test read before this one
+	if frames := transport.Counts().RequestFrames; frames != 1 {
+		t.Fatalf("Counts().RequestFrames is %d after one request, want 1", frames)
+	}
+}
+
+// The receive side reads this binding's own code points and nothing else. The
+// class of "everything else" is READ off the compiled enum rather than listed:
+// every MessageType protocol declares that is not one this binding reads.
+func TestMessageTransportReadsOnlyTheCodePointsThatAreItsOwn(t *testing.T) {
+	fake := &messageTransportFake{}
+	transport := newTestMessageTransport(t, fake, 5*time.Second)
+
+	results := callInBackground(transport, context.Background(), &protocol.HelloRequest{SupportedVersions: []uint32{1}})
+	awaitRequests(t, fake, 1)
+	requestId := fake.requestAt(0).GetRequestId()
+	encoded := encodeMessageResponse(t, helloResponse(requestId, "mine"))
+
+	mine := messageTransportReadCodePoints(t)
+	others := []protocol.MessageType{}
+	for number := range protocol.MessageType_name {
+		codePoint := protocol.MessageType(number)
+		if !mine[codePoint] {
+			others = append(others, codePoint)
+		}
+	}
+	sort.Slice(others, func(i int, j int) bool { return others[i] < others[j] })
+	t.Logf("code points this binding READS: %d %v; complement -- code points protocol declares that it does not: %d %v",
+		len(mine), sortedCodePoints(mine), len(others), others)
+	if len(others) == 0 {
+		t.Fatal("the complement is EMPTY: this binding would be reading every code point protocol has, " +
+			"which is not a filter at all")
+	}
+	if len(mine)+len(others) != len(protocol.MessageType_name) {
+		t.Fatalf("%d read + %d not read is not the %d code points protocol declares: the partition does not close",
+			len(mine), len(others), len(protocol.MessageType_name))
+	}
+
+	// the very same well-formed response bytes, at every code point that is not
+	// one this binding reads
+	for _, codePoint := range others {
+		fake.deliver(t, &protocol.Frame{MessageType: codePoint, MessageBytes: encoded})
+	}
+	counts := transport.Counts()
+	if counts.ResponseFrames != 0 {
+		t.Fatalf("Counts().ResponseFrames is %d after %d frames at code points this binding does not read, want 0",
+			counts.ResponseFrames, len(others))
+	}
+	if counts.Responses != 0 || counts.Unmatched != 0 {
+		t.Fatalf("a frame at another binding's code point was DECODED: Responses %d, Unmatched %d, want 0 and 0 -- "+
+			"connect carries every binding's traffic on one callback, so the code point is the only thing "+
+			"that says a frame is this binding's", counts.Responses, counts.Unmatched)
+	}
+	if counts.Waiting != 1 {
+		t.Fatalf("Counts().Waiting is %d, want 1 -- the waiter was answered by a frame at another code point", counts.Waiting)
+	}
+
+	// and the code point that IS this binding's arrives
+	fake.deliver(t, &protocol.Frame{
+		MessageType:  protocol.MessageType_MessageMessageServerResponse,
+		MessageBytes: encoded,
+	})
+	counts = transport.Counts()
+	if counts.ResponseFrames != 1 {
+		t.Fatalf("Counts().ResponseFrames is %d after one response frame, want 1", counts.ResponseFrames)
+	}
+	select {
+	case result := <-results:
+		if result.err != nil {
+			t.Fatalf("the call failed: %v", result.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the response at the binding's own code point was not delivered")
+	}
+}
+
+// The code points this binding READS, derived from the receive path's own
+// `switch` rather than written down here.
+//
+// The derivation is deliberately over the SOURCE and not over a production
+// helper the test could be handed: a helper would be a second place to say
+// which code points are read, and the two would be free to disagree. A `case`
+// added to the switch joins this class on the commit that adds it; the whole
+// switch deleted makes this class EMPTY, which the caller fails closed on.
+//
+// The spelling is turned into a NUMBER through protocol's own compiled enum
+// value map, so a constant this gate cannot resolve is a failure rather than a
+// silent zero.
+func messageTransportReadCodePoints(t *testing.T) map[protocol.MessageType]bool {
+	t.Helper()
+	gate := newBorrowGate(t)
+	decl := gate.decls["messageTransport.receive"]
+	if decl == nil {
+		t.Fatal("package sdk declares no messageTransport.receive, so there is no receive path to read the class off")
+	}
+	read := map[protocol.MessageType]bool{}
+	ast.Inspect(decl, func(node ast.Node) bool {
+		clause, ok := node.(*ast.CaseClause)
+		if !ok {
+			return true
+		}
+		for _, each := range clause.List {
+			selector, ok := each.(*ast.SelectorExpr)
+			if !ok {
+				continue
+			}
+			pkg, ok := selector.X.(*ast.Ident)
+			if !ok || pkg.Name != "protocol" || !strings.HasPrefix(selector.Sel.Name, "MessageType_") {
+				continue
+			}
+			spelled := strings.TrimPrefix(selector.Sel.Name, "MessageType_")
+			number, found := protocol.MessageType_value[spelled]
+			if !found {
+				t.Fatalf("messageTransport.receive names protocol.%s, which is not a value of protocol's MessageType enum",
+					selector.Sel.Name)
+			}
+			read[protocol.MessageType(number)] = true
+		}
+		return true
+	})
+	if len(read) == 0 {
+		t.Fatal("messageTransport.receive selects on NO code point: the receive path reads every frame " +
+			"connect hands it, including every other binding's")
+	}
+	return read
+}
+
+func sortedCodePoints(set map[protocol.MessageType]bool) []protocol.MessageType {
+	points := []protocol.MessageType{}
+	for codePoint := range set {
+		points = append(points, codePoint)
+	}
+	sort.Slice(points, func(i int, j int) bool { return points[i] < points[j] })
+	return points
+}
+
+// A cancelled Call is the OTHER way a waiter goes away, and it is the one the
+// caller controls. Review finding F5: no test in the suite constructed a
+// cancellable context, and deleting the forget from the ctx arm left a
+// permanent correlation-map entry with everything green.
+func TestMessageTransportCancelledCallIsTypedAndLeavesNoMapEntry(t *testing.T) {
+	fake := &messageTransportFake{}
+	transport := newTestMessageTransport(t, fake, 30*time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	results := callInBackground(transport, ctx, &protocol.HelloRequest{SupportedVersions: []uint32{1}})
+	awaitRequests(t, fake, 1)
+	if waiting := transport.Counts().Waiting; waiting != 1 {
+		t.Fatalf("Counts().Waiting is %d before the cancel, want 1", waiting)
+	}
+
+	cancel()
+	select {
+	case result := <-results:
+		if result.err == nil {
+			t.Fatal("a cancelled Call returned a nil error: (nil, nil) is the one answer a caller cannot tell from success")
+		}
+		if result.response != nil {
+			t.Fatalf("a cancelled Call returned a response as well as an error: %v", result.response)
+		}
+		if !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("a cancelled Call returned %v, which does not wrap context.Canceled -- "+
+				"the caller cannot tell its own cancel from a server that never answered", result.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a cancelled Call never returned")
+	}
+
+	counts := transport.Counts()
+	if counts.Waiting != 0 {
+		t.Fatalf("Counts().Waiting is %d after the only Call was cancelled, want 0 -- "+
+			"the correlation map entry outlived its waiter", counts.Waiting)
+	}
+	if counts.Timeouts != 0 {
+		t.Fatalf("Counts().Timeouts is %d after a CANCEL, want 0 -- a cancel is not a timeout", counts.Timeouts)
+	}
+
+	// the answer that arrives afterwards goes to nobody, and is counted
+	fake.answer(t, helloResponse(fake.requestAt(0).GetRequestId(), "late"))
+	counts = transport.Counts()
+	if counts.Unmatched != 1 {
+		t.Fatalf("Counts().Unmatched is %d after a response whose waiter was cancelled, want 1", counts.Unmatched)
+	}
+	if counts.Responses != 0 {
+		t.Fatalf("Counts().Responses is %d, want 0 -- the waiter that asked had been cancelled", counts.Responses)
+	}
+	if counts.Waiting != 0 {
+		t.Fatalf("Counts().Waiting is %d after the late response, want 0", counts.Waiting)
+	}
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Property 1 — nothing borrowed outlives the receive callback.
 // ═════════════════════════════════════════════════════════════════════════════
@@ -460,11 +786,23 @@ func TestMessageTransportRefusesWhatItCannotDo(t *testing.T) {
 //	every value that reaches this binding through the receive callback's
 //	PARAMETERS. The class is read off `connect.ReceiveFunction`'s own
 //	declaration at run time — go/parser over connect's source, located through
-//	`go list` — and is never listed here. The gate REPORTS the number it read,
-//	and asserts the binding's callback binds exactly that many parameters, so a
-//	parameter added to `ReceiveFunction` upstream fails here rather than
-//	silently widening the class. It is three today; the gate does not know that
-//	in advance and neither does this comment.
+//	`go list` — and is never listed here. The gate REPORTS the number it read
+//	and the source position it read it at, and asserts the binding's callback
+//	binds exactly that many parameters. It is three today; the gate does not
+//	know that in advance and neither does this comment.
+//
+//	WHAT THE ARITY CHECK ACTUALLY BUYS, corrected (review finding F7). An
+//	earlier draft of this header said a parameter added to `ReceiveFunction`
+//	upstream "fails here". It cannot: `messageTransportClient` declares
+//	`AddReceiveCallback(connect.ReceiveFunction)` — the alias itself — and
+//	`self.receive` is passed to it, so an arity change upstream is a COMPILE
+//	ERROR and this test binary never runs. The compiler's answer is the
+//	stronger one and it is the one that arrives. What the read buys is the
+//	other half: the number and the POSITION are reported, so a reader knows
+//	which declaration the class was taken from, and a gate that silently read
+//	the wrong file is visible rather than assumed. The taint roots are the
+//	sdk callback's OWN parameter names — the connect read is a cross-check and
+//	a report, not a driver.
 //
 // GATE SCOPE, derived separately from the class (R3):
 //
@@ -597,49 +935,142 @@ func TestNothingBorrowedOutlivesTheReceiveCallback(t *testing.T) {
 // and whose other tests run concurrently with this one, so `runtime.NumGoroutine`
 // would be measuring the package and not this binding.
 //
-// GATE CLASS:  every `go` statement in the binding's production files.
-// GATE SCOPE:  the binding's production files WHOLE — derived as the production
+// GATE CLASS, derived: every `go` statement in the files this gate is scoped to.
 //
-//	files of package sdk that declare a method on `messageTransport`
-//	— and not `Call` alone, because a goroutine started anywhere in
-//	this file outlives the request that started it just as well.
+// GATE SCOPE, derived SEPARATELY from the class and from TWO derivations that are
+// unioned rather than picked between:
 //
-// Complement printed: the statements scanned that are NOT `go` statements, with
-// its count. An empty complement means the gate parsed nothing, and it fails
-// closed on that.
+//	(a) the production files of package sdk that declare a method on
+//	    `messageTransport`, and
+//	(b) the production files that declare any function in the receive callback's
+//	    DYNAMIC EXTENT.
+//
+// Review finding F3 is exactly the gap between them. Before this repair the scope
+// was (a) alone while Property 1's scope was (b) alone, and a free function in a
+// file that declares no `messageTransport` method was inside one and outside the
+// other: the borrow gate NAMED `messageTransportProbeLeak` as inside the extent
+// on the line above this gate reporting its scope as a file set that excluded it,
+// and a `go` statement in that function mentioning nothing borrowed was seen by
+// neither gate. Two gates over one binding must not be able to disagree about
+// what the binding IS, so the scope here is the union and both contributions are
+// printed with what each one added that the other did not.
+//
+// Complements printed: what each derivation contributed that the other did not,
+// and, per file, the statements scanned that are NOT `go` statements. A file in
+// scope that contributes zero statements means the gate parsed a file and read
+// nothing out of it, and it fails closed on that PER FILE rather than on the
+// total -- a total that is merely non-zero is satisfied by one big file while
+// every other file in scope is silently empty, which is the shape the house rule
+// calls the silent one.
 func TestTheMessageTransportStartsNoGoroutine(t *testing.T) {
 	gate := newBorrowGate(t)
-	files := gate.bindingFiles()
-	if len(files) == 0 {
+
+	binding := gate.bindingFiles()
+	if len(binding) == 0 {
 		t.Fatal("no production file of package sdk declares a method on messageTransport")
+	}
+	mine, _ := gate.receiveRegistrations()
+	if len(mine) != 1 {
+		t.Fatalf("package sdk has %d receive-callback registrations on messageTransport %v, want exactly 1",
+			len(mine), mine)
+	}
+	gate.walkExtent(mine[0].callee)
+	extent := gate.extentFiles()
+	if len(extent) == 0 {
+		t.Fatal("the receive callback's dynamic extent is declared in no file, so the second derivation read nothing")
+	}
+
+	scope := unionOfFiles(binding, extent)
+	t.Logf("GATE SCOPE, the union of two derivations: %d files %v", len(scope), scope)
+	t.Logf("  (a) files declaring a messageTransport method: %d %v", len(binding), binding)
+	t.Logf("  (b) files declaring a function in the receive callback's extent (%d functions): %d %v",
+		len(gate.order), len(extent), extent)
+	t.Logf("  complement -- in (b) and NOT in (a): %d %v", len(filesNotIn(extent, binding)), filesNotIn(extent, binding))
+	t.Logf("  complement -- in (a) and NOT in (b): %d %v", len(filesNotIn(binding, extent)), filesNotIn(binding, extent))
+	if len(scope) != len(unionOfFiles(scope, binding)) || len(scope) != len(unionOfFiles(scope, extent)) {
+		t.Fatalf("the scope %v does not contain both derivations %v and %v", scope, binding, extent)
 	}
 
 	statements := 0
 	found := []string{}
-	for _, name := range files {
+	for _, name := range scope {
+		perFile := 0
+		goHere := 0
 		ast.Inspect(gate.prodFiles[name], func(node ast.Node) bool {
 			statement, ok := node.(ast.Stmt)
 			if !ok {
 				return true
 			}
-			statements += 1
+			perFile += 1
 			if _, isGo := statement.(*ast.GoStmt); isGo {
+				goHere += 1
 				found = append(found, gate.fset.Position(statement.Pos()).String())
 			}
 			return true
 		})
+		statements += perFile
+		t.Logf("  %s: %d statements, %d of them `go`; complement -- statements that are not `go`: %d",
+			name, perFile, goHere, perFile-goHere)
+		if perFile-goHere == 0 {
+			t.Fatalf("%s contributes an EMPTY complement: %d statements scanned in a file this gate "+
+				"holds in scope, so the gate parsed it and read nothing", name, perFile)
+		}
 	}
-	t.Logf("class: `go` statements in %v; complement — statements scanned that are not `go` statements: %d",
-		files, statements-len(found))
-	if statements-len(found) == 0 {
-		t.Fatalf("the complement is EMPTY: %d statements scanned across %v, so the gate parsed nothing",
-			statements, files)
+	if statements != len(found)+(statements-len(found)) || statements == 0 {
+		t.Fatalf("the partition does not close: %d statements scanned, %d of them `go`", statements, len(found))
 	}
+	t.Logf("class: `go` statements in %v; %d found; complement -- statements scanned that are not `go`: %d of %d",
+		scope, len(found), statements-len(found), statements)
+
 	if len(found) != 0 {
 		t.Fatalf("the binding starts %d goroutine(s), at %v: a request that timed out has to leave "+
 			"no goroutine behind, and a goroutine here is also the construction Property 1 refuses",
 			len(found), found)
 	}
+}
+
+// The production files that declare any function of the walked extent.
+func (self *borrowGate) extentFiles() []string {
+	seen := map[string]bool{}
+	names := []string{}
+	for _, key := range self.order {
+		name := self.declFile[key]
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func unionOfFiles(left []string, right []string) []string {
+	seen := map[string]bool{}
+	names := []string{}
+	for _, name := range append(append([]string{}, left...), right...) {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func filesNotIn(left []string, right []string) []string {
+	within := map[string]bool{}
+	for _, name := range right {
+		within[name] = true
+	}
+	names := []string{}
+	for _, name := range left {
+		if !within[name] {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -668,6 +1099,25 @@ type borrowGate struct {
 	declOrder  []string
 	duplicates []string
 
+	// Every package-level value NAME of package sdk, with where it was
+	// declared. Review finding F2: the AssignStmt arm cleared any assignment
+	// whose left-hand side is a bare identifier, with the reason "bound to the
+	// local %s, which dies with the callback" -- and nothing syntactic
+	// distinguishes a local from a package-level variable, so a borrowed frame
+	// stored into a package-level var was cleared as a local. A name declared
+	// here is not a local, whatever it looks like at the assignment.
+	packageValues map[string]string
+
+	// What each function literal in the walked declarations IS, so that the
+	// classifier can tell a closure that runs inside the callback from one that
+	// is kept for later. Review finding F1: isBorrowed had no FuncLit case, the
+	// store of a closure over a borrowed frame read as a store of something
+	// unborrowed, and the ReturnStmt inside the literal then CLEARED the
+	// borrowed expression with a reason about a caller that is inside the
+	// callback -- when the caller is whoever invokes the stored closure, after
+	// it returned.
+	litRole map[*ast.FuncLit]string
+
 	extent   map[string]bool
 	order    []string
 	analyzed map[string]bool
@@ -693,32 +1143,74 @@ var borrowSanitizers = map[string]string{
 
 func newBorrowGate(t *testing.T) *borrowGate {
 	t.Helper()
-	gate := &borrowGate{
-		t:           t,
-		fset:        token.NewFileSet(),
-		prodFiles:   map[string]*ast.File{},
-		decls:       map[string]*ast.FuncDecl{},
-		declFile:    map[string]string{},
-		extent:      map[string]bool{},
-		analyzed:    map[string]bool{},
-		borrowLines: map[string]bool{},
-		coveredLine: map[string]bool{},
-	}
 	paths, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("could not list the package's files: %v", err)
 	}
+	sources := map[string]any{}
 	for _, path := range paths {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
 		}
-		file, err := parser.ParseFile(gate.fset, path, nil, parser.SkipObjectResolution)
+		// nil means "read it off disk"
+		sources[path] = nil
+	}
+	return newBorrowGateOver(t, sources)
+}
+
+// The same gate over source handed to it rather than read off the package.
+//
+// It exists so that the classifier can be driven against constructions that are
+// NOT in this package -- see TestTheBorrowClassifierRefusesWhatItClaimsTo. A
+// gate whose verdicts are never themselves tested is a gate whose count can be
+// right while every verdict in it is wrong, which is exactly how the two false
+// clears of the Task 5 review survived a complement that asserted coverage.
+func newBorrowGateOver(t *testing.T, sources map[string]any) *borrowGate {
+	t.Helper()
+	gate := &borrowGate{
+		t:             t,
+		fset:          token.NewFileSet(),
+		prodFiles:     map[string]*ast.File{},
+		decls:         map[string]*ast.FuncDecl{},
+		declFile:      map[string]string{},
+		packageValues: map[string]string{},
+		litRole:       map[*ast.FuncLit]string{},
+		extent:        map[string]bool{},
+		analyzed:      map[string]bool{},
+		borrowLines:   map[string]bool{},
+		coveredLine:   map[string]bool{},
+	}
+	names := []string{}
+	for name := range sources {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, path := range names {
+		file, err := parser.ParseFile(gate.fset, path, sources[path], parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("could not parse %s: %v", path, err)
 		}
 		gate.prodFiles[path] = file
 		gate.fileNames = append(gate.fileNames, path)
 		for _, decl := range file.Decls {
+			if genDecl, isGen := decl.(*ast.GenDecl); isGen {
+				if genDecl.Tok != token.VAR && genDecl.Tok != token.CONST {
+					continue
+				}
+				for _, spec := range genDecl.Specs {
+					valueSpec, isValue := spec.(*ast.ValueSpec)
+					if !isValue {
+						continue
+					}
+					for _, name := range valueSpec.Names {
+						if name.Name == "_" {
+							continue
+						}
+						gate.packageValues[name.Name] = gate.fset.Position(name.Pos()).String()
+					}
+				}
+				continue
+			}
 			funcDecl, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
@@ -731,6 +1223,7 @@ func newBorrowGate(t *testing.T) *borrowGate {
 			gate.decls[key] = funcDecl
 			gate.declFile[key] = path
 			gate.declOrder = append(gate.declOrder, key)
+			gate.readLiteralRoles(funcDecl)
 		}
 	}
 	if len(gate.prodFiles) == 0 {
@@ -738,6 +1231,33 @@ func newBorrowGate(t *testing.T) *borrowGate {
 	}
 	sort.Strings(gate.fileNames)
 	return gate
+}
+
+// What every function literal in a declaration is FOR, read off the node that
+// holds it. A literal that is the callee of a `go`, of a `defer`, or of a call
+// made on the spot has a lifetime the callback controls; a literal that is
+// stored, returned, or handed anywhere else does not, and there is no third
+// thing to read here -- the role is the syntax, not a guess.
+func (self *borrowGate) readLiteralRoles(decl *ast.FuncDecl) {
+	ast.Inspect(decl, func(node ast.Node) bool {
+		switch statement := node.(type) {
+		case *ast.GoStmt:
+			if lit, ok := statement.Call.Fun.(*ast.FuncLit); ok {
+				self.litRole[lit] = "go"
+			}
+		case *ast.DeferStmt:
+			if lit, ok := statement.Call.Fun.(*ast.FuncLit); ok {
+				self.litRole[lit] = "defer"
+			}
+		case *ast.CallExpr:
+			if lit, ok := statement.Fun.(*ast.FuncLit); ok {
+				if _, already := self.litRole[lit]; !already {
+					self.litRole[lit] = "called"
+				}
+			}
+		}
+		return true
+	})
 }
 
 // The class, read off connect's own declaration.
@@ -1064,6 +1584,39 @@ func (self *borrowGate) analyze(key string, roots map[string]bool) {
 
 	// classification
 	ast.Inspect(decl.Body, func(node ast.Node) bool {
+		// A function literal is ruled on AS A LITERAL and is not descended
+		// into. Descending is what cleared review finding F1: the only
+		// statement inside `func() []byte { return frame.GetMessageBytes() }`
+		// is a ReturnStmt, and the ReturnStmt arm below clears a borrowed
+		// result because the caller of THIS declaration is inside the callback
+		// -- which is true of this declaration and false of a closure, whose
+		// caller is whoever invokes it, after the callback returned, over a
+		// buffer connect has already reclaimed.
+		if lit, isLit := node.(*ast.FuncLit); isLit {
+			names := borrowedNames(lit, tainted)
+			if len(names) == 0 {
+				return false
+			}
+			switch self.litRole[lit] {
+			case "go":
+				// the GoStmt arm below flags the whole statement, with the
+				// reason that is about the goroutine rather than the closure
+			case "defer":
+				self.clear(lit, strings.Join(names, ", "),
+					"captured by a deferred literal, which runs before the callback returns")
+			case "called":
+				self.clear(lit, strings.Join(names, ", "),
+					"captured by a literal that is invoked on the spot, inside the callback")
+			default:
+				self.flag(lit, strings.Join(names, ", "),
+					"captured by a function literal that is stored, returned or passed rather than "+
+						"run here. A closure over a borrowed value is a reference whose lifetime the "+
+						"callback does not control: whoever calls it calls it after the callback "+
+						"returned, over a buffer connect has reclaimed")
+			}
+			return false
+		}
+
 		switch statement := node.(type) {
 
 		case *ast.AssignStmt:
@@ -1073,6 +1626,12 @@ func (self *borrowGate) analyze(key string, roots map[string]bool) {
 				}
 				for _, lhs := range lhsFor(statement, index) {
 					if ident, ok := lhs.(*ast.Ident); ok {
+						if where, isPackage := self.packageValues[ident.Name]; isPackage {
+							self.flag(statement, types.ExprString(rhs),
+								fmt.Sprintf("stored into the PACKAGE-LEVEL %s, declared at %s, which "+
+									"outlives this callback and every callback after it", ident.Name, where))
+							continue
+						}
 						self.clear(statement, types.ExprString(rhs),
 							fmt.Sprintf("bound to the local %s, which dies with the callback", ident.Name))
 						continue
@@ -1245,6 +1804,14 @@ func isBorrowed(expr ast.Expr, tainted map[string]bool) bool {
 	switch each := expr.(type) {
 	case nil:
 		return false
+	case *ast.FuncLit:
+		// a closure that captures a borrowed value IS a borrowed value: it is a
+		// reference to one, held for as long as the closure is held. Review
+		// finding F1 -- borrowedNames, which the GoStmt and DeferStmt arms use,
+		// always saw captured identifiers; this function did not, so the
+		// AssignStmt arm read the store of a thunk as the store of something
+		// unborrowed.
+		return 0 < len(borrowedNames(each, tainted))
 	case *ast.Ident:
 		return tainted[each.Name]
 	case *ast.SelectorExpr:
@@ -1415,3 +1982,222 @@ func sortedKeys(set map[string]bool) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The classifier, driven against constructions that are NOT in this package.
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// WHY THIS EXISTS, stated as the defect it answers. C3 above asserts that every
+// line carrying a borrowed identifier received A VERDICT. It does not assert
+// that the verdict was RIGHT, and the Task 5 review found two constructions
+// where it was not: a closure over the borrowed bytes stored in a struct field,
+// and a borrowed frame assigned to a package-level variable, each printing a
+// CLEARANCE while the value escaped. Both satisfied the coverage identity. The
+// count was right and the verdicts were wrong, and nothing in a gate whose only
+// subject is the shipped source could have said so -- the shipped source does
+// not contain the constructions the gate is supposed to refuse.
+//
+// So the classifier is driven HERE over source written to be wrong. Each case
+// below is a construction and the verdict the rule owes it; the gate is built
+// over that source alone, walked from its own registration, and the verdict
+// read back. A rule that stops refusing something turns this red on the case
+// that names it, without anybody having to plant a mutation in a production
+// file and remember to take it out.
+//
+// GATE CLASS: the verdict the classifier returns for one construction.
+// GATE SCOPE: the synthetic package of each case, which is deliberately NOT
+//             package sdk -- a self-test over the shipped source could only
+//             ever re-derive that the shipped source is clean.
+func TestTheBorrowClassifierRefusesWhatItClaimsTo(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		extra   string
+		escapes bool
+		why     string
+	}{
+		{
+			name:    "the frame stored in a map the transport holds",
+			body:    "self.held[1] = frame",
+			escapes: true,
+			why:     "plan mutation 1",
+		},
+		{
+			name:    "the frame's bytes kept without copying",
+			body:    "self.bytes = frame.GetMessageBytes()",
+			escapes: true,
+			why:     "plan mutation 2",
+		},
+		{
+			name:    "a goroutine that copies promptly",
+			body:    "go func(borrowed []byte) { copied := append([]byte(nil), borrowed...); _ = copied }(frame.GetMessageBytes())",
+			escapes: true,
+			why:     "plan mutation 3 -- promptness is not the rule",
+		},
+		{
+			name:    "a closure over the borrowed bytes, stored in a field",
+			body:    "self.later = func() []byte { return frame.GetMessageBytes() }",
+			escapes: true,
+			why:     "review finding F1: cleared before this repair, with the reason \"returned to a caller that is itself inside the callback\"",
+		},
+		{
+			name:    "the frame assigned to a package-level variable",
+			body:    "messageTransportProbeLast = frame",
+			escapes: true,
+			why:     "review finding F2: cleared before this repair as \"bound to the local\"",
+		},
+		{
+			name:    "the frame sent on a channel",
+			body:    "self.answers <- frame",
+			escapes: true,
+			why:     "connect: never hand a borrowed Frame to a channel",
+		},
+		{
+			name:    "the frame handed to a function this gate cannot see inside",
+			body:    "elsewhere.Keep(frame)",
+			escapes: true,
+			why:     "outside the package and outside the sanitizer set",
+		},
+		{
+			name:    "the frame appended to a slice the transport holds",
+			body:    "self.keep = append(self.keep, frame)",
+			escapes: true,
+			why:     "a store through append is still a store",
+		},
+		{
+			name: "the frame stashed two hops away, renamed at every hop",
+			body: "self.stashOuter(frame)",
+			extra: "func (self *messageTransport) stashOuter(f *protocol.Frame) { self.stashInner(f) }\n" +
+				"func (self *messageTransport) stashInner(g *protocol.Frame) { self.keep = append(self.keep, g) }",
+			escapes: true,
+			why:     "the scope is the dynamic extent, not the lexical body",
+		},
+		{
+			name:    "the bytes decoded into a message of our own",
+			body:    "response := &protocol.MessageServerResponse{}\n\t\t_ = proto.Unmarshal(frame.GetMessageBytes(), response)",
+			escapes: false,
+			why:     "Unmarshal copies every byte it keeps",
+		},
+		{
+			name:    "the bytes bound to a local and measured",
+			body:    "borrowed := frame.GetMessageBytes()\n\t\t_ = len(borrowed)",
+			escapes: false,
+			why:     "a local dies with the callback and len reads a length",
+		},
+		{
+			name:    "the bytes copied into a buffer of our own",
+			body:    "ours := make([]byte, len(frame.GetMessageBytes()))\n\t\tcopy(ours, frame.GetMessageBytes())",
+			escapes: false,
+			why:     "copy is what the rule tells you to do",
+		},
+		{
+			name:    "the frame read in a condition",
+			body:    "if frame.GetMessageType() != 0 {\n\t\t\tcontinue\n\t\t}",
+			escapes: false,
+			why:     "a comparison keeps nothing",
+		},
+		{
+			name:    "the bytes captured by a deferred literal",
+			body:    "defer func() { _ = len(frame.GetMessageBytes()) }()",
+			escapes: false,
+			why:     "a defer runs before the callback returns",
+		},
+	}
+
+	refusedEscapes := 0
+	clearedSafe := 0
+	for _, each := range cases {
+		t.Run(each.name, func(t *testing.T) {
+			source := fmt.Sprintf(borrowClassifierProbe, each.body, each.extra)
+			gate := newBorrowGateOver(t, map[string]any{"borrow_probe.go": source})
+			mine, others := gate.receiveRegistrations()
+			if len(mine) != 1 {
+				t.Fatalf("the probe declares %d registrations on messageTransport %v (others %v), want 1",
+					len(mine), mine, others)
+			}
+			root := mine[0].callee
+			decl := gate.decls[root]
+			if decl == nil {
+				t.Fatalf("the probe registers %s, which it does not declare", root)
+			}
+			gate.walkExtent(root)
+			gate.analyze(root, setOf(fieldNames(decl.Type.Params)...))
+
+			verdicts := []string{}
+			for _, site := range gate.cleared {
+				verdicts = append(verdicts, fmt.Sprintf("CLEARED %s %s -- %s", site.pos, site.what, site.reason))
+			}
+			for _, site := range gate.flagged {
+				verdicts = append(verdicts, fmt.Sprintf("FLAGGED %s %s -- %s", site.pos, site.what, site.reason))
+			}
+			t.Logf("extent %d %v; %d verdict(s):", len(gate.order), gate.order, len(verdicts))
+			for _, verdict := range verdicts {
+				t.Logf("    %s", verdict)
+			}
+			if uncovered := gate.uncoveredBorrowLines(); len(uncovered) != 0 {
+				t.Fatalf("%d borrowed identifier(s) got no verdict at all: %v", len(uncovered), uncovered)
+			}
+			if len(verdicts) == 0 {
+				t.Fatal("the classifier returned NO verdict for this construction, so it did not look at it")
+			}
+
+			if each.escapes && len(gate.flagged) == 0 {
+				t.Fatalf("this construction ESCAPES the callback and the classifier cleared it (%s). "+
+					"Verdicts above. A clearance here is the shape review findings F1 and F2 had: the "+
+					"count is right, the coverage identity is satisfied, and the value is gone",
+					each.why)
+			}
+			if !each.escapes && len(gate.flagged) != 0 {
+				t.Fatalf("this construction is SAFE (%s) and the classifier flagged it: %v. "+
+					"A gate that refuses correct code is a gate that gets deleted", each.why, gate.flagged)
+			}
+		})
+		if each.escapes {
+			refusedEscapes += 1
+		} else {
+			clearedSafe += 1
+		}
+	}
+
+	// R5's two halves, as numbers rather than as an assurance: the classifier is
+	// FALSIFIABLE by the constructions above that escape, and SATISFIABLE by the
+	// ones that do not. A suite with only one half is a gate that either refuses
+	// everything or refuses nothing, and both pass a coverage check.
+	t.Logf("constructions that must be refused: %d; constructions that must be cleared: %d; total %d",
+		refusedEscapes, clearedSafe, len(cases))
+	if refusedEscapes == 0 || clearedSafe == 0 {
+		t.Fatalf("this table has %d refusals and %d clearances: a classifier tested in one direction only "+
+			"is a classifier that can be right by refusing everything, or by refusing nothing",
+			refusedEscapes, clearedSafe)
+	}
+}
+
+// The probe package. It is never compiled -- go/parser is the only thing that
+// reads it -- so the types are spelled the way the real binding spells them and
+// nothing here needs to resolve.
+const borrowClassifierProbe = `package sdk
+
+type messageTransport struct {
+	held    map[uint64]*protocol.Frame
+	bytes   []byte
+	later   func() []byte
+	answers chan *protocol.Frame
+	keep    []*protocol.Frame
+}
+
+var messageTransportProbeLast *protocol.Frame
+
+func newMessageTransport(client messageTransportClient) *messageTransport {
+	self := &messageTransport{}
+	client.AddReceiveCallback(self.receive)
+	return self
+}
+
+func (self *messageTransport) receive(source connect.TransferPath, frames []*protocol.Frame, from connect.Peer) {
+	for _, frame := range frames {
+		%s
+	}
+}
+
+%s
+`
