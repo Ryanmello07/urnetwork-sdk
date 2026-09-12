@@ -127,11 +127,6 @@ type messageTransportConfig struct {
 	// negotiate.
 	ProtocolVersion uint32
 
-	// §4.6's part size for the requests this binding fragments. Task 6 owns the
-	// cut and owns the one declaration of the bound; this task carries the
-	// number and sends every request whole.
-	PartBytes int
-
 	// How long a Call waits. Zero takes [messageTransportDefaultTimeout].
 	Timeout time.Duration
 }
@@ -158,6 +153,20 @@ type messageTransportCounts struct {
 	// "something arrived for nobody" are two readings and not one.
 	Unmatched uint64
 
+	// Frames that arrived at §10.1's fragment code point, whether or not the
+	// reassembly they belong to ever completed.
+	FragmentFrames uint64
+
+	// §4.6 reassemblies that completed and produced a response.
+	Reassembled uint64
+
+	// §4.6 reassemblies this binding abandoned: an index that was not the one
+	// the buffer was waiting for, a count that changed under it, or a part past
+	// §4.6's ceiling. Counted so that an ABORT and a TIMEOUT are two readings
+	// and not one -- they are the same silence to a caller that only watches
+	// the clock, and they have different causes and different fixes.
+	Aborted uint64
+
 	// Calls that gave up. Property 3's other half: a timeout is a thing that
 	// happened, not an absence.
 	Timeouts uint64
@@ -166,6 +175,23 @@ type messageTransportCounts struct {
 	// how "a timed-out request left nothing behind" is read: a leak shows up
 	// here as a number that never comes back down.
 	Waiting uint64
+
+	// The size of the §4.6 reassembly map right now, for Waiting's reason: a
+	// request that timed out with fragments half-arrived must leave no buffer
+	// behind either, and a buffer is the other map entry a waiter can strand.
+	Reassembling uint64
+}
+
+// What a waiter is handed: the response, or the local refusal that ended the
+// wait before one arrived.
+//
+// A struct rather than the response alone, because §4.6's abort is decided
+// inside the receive callback and has nowhere else to go. Without it an
+// abandoned reassembly is indistinguishable from a server that never answered,
+// and the caller waits out the whole timeout to be told the wrong thing.
+type messageTransportAnswer struct {
+	response *protocol.MessageServerResponse
+	err      error
 }
 
 // A binding to one message server, over one connect client.
@@ -173,7 +199,6 @@ type messageTransport struct {
 	client          messageTransportClient
 	server          connect.Id
 	protocolVersion uint32
-	partBytes       int
 	timeout         time.Duration
 
 	unsubscribe func()
@@ -182,7 +207,8 @@ type messageTransport struct {
 	nextRequestId atomic.Uint64
 
 	mutex   sync.Mutex
-	waiting map[uint64]chan *protocol.MessageServerResponse
+	waiting map[uint64]chan messageTransportAnswer
+	partial map[uint64]*messageFragmentPartial
 	counts  messageTransportCounts
 }
 
@@ -197,9 +223,9 @@ func newMessageTransport(config *messageTransportConfig) (*messageTransport, err
 		client:          config.Client,
 		server:          config.Server,
 		protocolVersion: config.ProtocolVersion,
-		partBytes:       config.PartBytes,
 		timeout:         config.Timeout,
-		waiting:         map[uint64]chan *protocol.MessageServerResponse{},
+		waiting:         map[uint64]chan messageTransportAnswer{},
+		partial:         map[uint64]*messageFragmentPartial{},
 	}
 	if self.timeout <= 0 {
 		self.timeout = messageTransportDefaultTimeout
@@ -220,6 +246,7 @@ func (self *messageTransport) Counts() messageTransportCounts {
 	defer self.mutex.Unlock()
 	counts := self.counts
 	counts.Waiting = uint64(len(self.waiting))
+	counts.Reassembling = uint64(len(self.partial))
 	return counts
 }
 
@@ -245,6 +272,27 @@ func (self *messageTransport) receive(source connect.TransferPath, frames []*pro
 			if proto.Unmarshal(frame.GetMessageBytes(), response) != nil {
 				// a response that did not decode carries no `request_id` to
 				// correlate, so there is no waiter to tell and nothing to answer
+				continue
+			}
+			self.deliver(response)
+		case protocol.MessageType_MessageMessageServerFragment:
+			self.countFragmentFrame()
+			fragment := &protocol.MessageServerFragment{}
+			if proto.Unmarshal(frame.GetMessageBytes(), fragment) != nil {
+				// a fragment that did not decode carries no `request_id`, so
+				// there is no reassembly to abandon and no waiter to tell
+				continue
+			}
+			assembled, complete, err := self.acceptFragment(fragment)
+			if err != nil {
+				self.abort(fragment.GetRequestId(), err)
+				continue
+			}
+			if !complete {
+				continue
+			}
+			response := &protocol.MessageServerResponse{}
+			if proto.Unmarshal(assembled, response) != nil {
 				continue
 			}
 			self.deliver(response)
@@ -287,7 +335,7 @@ func (self *messageTransport) deliver(response *protocol.MessageServerResponse) 
 	}
 	self.mutex.Unlock()
 	if found {
-		waiter <- response
+		waiter <- messageTransportAnswer{response: response}
 	}
 }
 
@@ -310,7 +358,7 @@ func (self *messageTransport) Call(ctx context.Context, body proto.Message) (*pr
 
 	// buffered by one: see [messageTransport.deliver] for why one is enough and
 	// why it is what keeps connect's receive path unblocked
-	waiter := make(chan *protocol.MessageServerResponse, 1)
+	waiter := make(chan messageTransportAnswer, 1)
 	self.mutex.Lock()
 	self.waiting[request.GetRequestId()] = waiter
 	self.mutex.Unlock()
@@ -323,12 +371,17 @@ func (self *messageTransport) Call(ctx context.Context, body proto.Message) (*pr
 	timer := time.NewTimer(self.timeout)
 	defer timer.Stop()
 	select {
-	case response := <-waiter:
-		if response.GetRequestId() != request.GetRequestId() {
-			return nil, fmt.Errorf("%w: request %d was answered under request_id %d",
-				errMessageTransportMiscorrelated, request.GetRequestId(), response.GetRequestId())
+	case answer := <-waiter:
+		if answer.err != nil {
+			// §4.6 abandoned the reassembly this response was arriving in. The
+			// map entry went with it, inside [messageTransport.abort]
+			return nil, answer.err
 		}
-		return response, nil
+		if answer.response.GetRequestId() != request.GetRequestId() {
+			return nil, fmt.Errorf("%w: request %d was answered under request_id %d",
+				errMessageTransportMiscorrelated, request.GetRequestId(), answer.response.GetRequestId())
+		}
+		return answer.response, nil
 	case <-ctx.Done():
 		self.forget(request.GetRequestId())
 		return nil, fmt.Errorf("message transport: request %d abandoned: %w", request.GetRequestId(), ctx.Err())
@@ -340,13 +393,19 @@ func (self *messageTransport) Call(ctx context.Context, body proto.Message) (*pr
 	}
 }
 
-// The map entry, and nothing else, because there is nothing else: no goroutine
-// was started for this request, and the waiter channel is unreferenced once the
-// entry is gone.
+// Both map entries, and nothing else, because there is nothing else: no
+// goroutine was started for this request, and the waiter channel is
+// unreferenced once the entry is gone.
+//
+// The §4.6 reassembly buffer goes with the waiter. A request that timed out
+// with half its response arrived would otherwise leave a buffer keyed on a
+// request_id nothing is waiting for, which is the same leak as the correlation
+// entry and is not visible in the same counter -- see Counts().Reassembling.
 func (self *messageTransport) forget(requestId uint64) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 	delete(self.waiting, requestId)
+	delete(self.partial, requestId)
 }
 
 func (self *messageTransport) countTimeout() {
@@ -355,28 +414,30 @@ func (self *messageTransport) countTimeout() {
 	self.counts.Timeouts += 1
 }
 
-// The request on the wire: one §4.2 frame at §10.1's request code point.
+// The request on the wire: one §4.2 frame at §10.1's request code point, or
+// §4.6's fragments of it when it does not fit in a part.
 //
-// Task 6 adds §4.6's cut, and `partBytes` is carried for it rather than read
-// here — this task writes no fragmenter and declares no part size, because the
-// part size gets exactly ONE declaration in `sdk` and it is Task 6's.
+// The cut is [messageTransport.fragments] and the part size is its constant.
+// Nothing here chooses a budget, which is the point: a second place that could
+// choose one is a second place for the bound to live.
 func (self *messageTransport) send(request *protocol.MessageServerRequest) error {
-	body, err := connect.ProtoMarshal(request)
+	frames, err := self.fragments(request)
 	if err != nil {
 		return err
 	}
-	frame := &protocol.Frame{
-		MessageType:  protocol.MessageType_MessageMessageServerRequest,
-		MessageBytes: body,
+	for index, frame := range frames {
+		if !self.client.SendWithTimeout(frame, connect.DestinationId(self.server), nil, -1) {
+			// this frame and every frame after it are on no wire, so their
+			// buffers are ours to give back. The ones already handed over are
+			// connect's now
+			messageFragmentReturn(frames[index:])
+			return fmt.Errorf("%w: request %d, frame %d of %d",
+				errMessageTransportRefused, request.GetRequestId(), index+1, len(frames))
+		}
+		self.mutex.Lock()
+		self.counts.RequestFrames += 1
+		self.mutex.Unlock()
 	}
-	if !self.client.SendWithTimeout(frame, connect.DestinationId(self.server), nil, -1) {
-		// the frame is on no wire, so the buffer is ours to give back
-		connect.MessagePoolReturn(body)
-		return fmt.Errorf("%w: request %d", errMessageTransportRefused, request.GetRequestId())
-	}
-	self.mutex.Lock()
-	self.counts.RequestFrames += 1
-	self.mutex.Unlock()
 	return nil
 }
 

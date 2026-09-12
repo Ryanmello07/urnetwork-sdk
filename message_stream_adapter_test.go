@@ -1097,6 +1097,8 @@ var streamAdapterPackageValueCensus = map[string]streamAdapterPackageVar{
 	"ErrStreamStoreLocked":                     streamAdapterPackageVarOf(&ErrStreamStoreLocked),
 	"ErrStreamStoreRewound":                    streamAdapterPackageVarOf(&ErrStreamStoreRewound),
 	"ErrStreamStoreState":                      streamAdapterPackageVarOf(&ErrStreamStoreState),
+	"errMessageFragmentAborted":                streamAdapterPackageVarOf(&errMessageFragmentAborted),
+	"messageFragmentAborts":                    streamAdapterPackageVarOf(&messageFragmentAborts),
 	"errMessageTransportMiscorrelated":         streamAdapterPackageVarOf(&errMessageTransportMiscorrelated),
 	"errMessageTransportNoArm":                 streamAdapterPackageVarOf(&errMessageTransportNoArm),
 	"errMessageTransportNoClient":              streamAdapterPackageVarOf(&errMessageTransportNoClient),
@@ -1160,6 +1162,7 @@ var streamAdapterNonSentinelRulings = map[string]string{
 	"errMessageTransportNoArm":         "the binding's refusal that a request body is not an arm of §4.3's body oneof. It is decided off the compiled descriptor inside the transport's own send path and reaches no store call",
 	"errMessageTransportRefused":       "the binding's refusal that connect would not take the frame. It is raised on the transport's send path, which the reserver cannot reach: a reserver talks to a StreamStore and a StreamStore opens files",
 	"errMessageTransportMiscorrelated": "the binding's refusal that a response arrived under another request's request_id. It is raised inside messageTransport.Call and nothing in the store's chain can carry it",
+	"errMessageFragmentAborted":        "the binding's typed §4.6 abort, raised inside the receive callback when a fragment is not the one the reassembly was waiting for. It is raised over a protocol.MessageServerFragment that connect delivered and reaches no store call at all; a reserver talks to a StreamStore and a StreamStore has no fragments",
 	"errMessageTransportTimeout":       "the binding's typed timeout, raised when no response carrying a request_id arrived before the deadline. It is a TRANSPORT deadline and not a store refusal; SenderRatchet.Next never meets it, because the reserver's error chain comes from a StreamStore and a StreamStore has no deadline",
 }
 
