@@ -1433,6 +1433,11 @@ func TestACrashAroundTheFlushBurnsExactlyWhatTheFlushRecorded(t *testing.T) {
 // both stream methods -- and on the allocator it is ALSO ErrStreamStoreConsumed, because the next
 // position is one this store has already returned to a caller and it has no way past it. Both
 // names come off one value.
+//
+// WHAT DETECTS IT is the verified prefix and not a record of what was returned. This case returns
+// three indices before the truncation, so it reads the same either way; the two cases that tell
+// the detectors apart are TestARowEmptiedInPlaceIsRefusedRatherThanRestartedAtOne, where the
+// store has returned nothing at all, and TestTheRefusalForAVanishedRowIsStickyAndRecreatesNothing.
 func TestPersistedStateBehindAnIndexAlreadyHandedOutIsRefused(t *testing.T) {
 	dir := t.TempDir()
 	parts := streamTestKeyOctets(t, 0x55)
@@ -2412,6 +2417,202 @@ func TestStreamStoreDoesNotYetSatisfyStreamIndexReserver(t *testing.T) {
 		if _, ok := storeType.MethodByName(name); !ok {
 			t.Errorf("*StreamStore has no %s; section 8.2 spells the store's two methods with these names", name)
 		}
+	}
+}
+
+// ----------------------------------------------------------------------------------------------
+// a row that went backwards under the only writer, which is the rewind detector's whole subject
+// ----------------------------------------------------------------------------------------------
+
+// A ROW EMPTIED IN PLACE IS A REWIND AND NOT A STREAM NEVER SEEN, and the store that has to tell
+// them apart has never handed an index out for this row.
+//
+// This is the case the removed handedOut map could not see. Its horizon was the indices THIS
+// store had RETURNED, so a row seeded by the open-time scan -- read, never allocated against --
+// had no entry, and emptying it in place answered a high water of 0 with no error. The very next
+// allocation then handed out index 1 on a row that had already spent 1, 2 and 3, which is spec A
+// section 5.6's total break of both AEADs reached with no corrupt byte anywhere. The verified
+// prefix is what sees it, because the prefix is seeded by the scan.
+//
+// Mutation: delete the length comparison in persistedHighWater and this goes red on the first
+// assertion, with a reserve that answers (1, nil).
+func TestARowEmptiedInPlaceIsRefusedRatherThanRestartedAtOne(t *testing.T) {
+	dir := t.TempDir()
+	parts := streamTestKeyOctets(t, 0x67)
+	rowName := streamTestRowName(t, parts)
+
+	store := streamTestOpen(t, dir)
+	for want := uint64(1); want <= 3; want += 1 {
+		if index, err := store.ReserveStreamIndex(parts[0], parts[1]); err != nil || index != want {
+			t.Fatalf("reserve answered (%d, %v), want (%d, nil)", index, err, want)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// A FRESH STORE. Its verified prefix comes from the open-time scan and it has returned
+	// nothing, which is the state the removed detector was blind in.
+	reopened := streamTestOpen(t, dir)
+	path := filepath.Join(reopened.rowDir, rowName)
+	if highWater, err := reopened.StreamHighWater(parts[0], parts[1]); err != nil || highWater != 3 {
+		t.Fatalf("the reopened store answered (%d, %v), want (3, nil)", highWater, err)
+	}
+	if length := streamTestRowLength(t, path); length != 3*streamRecordWidth {
+		t.Fatalf("the row is %d octets, want %d", length, 3*streamRecordWidth)
+	}
+
+	// out of band: the row is emptied IN PLACE. The directory entry survives, so nothing about
+	// the row's presence has changed.
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatalf("empty the row: %v", err)
+	}
+	if length := streamTestRowLength(t, path); length != 0 {
+		t.Fatalf("the truncation did not land: the row is %d octets, want 0", length)
+	}
+	t.Logf("the row went from %d octets to 0 in place, under a store that holds the only writer's exclusion and has handed out nothing", 3*streamRecordWidth)
+
+	index, err := reopened.ReserveStreamIndex(parts[0], parts[1])
+	if !errors.Is(err, ErrStreamStoreRewound) {
+		t.Errorf("the allocation after the row was emptied answered (%d, %v), want ErrStreamStoreRewound; answering 1 here re-issues record_key[1] under a class key that has not moved, which is a repeated (key, nonce) on BOTH of a record's aeads", index, err)
+	}
+	if !errors.Is(err, ErrStreamStoreConsumed) {
+		t.Errorf("the allocation answered %v, which errors.Is does not find ErrStreamStoreConsumed in; the next position is one this row has already spent and no later call can make another", err)
+	}
+	if index != 0 {
+		t.Errorf("a refused allocation answered index %d beside its error", index)
+	}
+	if highWater, err := reopened.StreamHighWater(parts[0], parts[1]); !errors.Is(err, ErrStreamStoreRewound) {
+		t.Errorf("the query answered (%d, %v), want ErrStreamStoreRewound", highWater, err)
+	} else if errors.Is(err, ErrStreamStoreConsumed) {
+		t.Errorf("the query answered %v, which errors.Is finds ErrStreamStoreConsumed in; the reader's seat reports that the number moved and does not claim a ladder is wedged", err)
+	}
+}
+
+// THE REFUSAL FOR A VANISHED ROW IS STICKY, AND IT CREATES NOTHING.
+//
+// The refusal used to be taken inside the write, which opened the row with os.O_CREATE BEFORE it
+// compared the size -- so the refusal itself recreated the row at zero length, the next call read
+// a present empty row, and the call after the refusal handed out index 1 on a row that had spent
+// 1, 2 and 3. A refusal that manufactures the state which makes the next call succeed is not a
+// refusal. Both halves are asserted: the directory entry, at the byte level, and the second call.
+//
+// Mutation: make persistedHighWater answer (0, nil) for an absent row it has a prefix for, and
+// this goes red on both.
+func TestTheRefusalForAVanishedRowIsStickyAndRecreatesNothing(t *testing.T) {
+	dir := t.TempDir()
+	parts := streamTestKeyOctets(t, 0x68)
+	rowName := streamTestRowName(t, parts)
+
+	store := streamTestOpen(t, dir)
+	for want := uint64(1); want <= 3; want += 1 {
+		if index, err := store.ReserveStreamIndex(parts[0], parts[1]); err != nil || index != want {
+			t.Fatalf("reserve answered (%d, %v), want (%d, nil)", index, err, want)
+		}
+	}
+	path := filepath.Join(store.rowDir, rowName)
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove the row: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the removal did not land: %v", err)
+	}
+	t.Log("the row vanished under a store that holds the only writer's exclusion on it")
+
+	for attempt := 1; attempt <= 3; attempt += 1 {
+		index, err := store.ReserveStreamIndex(parts[0], parts[1])
+		if !errors.Is(err, ErrStreamStoreRewound) {
+			t.Fatalf("attempt %d answered (%d, %v), want ErrStreamStoreRewound on every attempt", attempt, index, err)
+		}
+		if !errors.Is(err, ErrStreamStoreConsumed) {
+			t.Errorf("attempt %d answered %v, which errors.Is does not find ErrStreamStoreConsumed in", attempt, err)
+		}
+		if index != 0 {
+			t.Errorf("attempt %d answered index %d beside its error", attempt, index)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			info, statErr := os.Stat(path)
+			size := int64(-1)
+			if statErr == nil {
+				size = info.Size()
+			}
+			t.Fatalf("attempt %d RECREATED the row it refused (%d octets); the next read then finds a present, empty row, derives a high water of 0 from it and allocates index 1 on a key that has already spent it", attempt, size)
+		}
+	}
+	t.Log("three attempts, three identical refusals, and no directory entry made by any of them")
+}
+
+// AN INTERRUPTED APPEND LEAVES THE ROW ALLOCATABLE BY THE NEXT CALL, and this is the ordering
+// property in writeOneRecord, driven.
+//
+// The verified prefix is what the rewind detector stands on, so it is recorded only after the
+// write. Record it before, and an interrupted append leaves the row SHORTER than the prefix the
+// store claims to have confirmed: the next read refuses it as a rewind and the row is wedged
+// permanently by a failure a retry would have cleared. Measured: moving that assignment above the
+// write leaves every other stream case green and turns this one red, with the retry refused as
+// ErrStreamStoreRewound and ErrStreamStoreConsumed.
+//
+// The crash case is NOT this case and does not cover it: TestACrashAroundTheFlushBurnsExactlyWhat
+// TheFlushRecorded closes the store and reopens, and a reopened store's prefix comes from the
+// disk. What this drives is the SAME store going on afterwards.
+func TestAnInterruptedAppendLeavesTheRowAllocatableByTheNextCall(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		interrupt streamAppendInterrupt
+		wantNext  uint64
+	}{
+		{
+			name:      "a tear before the flush is repaired in place by the next append",
+			interrupt: streamAppendTearBeforeFlush,
+			wantNext:  2,
+		},
+		{
+			name:      "a failed flush burns the index it wrote and the next call goes on",
+			interrupt: streamAppendFailTheFlush,
+			wantNext:  3,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			parts := streamTestKeyOctets(t, 0x69)
+			rowName := streamTestRowName(t, parts)
+			store := streamTestOpen(t, dir)
+			if index, err := store.ReserveStreamIndex(parts[0], parts[1]); err != nil || index != 1 {
+				t.Fatalf("the first allocation answered (%d, %v), want (1, nil)", index, err)
+			}
+
+			streamTestSetInterrupt(t, store, testCase.interrupt)
+			index, err := store.ReserveStreamIndex(parts[0], parts[1])
+			if err == nil {
+				t.Fatalf("the interrupted allocation answered (%d, nil)", index)
+			}
+			if index != 0 {
+				t.Errorf("the interrupted allocation answered index %d beside its error", index)
+			}
+			path := filepath.Join(store.rowDir, rowName)
+			t.Logf("after the interruption the row is %d octets and the call answered %v",
+				streamTestRowLength(t, path), err)
+
+			streamTestSetInterrupt(t, store, streamAppendUninterrupted)
+			next, err := store.ReserveStreamIndex(parts[0], parts[1])
+			if err != nil {
+				t.Fatalf(
+					"the retry on the SAME store was refused: %v (rewound=%v consumed=%v). An interruption a retry cannot clear is a row wedged forever by a failure that cost nothing, and the store's own prefix is what wedged it",
+					err, errors.Is(err, ErrStreamStoreRewound), errors.Is(err, ErrStreamStoreConsumed),
+				)
+			}
+			if next != testCase.wantNext {
+				t.Errorf("the retry answered %d, want %d; a burned index is a legal gap and a reused one is section 5.6's total break", next, testCase.wantNext)
+			}
+			// and the row the retry left is one a fresh store reads identically.
+			if err := store.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+			reopened := streamTestOpen(t, dir)
+			if highWater, err := reopened.StreamHighWater(parts[0], parts[1]); err != nil || highWater != testCase.wantNext {
+				t.Errorf("a fresh store over the same directory answered (%d, %v), want (%d, nil)", highWater, err, testCase.wantNext)
+			}
+		})
 	}
 }
 

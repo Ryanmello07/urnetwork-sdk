@@ -67,19 +67,28 @@ type StreamStore struct {
 
 	// verified is the prefix of each row this store has already checksummed. See
 	// streamRowVerification for what it buys and what it costs. Under allocMutex.
-	verified map[string]streamRowVerification
-
-	// handedOut is the highest index THIS STORE has returned to a caller, per row. It is the
-	// rewind detector: persisted state behind one of these numbers is ErrStreamStoreRewound.
-	// It is never seeded from a caller, so it cannot be turned off by one. Under allocMutex.
+	//
+	// IT IS ALSO THE REWIND DETECTOR, AND THERE IS NO SECOND ONE. A row this store has seen
+	// can only ever grow: a flushed record is not unwritten by a crash, and the one shape a
+	// live writer can leave -- a torn tail -- lengthens a row rather than shortening it. So a
+	// row that is ABSENT after this store read it, or SHORTER than the prefix this store
+	// confirmed, went backwards under the only writer's exclusion, and persistedHighWater
+	// refuses both rather than re-deriving a smaller number from what is left.
+	//
+	// An earlier version kept a second map of the indices this store had RETURNED to a caller
+	// and compared the read against that instead. It was strictly weaker in two ways and it is
+	// gone: every returned index is also in this prefix, so that map could see nothing this
+	// cannot, and this prefix is seeded by the open-time scan, so it catches a rewind on a row
+	// this store has only ever READ -- which is the state every row the scan found is in, and
+	// the state the removed map could never see.
 	//
 	// ITS HORIZON IS THIS STORE'S LIFETIME AND NOT THE ROW'S, and that bound is the same one
 	// S2-23 prices from the format's side: nothing durable records what a previous process
-	// handed out, the format admits no second object that could, and a row rewound BETWEEN
-	// two opens is therefore indistinguishable from a row that was always that length. A
-	// rewind detector that spanned restarts would need a durable high-water witness outside
-	// the row, which is a format change and not a field here.
-	handedOut map[string]uint64
+	// confirmed, the format admits no second object that could, and a row rewound BETWEEN two
+	// opens is therefore indistinguishable from a row that was always that length. A rewind
+	// detector that spanned restarts would need a durable high-water witness outside the row,
+	// which is a format change and not a field here.
+	verified map[string]streamRowVerification
 
 	stateMutex sync.Mutex
 	closed     bool
@@ -609,7 +618,6 @@ func OpenStreamStore(dir string) (*StreamStore, error) {
 		keySpaceTag: streamKeySpaceTagOf(streamKeyType()),
 		exclusion:   exclusion,
 		verified:    map[string]streamRowVerification{},
-		handedOut:   map[string]uint64{},
 	}
 	entries, err := os.ReadDir(rowDir)
 	if err != nil {
@@ -915,20 +923,19 @@ func (self *StreamStore) ReserveStreamIndex(groupId []byte, senderHandle []byte)
 	}
 	persisted, err := self.persistedHighWater(rowName)
 	if err != nil {
+		if errors.Is(err, ErrStreamStoreRewound) {
+			// BOTH NAMES, OFF ONE VALUE, because this is one state seen from two seats:
+			// the reader's -- the number moved -- and the allocator's -- the next
+			// position is one I have already returned, and I have no way past it. The
+			// read raises the reader's name, and this is the only place in the store
+			// that adds the allocator's to it.
+			return 0, fmt.Errorf(
+				"%w; the next index this store would allocate is one it has already returned to a caller, and a second record under a reused stream_index is a reused nonce under a reused record_key (%w)",
+				err,
+				ErrStreamStoreConsumed,
+			)
+		}
 		return 0, err
-	}
-	if handed, ok := self.handedOut[rowName]; ok && persisted < handed {
-		// Both names, off one value, because this is one state seen from two seats: the
-		// reader's -- the number moved -- and the allocator's -- the next position is one I
-		// have already returned, and I have no way past it.
-		return 0, fmt.Errorf(
-			"%w: row %s answers a high water of %d and this store has already handed out %d for it; the next index this store would allocate is one it has already returned to a caller, and a second record under a reused stream_index is a reused nonce under a reused record_key (%w)",
-			ErrStreamStoreRewound,
-			rowName,
-			persisted,
-			handed,
-			ErrStreamStoreConsumed,
-		)
 	}
 	if persisted == math.MaxUint64 {
 		return 0, fmt.Errorf(
@@ -942,9 +949,6 @@ func (self *StreamStore) ReserveStreamIndex(groupId []byte, senderHandle []byte)
 	if err := self.writeOneRecord(rowName, next); err != nil {
 		return 0, err
 	}
-	// only now: an index is handed out when the call returns it, and not before. The flush
-	// above has returned, so what this remembers is what is on the disk.
-	self.handedOut[rowName] = next
 	return next, nil
 }
 
@@ -971,16 +975,12 @@ func (self *StreamStore) StreamHighWater(groupId []byte, senderHandle []byte) (u
 	}
 	persisted, err := self.persistedHighWater(rowName)
 	if err != nil {
+		// THE READER'S SEAT, AND IT STOPS HERE. persistedHighWater raises
+		// ErrStreamStoreRewound for a row that went backwards; the allocator's
+		// ErrStreamStoreConsumed is added by ReserveStreamIndex and never by this method,
+		// because a caller that only ever queried is owed the news that the number moved
+		// and is owed no claim that a ladder is permanently wedged.
 		return 0, err
-	}
-	if handed, ok := self.handedOut[rowName]; ok && persisted < handed {
-		return 0, fmt.Errorf(
-			"%w: row %s answers a high water of %d and this store has already handed out %d for it; a caller that resumed at the smaller number would encrypt a second record at an index already spent",
-			ErrStreamStoreRewound,
-			rowName,
-			persisted,
-			handed,
-		)
 	}
 	return persisted, nil
 }
@@ -1033,18 +1033,34 @@ func (self *StreamStore) persistedHighWater(rowName string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	prior, seen := self.verified[rowName]
 	if !present {
+		if seen {
+			// THE ROW VANISHED UNDER THE ONLY WRITER. It is refused here rather than
+			// answered as a stream never seen, and the discriminator between those two
+			// states is not on the disk: it is the fact that THIS store already read
+			// this row, which is what seen records. A row the open-time scan found is
+			// seen before any index has been handed out for it.
+			//
+			// An earlier version answered (0, nil) here and left the refusal to an
+			// offset check in writeOneRecord. That refusal did not hold. The write
+			// opened the row with os.O_CREATE BEFORE it compared the size, so the
+			// refusal itself recreated the row at zero length; the very next call read
+			// a present, empty row, re-derived a high water of 0 from it and handed out
+			// index 1 on a key that had already spent it. Refusing before anything
+			// opens the file is what makes this refusal STICKY: the prefix stays, so
+			// every later call for this row meets the same answer.
+			return 0, fmt.Errorf(
+				"%w: row %s is absent from %s and this store has already confirmed %d record(s) of it carrying a high water of %d; a row that went backwards under the only writer's exclusion is not a stream never seen, and answering contract clause 4's error-free zero for one restarts the ladder at index 1 under a class key that has not moved",
+				ErrStreamStoreRewound,
+				rowName,
+				self.rowDir,
+				prior.records,
+				prior.highWater,
+			)
+		}
 		// contract clause 4: a stream never seen is 0 with no error, so the first
 		// allocation is 1.
-		//
-		// A verified prefix for this row is deliberately NOT cleared here, and that is a
-		// safety choice rather than an oversight. A row that this store verified and that
-		// is now absent was removed out of band; clearing the prefix would let the next
-		// allocation start the ladder again at 1 under a key that has already spent
-		// indices, which is ledger item 170's hazard reached by a different route. Left in
-		// place, the offset check in writeOneRecord refuses instead -- and where this store
-		// has actually handed an index out, the rewind check above the caller names it
-		// first and more precisely.
 		return 0, nil
 	}
 
@@ -1064,14 +1080,27 @@ func (self *StreamStore) persistedHighWater(rowName string) (uint64, error) {
 		return 0, fmt.Errorf("%w: row %s could not be sized: %v", ErrStreamStoreState, rowName, err)
 	}
 
-	prior := self.verified[rowName]
 	priorLength := int64(prior.records) * streamRecordWidth
 	if info.Size() < priorLength {
-		// The row is SHORTER than the prefix this store verified, which is the out-of-band
-		// truncation S2-23 prices. Re-verify the whole of what is left rather than trusting
-		// a prefix that is no longer there; the caller's rewind check is what names it.
-		prior = streamRowVerification{}
-		priorLength = 0
+		// THE ROW IS SHORTER THAN THE PREFIX THIS STORE CONFIRMED, and it is refused for
+		// the same reason the absent row above is. A flushed record is not unwritten by a
+		// crash and an interrupted append lengthens a row rather than shortening it, so no
+		// writer -- correct or interrupted -- can reach this branch. The row lost confirmed
+		// records out of band, under the only writer's exclusion.
+		//
+		// An earlier version RESET the prefix here and re-derived a high water from
+		// whatever was left. Emptying a row IN PLACE then answered 0 with no error and the
+		// very next allocation handed out index 1 on a row that had already spent it --
+		// unless this same process happened to have returned an index for that row, which
+		// a row seeded by the open-time scan never has.
+		return 0, fmt.Errorf(
+			"%w: row %s is %d octets and this store has confirmed %d octets of it carrying a high water of %d; a flushed record is not unwritten by a crash and an interrupted append lengthens a row rather than shortening it, so a row that lost confirmed records lost them out of band",
+			ErrStreamStoreRewound,
+			rowName,
+			info.Size(),
+			priorLength,
+			prior.highWater,
+		)
 	}
 	tail := make([]byte, info.Size()-priorLength)
 	if 0 < len(tail) {
@@ -1176,27 +1205,22 @@ func (self *StreamStore) writeOneRecord(rowName string, index uint64) error {
 		)
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("%w: row %s could not be sized: %v", ErrStreamStoreState, rowName, err)
-	}
-	// The row's length may exceed the verified prefix by at most one record, and only by the
-	// two shapes one interrupted append leaves: a partial, or one whole record that does not
-	// verify. Writing a whole record at `at` overwrites either of them entirely, so the live
-	// writer repairs its own torn tail in the same write that allocates -- no second writer,
-	// no read that writes, and the length is a whole multiple of the record width again.
-	// Anything outside that window is a row this call did not read, and allocating into one
-	// is how an index gets handed out twice.
-	if info.Size() < at || at+streamRecordWidth < info.Size() {
-		return fmt.Errorf(
-			"%w: row %s is %d octets and the high water just read off it ends at %d, which is not within one record of it; the row changed under a store that holds the only writer's exclusion on it",
-			ErrStreamStoreState,
-			rowName,
-			info.Size(),
-			at,
-		)
-	}
-
+	// THE ROW'S LENGTH IS ALREADY BOUNDED WHEN THIS RUNS, by the read that produced at.
+	// persistedHighWater refuses a row that is absent or shorter than the confirmed prefix,
+	// and classifyStreamRowTail admits at most one record's worth of unconfirmed tail past
+	// that prefix -- one partial, or one whole record that does not verify. So the row is
+	// between at and at+streamRecordWidth octets on every path that reaches here, and writing
+	// a whole record at at overwrites either shape entirely: the live writer repairs its own
+	// torn tail in the same write that allocates, with no second writer, no read that writes,
+	// and a length that is a whole multiple of the record width again.
+	//
+	// That bound used to be RESTATED here as a refusal, and the restatement was UNDRIVEN.
+	// Measured at 9022851, before this change: replacing it with an unconditional append at the
+	// rounded-down end of the file left all 33 of that commit's stream tests green and left the
+	// unfiltered root pass unchanged against its own baseline. The one state it could actually
+	// have refused -- a row that lost records under this store -- is refused at the read
+	// instead, where two cases drive it, and refusing there is also what makes the refusal
+	// stick, because nothing has opened the row with os.O_CREATE yet.
 	record := encodeStreamRecord(rowName, index)
 	octets := record[:]
 	interrupt := self.appendInterrupt()
@@ -1241,6 +1265,14 @@ func (self *StreamStore) writeOneRecord(rowName string, index uint64) error {
 
 	// The flush returned, so the record is on stable storage and the verified prefix grows by
 	// exactly the record that was just written.
+	//
+	// THE ORDERING IS THE PROPERTY HERE, NOT THE ASSIGNMENT. The prefix is what the rewind
+	// detector stands on, so recording it before the write records a record the write may
+	// never make: an interrupted append then leaves the row SHORTER than the prefix this store
+	// claims to have confirmed, the next read refuses it as a rewind, and the row is wedged
+	// permanently by a failure a retry would have cleared.
+	// TestAnInterruptedAppendLeavesTheRowAllocatableByTheNextCall drives exactly that -- move
+	// this assignment above the write and it goes red.
 	self.verified[rowName] = streamRowVerification{
 		records:   int(at/streamRecordWidth) + 1,
 		highWater: index,

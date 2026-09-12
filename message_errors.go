@@ -63,9 +63,19 @@ var (
 	// adapter is the only code that maps one onto the other. Nothing in this package imports
 	// messagegroup.ErrStreamIndexRewound.
 	//
-	// It is raised against WHAT THIS PROCESS HANDED OUT, never against a number a caller
-	// remembers: a store that took the caller's word for its own high water would be a store
-	// whose rewind detector a caller can turn off.
+	// It is raised against WHAT THIS PROCESS HAS CONFIRMED ON THE DISK -- the verified prefix
+	// of the row, seeded by the open-time scan and grown by every read and every allocation --
+	// and never against a number a caller remembers: a store that took the caller's word for
+	// its own high water would be a store whose rewind detector a caller can turn off. The
+	// confirmed prefix is strictly wider than the set of indices this store has RETURNED,
+	// which is what an earlier version compared against: a row this process has only ever READ
+	// is still a row it can catch going backwards, and every row the open-time scan found is
+	// in exactly that state.
+	//
+	// THE TWO OBSERVABLES are a row that is ABSENT after this store confirmed part of it, and
+	// a row SHORTER than the prefix this store confirmed. Both are refused by
+	// persistedHighWater, before anything opens the row for writing -- which is what makes the
+	// refusal stick instead of recreating, with os.O_CREATE, the very row it refused.
 	ErrStreamStoreRewound = errors.New("stream store rewound")
 
 	// ErrStreamStoreConsumed is the store's PERMANENT refusal to allocate for a key: the next
