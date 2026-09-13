@@ -14,6 +14,29 @@ package sdk
 // unconditionally, and `capabilities` is cloned out of one process-lifetime
 // value — and deliberately not imported: `sdk` cannot import the server module.
 // What is established here is what THIS side does with what it is told.
+//
+// AND ONE MORE, WHICH IS REVIEW FINDING E AND IS THE GAP BETWEEN PROPERTY 2 AS
+// THE PLAN WORDS IT AND PROPERTY 2 AS THIS FILE ESTABLISHES IT.
+//
+// The plan's Property 2 is "the nonce a caller reads is the CURRENT
+// connection's, and a nonce from a superseded connection is never handed out".
+// What is established below is the narrower "the nonce a caller reads is the one
+// the most recent COMPLETED HELLO issued, and the epoch moves on every Hello".
+// The two coincide only if every connection change is followed by a Hello
+// through this transport, and NOTHING IN `sdk` ARRANGES THAT:
+// `grep -rn 'nonceEpoch' --include=*.go .` in sdk returns three lines — the
+// field, the increment in [messageTransport.adopt], and the accessor — and
+// `adopt` is called from exactly one place, a Hello that returned REASON_OK on
+// the Hello arm. Nothing here observes a `connect` reconnect, and nothing in
+// `sdk` constructs the `connect.Client` at all.
+//
+// So under a transparent reconnect that no Hello follows, [messageTransport.Nonce]
+// hands out a superseded nonce at an unchanged epoch, and Task 10's refusal —
+// which compares a seal-time epoch against the current one — sees no change and
+// submits. That is not fixable in this task: it needs something in `sdk` to be
+// told that the connection changed, which is S2-7, and it is the shadow S2-2
+// casts over this property. Filed beside S2-2 rather than left for Task 10 to
+// discover.
 
 import (
 	"bytes"
@@ -539,6 +562,131 @@ func TestTheFirstRequestOfAConnectionUsesTheCompiledInPartBudget(t *testing.T) {
 	t.Logf("the first request of this connection was cut into %d fragments of %d bytes with "+
 		"Capabilities nil, and the transport advertises %v now",
 		len(fragments), messageFragmentPartBytes, transport.Capabilities() != nil)
+}
+
+// REVIEW FINDING C — the other half of Property 4's ordering hole.
+//
+// The plan names one half: the first request of a connection has no advertised
+// budget to CUT itself to, so it uses the compiled-in part size (the test
+// above). The half the plan does not name is the same ordering, one step later:
+// that request has no advertised bound to be MEASURED against either, because
+// the `Capabilities` cache belongs to the connection that is gone. Enforcing it
+// against the Hello that opens the NEXT connection is a refusal read off an
+// advertisement that has expired — and with a small enough previous bound it is
+// a WEDGE rather than a refusal, because the only thing that replaces the cache
+// is a Hello, and the Hello is what is being refused.
+//
+// Both directions are driven, because an exemption that is too wide is the same
+// defect facing the other way: after the re-Hello, a request that is NOT the
+// nonce-issuing arm is still measured against the bound that Hello fetched.
+func TestAReHelloIsBoundedByNoAdvertisementOfTheConnectionItReplaces(t *testing.T) {
+	answers := &messageHelloAnswers{}
+	answers.advertise("n1", &protocol.Capabilities{MaxRequestBytes: 4})
+	fake, transport := newHelloTransport(t, answers)
+	if _, _, err := transport.Hello(context.Background(), 1); err != nil {
+		t.Fatalf("the first Hello failed: %v", err)
+	}
+
+	// the previous connection's bound is real, and it is small enough that
+	// everything including a Hello is over it
+	_, err := transport.Call(context.Background(), &protocol.SubmitRequest{GroupId: bytes.Repeat([]byte{0x11}, 16)})
+	if !errors.Is(err, errMessageTransportOverCapability) {
+		t.Fatalf("a request past an advertised max_request_bytes of 4 was refused with %v, want "+
+			"errMessageTransportOverCapability: this test is measuring nothing if the bound is not live", err)
+	}
+
+	answers.advertise("n2", &protocol.Capabilities{MaxRequestBytes: 100000})
+	before := len(fake.codePoints())
+	reason, hello, err := transport.Hello(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("the re-Hello was refused with %v. It was measured against the PREVIOUS connection's "+
+			"max_request_bytes of 4, and that advertisement belongs to a connection that is gone — "+
+			"§4.3.1 makes every Capabilities value config, so 4 is as legal as 4000000. This is not a "+
+			"refused request, it is a WEDGE: self.capabilities is replaced only by a Hello that "+
+			"completed, and no Hello can complete", err)
+	}
+	if reason != protocol.Reason_REASON_OK || hello == nil {
+		t.Fatalf("the re-Hello answered reason %v hello %v", reason, hello)
+	}
+	if grew := len(fake.codePoints()) - before; grew == 0 {
+		t.Fatal("the re-Hello reached no wire at all, so it was refused somewhere this test did not look")
+	}
+	if got := transport.Capabilities().GetMaxRequestBytes(); got != 100000 {
+		t.Fatalf("Capabilities().max_request_bytes is %d after the re-Hello, want the advertisement the "+
+			"re-Hello fetched", got)
+	}
+	if epoch := transport.NonceEpoch(); epoch != 2 {
+		t.Fatalf("NonceEpoch() is %d after two Hellos, want 2", epoch)
+	}
+
+	// ── the other direction: the exemption is ONE arm, not "everything after a
+	//    Hello". A re-Hello that advertises a smaller bound still binds
+	//    everything that is not the arm which issues the nonce ────────────────
+	answers.advertise("n3", &protocol.Capabilities{MaxRequestBytes: 8})
+	if _, _, err := transport.Hello(context.Background(), 1); err != nil {
+		t.Fatalf("the third Hello failed: %v", err)
+	}
+	before = len(fake.codePoints())
+	_, err = transport.Call(context.Background(), &protocol.SubmitRequest{GroupId: bytes.Repeat([]byte{0x11}, 16)})
+	if !errors.Is(err, errMessageTransportOverCapability) {
+		t.Fatalf("a SubmitRequest past the CURRENT advertisement of 8 was answered with %v: the "+
+			"exemption is the arm that issues this connection's nonce and nothing else, and an "+
+			"exemption that reaches further has turned Property 3 off", err)
+	}
+	if grew := len(fake.codePoints()) - before; grew != 0 {
+		t.Fatalf("%d frame(s) reached the client for a request the current advertisement refused", grew)
+	}
+}
+
+// REVIEW FINDING F — a Hello that issued no `server_nonce` opens nothing.
+//
+// Property 1's basis is that `write_auth` and `req_auth` are MACs over this
+// connection's `server_nonce`. The gate was keyed on the EPOCH, which
+// [messageTransport.adopt] moves after any REASON_OK Hello carrying a Hello arm
+// — including one whose `server_nonce` is empty — so a Hello that issued no
+// nonce opened the gate and a Submit went on the wire to be MAC'd over nothing.
+//
+// The fake is what makes this drivable and is also the boundary: nothing here
+// says a real server can answer REASON_OK with an empty nonce. What it says is
+// that if one did, this side would not treat it as a connection.
+func TestAHelloThatIssuedNoNonceIsNotAConnectionEither(t *testing.T) {
+	answers := &messageHelloAnswers{}
+	answers.advertise("", &protocol.Capabilities{})
+	fake, transport := newHelloTransport(t, answers)
+
+	reason, hello, err := transport.Hello(context.Background(), 1)
+	if err != nil || reason != protocol.Reason_REASON_OK || hello == nil {
+		t.Fatalf("the Hello failed: reason %v hello %v err %v — this test is about a Hello that "+
+			"SUCCEEDS and issues nothing", reason, hello, err)
+	}
+	if nonce := transport.Nonce(); len(nonce) != 0 {
+		t.Fatalf("Nonce() is %q, want empty: this test is measuring nothing otherwise", nonce)
+	}
+
+	before := len(fake.codePoints())
+	_, err = transport.Call(context.Background(), &protocol.SubmitRequest{GroupId: bytes.Repeat([]byte{0x11}, 16)})
+	if !errors.Is(err, errMessageTransportNoHello) {
+		t.Fatalf("a SubmitRequest after a Hello that issued NO server_nonce was answered with %v, want "+
+			"errMessageTransportNoHello. Task 10 MACs over Nonce(), which is empty here, and a MAC over "+
+			"nothing is not an authenticator", err)
+	}
+	if grew := len(fake.codePoints()) - before; grew != 0 {
+		t.Fatalf("%d frame(s) reached the client after a Hello that issued no nonce: the refusal "+
+			"Property 1 owes is raised LOCALLY", grew)
+	}
+
+	// satisfiable half: the same body, after a Hello that DID issue one
+	answers.advertise("a-real-nonce", &protocol.Capabilities{})
+	if _, _, err := transport.Hello(context.Background(), 1); err != nil {
+		t.Fatalf("the second Hello failed: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	_, err = transport.Call(ctx, &protocol.SubmitRequest{GroupId: bytes.Repeat([]byte{0x11}, 16)})
+	cancel()
+	if errors.Is(err, errMessageTransportNoHello) {
+		t.Fatalf("a SubmitRequest was refused as preceding Hello after a Hello that issued %q: %v",
+			transport.Nonce(), err)
+	}
 }
 
 // A Hello the server answers REASON_OK on another arm changes nothing about

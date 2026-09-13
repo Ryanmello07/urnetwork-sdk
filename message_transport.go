@@ -299,7 +299,18 @@ func (self *messageTransport) receive(source connect.TransferPath, frames []*pro
 				continue
 			}
 			response := &protocol.MessageServerResponse{}
-			if proto.Unmarshal(assembled, response) != nil {
+			if err := proto.Unmarshal(assembled, response); err != nil {
+				// REVIEW FINDING H. Unlike the response-frame arm above, the
+				// `request_id` IS in hand here — every fragment carried it, and
+				// it is the key the reassembly was filed under — so the waiter
+				// that will never be answered is reachable and is TOLD, which is
+				// what every other §4.6 abandonment does and for the reason
+				// message_transport_fragment.go gives: a caller that waits
+				// thirty seconds to learn what the receive path knew immediately
+				// has been told the wrong thing about why.
+				self.abort(fragment.GetRequestId(), fmt.Errorf(
+					"%w: request %d, the %d byte(s) reassembled from %d fragment(s) are not a MessageServerResponse: %v",
+					errMessageFragmentAborted, fragment.GetRequestId(), len(assembled), fragment.GetCount(), err))
 				continue
 			}
 			self.deliver(response)
@@ -460,9 +471,13 @@ func (self *messageTransport) send(request *protocol.MessageServerRequest) error
 // The arm of the request's `body` oneof that carries this type, read out of the
 // compiled descriptor.
 //
-// A switch listing fourteen typed wrappers is where a copy-paste puts a Fetch
+// A switch listing the typed wrappers by hand is where a copy-paste puts a Fetch
 // body in the Submit arm, and §4.3.8's op byte is the arm's field number, so a
 // binding that wrote the arms down twice would have two places to disagree.
+// There are FIFTEEN of them at connect 71d2482 —
+// `grep -oE 'type MessageServerRequest_[A-Za-z]+ struct' protocol/message.pb.go | wc -l`
+// — and the number is here as a measurement rather than as a bound: nothing in
+// this function knows it, which is the point.
 func setMessageServerRequestBody(request *protocol.MessageServerRequest, body proto.Message) error {
 	if body == nil {
 		return errMessageTransportNoArm

@@ -693,6 +693,77 @@ func TestAReassemblyMissingAFragmentProducesNoPartialMessage(t *testing.T) {
 	}
 }
 
+// REVIEW FINDING H — a reassembly that completes into bytes that are not a
+// response is a response that will never arrive, and its waiter is TOLD.
+//
+// The fragment arm of [messageTransport.receive] had a `continue` here, and the
+// waiter was left for its own timeout to discover — the exact thing
+// message_transport_fragment.go's header refuses for every other §4.6
+// abandonment: "a caller that waits thirty seconds to learn what the receive
+// path knew immediately has been told the wrong thing about why". The
+// response-frame arm's justification for `continue` — a response that did not
+// decode carries no request_id — does not apply here: every fragment carried
+// one, and it is the key the buffer was filed under.
+//
+// The transport timeout here is deliberately LONGER than the wait below, so
+// that a pass cannot be a timeout arriving early.
+func TestAReassemblyThatCompletesIntoUndecodableBytesTellsItsWaiter(t *testing.T) {
+	fake := &messageTransportFake{}
+	transport := newTestMessageTransport(t, fake, 30*time.Second)
+
+	results := callInBackground(transport, context.Background(), &protocol.HelloRequest{SupportedVersions: []uint32{1}})
+	awaitRequests(t, fake, 1)
+	requestId := fake.requestAt(0).GetRequestId()
+
+	// 0xFF is wire type 7, which no protobuf field can have, so these bytes
+	// reassemble perfectly and decode as nothing
+	undecodable := bytes.Repeat([]byte{0xFF}, 3*messageFragmentPartBytes)
+	if proto.Unmarshal(undecodable, &protocol.MessageServerResponse{}) == nil {
+		t.Fatal("the bytes this test calls undecodable decode as a MessageServerResponse, so it is " +
+			"measuring nothing")
+	}
+	frames := messageFragmentCut(t, requestId, undecodable, messageFragmentPartBytes)
+	if len(frames) < 2 {
+		t.Fatalf("this test needs a FRAGMENTED response and cut %d frame(s)", len(frames))
+	}
+	fake.deliver(t, frames...)
+
+	select {
+	case result := <-results:
+		if result.response != nil {
+			t.Fatalf("a reassembly of undecodable bytes answered the waiter with a response: %v", result.response)
+		}
+		if !errors.Is(result.err, errMessageFragmentAborted) {
+			t.Fatalf("the waiter was told %v, want errMessageFragmentAborted", result.err)
+		}
+		for _, named := range []string{"MessageServerResponse", "6144"} {
+			if !strings.Contains(result.err.Error(), named) {
+				t.Fatalf("the refusal %q does not name %q: it is the one thing the receive path knew "+
+					"and the caller does not", result.err, named)
+			}
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a reassembly that COMPLETED into bytes that are not a MessageServerResponse left its " +
+			"waiter waiting: the request_id is in hand on that path, so the waiter is reachable, and " +
+			"every other §4.6 abandonment tells it immediately")
+	}
+
+	counts := transport.Counts()
+	if counts.Reassembled != 1 {
+		t.Fatalf("Counts().Reassembled is %d: the reassembly COMPLETED, and that it decoded to nothing "+
+			"is a different reading", counts.Reassembled)
+	}
+	if counts.Responses != 0 {
+		t.Fatalf("Counts().Responses is %d after a reassembly that decoded to nothing, want 0", counts.Responses)
+	}
+	if counts.Waiting != 0 {
+		t.Fatalf("Counts().Waiting is %d after the waiter was told, want 0", counts.Waiting)
+	}
+	if counts.Reassembling != 0 {
+		t.Fatalf("Counts().Reassembling is %d after the reassembly completed, want 0", counts.Reassembling)
+	}
+}
+
 // ── the abort table, and the gate that keeps it from understating itself ─────
 //
 // GATE CLASS: the rules of [messageFragmentAborts] — read off the table at run
@@ -967,23 +1038,46 @@ func TestThePartSizeHasExactlyOneDeclarationInPackageSdk(t *testing.T) {
 		t.Fatalf("the one declaration of the part size is %q, not messageFragmentPartBytes", declarations[0])
 	}
 
-	// ── the copies, and the derived scope that says which of them matter ────
+	// ── the copies, and the two narrowings that say what happens to them ────
+	//
+	// REVIEW FINDING A. `binding` is a NARROWING, and a narrowing that comes
+	// back empty makes the assertion below a claim about no files at all: the
+	// final check was `len(inBinding) != 0`, so with an empty narrowing plan
+	// mutation 8 passed green with the copy printed one line above the PASS.
+	// Forced empty, that is exactly what happened. It fails closed now, the way
+	// the goroutine gate over the same derivation already did.
 	gate := newBorrowGate(t)
 	binding := gate.bindingFiles()
 	t.Logf("  the binding's own files, derived as the production files declaring a method on "+
 		"messageTransport: %d %v", len(binding), binding)
+	if len(binding) == 0 {
+		t.Fatal("the enforcement narrowing is EMPTY: no production file of package sdk declares a " +
+			"method on messageTransport, so `no copy in the binding's own files` is a claim about no " +
+			"files, and every copy in the package satisfies it")
+	}
 	within := map[string]bool{}
 	for _, name := range binding {
 		within[name] = true
 	}
+	sources := map[string]*ast.File{}
+	for index, name := range checked.names {
+		sources[name] = checked.files[index]
+	}
 	inBinding := []messageFragmentConstSite{}
-	outside := []messageFragmentConstSite{}
+	outside := []messageFragmentCopy{}
 	for _, site := range copies {
-		if within[filepath.Base(checked.fset.Position(site.expr.Pos()).Filename)] {
+		position := checked.fset.Position(site.expr.Pos())
+		name := filepath.Base(position.Filename)
+		if within[name] {
 			inBinding = append(inBinding, site)
-		} else {
-			outside = append(outside, site)
+			continue
 		}
+		outside = append(outside, messageFragmentCopy{
+			file:  name,
+			where: messageFragmentEnclosing(sources[name], site.expr.Pos()),
+			pos:   position.String(),
+			text:  site.text,
+		})
 	}
 
 	// ── and the files this build does not compile, which the type checker
@@ -1002,15 +1096,36 @@ func TestThePartSizeHasExactlyOneDeclarationInPackageSdk(t *testing.T) {
 	// the stronger one: their integer constant EXPRESSIONS are evaluated
 	// directly off the syntax tree — which still sees `1 << 11` and still does
 	// not see a named constant, since nothing resolves names here. The
-	// weakness is printed rather than hidden, and the assertion is the same:
-	// none of them may be in the binding's own files.
+	// weakness is printed rather than hidden, and the assertions are the same
+	// two the compiled files get: none of them may be in the binding's own
+	// files, and none of them may be a DECLARATION. The declaration half is
+	// review finding B's sharper half — before it, `const x = 2048` inside a
+	// `//go:build !windows` file was printed and passed here while failing on a
+	// linux build, which is a property of the platform wearing a gate's coat.
 	unmeasured := []string{}
+	excludedDeclarations := []string{}
 	for _, name := range checked.excluded {
 		fset := token.NewFileSet()
 		file, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("could not parse the out-of-build file %s: %v", name, err)
 		}
+		declared := map[ast.Expr]string{}
+		ast.Inspect(file, func(node ast.Node) bool {
+			spec, ok := node.(*ast.ValueSpec)
+			if !ok {
+				return true
+			}
+			for index, named := range spec.Names {
+				if len(spec.Values) <= index {
+					continue
+				}
+				if value, ok := messageFragmentUntypedInt(spec.Values[index]); ok && value == partSize {
+					declared[spec.Values[index]] = named.Name
+				}
+			}
+			return true
+		})
 		ast.Inspect(file, func(node ast.Node) bool {
 			expr, ok := node.(ast.Expr)
 			if !ok {
@@ -1020,23 +1135,71 @@ func TestThePartSizeHasExactlyOneDeclarationInPackageSdk(t *testing.T) {
 			if !ok || value != partSize {
 				return true
 			}
-			unmeasured = append(unmeasured,
-				fmt.Sprintf("%s %s", fset.Position(expr.Pos()), types.ExprString(expr)))
+			position := fset.Position(expr.Pos())
+			unmeasured = append(unmeasured, fmt.Sprintf("%s %s", position, types.ExprString(expr)))
+			if declaredName, isDeclaration := declared[expr]; isDeclaration {
+				excludedDeclarations = append(excludedDeclarations,
+					fmt.Sprintf("%s at %s", declaredName, position))
+				return true
+			}
 			if within[name] {
 				inBinding = append(inBinding, messageFragmentConstSite{
 					expr: expr,
-					pos:  fset.Position(expr.Pos()).String(),
+					pos:  position.String(),
 					text: types.ExprString(expr),
 				})
+				return true
 			}
+			outside = append(outside, messageFragmentCopy{
+				file:  name,
+				where: messageFragmentEnclosing(file, expr.Pos()),
+				pos:   position.String(),
+				text:  types.ExprString(expr),
+			})
 			return true
 		})
 	}
 	sort.Strings(unmeasured)
+	sort.Strings(excludedDeclarations)
+
+	// ── REVIEW FINDING B: the copies outside the binding are ASSERTED, not
+	//    only printed ─────────────────────────────────────────────────────────
+	//
+	// The class is read package-wide, which is what makes `1 << 11` in a file
+	// far from here visible at all — but it used to be asserted over the
+	// binding's three files, so a copy anywhere else in package sdk was printed
+	// and passed by the whole suite. That is the plan's own named divergence —
+	// "a gate that scans one file passes on the day somebody writes the number
+	// into the send path" — deferred rather than prevented: Task 10's send path
+	// is a different type in a different file, and would declare no
+	// messageTransport method.
+	//
+	// Package-wide now, with one escape: a ruling, by name, with a sentence.
+	excused := []string{}
+	unexcused := []messageFragmentCopy{}
+	matched := map[string]bool{}
+	for _, copied := range outside {
+		key := copied.file + " " + copied.where
+		if _, ruled := messageFragmentPartSizeCopyRulings[key]; !ruled {
+			unexcused = append(unexcused, copied)
+			continue
+		}
+		matched[key] = true
+		excused = append(excused, fmt.Sprintf("%s %s (in %s)", copied.pos, copied.text, key))
+	}
+	stale := []string{}
+	for key := range messageFragmentPartSizeCopyRulings {
+		if !matched[key] {
+			stale = append(stale, key)
+		}
+	}
+	sort.Strings(excused)
+	sort.Strings(stale)
 
 	t.Logf("  COPIES INSIDE the binding's files: %d %v", len(inBinding), sitesOf(inBinding))
-	t.Logf("  COPIES OUTSIDE them, printed because being wrong about one has to be visible: %d %v",
-		len(outside), sitesOf(outside))
+	t.Logf("  COPIES OUTSIDE them, anywhere in package sdk, which is where the scope is: %d %v",
+		len(outside), copiesOf(outside))
+	t.Logf("  of those, EXCUSED by a ruling of their own: %d %v", len(excused), excused)
 	t.Logf("  IN THE %d FILE(S) THIS BUILD DOES NOT COMPILE, evaluated off the syntax tree rather than "+
 		"off the type checker: %d %v", len(checked.excluded), len(unmeasured), unmeasured)
 	if len(inBinding) != 0 {
@@ -1044,6 +1207,123 @@ func TestThePartSizeHasExactlyOneDeclarationInPackageSdk(t *testing.T) {
 			"without naming it: %v. The class is the VALUE and not the spelling, so `1 << 11` is here "+
 			"for the same reason `2048` is",
 			len(inBinding), binding, sitesOf(inBinding))
+	}
+	if len(unexcused) != 0 {
+		t.Fatalf("%d constant expression(s) elsewhere in package sdk evaluate to the part size %d "+
+			"without naming it and without a ruling: %v. Property 3's scope is the PACKAGE, not this "+
+			"binding's files. If one of these is not §4.6's part size, say so in "+
+			"messageFragmentPartSizeCopyRulings under the key printed beside it; if it is, name the "+
+			"constant", len(unexcused), partSize, copiesOf(unexcused))
+	}
+	if len(stale) != 0 {
+		t.Fatalf("%d ruling(s) in messageFragmentPartSizeCopyRulings excuse a copy that is not there: "+
+			"%v. An excuse for something that is gone is an excuse nothing checks, and it is how a "+
+			"name-matched class quietly stops being one", len(stale), stale)
+	}
+	if len(excludedDeclarations) != 0 {
+		t.Fatalf("%d named declaration(s) of the part size %d live in a file this build does not "+
+			"compile: %v. The type checker above counted the declarations it could reach and found "+
+			"one; this is the other half, and a second declaration is two things that can be edited "+
+			"apart whatever the build tag on the file says",
+			len(excludedDeclarations), partSize, excludedDeclarations)
+	}
+}
+
+// One copy of the part size, with the declaration it sits inside, which is what
+// a ruling names.
+type messageFragmentCopy struct {
+	file  string
+	where string
+	pos   string
+	text  string
+}
+
+func copiesOf(copies []messageFragmentCopy) []string {
+	shown := []string{}
+	for _, copied := range copies {
+		shown = append(shown, fmt.Sprintf("%s %s (in %s %s)", copied.pos, copied.text, copied.file, copied.where))
+	}
+	sort.Strings(shown)
+	return shown
+}
+
+// Copies of the part size OUTSIDE the binding's own files, excused one at a
+// time and by name.
+//
+// Every entry is a sentence saying why that value is not §4.6's part size. The
+// key is the FILE and the DECLARATION the copy sits inside, so an excuse covers
+// one function rather than a file forever, and it survives the line moving.
+// Every entry is also asserted to MATCH something — an excuse for a copy that is
+// gone is an excuse nothing checks any more.
+//
+// It holds no entry in the binding's own files and cannot: a copy there is
+// refused before this table is consulted. This is a table for values that are
+// not this bound, never a second home for this bound.
+var messageFragmentPartSizeCopyRulings = map[string]string{
+	"device_local_ioloop.go IoLoop.run": "MessagePoolGet(2048) — the buffer the !windows fd read loop " +
+		"reads one packet into. It is a packet buffer and not a frame budget: it bounds a read from a " +
+		"tun fd, nothing carries it to a MessageServerFragment, and it predates this binding. It is in " +
+		"the class because the class is the VALUE, which is the property that makes the class worth " +
+		"having, and it is excused by name here rather than by narrowing the scope back to three files.",
+}
+
+// The declaration an expression sits inside, named the way a ruling names it:
+// `Type.Method` for a method, the function's name for a function, and the first
+// name of the value or type spec that holds it otherwise.
+//
+// Read off the file's own declaration list rather than tracked during a walk, so
+// that the type-checked tree and the files this build does not compile get the
+// same answer out of the same code.
+func messageFragmentEnclosing(file *ast.File, pos token.Pos) string {
+	if file == nil {
+		return "(no parsed file)"
+	}
+	for _, decl := range file.Decls {
+		if pos < decl.Pos() || decl.End() < pos {
+			continue
+		}
+		switch each := decl.(type) {
+		case *ast.FuncDecl:
+			if each.Recv != nil && len(each.Recv.List) == 1 {
+				return messageFragmentTypeName(each.Recv.List[0].Type) + "." + each.Name.Name
+			}
+			return each.Name.Name
+		case *ast.GenDecl:
+			for _, spec := range each.Specs {
+				if pos < spec.Pos() || spec.End() < pos {
+					continue
+				}
+				switch held := spec.(type) {
+				case *ast.ValueSpec:
+					if len(held.Names) != 0 {
+						return held.Names[0].Name
+					}
+				case *ast.TypeSpec:
+					return held.Name.Name
+				}
+			}
+			return each.Tok.String()
+		}
+	}
+	return "(file scope)"
+}
+
+// The name of a receiver's type, through the pointer and through the type
+// parameters a generic receiver carries.
+func messageFragmentTypeName(expr ast.Expr) string {
+	for {
+		switch each := expr.(type) {
+		case *ast.StarExpr:
+			expr = each.X
+		case *ast.IndexExpr:
+			expr = each.X
+		case *ast.IndexListExpr:
+			expr = each.X
+		case *ast.Ident:
+			return each.Name
+		default:
+			return types.ExprString(expr)
+		}
 	}
 }
 

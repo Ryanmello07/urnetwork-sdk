@@ -183,6 +183,18 @@ func (self *messageTransport) Nonce() []byte {
 // holds — and Task 10 refuses such a record rather than submitting it to be
 // refused on the wire. See this file's header for why the session rebuild that
 // would actually recover is not in this plan.
+//
+// IT COUNTS HELLOS, NOT CONNECTIONS, and the difference is load-bearing for the
+// caller that reads it. The counter moves in [messageTransport.adopt] and
+// `adopt` is reached from one place, a Hello that answered REASON_OK on the
+// Hello arm. Nothing in `sdk` observes a `connect` reconnect — nothing in `sdk`
+// constructs the `connect.Client` at all, which is S2-7 — so a connection that
+// is replaced underneath this binding WITHOUT a Hello through it leaves a
+// superseded nonce readable here at an unchanged number, and a refusal built on
+// comparing this number sees nothing to refuse. The two coincide only while
+// every connection change is followed by a Hello through this transport, and
+// this binding cannot make that true by itself. Stated here because it is the
+// caller of this accessor who would otherwise assume otherwise.
 func (self *messageTransport) NonceEpoch() uint64 {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
@@ -203,6 +215,30 @@ func (self *messageTransport) Capabilities() *protocol.Capabilities {
 
 // ── the two local refusals Call owes ─────────────────────────────────────────
 
+// Does this connection HAVE a nonce?
+//
+// REVIEW FINDING F, and it is the difference between the epoch MOVING and the
+// connection having a nonce. [messageTransport.refuseBeforeHello] opened on
+// `NonceEpoch() != 0`, and [messageTransport.adopt] moves the epoch after any
+// REASON_OK Hello carrying a Hello arm — including one whose `server_nonce` is
+// empty. An empty nonce is not a nonce: a `write_auth` over it is a MAC over
+// nothing, and the gate that is supposed to stop that request opened for it.
+//
+// WHY THE EPOCH IS NOT ALSO CHECKED, stated because the obvious spelling is
+// `0 < epoch && 0 < len(nonce)`: the nonce is written in exactly one place and
+// that place moves the epoch in the same critical section, so a non-empty nonce
+// already implies an epoch that moved. The extra clause defends nothing, and a
+// clause that defends nothing was DELETED and the suite run to find that out.
+//
+// It is also one read under ONE acquisition of the lock rather than two under
+// two — the hazard this file's header names — which is why it is a method here
+// rather than two accessor calls at the call site.
+func (self *messageTransport) hasConnectionNonce() bool {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return 0 < len(self.nonce)
+}
+
 // Property 1: no request that requires an authenticator precedes Hello.
 //
 // THE CLASS IS DERIVED FROM THE DESCRIPTOR, not listed. Hello is the one
@@ -220,8 +256,12 @@ func (self *messageTransport) Capabilities() *protocol.Capabilities {
 // see — and refusing both before Hello is correct anyway: §5.1 check 2 resolves
 // the connection the server opened at Hello, so a request that precedes Hello
 // has no connection to be resolved against.
+//
+// The gate is [messageTransport.hasConnectionNonce] and not the epoch: review
+// finding F is that a Hello which issued an EMPTY server_nonce moved the epoch
+// and opened this.
 func (self *messageTransport) refuseBeforeHello(body proto.Message) error {
-	if self.NonceEpoch() != 0 {
+	if self.hasConnectionNonce() {
 		return nil
 	}
 	exempt, err := messageTransportNonceIssuingArm()
@@ -296,6 +336,33 @@ func (self *messageTransport) refuseOverCapability(request *protocol.MessageServ
 		// construction, and it is why the part budget is compiled in
 		return nil
 	}
+
+	// REVIEW FINDING C — the OTHER half of Property 4's ordering hole, which the
+	// part budget closed and this did not.
+	//
+	// `Capabilities` is per CONNECTION and is replaced only by a Hello that
+	// completed. So a cached advertisement outlives the connection that made it,
+	// and the first request of the NEXT connection — which is the Hello that
+	// will fetch the next advertisement — was being measured against an
+	// advertisement that is gone. With a small enough previous bound that is not
+	// a refused request, it is a WEDGE: the cache is replaced only by a Hello,
+	// and no Hello can get out to replace it.
+	//
+	// The exemption is not "Hello" by name. It is the arm that ISSUES this
+	// connection's nonce, derived from the descriptors by the same function
+	// Property 1's refusal uses — the one arm that by construction needs no
+	// prior connection state, because it is what creates it.
+	exempt, err := messageTransportNonceIssuingArm()
+	if err != nil {
+		return err
+	}
+	if oneof := request.ProtoReflect().Descriptor().Oneofs().ByName("body"); oneof != nil {
+		field := request.ProtoReflect().WhichOneof(oneof)
+		if field != nil && field.Kind() == protoreflect.MessageKind && field.Message().FullName() == exempt {
+			return nil
+		}
+	}
+
 	for _, bound := range messageCapabilityBounds {
 		advertised, err := messageCapabilityValue(capabilities, bound.field)
 		if err != nil {

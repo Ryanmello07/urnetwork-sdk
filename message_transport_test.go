@@ -55,8 +55,10 @@ package sdk
 //     off protocol's compiled enum.
 //   - `config.ProtocolVersion`, which is documented as stamped on every request
 //     and was never read back.
-//   - `Counts().RequestFrames` and `Counts().ResponseFrames`, two of the six
-//     counters, which no test read.
+//   - `Counts().RequestFrames` and `Counts().ResponseFrames`, two of the TEN
+//     counters `messageTransportCounts` declares at this commit — the Task 5
+//     review said six, which was true of Task 5 and stopped being true when
+//     Task 6 added the four §4.6 counters — which no test read.
 //   - the `ctx.Done()` arm of `Call`, which no test reached: no test in the suite
 //     constructed a cancellable context.
 
@@ -80,6 +82,8 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -644,6 +648,48 @@ func TestMessageTransportReadsOnlyTheCodePointsThatAreItsOwn(t *testing.T) {
 	sort.Slice(others, func(i int, j int) bool { return others[i] < others[j] })
 	t.Logf("code points this binding READS: %d %v; complement -- code points protocol declares that it does not: %d %v",
 		len(mine), sortedCodePoints(mine), len(others), others)
+
+	// ── the half the class CANNOT supply, because the class is read off the
+	//    thing it constrains ───────────────────────────────────────────────────
+	//
+	// `mine` is derived from the receive path's own switch. That is what makes a
+	// `case` added tomorrow join the class — and it is also why the class cannot
+	// object to one: a code point added to a case moves OUT of the complement and
+	// is then never driven. Found by planting exactly that, this commit's own
+	// mutation F6c — `protocol.MessageType_MessageMessageServerPush` added beside
+	// the response case — and watching the whole transport set stay green.
+	//
+	// So the read set is measured against something that is not the switch: every
+	// code point this binding reads must name a message that declares
+	// `request_id`. Correlation by `request_id` is the ONLY thing this binding
+	// does with what it reads — a frame it cannot correlate has no waiter to
+	// answer and nothing else to be — and §4.3's push, the one message-server
+	// code point that is not an answer, declares a `body` oneof and no
+	// `request_id` at all. Read off the compiled descriptor rather than from the
+	// name, so a field renamed upstream fails here rather than quietly stopping
+	// being the rule.
+	parent := (&protocol.MessageServerResponse{}).ProtoReflect().Descriptor().FullName().Parent()
+	for _, codePoint := range sortedCodePoints(mine) {
+		spelled, named := protocol.MessageType_name[int32(codePoint)], protoreflect.FullName("")
+		if spelled == "" {
+			t.Fatalf("the receive path reads code point %d, which protocol's enum does not name", codePoint)
+		}
+		named = parent.Append(protoreflect.Name(strings.TrimPrefix(spelled, "Message")))
+		messageType, err := protoregistry.GlobalTypes.FindMessageByName(named)
+		if err != nil {
+			t.Fatalf("the receive path reads %s and this build links no message %s for it (%v): a code "+
+				"point this binding reads is a code point it DECODES, and one it cannot name is one it "+
+				"cannot decode", spelled, named, err)
+		}
+		if messageType.Descriptor().Fields().ByName("request_id") == nil {
+			t.Fatalf("the receive path reads %s, whose message %s declares no request_id. Correlation by "+
+				"request_id is the only thing this binding does with what it reads, so a frame it cannot "+
+				"correlate has no waiter to answer and nothing else to be. §4.3's push is the one "+
+				"message-server code point that is not an answer, and this is the rule that says so "+
+				"without naming it", spelled, named)
+		}
+		t.Logf("  %s names %s, which declares request_id, so this binding can correlate it", spelled, named)
+	}
 	if len(others) == 0 {
 		t.Fatal("the complement is EMPTY: this binding would be reading every code point protocol has, " +
 			"which is not a filter at all")
@@ -966,25 +1012,29 @@ func TestNothingBorrowedOutlivesTheReceiveCallback(t *testing.T) {
 //
 // GATE CLASS, derived: every `go` statement in the files this gate is scoped to.
 //
-// GATE SCOPE, derived SEPARATELY from the class and from TWO derivations that are
-// unioned rather than picked between:
+// GATE SCOPE, derived SEPARATELY from the class and from THREE derivations that
+// are unioned rather than picked between:
 //
 //	(a) the production files of package sdk that declare a method on
-//	    `messageTransport`, and
+//	    `messageTransport`,
 //	(b) the production files that declare any function in the receive callback's
-//	    DYNAMIC EXTENT.
+//	    DYNAMIC EXTENT, and
+//	(c) the production files that declare any function in the dynamic extent of
+//	    the binding's EXPORTED methods — its entry points, derived as the
+//	    exported methods on `messageTransport` rather than listed.
 //
-// Review finding F3 is exactly the gap between them. Before this repair the scope
-// was (a) alone while Property 1's scope was (b) alone, and a free function in a
-// file that declares no `messageTransport` method was inside one and outside the
-// other: the borrow gate NAMED `messageTransportProbeLeak` as inside the extent
-// on the line above this gate reporting its scope as a file set that excluded it,
-// and a `go` statement in that function mentioning nothing borrowed was seen by
-// neither gate. Two gates over one binding must not be able to disagree about
-// what the binding IS, so the scope here is the union and both contributions are
-// printed with what each one added that the other did not.
+// Review finding F3 was the gap between (a) and (b): the borrow gate NAMED a
+// free function as inside the receive extent on the line above this gate
+// reporting a scope that excluded it. Review finding D is the gap (a) ∪ (b) left
+// open on the other side — a production file declaring no `messageTransport`
+// method, reached only from the SEND path, was in neither, and a `go` statement
+// in a function `Call` invokes on every request was printed by nothing and
+// passed filtered AND unfiltered. Property 3's refusal is "No goroutine, no map
+// entry, no channel", not "no goroutine in the receive extent", so the scope is
+// the union of every way into this binding: what connect calls, and what a
+// caller calls.
 //
-// Complements printed: what each derivation contributed that the other did not,
+// Complements printed: what each derivation contributed that the others did not,
 // and, per file, the statements scanned that are NOT `go` statements. A file in
 // scope that contributes zero statements means the gate parsed a file and read
 // nothing out of it, and it fails closed on that PER FILE rather than on the
@@ -1009,45 +1059,70 @@ func TestTheMessageTransportStartsNoGoroutine(t *testing.T) {
 		t.Fatal("the receive callback's dynamic extent is declared in no file, so the second derivation read nothing")
 	}
 
-	scope := unionOfFiles(binding, extent)
-	t.Logf("GATE SCOPE, the union of two derivations: %d files %v", len(scope), scope)
+	// (c) on a gate of its own, so that walking the entry points cannot move
+	// what (b) reported. The entry points are DERIVED -- every exported method
+	// on messageTransport -- so a method added to the binding joins them on the
+	// commit that adds it, and a send path that calls out to a new file is in
+	// scope on the same commit.
+	callers := newBorrowGate(t)
+	entries := callers.exportedBindingMethods()
+	if len(entries) == 0 {
+		t.Fatal("messageTransport declares no exported method, so the third derivation has no root to " +
+			"walk and this binding has no entry point a caller could use")
+	}
+	for _, entry := range entries {
+		callers.walkExtent(entry)
+	}
+	reached := callers.extentFiles()
+	if len(reached) == 0 {
+		t.Fatal("the exported methods' dynamic extent is declared in no file, so the third derivation read nothing")
+	}
+
+	scope := unionOfFiles(unionOfFiles(binding, extent), reached)
+	t.Logf("GATE SCOPE, the union of three derivations: %d files %v", len(scope), scope)
 	t.Logf("  (a) files declaring a messageTransport method: %d %v", len(binding), binding)
 	t.Logf("  (b) files declaring a function in the receive callback's extent (%d functions): %d %v",
 		len(gate.order), len(extent), extent)
+	t.Logf("  (c) files declaring a function in the extent of the %d exported method(s) %v (%d functions): %d %v",
+		len(entries), entries, len(callers.order), len(reached), reached)
 	t.Logf("  complement -- in (b) and NOT in (a): %d %v", len(filesNotIn(extent, binding)), filesNotIn(extent, binding))
 	t.Logf("  complement -- in (a) and NOT in (b): %d %v", len(filesNotIn(binding, extent)), filesNotIn(binding, extent))
-	if len(scope) != len(unionOfFiles(scope, binding)) || len(scope) != len(unionOfFiles(scope, extent)) {
-		t.Fatalf("the scope %v does not contain both derivations %v and %v", scope, binding, extent)
+	t.Logf("  complement -- in (c) and NOT in (a) ∪ (b): %d %v",
+		len(filesNotIn(reached, unionOfFiles(binding, extent))), filesNotIn(reached, unionOfFiles(binding, extent)))
+	t.Logf("  complement -- production files of package sdk this scope does NOT hold: %d %v",
+		len(filesNotIn(gate.fileNames, scope)), filesNotIn(gate.fileNames, scope))
+	if len(scope) != len(unionOfFiles(scope, binding)) ||
+		len(scope) != len(unionOfFiles(scope, extent)) ||
+		len(scope) != len(unionOfFiles(scope, reached)) {
+		t.Fatalf("the scope %v does not contain all three derivations %v, %v and %v",
+			scope, binding, extent, reached)
+	}
+	if len(filesNotIn(gate.fileNames, scope)) == 0 {
+		t.Fatalf("the scope holds every one of package sdk's %d production files: a scope that narrows "+
+			"nothing has not been derived, it has been assumed", len(gate.fileNames))
 	}
 
 	statements := 0
 	found := []string{}
 	for _, name := range scope {
-		perFile := 0
-		goHere := 0
-		ast.Inspect(gate.prodFiles[name], func(node ast.Node) bool {
-			statement, ok := node.(ast.Stmt)
-			if !ok {
-				return true
-			}
-			perFile += 1
-			if _, isGo := statement.(*ast.GoStmt); isGo {
-				goHere += 1
-				found = append(found, gate.fset.Position(statement.Pos()).String())
-			}
-			return true
-		})
+		here, perFile := gate.goStatements(name)
 		statements += perFile
+		found = append(found, here...)
 		t.Logf("  %s: %d statements, %d of them `go`; complement -- statements that are not `go`: %d",
-			name, perFile, goHere, perFile-goHere)
-		if perFile-goHere == 0 {
+			name, perFile, len(here), perFile-len(here))
+		if perFile-len(here) == 0 {
 			t.Fatalf("%s contributes an EMPTY complement: %d statements scanned in a file this gate "+
 				"holds in scope, so the gate parsed it and read nothing", name, perFile)
 		}
 	}
-	if statements != len(found)+(statements-len(found)) || statements == 0 {
-		t.Fatalf("the partition does not close: %d statements scanned, %d of them `go`", statements, len(found))
-	}
+	// There is deliberately NO total-statement check here beside the per-file
+	// one. `statements == 0` cannot happen once every file in scope has been
+	// asserted to contribute a non-empty complement and the scope has been
+	// asserted to contain a non-empty (a) — it is the second check in this test
+	// that could not fail, and removing the first one (review finding G) while
+	// leaving this one in would have been the repair shipping the defect it was
+	// repairing. The per-file check is strictly stronger anyway: a total that is
+	// merely non-zero is satisfied by one big file while the rest are silent.
 	t.Logf("class: `go` statements in %v; %d found; complement -- statements scanned that are not `go`: %d of %d",
 		scope, len(found), statements-len(found), statements)
 
@@ -1056,6 +1131,125 @@ func TestTheMessageTransportStartsNoGoroutine(t *testing.T) {
 			"no goroutine behind, and a goroutine here is also the construction Property 1 refuses",
 			len(found), found)
 	}
+}
+
+// REVIEW FINDING G — what the tautology was standing in for.
+//
+// The assertion this replaces read
+//
+//	if statements != len(found)+(statements-len(found)) || statements == 0 {
+//
+// and `x != y + (x - y)` is identically false, so the only live half of it was
+// the zero check the per-file complement above already makes. A check that
+// cannot fail, in a file whose subject is checks that cannot fail.
+//
+// The question it was standing in for is the one worth asking: does the class
+// derivation FIND a `go` statement when there is one? That is asked here
+// directly, over source that is NOT package sdk, through the same
+// `borrowGate.goStatements` the gate above runs -- so a derivation that stopped
+// seeing `go` statements fails here even if package sdk never grows one. Both
+// directions, because a scan that finds a `go` statement everywhere is as broken
+// as one that finds it nowhere: the negative file holds the two constructions
+// nearest to a `go` -- a `defer` and a function literal called on the spot.
+func TestTheGoroutineScanFindsAGoStatementWhenThereIsOne(t *testing.T) {
+	gate := newBorrowGateOver(t, map[string]any{
+		"probe_with.go": `package probe
+
+type held struct{}
+
+func (self *held) start() {
+	go func() { _ = 1 }()
+}
+
+func loose(f func()) {
+	go f()
+}
+`,
+		"probe_without.go": `package probe
+
+func nothingStarted(f func()) {
+	defer f()
+	func() { _ = 1 }()
+	for index := 0; index < 3; index += 1 {
+		_ = index
+	}
+}
+`,
+	})
+
+	with, withStatements := gate.goStatements("probe_with.go")
+	without, withoutStatements := gate.goStatements("probe_without.go")
+	t.Logf("the scan over a file holding two `go` statements in two shapes: %d found in %d statements %v",
+		len(with), withStatements, with)
+	t.Logf("the scan over a file holding a `defer` and a called function literal: %d found in %d statements",
+		len(without), withoutStatements)
+
+	if len(with) != 2 {
+		t.Fatalf("the scan found %d `go` statement(s) in a file that holds two -- one whose callee is a "+
+			"function literal and one whose callee is a parameter: %v. The gate above reports `0 found` "+
+			"by running this same scan, and a scan that finds nothing reports that either way",
+			len(with), with)
+	}
+	if withStatements <= len(with) {
+		t.Fatalf("the scan counted %d statement(s) in a file with %d `go` statements and a body around "+
+			"them: the complement it prints is the statements that are NOT `go`, and it is empty here",
+			withStatements, len(with))
+	}
+	if len(without) != 0 {
+		t.Fatalf("the scan found %d `go` statement(s) in a file that holds none: %v. A `defer` and a "+
+			"function literal called on the spot are the two constructions nearest to a `go`, and "+
+			"reading either as one would make the gate above fail on a binding that is correct",
+			len(without), without)
+	}
+	if withoutStatements == 0 {
+		t.Fatal("the scan counted 0 statements in a file that holds several, so it read nothing and " +
+			"`0 go statements` was an answer about nothing")
+	}
+}
+
+// The `go` statements of one file in scope, and the statements scanned to find
+// them.
+//
+// A method rather than a loop body, so that the control above runs the SAME
+// derivation the gate runs rather than a copy of it that can drift from it.
+func (self *borrowGate) goStatements(name string) (found []string, statements int) {
+	file := self.prodFiles[name]
+	if file == nil {
+		self.t.Fatalf("this gate holds %s in scope and parsed no such file, so the class would be read "+
+			"out of nothing for it", name)
+		return nil, 0
+	}
+	ast.Inspect(file, func(node ast.Node) bool {
+		statement, ok := node.(ast.Stmt)
+		if !ok {
+			return true
+		}
+		statements += 1
+		if _, isGo := statement.(*ast.GoStmt); isGo {
+			found = append(found, self.fset.Position(statement.Pos()).String())
+		}
+		return true
+	})
+	return found, statements
+}
+
+// The binding's entry points: every EXPORTED method on messageTransport.
+//
+// Derived rather than listed, so that a method added to the binding is a root of
+// the third scope derivation on the commit that adds it. Unexported methods are
+// deliberately not roots -- they are reachable only from an exported one or from
+// the receive callback, and both are already walked.
+func (self *borrowGate) exportedBindingMethods() []string {
+	keys := []string{}
+	for _, key := range self.declOrder {
+		decl := self.decls[key]
+		if recvTypeName(decl) != "messageTransport" || !decl.Name.IsExported() {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // The production files that declare any function of the walked extent.
