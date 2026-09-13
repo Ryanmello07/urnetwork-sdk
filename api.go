@@ -660,6 +660,11 @@ type NetworkCreateArgs struct {
 	VerifyOtpNumeric bool            `json:"verify_use_numeric,omitempty"`
 	ReferralCode     string          `json:"referral_code,omitempty"`
 	WalletAuth       *WalletAuthArgs `json:"wallet_auth,omitempty"`
+	// ProductUpdatesOptOut is the sign-up form's "Periodic product updates"
+	// line UNTICKED. The wire field is product_updates (see MarshalJSON in
+	// onboarding_api.go): false here sends product_updates true, so the zero
+	// value keeps the preference on, as the form ships.
+	ProductUpdatesOptOut bool `json:"-"`
 }
 
 type NetworkCreateResult struct {
@@ -731,6 +736,13 @@ type AuthNetworkClientArgs struct {
 	DeviceSpec        string `json:"device_spec"`
 
 	ProxyConfig *ProxyConfig `json:"proxy_config,omitempty"`
+
+	// TimeZone is the device's IANA zone ("America/Chicago") and Locale its
+	// BCP 47 tag ("pt-BR"): the onboarding campaign sends in the user's local
+	// morning and picks the email template's language from them
+	// (mmm/onboarding/PLAN.md). Optional; the apps set both on every call.
+	TimeZone string `json:"time_zone,omitempty"`
+	Locale   string `json:"locale,omitempty"`
 }
 
 type AuthNetworkClientResult struct {
@@ -1374,6 +1386,40 @@ type SubscriptionBalanceResult struct {
 	ActiveTransferBalances    *TransferBalanceList `json:"active_transfer_balances,omitempty"`
 	PendingPayoutUsdNanoCents NanoCents            `json:"pending_payout_usd_nano_cents"`
 	UpdateTime                string               `json:"update_time"`
+
+	// ----- the onboarding plan fields (onboarding_api.go) -----
+	// PriceTier is the caller's regional price tier (an estimate unless the
+	// source is a storefront or a billing country); nil from an older server.
+	PriceTier *PriceTier `json:"price_tier,omitempty"`
+	// OnboardingOffer is the caller's welcome offer; nil when none was issued.
+	OnboardingOffer *OnboardingOffer `json:"onboarding_offer,omitempty"`
+	// Experiments is the caller's variant per experiment surface; nil when no
+	// experiment runs.
+	Experiments *ExperimentAssignmentList `json:"experiments,omitempty"`
+}
+
+// ExperimentVariant is the caller's variant on a surface, "" when no
+// experiment runs on it (see ExperimentAssignmentList.IsHoldout for the
+// in-app offer's surfaces).
+func (self *SubscriptionBalanceResult) ExperimentVariant(surface string) string {
+	if self.Experiments == nil {
+		return ""
+	}
+	return self.Experiments.VariantForSurface(surface)
+}
+
+// IsHoldout reports whether the caller is held out on a surface (the regular
+// plan picker, no offer screen, for the in-app offer surfaces).
+func (self *SubscriptionBalanceResult) IsHoldout(surface string) bool {
+	if self.Experiments == nil {
+		return false
+	}
+	return self.Experiments.IsHoldout(surface)
+}
+
+// OfferActive reports whether the welcome offer can be redeemed now.
+func (self *SubscriptionBalanceResult) OfferActive() bool {
+	return self.OnboardingOffer != nil && self.OnboardingOffer.IsActive()
 }
 
 func (self *Api) SubscriptionBalance(callback SubscriptionBalanceCallback) {
@@ -2179,7 +2225,10 @@ func IsPointsLeaderboardSort(sort string) bool {
 type GetPointsLeaderboardArgs struct {
 	Sort   string `json:"sort"`
 	Cursor string `json:"cursor,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
+	// SeekRank opens the page at this 1-based position of the sort's total
+	// order (clamped by the server); used without a cursor.
+	SeekRank int64 `json:"seek_rank,omitempty"`
+	Limit    int   `json:"limit,omitempty"`
 }
 
 // PointsLeaderboardRow is one ranked network. The `*Text` fields and
@@ -2198,6 +2247,10 @@ type PointsLeaderboardRow struct {
 	RankPoints       int64   `json:"rank_points"`
 	RankBlocks       int64   `json:"rank_blocks"`
 	RankStreak       int64   `json:"rank_streak"`
+	// Position is the row's 1-based place in the requested sort's total order
+	// (ranks tie, positions never do): the seek coordinate and the key the
+	// view controller keeps its loaded window by.
+	Position int64 `json:"position"`
 
 	DisplayName          string `json:"display_name,omitempty"`
 	TotalPointsText      string `json:"total_points_text,omitempty"`
@@ -2251,6 +2304,9 @@ type PointsLeaderboardResult struct {
 	Rows *PointsLeaderboardRowList `json:"rows"`
 	// the cursor of the next page; empty on the last page
 	NextCursor string `json:"next_cursor,omitempty"`
+	// the cursor of the page before this one; empty when this page starts at
+	// the top
+	PrevCursor string `json:"prev_cursor,omitempty"`
 	// the snapshot behind the cursor is gone: start again from the top
 	Restart     bool  `json:"restart,omitempty"`
 	TotalRanked int64 `json:"total_ranked"`
@@ -2258,6 +2314,10 @@ type PointsLeaderboardResult struct {
 	SnapshotTime *Time `json:"snapshot_time,omitempty"`
 	// the latest finalized epoch the snapshot counts
 	LatestEpoch int64 `json:"latest_epoch"`
+	// false means the server had no legitimate finalized epoch windows. Total
+	// points and their ranking remain valid, but block/streak values and ranks
+	// must be presented as unavailable rather than as measured zeroes.
+	EpochMetricsAvailable bool `json:"epoch_metrics_available"`
 	// the caller's own row, only with a jwt
 	Me    *PointsLeaderboardMe    `json:"me,omitempty"`
 	Error *PointsLeaderboardError `json:"error,omitempty"`
@@ -2526,8 +2586,12 @@ type SolanaPaymentIntentArgs struct {
 	// looks the price up from pro.yml by plan and rejects the intent with
 	// "Unknown plan." when this is empty, so an app that omits it cannot sell at
 	// all. The price is deliberately not a field here -- a client-supplied amount
-	// would let anyone quote themselves a year for a cent.
+	// would let anyone quote themselves a year for a cent. PlanYearlyOnboarding
+	// is the welcome offer (refused unless the caller's offer is redeemable).
 	Plan string `json:"plan"`
+	// the store's storefront country, when the app knows it; else the server
+	// resolves the regional tier from the Stripe billing country or the ip
+	StorefrontCountry string `json:"storefront_country,omitempty"`
 }
 
 type SolanaPaymentIntentResult struct {
@@ -2536,6 +2600,14 @@ type SolanaPaymentIntentResult struct {
 	// constant is how a customer pays and gets nothing.
 	AmountUsd float64                   `json:"amount_usd,omitempty"`
 	Error     *SolanaPaymentIntentError `json:"error,omitempty"`
+	// the regional tier the quote came from, the plan, the plan's regular price
+	// (the full-year price for PlanYearlyOnboarding) and whether the welcome
+	// offer was applied
+	Tier             string  `json:"tier,omitempty"`
+	Plan             string  `json:"plan,omitempty"`
+	RegularAmountUsd float64 `json:"regular_amount_usd,omitempty"`
+	OfferApplied     bool    `json:"offer_applied,omitempty"`
+	Currency         string  `json:"currency,omitempty"`
 }
 
 type SolanaPaymentIntentError struct {
@@ -2641,6 +2713,10 @@ type StripeCreateCheckoutSessionArgs struct {
 	// Only valid with ui_mode "embedded". Empty means the embedded flow
 	// redirects to the configured return_url, and hosted behaves as always.
 	RedirectOnCompletion string `json:"redirect_on_completion,omitempty"`
+	// the store's storefront country, when the caller knows it: the Pro items
+	// are priced at the caller's regional tier and the welcome-offer coupon is
+	// applied server-side when redeemable (yearly only)
+	StorefrontCountry string `json:"storefront_country,omitempty"`
 }
 
 type StripeCreateCheckoutSessionError struct {

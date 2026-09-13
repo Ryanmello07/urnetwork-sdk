@@ -99,15 +99,24 @@ func NewAccountHost(this js.Value, args []js.Value) any {
 			api.RemoveNetworkClient(&sdk.RemoveNetworkClientArgs{ClientId: clientId}, sdk.RemoveNetworkClientCallback(cb))
 		})
 	})
-	// getPointsLeaderboard(sort, cursor?, limit?): one page of the all-time
-	// points leaderboard (public; the jwt only adds `me`)
+	// getPointsLeaderboard(sort, cursor?, limit?, seekRank?): one page of the
+	// all-time points leaderboard (public; the jwt only adds `me`). The cursor
+	// pages in either direction (`next_cursor` / `prev_cursor`); `seekRank`
+	// (without a cursor) opens the page at that 1-based position of the sort.
 	m["getPointsLeaderboard"] = promiseMethod(func(args []js.Value) js.Value {
 		sort := stringArg(args, 0)
 		cursor := stringArg(args, 1)
 		limit := int(int64Arg(args, 2))
+		seekRank := int64Arg(args, 3)
 		return apiPromise(func(cb connect.ApiCallback[*sdk.PointsLeaderboardResult]) {
-			api.GetPointsLeaderboard(&sdk.GetPointsLeaderboardArgs{Sort: sort, Cursor: cursor, Limit: limit}, sdk.GetPointsLeaderboardCallback(cb))
+			api.GetPointsLeaderboard(&sdk.GetPointsLeaderboardArgs{Sort: sort, Cursor: cursor, Limit: limit, SeekRank: seekRank}, sdk.GetPointsLeaderboardCallback(cb))
 		})
+	})
+	// pointsLeaderboardScrollLabel(rank, total): synchronous; the scroll
+	// indicator's label parts (PointsLeaderboardScrollLabelParts) at a rank
+	// among `total` ranked networks
+	m["pointsLeaderboardScrollLabel"] = js.FuncOf(func(this js.Value, args []js.Value) any {
+		return jsJson(sdk.PointsLeaderboardScrollLabel(int64Arg(args, 0), int64Arg(args, 1)))
 	})
 	m["setPointsLeaderboardPublic"] = promiseMethod(func(args []js.Value) js.Value {
 		public := boolArg(args, 0)
@@ -217,6 +226,102 @@ func NewAccountHost(this js.Value, args []js.Value) any {
 		return apiPromise(func(cb connect.ApiCallback[*sdk.SubscriptionBalanceResult]) {
 			api.SubscriptionBalance(sdk.SubscriptionBalanceCallback(cb))
 		})
+	})
+
+	// ----- onboarding program (mmm/onboarding/PLAN.md) -----
+
+	// subscriptionBalanceForStorefront(storefrontCountry?): the plan response
+	// with the price tier resolved for a storefront country ("" = none)
+	m["subscriptionBalanceForStorefront"] = promiseMethod(func(args []js.Value) js.Value {
+		storefrontCountry := stringArg(args, 0)
+		return apiPromise(func(cb connect.ApiCallback[*sdk.SubscriptionBalanceResult]) {
+			api.SubscriptionBalanceForStorefront(storefrontCountry, sdk.SubscriptionBalanceCallback(cb))
+		})
+	})
+	// onboardingOfferIssue(surface?, storefrontCountry?): issue the welcome
+	// offer once (idempotent)
+	m["onboardingOfferIssue"] = promiseMethod(func(args []js.Value) js.Value {
+		surface := stringArg(args, 0)
+		storefrontCountry := stringArg(args, 1)
+		return apiPromise(func(cb connect.ApiCallback[*sdk.OnboardingOfferIssueResult]) {
+			api.OnboardingOfferIssue(&sdk.OnboardingOfferIssueArgs{Surface: surface, StorefrontCountry: storefrontCountry}, sdk.OnboardingOfferIssueCallback(cb))
+		})
+	})
+	// clientEventsSend(eventsJson): a json array of `{name, at?, props?}`
+	// checked against the closed schema (unknown names/props reject) and
+	// stamped platform "web"; at most 200 per call. Pages batch every 30 s
+	// and drop an event after three failed calls.
+	m["clientEventsSend"] = promiseMethod(func(args []js.Value) js.Value {
+		events, err := sdk.ParseClientEventsJson(stringArg(args, 0))
+		if err != nil {
+			return jsRejected(err)
+		}
+		appVersion := stringArg(args, 1)
+		locale := stringArg(args, 2)
+		session := stringArg(args, 3)
+		for i := 0; i < events.Len(); i++ {
+			event := events.Get(i)
+			if event.Platform == "" {
+				event.Platform = sdk.EventPlatformWeb
+			}
+			if event.AppVersion == "" {
+				event.AppVersion = appVersion
+			}
+			if event.Locale == "" {
+				event.Locale = locale
+			}
+			if event.Session == "" {
+				event.Session = session
+			}
+		}
+		return apiPromise(func(cb connect.ApiCallback[*sdk.ClientEventsSendResult]) {
+			api.ClientEventsSend(&sdk.ClientEventsSendArgs{Events: events}, sdk.ClientEventsSendCallback(cb))
+		})
+	})
+	// clientEventNames(): the closed list of event names a page may send
+	m["clientEventNames"] = js.FuncOf(func(this js.Value, args []js.Value) any {
+		return jsJson(sdk.ClientEventNames())
+	})
+	// stripePaymentSheet(plan, storefrontCountry?, stripeVersion?)
+	m["stripePaymentSheet"] = promiseMethod(func(args []js.Value) js.Value {
+		plan := stringArg(args, 0)
+		storefrontCountry := stringArg(args, 1)
+		stripeVersion := stringArg(args, 2)
+		return apiPromise(func(cb connect.ApiCallback[*sdk.StripePaymentSheetResult]) {
+			api.StripePaymentSheet(&sdk.StripePaymentSheetArgs{Plan: plan, StorefrontCountry: storefrontCountry, StripeVersion: stripeVersion}, sdk.StripePaymentSheetCallback(cb))
+		})
+	})
+	// stripePrices(storefrontCountry?): the caller's tier's Stripe price ids
+	m["stripePrices"] = promiseMethod(func(args []js.Value) js.Value {
+		storefrontCountry := stringArg(args, 0)
+		return apiPromise(func(cb connect.ApiCallback[*sdk.StripePricesResult]) {
+			api.StripePrices(storefrontCountry, sdk.StripePricesCallback(cb))
+		})
+	})
+	// onboardingClick(token): the landing page's attribution call (no auth)
+	m["onboardingClick"] = promiseMethod(func(args []js.Value) js.Value {
+		token := stringArg(args, 0)
+		return apiPromise(func(cb connect.ApiCallback[*sdk.OnboardingClickResult]) {
+			api.OnboardingClick(&sdk.OnboardingClickArgs{Token: token}, sdk.OnboardingClickCallback(cb))
+		})
+	})
+	// onboardingFeedbackToken(token, rating?, reason?): the feedback link's
+	// pre-filled rating/reason (no auth)
+	m["onboardingFeedbackToken"] = promiseMethod(func(args []js.Value) js.Value {
+		token := stringArg(args, 0)
+		rating := int(int64Arg(args, 1))
+		reason := stringArg(args, 2)
+		return apiPromise(func(cb connect.ApiCallback[*sdk.OnboardingFeedbackTokenResult]) {
+			api.OnboardingFeedbackToken(token, rating, reason, sdk.OnboardingFeedbackTokenCallback(cb))
+		})
+	})
+	// computePriceEquivalent(yearly, monthly, minorUnitDigits): synchronous;
+	// the per-month sub-line math shared by every platform
+	m["computePriceEquivalent"] = js.FuncOf(func(this js.Value, args []js.Value) any {
+		yearly := float64Arg(args, 0)
+		monthly := float64Arg(args, 1)
+		digits := int(int64Arg(args, 2))
+		return jsJson(sdk.ComputePriceEquivalent(yearly, monthly, digits))
 	})
 	m["getNetworkUser"] = promiseMethod(func(args []js.Value) js.Value {
 		return apiPromise(func(cb connect.ApiCallback[*sdk.GetNetworkUserResult]) {

@@ -35,7 +35,6 @@ func generateTypes() error {
 		sdk.NetworkSpaceValues{},
 		sdk.ExportNetworkSpace{},
 		sdk.NetExtender{},
-		sdk.NetExtenderAutoConfigure{},
 		sdk.ProxyAuthResult{},
 		sdk.ProxyConfigResult{},
 
@@ -47,6 +46,7 @@ func generateTypes() error {
 		sdk.PointsLeaderboardRow{},
 		sdk.PointsLeaderboardResult{},
 		sdk.PointsLeaderboardError{},
+		sdk.PointsLeaderboardScrollLabelParts{},
 		sdk.SetPointsLeaderboardPublicArgs{},
 		sdk.SetPointsLeaderboardPublicResult{},
 		sdk.SetPointsLeaderboardPublicError{},
@@ -64,6 +64,24 @@ func generateTypes() error {
 		sdk.NetworkCheckResult{},
 		sdk.NetworkCreateArgs{},
 		sdk.NetworkCreateResult{},
+		// onboarding program
+		sdk.PriceTier{},
+		sdk.OnboardingOffer{},
+		sdk.ExperimentAssignment{},
+		sdk.OnboardingError{},
+		sdk.OnboardingOfferIssueArgs{},
+		sdk.OnboardingOfferIssueResult{},
+		sdk.ClientEvent{},
+		sdk.ClientEventRejection{},
+		sdk.ClientEventsSendArgs{},
+		sdk.ClientEventsSendResult{},
+		sdk.StripePaymentSheetArgs{},
+		sdk.StripePaymentSheetResult{},
+		sdk.StripePricesResult{},
+		sdk.OnboardingClickArgs{},
+		sdk.OnboardingClickResult{},
+		sdk.OnboardingFeedbackTokenResult{},
+		sdk.PriceEquivalent{},
 		sdk.NetworkCreateResultError{},
 		sdk.NetworkCreateResultVerification{},
 		sdk.NetworkCreateResultNetwork{},
@@ -262,6 +280,13 @@ func goTypeToTypeScript(t reflect.Type) string {
 			return "AccountEpoch[]"
 		case "sdk.PointsLeaderboardRowList":
 			return "PointsLeaderboardRow[]"
+		case "sdk.ClientEventList":
+			return "ClientEvent[]"
+		case "sdk.ClientEventRejectionList":
+			return "ClientEventRejection[]"
+		case "sdk.ExperimentAssignmentList":
+			// custom json: an object keyed by surface
+			return "Record<string, ExperimentAssignment>"
 		case "sdk.PointsLeaderboardMe":
 			// custom json: the row's fields with points_leaderboard_public beside them
 			return "PointsLeaderboardRow & { points_leaderboard_public: boolean }"

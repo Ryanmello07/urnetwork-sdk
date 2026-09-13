@@ -123,6 +123,34 @@ export interface NetworkPeersInfo {
  * hosting the connection (0 when unknown); derive the duration locally rather
  * than expecting it to tick.
  */
+/** the state of one provider platform transport: connecting | connected |
+ * disabled | sleeping (no path of that family) | idle-policy (the control
+ * family policy forbids that family) | unknown */
+export type ProviderFamilyTransportState =
+  | "connecting"
+  | "connected"
+  | "disabled"
+  | "sleeping"
+  | "idle-policy"
+  | "unknown";
+
+/** the per-family readout of the provider's v4-pinned, v6-pinned and
+ * family-agnostic standby platform transports (connect/IPV6.md A4) */
+export interface ProviderFamilyTransportStatus {
+  hasIpv4: boolean;
+  ipv4State: ProviderFamilyTransportState;
+  hasIpv6: boolean;
+  ipv6State: ProviderFamilyTransportState;
+  standbyState: ProviderFamilyTransportState;
+  /** true while the standby is released to dial */
+  standbyActive: boolean;
+}
+
+/** a provider's proven address-family category (connect/IPV6.md) */
+export type IpFamily = "dualstack" | "v4-only" | "v6-only";
+/** the short display form of IpFamily */
+export type IpFamilyLabel = "both" | "v4" | "v6";
+
 export interface ConnectedProviderLocationInfo {
   clientId?: string;
   country: string;
@@ -137,6 +165,10 @@ export interface ConnectedProviderLocationInfo {
   hasRegionCoordinates: boolean;
   hasCityCoordinates: boolean;
   connectedSinceMillis: number;
+  /** the provider's proven address-family category, as on ProviderGridPoint */
+  ipFamily: IpFamily;
+  /** the short display form of ipFamily: "both", "v4" or "v6" */
+  ipFamilyLabel: IpFamilyLabel;
   /** the dot color from the sdk palette (hex, no "#"): the country's when the
    * location is known, else the stable per-client color */
   colorHex: string;
@@ -182,6 +214,9 @@ export interface DeviceRemote {
   getProvidePaused(): boolean;
   setProvidePaused(v: boolean): void;
   getProvideEnabled(): boolean;
+  /** the per-family readout of the provider's platform transports
+   * (connect/IPV6.md A4); every state is "unknown" without a provider */
+  getProviderFamilyTransportStatus(): ProviderFamilyTransportStatus | null;
 
   // connect location / destination
   getConnectLocation(): ConnectLocationInfo | null;
@@ -279,6 +314,11 @@ export interface ProviderGridPoint {
   endTimeUnixMillis?: number;
   /** relative time until removal — what an exit animation wants */
   endTimeMillisUntil?: number;
+  /** the provider's proven address-family category: "dualstack", "v4-only"
+   * or "v6-only" (legacy providers read as v4-only) */
+  ipFamily: IpFamily;
+  /** the short display form of ipFamily: "both", "v4" or "v6" */
+  ipFamilyLabel: IpFamilyLabel;
 }
 
 export interface ConnectGrid {
@@ -593,13 +633,34 @@ export interface PointsLeaderboardViewController {
 
   getSort(): PointsLeaderboardSort;
   setSort(sort: PointsLeaderboardSort): void;
+  /** the page after the loaded window (a no-op while loading or at the end) */
   loadMore(): void;
+  /** the page before the loaded window (a no-op while loading or at the top) */
+  loadMoreBefore(): void;
   refresh(): void;
+  /**
+   * Jump the loaded window to the page holding this 1-based position of the
+   * sort's total order (the scroll indicator's rank): cancels an in-flight
+   * page, clears the rows, lands the page as the window; then page backward
+   * with loadMoreBefore and forward with loadMore. The server clamps the rank.
+   */
+  seekToRank(rank: number): void;
+  /** drop the window and load the first page again (rows cleared at once) */
+  reloadFromTop(): void;
 
   getRows(): PointsLeaderboardRow[];
   getRowCount(): number;
   isLoading(): boolean;
   isEndReached(): boolean;
+  /** ranks above the window remain (the window does not start at 1) */
+  hasMoreBefore(): boolean;
+  /** ranks below the window remain (the negation of isEndReached) */
+  hasMoreAfter(): boolean;
+  /** 1-based position of the first / last loaded row, 0 while empty */
+  firstLoadedPosition(): number;
+  lastLoadedPosition(): number;
+  /** the indicator's label parts at a rank among getTotalRanked() */
+  getScrollLabel(rank: number): PointsLeaderboardScrollLabelParts;
   getMe(): PointsLeaderboardMe | null;
   getErrorMessage(): string;
   getTotalRanked(): number;
@@ -607,6 +668,34 @@ export interface PointsLeaderboardViewController {
   getSnapshotTime(): string | null;
 
   addPointsLeaderboardListener(cb: () => void): Unsubscribe;
+}
+
+/**
+ * The tier of a rank among the ranked networks (the scroll indicator's
+ * "#1,240 · Top 5%"): a rank is in a tier when it is within the tier's percent
+ * of the total, rounded up. The app maps the tier to its localized string.
+ */
+export const PointsLeaderboardTier = {
+  Unknown: 0,
+  Top1: 1,
+  Top5: 2,
+  Top10: 3,
+  Top25: 4,
+  Top50: 5,
+  Rest: 6,
+} as const;
+export type PointsLeaderboardTier = (typeof PointsLeaderboardTier)[keyof typeof PointsLeaderboardTier];
+
+/** PointsLeaderboardScrollLabel / getScrollLabel: the indicator label parts. */
+export interface PointsLeaderboardScrollLabelParts {
+  /** the rank, clamped to [1, total] */
+  rank: number;
+  total: number;
+  /** the rank preformatted, "#1240" */
+  rank_text: string;
+  tier: PointsLeaderboardTier;
+  /** 1, 5, 10, 25 or 50; 0 for the rest and the unknown tier */
+  tier_percent: number;
 }
 
 /**
@@ -913,7 +1002,10 @@ export interface AccountHost {
   networkDelete(): Promise<any>;
   getLeaderboard(): Promise<any>;
   /** One page of the all-time points leaderboard (public; the jwt only adds `me`). */
-  getPointsLeaderboard(sort: PointsLeaderboardSort, cursor?: string, limit?: number): Promise<any>;
+  /** cursor pages either direction (next_cursor / prev_cursor); seekRank (no cursor) opens the page at that position */
+  getPointsLeaderboard(sort: PointsLeaderboardSort, cursor?: string, limit?: number, seekRank?: number): Promise<any>;
+  /** synchronous: the scroll indicator's label parts at a rank among total ranked */
+  pointsLeaderboardScrollLabel(rank: number, total: number): PointsLeaderboardScrollLabelParts;
   setPointsLeaderboardPublic(isPublic: boolean): Promise<any>;
   /** Validate with validateEmojiTag first and send `normalized`; "" clears the tag. */
   setEmojiTag(emojiTag: string): Promise<any>;
@@ -928,6 +1020,35 @@ export interface AccountHost {
   checkBalanceCode(secret: string): Promise<any>;
   subscriptionBalance(): Promise<any>;
   getNetworkUser(): Promise<any>;
+
+  // ----- onboarding program (mmm/onboarding/PLAN.md) -----
+  /** The plan response (SubscriptionBalanceResult) with price_tier, onboarding_offer and experiments; storefontCountry "" when the page has no store. */
+  subscriptionBalanceForStorefront(storefrontCountry?: string): Promise<any>;
+  /** Issue the welcome offer once (idempotent); surface intro_step | final_screen | account. */
+  onboardingOfferIssue(surface?: string, storefrontCountry?: string): Promise<any>;
+  /** Send a batch (<= 200) of product events: a json array of {name, at?, props?} checked against the closed schema (rejects on an unknown name/prop). Stamped platform "web" plus the given app version, locale and session. */
+  clientEventsSend(eventsJson: string, appVersion?: string, locale?: string, session?: string): Promise<any>;
+  /** The closed list of event names a page may send. */
+  clientEventNames(): string[];
+  /** Prepare an inline Stripe PaymentSheet purchase (plan yearly | monthly). */
+  stripePaymentSheet(plan: string, storefrontCountry?: string, stripeVersion?: string): Promise<any>;
+  /** The caller's tier's Stripe price ids and the welcome coupon when redeemable. */
+  stripePrices(storefrontCountry?: string): Promise<any>;
+  /** The landing page's attribution call for a campaign token (no auth). */
+  onboardingClick(token: string): Promise<any>;
+  /** A feedback link token's pre-filled rating/reason (no auth). */
+  onboardingFeedbackToken(token: string, rating?: number, reason?: string): Promise<any>;
+  /** The per-month sub-line math: yearly / 12 rounded up to the minor unit, saving rounded down, suppressed under one major unit. */
+  computePriceEquivalent(yearly: number, monthly: number, minorUnitDigits: number): PriceEquivalent;
+}
+
+export interface PriceEquivalent {
+  monthly_equivalent: number;
+  monthly_equivalent_minor: number;
+  show_equivalent: boolean;
+  saving_percent: number;
+  yearly_minor: number;
+  monthly_minor: number;
 }
 
 export interface ExtensionDeviceRemoteOptions {

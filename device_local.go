@@ -158,16 +158,30 @@ func deviceMemoryShares(
 // newDeviceLocalPlatformTransportSettings applies one DeviceLocal target to
 // every carrier-local memory setting and then installs the budget shared only
 // by that DeviceLocal's provider and window transports.
+//
+// The space's alt url goes with it (EXTENDER.md L4): the H3, dns and pump
+// carriers then send their packets to alt while the sni, the quic
+// authentication and the H1 websocket stay on the platform url. A space with
+// no alt url leaves every carrier on the platform host, which is where they
+// have always been.
 func newDeviceLocalPlatformTransportSettings(
 	memoryTargetByteCount ByteCount,
 	platformTransportBudget *connect.PlatformTransportBudget,
 	dialContextSettings *connect.DialContextSettings,
+	altUrl string,
 	dnsPumpHost string,
 ) *connect.PlatformTransportSettings {
 	settings := connect.DefaultPlatformTransportSettingsWithMemoryTarget(
 		memoryTargetByteCount,
 	)
 	settings.PlatformTransportBudget = platformTransportBudget
+	if altUrl = strings.TrimSpace(altUrl); altUrl != "" {
+		settings.AltUrl = altUrl
+		// the pump destination is only where this device's own packets go, so
+		// it derives from the alt url rather than from the fixed `whodis` name
+		// (L3). An embedder that named one still wins, below.
+		settings.DnsPumpHost = ""
+	}
 	if dnsPumpHost = strings.TrimSpace(dnsPumpHost); dnsPumpHost != "" {
 		settings.DnsPumpHost = dnsPumpHost
 	}
@@ -375,6 +389,8 @@ func DefaultDeviceLocalSettings() *DeviceLocalSettings {
 		UseExperimentalTunnelAddress: true,
 
 		AllowProvider: true,
+		// the provider extender role follows providing by default (G1)
+		ProvideExtenderEnabled: true,
 		// Security-policy monitoring clones diagnostic maps and, for a
 		// DeviceRemote, performs synchronous RPC. Keep it opt-in so an app
 		// object never owns background polling.
@@ -529,6 +545,19 @@ type DeviceLocalSettings struct {
 	// The app constructors default this to true; the platform constructors
 	// set false (the device is embedded inside the platform).
 	AllowProvider bool
+	// ProvideExtenderEnabled allows this device to run the provider extender
+	// role while it provides (EXTENDER.md G1, G2). Default on, which is what
+	// DefaultDeviceLocalSettings sets; an embedder that runs many providers in
+	// one process turns it off, since one host can hold only one extender
+	// identity and bind the carrier ports once. It is the embedder's switch,
+	// independent of the user's persisted `.provide_extender` setting of F3:
+	// the role runs only when both allow it.
+	ProvideExtenderEnabled bool
+	// providerExtenderSettings, when set, adjusts the provider extender role's
+	// settings before it is built (EXTENDER.md G2). Tests bind ephemeral
+	// carrier ports and point the activation at an in-process operator through
+	// it; production takes the fixed carrier ports and the space's own urls.
+	providerExtenderSettings func(settings *deviceLocalExtenderSettings)
 	// Verbose opts into periodic, summarized security-policy diagnostics. It
 	// is disabled by default because a DeviceRemote poll performs RPC and app
 	// foreground/background polling belongs to view controllers.
@@ -657,6 +686,9 @@ type DeviceLocal struct {
 	// local-address pool at construction (released in Close) so it never collides
 	// with an IpMux-reserved address.
 	tunnelLocalAddress netip.Addr
+	// tunnelLocalAddressIpv6 is the IPv6 counterpart: a random address in the
+	// fixed ULA /48 (see tunnel_address_ipv6.go). Not pooled, nothing to release.
+	tunnelLocalAddressIpv6 netip.Addr
 
 	// tunnelDnsSetting is the DNS config the platform applies to the TUN. It
 	// defaults to the URnetwork-owned plain-DNS identity: UpgradeMux claims :53
@@ -670,6 +702,8 @@ type DeviceLocal struct {
 	apiMultiClientGenerator   *connect.ApiMultiClientGenerator
 	ownedMultiClientGenerator deviceMultiClientGenerator
 	provider                  *deviceLocalProvider
+	// the enabled subprotocols and their listeners (device_local_subprotocol.go)
+	subprotocols *deviceLocalSubprotocols
 
 	stats *DeviceStats
 
@@ -711,6 +745,19 @@ type DeviceLocal struct {
 	// the mobile low-memory profile; its goroutine follows self.ctx.
 	memorySampler                 *mobileMemorySampler
 	platformTransportReceiveStats *connect.PlatformTransportReceiveStats
+	// transferDiagStats is the shared p2p data-plane counter set of the
+	// build-time transfer diagnostic seam (transfer_diag.go); nil unless on.
+	transferDiagStats *connect.P2pDataPlaneStats
+	// transferDiagAllowDirect, when set, overrides direct (p2p) mode for the
+	// next window (a relay-only control for the rig); nil leaves the
+	// performance profile and the same-network force in charge.
+	transferDiagAllowDirect *bool
+	// transferDiagDeferTimeoutResend overrides FLIGHTGATEFIX §13.5's setting
+	// for clients built after it is set; nil leaves the build's default.
+	transferDiagDeferTimeoutResend *bool
+	// transferDiagLaneRule overrides the reliable-lane proven-recovery rule
+	// for clients built after it is set; nil leaves the build's default.
+	transferDiagLaneRule *bool
 	// Aggregate packet ownership is the remaining active-load risk after
 	// per-flow queue bounds. This gate exists only on <=24-MiB mobile devices;
 	// server/default paths retain their original admission and hot path.
@@ -921,8 +968,13 @@ type DeviceLocal struct {
 	tunnelChangeListeners                    *connect.CallbackList[TunnelChangeListener]
 	contractStatusChangeListeners            *connect.CallbackList[ContractStatusChangeListener]
 	windowStatusChangeListeners              *connect.CallbackList[WindowStatusChangeListener]
-	jwtRefreshListeners                      *connect.CallbackList[JwtRefreshListener]
-	authLogoutListeners                      *connect.CallbackList[AuthLogoutListener]
+	extenderProvideStatusChangeListeners     *connect.CallbackList[ExtenderProvideStatusChangeListener]
+	// closed and replaced when the provider extender role starts, stops or its
+	// setting changes, which is what the status watch waits on beside the
+	// role's own monitor (F3)
+	extenderProvideMonitor *connect.Monitor
+	jwtRefreshListeners    *connect.CallbackList[JwtRefreshListener]
+	authLogoutListeners    *connect.CallbackList[AuthLogoutListener]
 
 	blockActionWindowChangeListeners         *connect.CallbackList[BlockActionWindowChangeListener]
 	blockStatsChangeListeners                *connect.CallbackList[BlockStatsChangeListener]
@@ -1174,6 +1226,10 @@ func newDeviceLocalWithOverrides(
 ) (*DeviceLocal, error) {
 	if settings.KeyMaterial != nil {
 		applyDeviceLocalKeyMaterial(&settings.ClientSettings, settings.KeyMaterial)
+		// the extender identity belongs to the space, not to the client
+		// settings: the space's member node and the provider extender role
+		// both present it (B1, G2)
+		networkSpace.setExtenderKeySeed(settings.KeyMaterial.GetExtenderKeySeed())
 	}
 
 	// resolve the device logger. all nested components and clients follow it.
@@ -1329,18 +1385,20 @@ func newDeviceLocalWithOverrides(
 		ctx:          ctx,
 		cancel:       cancel,
 		byJwt:        byJwt,
+		subprotocols: newDeviceLocalSubprotocols(ctx, log),
 		// apiUrl:            apiUrl,
-		deviceDescription:  deviceDescription,
-		deviceSpec:         deviceSpec,
-		appVersion:         appVersion,
-		settings:           settings,
-		log:                log,
-		clientId:           clientId,
-		instanceId:         instanceId.toConnectId(),
-		tunnelLocalAddress: tunnelLocalAddress,
-		tunnelDnsSetting:   DefaultTunnelDnsSetting(),
-		clientStrategy:     clientStrategy,
-		lifecycleDone:      make(chan struct{}),
+		deviceDescription:      deviceDescription,
+		deviceSpec:             deviceSpec,
+		appVersion:             appVersion,
+		settings:               settings,
+		log:                    log,
+		clientId:               clientId,
+		instanceId:             instanceId.toConnectId(),
+		tunnelLocalAddress:     tunnelLocalAddress,
+		tunnelLocalAddressIpv6: randomTunnelLocalIpv6(),
+		tunnelDnsSetting:       DefaultTunnelDnsSetting(),
+		clientStrategy:         clientStrategy,
+		lifecycleDone:          make(chan struct{}),
 		// Identity persistence bridges a process restart. Destination
 		// generators overlap during asynchronous retirement, so this owner
 		// gives each one a generation-bound store view and permits restoration
@@ -1408,6 +1466,8 @@ func newDeviceLocalWithOverrides(
 		contractStatusChangeListeners:            connect.NewCallbackList[ContractStatusChangeListener](),
 		tunnelChangeListeners:                    connect.NewCallbackList[TunnelChangeListener](),
 		windowStatusChangeListeners:              connect.NewCallbackList[WindowStatusChangeListener](),
+		extenderProvideStatusChangeListeners:     connect.NewCallbackList[ExtenderProvideStatusChangeListener](),
+		extenderProvideMonitor:                   connect.NewMonitor(),
 		jwtRefreshListeners:                      connect.NewCallbackList[JwtRefreshListener](),
 		authLogoutListeners:                      connect.NewCallbackList[AuthLogoutListener](),
 		authPublication:                          authPublication,
@@ -1431,6 +1491,10 @@ func newDeviceLocalWithOverrides(
 		providerEgressContractDetailsChangeListeners:  connect.NewCallbackList[ContractDetailsChangeListener](),
 		providerIngressContractStatsChangeListeners:   connect.NewCallbackList[ContractStatsChangeListener](),
 		providerIngressContractDetailsChangeListeners: connect.NewCallbackList[ContractDetailsChangeListener](),
+	}
+	// the enabled subprotocols follow the device's own client
+	if provider != nil {
+		deviceLocal.attachSubprotocolsToClient(provider.Client())
 	}
 	// Learned caches have an independent lifecycle, not user preference intent.
 	if localState != nil {
@@ -1505,6 +1569,9 @@ func newDeviceLocalWithOverrides(
 
 	// set up with nil destination
 	if provider != nil {
+		// the extender role is built on the first provide change, which is
+		// after this device exists, so the test seam is installed here (G2)
+		provider.extenderSettingsConfigure = settings.providerExtenderSettings
 		localUserNatSub := provider.LocalUserNat().AddReceivePacketCallback(deviceLocal.localFallbackReceive)
 		deviceLocal.localUserNatSub = localUserNatSub
 		// the provider client lives as long as the device, so its contract
@@ -1520,6 +1587,13 @@ func newDeviceLocalWithOverrides(
 			deviceLocal.watchNetworkPeers(networkPeersNotify)
 		})
 	}
+
+	// the provider extender status, coalesced to one callback per second (F3)
+	deviceLocal.lifecycleWorkers.Add(1)
+	go connect.HandleError(func() {
+		defer deviceLocal.lifecycleWorkers.Done()
+		deviceLocal.watchExtenderProvideStatus()
+	})
 
 	// the trailing edge of the contract stats epoch gate: carries out the last
 	// batch of a transfer, which lands inside the gate and would otherwise never
@@ -1544,6 +1618,7 @@ func newDeviceLocalWithOverrides(
 		mobileRuntime(),
 	)
 	deviceLocal.updateMobilePacketPerformanceModeWithLock()
+	deviceLocal.startTransferDiag()
 	if deviceLocal.mobilePacketPressure != nil {
 		deviceLocal.platformTransportReceiveStats =
 			&connect.PlatformTransportReceiveStats{}
@@ -1609,9 +1684,10 @@ func (self *DeviceLocal) TunnelDnsAddressesIpv4() *StringList {
 	return self.tunnelDnsAddressList(false)
 }
 
-// TunnelDnsAddressesIpv6 is TunnelDnsAddressesIpv4 for IPv6. There is no default
-// IPv6 tunnel dns, so this is empty unless the dns resolver settings set
-// unencrypted local IPv6 servers.
+// TunnelDnsAddressesIpv6 is TunnelDnsAddressesIpv4 for IPv6: the resolver
+// settings' unencrypted local IPv6 servers when set, otherwise the IPv6
+// upgrade-mask stand-in (DefaultTunnelDnsAddressIpv6), which the UpgradeMux
+// claims on :53 exactly like the IPv4 mask.
 func (self *DeviceLocal) TunnelDnsAddressesIpv6() *StringList {
 	return self.tunnelDnsAddressList(true)
 }
@@ -3118,6 +3194,10 @@ func (self *DeviceLocal) canReferChanged(canRefer bool) {
 }
 
 func (self *DeviceLocal) provideModeChanged(provideMode ProvideMode) {
+	// self.assertNotLockOwner()
+	// the provider's transports follow the mode: a public provider dials the
+	// platform directly (EXTENDER.md J4)
+	self.updateProviderProvideMode(provideMode)
 	for _, listener := range self.provideModeChangeListeners.Get() {
 		connect.HandleError(func() {
 			listener.ProvideModeChanged(provideMode)
@@ -3125,8 +3205,25 @@ func (self *DeviceLocal) provideModeChanged(provideMode ProvideMode) {
 	}
 }
 
+// Hands the current provide mode to the provider, which rebuilds its
+// transports when the public flag flips (J4). Never called with the device
+// lock held.
+func (self *DeviceLocal) updateProviderProvideMode(provideMode ProvideMode) {
+	self.stateLock.Lock()
+	provider := self.provider
+	closed := self.closed
+	self.stateLock.Unlock()
+	if closed || provider == nil {
+		return
+	}
+	provider.setProvideMode(provideMode)
+}
+
 func (self *DeviceLocal) provideChanged(provideEnabled bool) {
 	// self.assertNotLockOwner()
+	// the extender role is the provider's spare capacity, so it follows
+	// provide exactly (G2)
+	self.updateExtenderProvide()
 	for _, listener := range self.provideChangeListeners.Get() {
 		connect.HandleError(func() {
 			listener.ProvideChanged(provideEnabled)
@@ -3483,15 +3580,33 @@ func (self *DeviceLocal) GetProvideTlsPrivateKeyPem() []byte {
 	return bytes.Clone(manager.ProvideTlsPrivateKeyPem())
 }
 
+// GetExtenderKeySeed returns the extender identity seed of this device's
+// space (EXTENDER.md B1, G2), creating it on first use. It is what the space's
+// mesh peer id is derived from and what the operator signs this host's
+// extender records for, so an embedder that persists it and passes it back
+// keeps one extender identity across restarts.
+//
+// Nil when the space persists its own: a space with local state keeps
+// `.extender_key` and that always wins, so there is nothing for the caller to
+// save.
+func (self *DeviceLocal) GetExtenderKeySeed() []byte {
+	if self.networkSpace == nil || self.networkSpace.asyncLocalState != nil {
+		return nil
+	}
+	return self.networkSpace.extenderIdentityKeySeed()
+}
+
 // GetKeyMaterial returns the provider client's persisted identity
 // material. Persist it in caller-owned local storage and pass it back to
 // NewDeviceLocalWithKeyMaterial on the next process start.
 func (self *DeviceLocal) GetKeyMaterial() *DeviceLocalKeyMaterial {
-	return NewDeviceLocalKeyMaterial(
+	keyMaterial := NewDeviceLocalKeyMaterial(
 		self.GetClientKeySeed(),
 		self.GetProvideTlsCertificatePem(),
 		self.GetProvideTlsPrivateKeyPem(),
 	)
+	keyMaterial.SetExtenderKeySeed(self.GetExtenderKeySeed())
+	return keyMaterial
 }
 
 // SetKeyMaterial applies provider-client identity material to this device and
@@ -3512,6 +3627,11 @@ func (self *DeviceLocal) SetKeyMaterial(keyMaterial *DeviceLocalKeyMaterial) {
 		applyDeviceLocalKeyMaterial(&self.settings.ClientSettings, keyMaterial)
 		return self.providerClient()
 	}()
+	if self.networkSpace != nil {
+		// the extender identity lives on the space; a role already running
+		// keeps the identity it activated with until it restarts (G2)
+		self.networkSpace.setExtenderKeySeed(keyMaterial.GetExtenderKeySeed())
+	}
 
 	if client != nil {
 		if seed := keyMaterial.GetClientKeySeed(); 0 < len(seed) {
@@ -3554,6 +3674,43 @@ func (self *DeviceLocal) GetProviderConnected() bool {
 	closed := self.closed
 	self.stateLock.Unlock()
 	return !closed && provider != nil && provider.IsConnected()
+}
+
+// GetProviderFamilyTransportStatus reads the current provider generation's
+// transport group. Snapshots the provider under stateLock like
+// GetProviderConnected so a concurrent Close cannot hand back a stale one.
+func (self *DeviceLocal) GetProviderFamilyTransportStatus() *ProviderFamilyTransportStatus {
+	self.stateLock.Lock()
+	provider := self.provider
+	closed := self.closed
+	self.stateLock.Unlock()
+	if closed || provider == nil {
+		return unknownProviderFamilyTransportStatus()
+	}
+	return provider.familyTransportStatus()
+}
+
+// GetExtenderStatus reads this device's network space (K5). A hosted device
+// reports the empty status: its space is shared across unrelated customers, so
+// its directory -- the proxy host's own extenders and their live connection
+// counts -- is not this tenant's to see.
+func (self *DeviceLocal) GetExtenderStatus() *ExtenderStatus {
+	if self.settings.HostedIncompatible {
+		return emptyExtenderStatus()
+	}
+	return self.networkSpace.GetExtenderStatus()
+}
+
+// AddExtenderStatusChangeListener subscribes to the space's coalesced extender
+// status (F2, K5). A hosted device reports nothing to listen to, and returns a
+// sub that is already inert rather than nil.
+func (self *DeviceLocal) AddExtenderStatusChangeListener(
+	listener ExtenderStatusChangeListener,
+) Sub {
+	if self.settings.HostedIncompatible {
+		return newSub(func() {})
+	}
+	return self.networkSpace.AddExtenderStatusChangeListener(listener)
 }
 
 func (self *DeviceLocal) GetConnectEnabled() bool {
@@ -3645,6 +3802,13 @@ func providerLocalUserNatSettings(
 	return localUserNatSettings
 }
 
+// A mode that includes public also decides how the provider reaches the
+// platform: a public provider dials directly on every transport, the standby
+// included, so the platform observes the provider's own address and location
+// (EXTENDER.md J4). A network or friends-and-family provider keeps the shared
+// strategy and its extender dialers, since network peers carry no location
+// metadata. A change that flips that rebuilds the provider transports
+// make-before-break.
 func (self *DeviceLocal) SetProvideMode(provideMode ProvideMode) {
 	_ = self.setLocalCatalogPreference("provide-mode", provideMode)
 }
@@ -4059,6 +4223,7 @@ func (self *DeviceLocal) applyDestination(
 						self.settings.MemoryTargetByteCount,
 						self.platformTransportBudget,
 						nil,
+						self.networkSpace.GetAltUrl(),
 						self.settings.DnsPumpHost,
 					)
 					applyMobileLowMemoryPlatformTransportSettings(
@@ -4101,6 +4266,8 @@ func (self *DeviceLocal) applyDestination(
 							transportMode == connect.TransportModeH1,
 						)
 						clientSettings.Log = self.log
+						self.attachTransferDiag(clientSettings)
+						self.applyTransferDiagSettings(clientSettings)
 						// share the device budgets so every window client's
 						// queues draw from the same pools
 						clientSettings.SendBufferSettings.ResendQueueBudget = self.settings.SendBufferSettings.ResendQueueBudget
@@ -4163,6 +4330,10 @@ func (self *DeviceLocal) applyDestination(
 			// hosted hard limit: the hosted multi client must never allow
 			// direct mode, superseding any performance profile and the
 			// same-network force inside the multi client
+			if override := self.transferDiagAllowDirect; override != nil {
+				overrideAllowDirect := *override
+				settings.OverrideAllowDirect = &overrideAllowDirect
+			}
 			if self.settings.HostedIncompatible {
 				overrideAllowDirect := false
 				settings.OverrideAllowDirect = &overrideAllowDirect
@@ -4235,6 +4406,9 @@ func (self *DeviceLocal) applyDestination(
 				multi.SetServerNameLookup(upgradeMux)
 				// the mux blocks ad/tracker hostnames at the dns layer
 				upgradeMux.SetBlocker(self.blocker)
+				// while no exit can carry v6, AAAA answers empty so apps do not
+				// blackhole on a v6 address the tunnel cannot route (IPV6.md B6)
+				upgradeMux.SetIpv6Unroutable(multi.Ipv6Unroutable)
 				self.upgradeMux = upgradeMux
 				self.upgradeMuxLiveSettings = self.upgradeMuxSettings
 				// pre-warm the DoH connections in the background: the tunnel dials park
@@ -4356,6 +4530,9 @@ func (self *DeviceLocal) GetWindowStatus() *WindowStatus {
 				TargetSize:         n,
 				ProviderStateAdded: n,
 				MinSatisfied:       true,
+				// fixed destinations bypass discovery, so their category is
+				// legacy, which reads as v4-only
+				ProviderV4OnlyCount: n,
 			}
 		case *connect.RemoteUserNatMultiClient:
 			windowStatus = toWindowStatus(v.Monitor())
@@ -4370,10 +4547,11 @@ func (self *DeviceLocal) GetWindowStatus() *WindowStatus {
 func toWindowStatus(monitor connect.MultiClientMonitor) *WindowStatus {
 	windowExpandEvent, providerEvents := monitor.Events()
 	windowStatus := &WindowStatus{
-		TargetSize:   windowExpandEvent.TargetSize,
-		MinSatisfied: windowExpandEvent.MinSatisfied,
-		StallReason:  windowExpandEvent.Reason,
-		Failed:       windowExpandEvent.Failed,
+		TargetSize:    windowExpandEvent.TargetSize,
+		MinSatisfied:  windowExpandEvent.MinSatisfied,
+		StallReason:   windowExpandEvent.Reason,
+		Failed:        windowExpandEvent.Failed,
+		Ipv6Available: windowExpandEvent.Ipv6Available,
 	}
 	for _, providerEvent := range providerEvents {
 		switch providerEvent.State {
@@ -4385,6 +4563,14 @@ func toWindowStatus(monitor connect.MultiClientMonitor) *WindowStatus {
 			windowStatus.ProviderStateNotAdded += 1
 		case connect.ProviderStateAdded:
 			windowStatus.ProviderStateAdded += 1
+			switch ipFamilyValue(providerEvent.IpFamily) {
+			case IpFamilyDualstack:
+				windowStatus.ProviderDualstackCount += 1
+			case IpFamilyV6Only:
+				windowStatus.ProviderV6OnlyCount += 1
+			default:
+				windowStatus.ProviderV4OnlyCount += 1
+			}
 		case connect.ProviderStateRemoved:
 			windowStatus.ProviderStateRemoved += 1
 		}
@@ -4906,6 +5092,7 @@ func (self *DeviceLocal) close() {
 	}
 	if self.provider != nil {
 		provider := self.provider
+		self.subprotocols.attach(nil)
 		provider.Close()
 		self.provider = nil
 		self.startLifecycleWorkerWithLock(func() {

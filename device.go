@@ -349,6 +349,16 @@ type WindowStatus struct {
 	ProviderStateNotAdded         int
 	ProviderStateAdded            int
 	ProviderStateRemoved          int
+	// The Added providers split by address-family category (see ip_family.go).
+	// They sum to ProviderStateAdded. A legacy provider counts as v4-only.
+	ProviderDualstackCount int
+	ProviderV4OnlyCount    int
+	ProviderV6OnlyCount    int
+	// Ipv6Available is true while at least one Added provider can carry IPv6
+	// (dualstack or v6-only). While false after the window has formed, the
+	// tunnel answers AAAA queries empty and refuses v6 flows with an ICMPv6
+	// no-route reply, so apps connect over v4 at once (connect/IPV6.md B6).
+	Ipv6Available bool
 	// StallReason is the machine-readable diagnosis while the window is still
 	// forming: evaluating | platform-unreachable | providers-unresponsive |
 	// rate-limited | auth-failing (the connect WindowStall* constants).
@@ -458,11 +468,12 @@ func GetDefaultDnsResolverSettings() *DnsResolverSettings {
 	return settings
 }
 
-// GetDefaultTunnelMtu exposes the single MTU contract shared by native tunnel
-// interfaces and connect's provider-side packetizer. Native apps should apply
-// this value when constructing their IPv4 tunnel interface.
+// GetDefaultTunnelMtu exposes the tunnel interface mtu every native tunnel
+// configures (connect.DefaultTunnelMtu, 1280 so the interface can carry IPv6).
+// Packets written into the tunnel are at most connect.DefaultMtu, which is
+// below this by design (connect/IPV6.md C1).
 func GetDefaultTunnelMtu() int32 {
-	return int32(connect.DefaultMtu)
+	return int32(connect.DefaultTunnelMtu)
 }
 
 // every device must also support the unexported `device` interface
@@ -657,6 +668,25 @@ type Device interface {
 	GetProviderTransportStatus() *TransportStatus
 
 	AddProviderTransportStatusChangeListener(listener ProviderTransportStatusChangeListener) Sub
+
+	// GetProviderFamilyTransportStatus is the per-family readout of the
+	// provider's platform transports (connect/IPV6.md A4): whether the v4 and
+	// v6 pinned transports exist and their states, and the standby. Never
+	// nil; every state is "unknown" when there is no provider or the device
+	// cannot be reached.
+	GetProviderFamilyTransportStatus() *ProviderFamilyTransportStatus
+
+	// GetExtenderStatus is the extender network of the device's network space
+	// (EXTENDER.md K5): the role, the gossip state, the counts, the event rate
+	// and every known address. It reads the space the DEVICE runs in -- on ios
+	// the packet tunnel extension, whose directory carries the dials that
+	// matter -- so a remote device reads it through the rpc rather than from
+	// its own process. Never nil; empty when there is no extender network to
+	// describe.
+	GetExtenderStatus() *ExtenderStatus
+
+	// rate limited to one callback per second
+	AddExtenderStatusChangeListener(listener ExtenderStatusChangeListener) Sub
 
 	// packet stats
 

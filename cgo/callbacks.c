@@ -121,6 +121,10 @@ void urnet_invoke_claim_network_name(urnet_claim_network_name_cb cb, void* user_
 	cb(user_data, result_json, err_param);
 }
 
+void urnet_invoke_client_events_send(urnet_client_events_send_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
+}
+
 void urnet_invoke_commit(urnet_commit_cb cb, void* user_data, bool success) {
 	cb(user_data, success);
 }
@@ -183,6 +187,18 @@ void urnet_invoke_device_set_name(urnet_device_set_name_cb cb, void* user_data, 
 
 void urnet_invoke_dns_resolver_settings_change(urnet_dns_resolver_settings_change_cb cb, void* user_data, const char* dns_resolver_settings_json) {
 	cb(user_data, dns_resolver_settings_json);
+}
+
+void urnet_invoke_extender_provide_status_change(urnet_extender_provide_status_change_cb cb, void* user_data, const char* status_json) {
+	cb(user_data, status_json);
+}
+
+void urnet_invoke_extender_status_change(urnet_extender_status_change_cb cb, void* user_data, const char* status_json) {
+	cb(user_data, status_json);
+}
+
+void urnet_invoke_extender_view_controller(urnet_extender_view_controller_cb cb, void* user_data, const char* status_json) {
+	cb(user_data, status_json);
 }
 
 void urnet_invoke_filtered_locations(urnet_filtered_locations_cb cb, void* user_data, const char* locations_json, const char* state) {
@@ -321,6 +337,10 @@ void urnet_invoke_local_override_app_ids(urnet_local_override_app_ids_cb cb, voi
 	cb(user_data);
 }
 
+void urnet_invoke_local_state_save(urnet_local_state_save_cb cb, void* user_data, uint64_t result) {
+	cb(user_data, result);
+}
+
 void urnet_invoke_network_block_location(urnet_network_block_location_cb cb, void* user_data, const char* result_json, const char* err_param) {
 	cb(user_data, result_json, err_param);
 }
@@ -375,6 +395,18 @@ void urnet_invoke_network_user_update_success(urnet_network_user_update_success_
 
 void urnet_invoke_offline_change(urnet_offline_change_cb cb, void* user_data, bool offline, bool vpn_interface_while_offline) {
 	cb(user_data, offline, vpn_interface_while_offline);
+}
+
+void urnet_invoke_onboarding_click(urnet_onboarding_click_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
+}
+
+void urnet_invoke_onboarding_feedback_token(urnet_onboarding_feedback_token_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
+}
+
+void urnet_invoke_onboarding_offer_issue(urnet_onboarding_offer_issue_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
 }
 
 void urnet_invoke_packet_stats_change(urnet_packet_stats_change_cb cb, void* user_data, const char* packet_stats_json) {
@@ -599,6 +631,22 @@ void urnet_invoke_stripe_create_customer_portal(urnet_stripe_create_customer_por
 
 void urnet_invoke_stripe_payment_intent(urnet_stripe_payment_intent_cb cb, void* user_data, const char* result_json, const char* err_param) {
 	cb(user_data, result_json, err_param);
+}
+
+void urnet_invoke_stripe_payment_sheet(urnet_stripe_payment_sheet_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
+}
+
+void urnet_invoke_stripe_prices(urnet_stripe_prices_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
+}
+
+void urnet_invoke_subprotocol(urnet_subprotocol_cb cb, void* user_data, int64_t subprotocol_id, const char* source_client_id, const uint8_t* message_bytes, int32_t message_bytes_len) {
+	cb(user_data, subprotocol_id, source_client_id, message_bytes, message_bytes_len);
+}
+
+void urnet_invoke_subprotocols_query(urnet_subprotocols_query_cb cb, void* user_data, const char* subprotocol_ids_json, bool ok_param) {
+	cb(user_data, subprotocol_ids_json, ok_param);
 }
 
 void urnet_invoke_subscription_balance(urnet_subscription_balance_cb cb, void* user_data, const char* result_json, const char* err_param) {

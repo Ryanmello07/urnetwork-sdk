@@ -18,9 +18,13 @@ export interface NetworkSpaceValues {
   sso_google?: boolean;
   api_url?: string;
   platform_url?: string;
+  alt_url?: string;
   sn_chain?: SnChainSettings | null;
   net_extender?: NetExtender | null;
-  net_extender_auto_configure?: NetExtenderAutoConfigure | null;
+  extender_dns_name?: string;
+  gossip_url?: string;
+  extender_root_public_keys?: string[];
+  extender_hosts?: string[];
 }
 
 export interface ExportNetworkSpace {
@@ -31,11 +35,6 @@ export interface ExportNetworkSpace {
 export interface NetExtender {
   ip: string;
   secret: string;
-}
-
-export interface NetExtenderAutoConfigure {
-  dns_ip?: string;
-  extender_hostname?: string;
 }
 
 export interface ProxyAuthResult {
@@ -65,6 +64,7 @@ export interface ApiError {
 export interface GetPointsLeaderboardArgs {
   sort: string;
   cursor?: string;
+  seek_rank?: number;
   limit?: number;
 }
 
@@ -80,6 +80,7 @@ export interface PointsLeaderboardRow {
   rank_points: number;
   rank_blocks: number;
   rank_streak: number;
+  position: number;
   display_name?: string;
   total_points_text?: string;
   blocks_with_points_text?: string;
@@ -93,16 +94,26 @@ export interface PointsLeaderboardRow {
 export interface PointsLeaderboardResult {
   rows: PointsLeaderboardRow[] | null;
   next_cursor?: string;
+  prev_cursor?: string;
   restart?: boolean;
   total_ranked: number;
   snapshot_time?: string | null;
   latest_epoch: number;
+  epoch_metrics_available: boolean;
   me?: PointsLeaderboardRow & { points_leaderboard_public: boolean } | null;
   error?: PointsLeaderboardError | null;
 }
 
 export interface PointsLeaderboardError {
   message: string;
+}
+
+export interface PointsLeaderboardScrollLabelParts {
+  rank: number;
+  total: number;
+  rank_text: string;
+  tier: number;
+  tier_percent: number;
 }
 
 export interface SetPointsLeaderboardPublicArgs {
@@ -196,6 +207,142 @@ export interface NetworkCreateResult {
   error?: NetworkCreateResultError | null;
 }
 
+export interface PriceTier {
+  name: string;
+  yearly_usd: number;
+  monthly_usd: number;
+  currency: string;
+  source: string;
+  estimate: boolean;
+}
+
+export interface OnboardingOffer {
+  issued_at: string;
+  expires_at: string;
+  percent_off: number;
+  months_free: number;
+  first_year_usd: number;
+  regular_year_usd: number;
+  tier: string;
+  currency: string;
+  state: string;
+  apple_offer_code?: string;
+  play_offer_tag?: string;
+  stripe_coupon_id?: string;
+  redeemed_at?: string;
+  store?: string;
+}
+
+export interface ExperimentAssignment {
+  surface: string;
+  experiment_id: string;
+  variant: string;
+}
+
+export interface OnboardingError {
+  message: string;
+}
+
+export interface OnboardingOfferIssueArgs {
+  surface?: string;
+  storefront_country?: string;
+}
+
+export interface OnboardingOfferIssueResult {
+  offer?: OnboardingOffer | null;
+  created: boolean;
+  error?: OnboardingError | null;
+}
+
+export interface ClientEvent {
+  name: string;
+  at?: string;
+  platform?: string;
+  app_version?: string;
+  locale?: string;
+  session?: string;
+}
+
+export interface ClientEventRejection {
+  index: number;
+  message: string;
+}
+
+export interface ClientEventsSendArgs {
+  events: ClientEvent[] | null;
+}
+
+export interface ClientEventsSendResult {
+  accepted: number;
+  rejected?: ClientEventRejection[] | null;
+}
+
+export interface StripePaymentSheetArgs {
+  plan: string;
+  storefront_country?: string;
+  stripe_version?: string;
+}
+
+export interface StripePaymentSheetResult {
+  customer_id?: string;
+  ephemeral_key_secret?: string;
+  setup_intent_client_secret?: string;
+  payment_intent_client_secret?: string;
+  intent_type?: string;
+  subscription_id?: string;
+  publishable_key?: string;
+  tier?: string;
+  currency?: string;
+  plan?: string;
+  amount_first_period_usd: number;
+  regular_period_usd: number;
+  trial_days: number;
+  trial_end_at?: string;
+  offer_applied: boolean;
+  error?: OnboardingError | null;
+}
+
+export interface StripePricesResult {
+  tier: string;
+  currency: string;
+  yearly_price_id: string;
+  monthly_price_id: string;
+  yearly_usd: number;
+  monthly_usd: number;
+  publishable_key: string;
+  onboarding_coupon_id?: string;
+  offer_eligible: boolean;
+  error?: OnboardingError | null;
+}
+
+export interface OnboardingClickArgs {
+  token: string;
+}
+
+export interface OnboardingClickResult {
+  ok: boolean;
+  step?: string;
+  destination?: string;
+  error?: string;
+}
+
+export interface OnboardingFeedbackTokenResult {
+  ok: boolean;
+  step?: string;
+  rating?: number;
+  reason?: string;
+  error?: string;
+}
+
+export interface PriceEquivalent {
+  monthly_equivalent: number;
+  monthly_equivalent_minor: number;
+  show_equivalent: boolean;
+  saving_percent: number;
+  yearly_minor: number;
+  monthly_minor: number;
+}
+
 export interface NetworkCreateResultError {
   message: string;
 }
@@ -262,6 +409,7 @@ export interface AuthCodeLoginResult {
 
 export interface AuthNetworkClientResult {
   by_client_jwt?: string;
+  client_id?: string | null;
   proxy_config_result: ProxyConfigResult | null;
   error?: AuthNetworkClientError | null;
 }
@@ -285,6 +433,8 @@ export interface AuthNetworkClientArgs {
   description: string;
   device_spec: string;
   proxy_config?: ProxyConfig | null;
+  time_zone?: string;
+  locale?: string;
 }
 
 export interface ProxyConfig {
