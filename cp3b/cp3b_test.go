@@ -256,15 +256,32 @@ func assertServerCannotRead(t *testing.T, world *world, groupId []byte, secrets 
 		t.Fatal("the server holds no rows for this group, so this control examined nothing")
 	}
 	t.Logf("the server holds %d rows for this group, and neither string is in any of them", len(result.Records))
+	searched := 0
 	for _, row := range result.Records {
+		columns := map[string][]byte{
+			"ct_head":           row.CtHead,
+			"ct_body":           row.CtBody,
+			"server_attachment": row.ServerAttachment,
+			"body_hash":         row.BodyHash,
+			"sender_handle":     row.SenderHandle,
+		}
+		// THE CONTROL ON THE CONTROL, and it was missing: every clause below is a
+		// bytes.Contains that must NOT match, and a search over five fields that are empty,
+		// or a Contains that never matches anything, passes all of them in silence. So each
+		// non-empty column is first searched for a needle that IS in it -- its own first four
+		// octets -- and the column is COUNTED. A build that renamed these fields, or that
+		// answered rows with nothing in them, fails here instead of passing the negatives.
+		for name, column := range columns {
+			if len(column) < 4 {
+				continue
+			}
+			if !bytes.Contains(column, column[:4]) {
+				t.Fatalf("the search over the server's %s column cannot find a needle that is in it, so the clauses below prove nothing", name)
+			}
+			searched += 1
+		}
 		for _, secret := range secrets {
-			for name, column := range map[string][]byte{
-				"ct_head":           row.CtHead,
-				"ct_body":           row.CtBody,
-				"server_attachment": row.ServerAttachment,
-				"body_hash":         row.BodyHash,
-				"sender_handle":     row.SenderHandle,
-			} {
+			for name, column := range columns {
 				if bytes.Contains(column, []byte(secret)) {
 					t.Errorf("the server's %s column of record %d carries %q in the clear",
 						name, row.StreamIndex, secret)
@@ -272,4 +289,8 @@ func assertServerCannotRead(t *testing.T, world *world, groupId []byte, secrets 
 			}
 		}
 	}
+	if searched == 0 {
+		t.Fatal("every column of every row is shorter than four octets, so this control searched nothing")
+	}
+	t.Logf("%d non-empty octet columns were searched, each first proven searchable against itself", searched)
 }

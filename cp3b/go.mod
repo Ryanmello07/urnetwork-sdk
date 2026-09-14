@@ -56,6 +56,6 @@ replace github.com/urnetwork/glog => ../../glog
 
 replace github.com/urnetwork/goidenticons => ../../goidenticons
 
-replace github.com/urnetwork/message-server => ../../msgrepo
+replace github.com/urnetwork/message-server => ../../message-server
 
 replace github.com/urnetwork/sdk => ../

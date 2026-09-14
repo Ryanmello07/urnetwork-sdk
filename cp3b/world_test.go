@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -41,7 +42,32 @@ type world struct {
 
 const worldProtocolVersion = 1
 
+// worldOptions are the two things a case may need the server configured differently for. Both
+// default to the server's own default, so a case that says nothing gets the deployed shape.
+type worldOptions struct {
+	// §4.3.1's `max_records_per_fetch`. A small number here is an ORDINARY OPERATOR SETTING
+	// and not a test seam: the server advertises whatever it is configured with, and a page
+	// truncated by it is what §4.3.4 calls NORMAL. It is how a case reaches the truncation
+	// path without writing 512 messages.
+	maxRecordsPerFetch int
+
+	// What the server ADVERTISES about §4.3.4. This build signs nothing whatever it says here
+	// (msgrepo/api/fetch.go:112), so setting it true is a server that claims to sign and does
+	// not -- which is the downgrade a client must refuse.
+	attestationSupported bool
+
+	// How the fetch RESULT is bent on its way out of the store, and nothing else about the
+	// server. See [shapedStore]: the group is still founded, opened and written through the
+	// real §6.1 transaction.
+	fetchShape fetchShape
+}
+
 func newWorld(t *testing.T) *world {
+	t.Helper()
+	return newWorldWith(t, worldOptions{})
+}
+
+func newWorldWith(t *testing.T, options worldOptions) *world {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -59,21 +85,30 @@ func newWorld(t *testing.T) *world {
 		t.Fatalf("peer.NewChecks: %v", err)
 	}
 	memory := store.NewMemoryStore(store.DefaultLimits())
+	var backing store.Store = memory
+	if options.fetchShape != fetchNormal {
+		backing = &shapedStore{Store: memory, shape: options.fetchShape}
+	}
 	handler, err := api.New(api.Config{
-		Store:       memory,
-		KnownGroups: api.NewMemoryKnownGroups(),
-		Front:       checks,
+		Store:              backing,
+		KnownGroups:        api.NewMemoryKnownGroups(),
+		Front:              checks,
+		MaxRecordsPerFetch: options.maxRecordsPerFetch,
 	})
 	if err != nil {
 		cancel()
 		t.Fatalf("api.New: %v", err)
 	}
 	served, err := peer.New(peer.Config{
-		Client:          serverClient,
-		Handler:         handler,
-		Connections:     connections,
-		Checks:          checks,
-		Capabilities:    &protocol.Capabilities{MaxRequestBytes: peer.DefaultMaxRequestBytes},
+		Client:      serverClient,
+		Handler:     handler,
+		Connections: connections,
+		Checks:      checks,
+		Capabilities: &protocol.Capabilities{
+			MaxRequestBytes:      peer.DefaultMaxRequestBytes,
+			MaxRecordsPerFetch:   uint32(options.maxRecordsPerFetch),
+			AttestationSupported: options.attestationSupported,
+		},
 		ProtocolVersion: worldProtocolVersion,
 		ServerId:        bytes.Repeat([]byte{0x5A}, 16),
 	})
@@ -179,4 +214,98 @@ func newGroupId(t *testing.T) []byte {
 		t.Fatalf("drawing a group id: %v", err)
 	}
 	return groupId
+}
+
+// ── a device that can be killed and started again ────────────────────────────────────────────
+
+// persona is one device together with the TWO DIRECTORIES that are the only thing that survives
+// its death: the durable stream store the reserver allocates out of, and the durable MLS state
+// store S2-14 added.
+//
+// It exists so that a restart can be written as what it is -- everything in memory dropped, the
+// same two directories reopened -- rather than as a device that keeps a pointer to something the
+// previous run held. Nothing crosses [world.restart] except the two path strings and the name.
+type persona struct {
+	name      string
+	stateDir  string
+	streamDir string
+
+	client      *connect.Client
+	transport   *sdk.MessageTransport
+	streamStore *sdk.StreamStore
+	stateStore  *urmessage.DurableStateStore
+	device      *urmessage.Device
+
+	dead bool
+}
+
+// durablePersona stands one up over two directories of the caller's choosing.
+func (self *world) durablePersona(t *testing.T, name string, stateDir string, streamDir string) *persona {
+	t.Helper()
+	client := self.connectClient(t)
+	transport := self.transport(t, client)
+	streamStore, err := sdk.OpenStreamStore(streamDir)
+	if err != nil {
+		t.Fatalf("%s: sdk.OpenStreamStore(%s): %v", name, streamDir, err)
+	}
+	stateStore, err := urmessage.OpenDurableStateStore(stateDir)
+	if err != nil {
+		streamStore.Close()
+		t.Fatalf("%s: urmessage.OpenDurableStateStore(%s): %v", name, stateDir, err)
+	}
+	device, err := urmessage.NewDevice(urmessage.DeviceConfig{
+		Transport:  transport,
+		Reserver:   sdk.NewStreamIndexReserver(streamStore),
+		StateStore: stateStore,
+	})
+	if err != nil {
+		stateStore.Close()
+		streamStore.Close()
+		t.Fatalf("%s: urmessage.NewDevice: %v", name, err)
+	}
+	current := &persona{
+		name: name, stateDir: stateDir, streamDir: streamDir,
+		client: client, transport: transport,
+		streamStore: streamStore, stateStore: stateStore, device: device,
+	}
+	t.Cleanup(current.kill)
+	return current
+}
+
+// newPersona is durablePersona over two fresh directories.
+func (self *world) newPersona(t *testing.T, name string) *persona {
+	t.Helper()
+	root := t.TempDir()
+	return self.durablePersona(t, name,
+		filepath.Join(root, name, "state"), filepath.Join(root, name, "stream"))
+}
+
+// kill drops everything this device holds in memory and releases both single-writer exclusions.
+//
+// IT IS THE WHOLE OF WHAT "THE USER CLOSED THE APP" MEANS HERE. Both stores are closed, so the
+// next opener has to acquire the exclusions again -- which is also what says the previous run
+// really let go of them rather than the test merely forgetting about it.
+func (self *persona) kill() {
+	if self.dead {
+		return
+	}
+	self.dead = true
+	self.device.Close()
+	self.stateStore.Close()
+	self.streamStore.Close()
+	self.transport.Close()
+	self.client.Close()
+}
+
+// restart kills this device and opens a NEW one over the same two directories.
+//
+// THE ONLY THING THAT CROSSES IS THE DISK. The returned persona has a new connect client, a new
+// transport, a new crypto provider, a new engine and a new device; it shares no pointer with the
+// one that was killed. A restore that worked because something stayed in memory could not pass
+// through this function.
+func (self *world) restart(t *testing.T, previous *persona) *persona {
+	t.Helper()
+	name, stateDir, streamDir := previous.name, previous.stateDir, previous.streamDir
+	previous.kill()
+	return self.durablePersona(t, name, stateDir, streamDir)
 }

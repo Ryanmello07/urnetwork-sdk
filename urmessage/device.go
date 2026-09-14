@@ -3,6 +3,7 @@ package urmessage
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -76,6 +77,17 @@ type Device struct {
 	engine    messagegroup.GroupEngine
 	leafKeys  []byte
 
+	// The store the engine was built over, HELD BESIDE the engine because a restore needs it
+	// directly: [mls.LoadGroup] takes a *mls.GroupConfig and messagegroup.GroupEngine has no
+	// method that opens a persisted group. That is J1-8; see [restoredHandle].
+	stateStore mls.StateStore
+
+	// This device's MLS signature private key. mls clones it into every group it founds or
+	// joins, and this copy exists for one reason: [mls.LoadGroup] takes the signer as an
+	// argument and NOT out of the persisted blob -- deliberately, because a signature key is
+	// the device across every group and an epoch state is one group at one epoch.
+	signer mls.SignaturePrivateKey
+
 	// The credential identity this device founds and joins under: its signer's public half. See
 	// [NewDevice] for why it is that value and not another.
 	identityPub []byte
@@ -86,11 +98,29 @@ type Device struct {
 	groups map[string]*Group
 }
 
-// NewDevice draws this device's identity and opens its MLS engine.
+// NewDevice opens this device's identity and its MLS engine.
 //
-// THE IDENTITY IS DRAWN HERE AND IS NOT PERSISTED. Recovery and multi-device are out of scope for
-// the alpha, so a device that restarts is a new device: it has a new signature key pair, it is not
-// the leaf any group remembers, and it re-joins rather than resumes.
+// THE IDENTITY IS PERSISTED WHEN THE STORE CAN HOLD ONE, AND DRAWN FRESH WHEN IT CANNOT, and which
+// of the two happened is a fact about the store the caller supplied rather than a mode.
+//
+//   - Over a [DeviceStore] -- which [OpenDurableStateStore] is -- the signature key pair and the
+//     leaf keys body are read back if the directory holds them and are minted and written once if
+//     it does not. That is what makes a restart a RESTORE: [mls.LoadGroup] verifies the restored
+//     group's own leaf against the key handed in, so a device with a new signature key is refused
+//     by every group it was in, and a durable store would be write-only without this.
+//   - Over anything else -- [MemoryStateStore], or a caller's own map -- a fresh pair is drawn
+//     every process, exactly as before this paragraph existed. A device that restarts is then a
+//     new device: it is not the leaf any group remembers, and it re-joins rather than resumes.
+//
+// THE X-WING LEAF PRIVATE KEY IS STILL DROPPED, on both paths, and that is not new and is not
+// fixed here. [messagegroup.XwingGenerateKey] draws a pair, the PUBLIC half is encoded into the
+// leaf keys extension, and the private half is unreferenced the moment it is drawn -- which was
+// already true before any store existed. Nothing in the alpha opens a device wrap (6.1's wraps
+// carry no key material; see [alphaWrapBody]), so nothing needs it today. What it means is
+// concrete and is worth writing down: this device can never open an X-Wing device wrap addressed
+// to the leaf it publishes, so the day 6.1's fan-out actually carries an epoch secret, persisting
+// the leaf keys body without the key under it leaves a device advertising a wrap target it cannot
+// read. FILED AS S2-26: the device X-Wing leaf key is drawn and dropped.
 func NewDevice(config DeviceConfig) (*Device, error) {
 	if config.Transport == nil {
 		return nil, ErrNoTransport
@@ -115,9 +145,9 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("urmessage: the mls crypto provider: %w", err)
 	}
-	signer, signerPub, err := crypto.SignatureKeyPair()
+	signer, signerPub, leafKeys, err := deviceIdentity(crypto, stateStore, random)
 	if err != nil {
-		return nil, fmt.Errorf("urmessage: this device's signature key pair: %w", err)
+		return nil, err
 	}
 	// THE CREDENTIAL IDENTITY IS THE SIGNER'S PUBLIC HALF, which is a decision and not an
 	// accident. The alpha has no identity system at all -- contact cards and the rendezvous are
@@ -126,19 +156,8 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 	// What a member reads off MemberAt is therefore exactly "the leaf that signs", and MG-1's
 	// obligation -- that a joiner must decide whether it expected THAT identity -- is the
 	// caller's and is not met here.
-	xwing, err := messagegroup.XwingGenerateKey(random)
-	if err != nil {
-		return nil, fmt.Errorf("urmessage: this device's x-wing key: %w", err)
-	}
-	leafKeys, err := (&mls.LeafKeysExtension{
-		AlgId:          mls.AlgIdXwing,
-		DeviceXwingPub: xwing.Public().Bytes(),
-	}).Encode()
-	if err != nil {
-		return nil, fmt.Errorf("urmessage: this device's leaf keys extension: %w", err)
-	}
 	engine, err := messagegroup.NewConnectMlsEngine(crypto, stateStore, signer,
-		mls.BasicCredential(signerPub), leafKeys.ExtensionData)
+		mls.BasicCredential(signerPub), leafKeys)
 	if err != nil {
 		return nil, fmt.Errorf("urmessage: the mls engine: %w", err)
 	}
@@ -147,12 +166,64 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 		reserver:    config.Reserver,
 		crypto:      crypto,
 		engine:      engine,
-		leafKeys:    leafKeys.ExtensionData,
+		leafKeys:    leafKeys,
+		stateStore:  stateStore,
+		signer:      append(mls.SignaturePrivateKey(nil), signer...),
 		identityPub: append([]byte(nil), signerPub...),
 		nowMs:       nowMs,
 		random:      random,
 		groups:      map[string]*Group{},
 	}, nil
+}
+
+// deviceIdentity is the signature key pair and the leaf keys body this device runs under: read
+// back from a durable store when there is one, minted and written once when there is not.
+//
+// THE MINT-AND-WRITE IS ONE STEP AND ITS FAILURE IS THE CALL'S. A device that minted an identity,
+// failed to write it and ran anyway would found groups under a key the next process cannot
+// produce -- which is the same state as no store at all, reached by a path nobody would look at
+// again.
+//
+// A STORE THAT REFUSES FOR ANY OTHER REASON IS NOT TREATED AS AN EMPTY ONE. Only
+// [ErrNoDeviceIdentity] falls through to the mint; a disk that would not answer is returned,
+// because minting over it would silently replace an identity that is still on the disk and leave
+// every group this device is in unreachable.
+func deviceIdentity(crypto mls.CryptoProvider, stateStore mls.StateStore, random io.Reader) (
+	mls.SignaturePrivateKey, mls.SignaturePublicKey, []byte, error) {
+
+	store, durable := stateStore.(DeviceStore)
+	if durable {
+		pub, priv, leafKeys, err := store.GetDeviceIdentity()
+		switch {
+		case err == nil:
+			return mls.SignaturePrivateKey(priv), mls.SignaturePublicKey(pub), leafKeys, nil
+		case errors.Is(err, ErrNoDeviceIdentity):
+			// the ordinary state of a fresh directory: fall through and mint.
+		default:
+			return nil, nil, nil, fmt.Errorf("urmessage: this device's persisted identity: %w", err)
+		}
+	}
+	signer, signerPub, err := crypto.SignatureKeyPair()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("urmessage: this device's signature key pair: %w", err)
+	}
+	xwing, err := messagegroup.XwingGenerateKey(random)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("urmessage: this device's x-wing key: %w", err)
+	}
+	leafKeys, err := (&mls.LeafKeysExtension{
+		AlgId:          mls.AlgIdXwing,
+		DeviceXwingPub: xwing.Public().Bytes(),
+	}).Encode()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("urmessage: this device's leaf keys extension: %w", err)
+	}
+	if durable {
+		if err := store.PutDeviceIdentity(signerPub, signer, leafKeys.ExtensionData); err != nil {
+			return nil, nil, nil, fmt.Errorf("urmessage: this device's identity could not be persisted: %w", err)
+		}
+	}
+	return signer, signerPub, leafKeys.ExtensionData, nil
 }
 
 // Connect performs 4.3.1's Hello and rebinds every live group onto the nonce it issued.

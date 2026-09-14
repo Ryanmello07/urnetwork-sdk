@@ -41,6 +41,19 @@ const alphaWrapBody = "urmessage/v1 alpha epoch wrap: no key material, the epoch
 // The body of the marker that closes 6.1's fan-out.
 const alphaEpochCompleteBody = "urmessage/v1 alpha epoch complete"
 
+// How many 4.3.4 pages one [Group.Receive] will walk before it stops and SAYS it stopped.
+//
+// It is a bound and not a limit on history: at the advertised default of 512 records per fetch
+// this is more records than the alpha can produce, and reaching it means either a group with an
+// enormous backlog or a server that is paging a client in circles. Either way the answer is the
+// same and it is the whole reason the constant exists: [Group.Receive] returns what it read AND
+// [ErrFetchIncomplete], so "that is all there is" and "I stopped early" are two readings.
+//
+// A LOOP WITH NO BOUND WOULD BE THE WORSE FAILURE. A server that answered complete=false forever
+// would hang the call rather than answer it, and a UI holding that call would look like a network
+// problem instead of like a server problem.
+const maxFetchPages = 1024
+
 // Message is one line of text that crossed the group.
 type Message struct {
 	// The server's own id for the record: per group, gapless, and the cursor a later fetch
@@ -90,6 +103,18 @@ type Stats struct {
 	// rather than invisible.
 	Submitted uint64
 	Rebound   uint64
+
+	// Fetch PAGES the server answered, across every [Group.Receive]. It is here because one
+	// Receive is not one page: 4.3.4 truncates a page by `limit` or by `max_response_bytes`
+	// and calls both NORMAL, so a conversation longer than the server's page is several
+	// requests. A number bigger than the Receive count is the ordinary reading of a backlog.
+	Pages uint64
+
+	// Fetch pages this build could NOT verify the 4.3.4 attestation of, which today is every
+	// page the deployed server answers. It is a counter rather than a silence because the
+	// thing it measures -- a server that OMITS records -- is the one thing the AEAD does not
+	// catch. See [Group.Receive] for what is and is not checked, and what closing it needs.
+	Unattested uint64
 }
 
 // trackedKey is one receiver ladder this group has installed. A second TrackSender over a live
@@ -197,6 +222,12 @@ func (self *Device) CreateGroup(ctx context.Context, groupId []byte) (*Group, er
 		tracked:        map[trackedKey]bool{},
 	}
 	self.hold(group)
+	// NOTHING IS PERSISTED HERE AND THAT IS DELIBERATE. A group at epoch zero with no second
+	// member cannot be restored into anything a caller can use -- [Group.AddMember] needs the
+	// founding session, which is not persisted, and [Group.Open] needs the commit AddMember
+	// makes -- so a record written here would describe a group that comes back dead. mls has
+	// already written its own epoch-zero state by now; [DurableStateStore.GroupRecords] skips a
+	// group directory with no record in it for exactly this state, and says so.
 	return group, nil
 }
 
@@ -246,6 +277,20 @@ func (self *Device) Join(ctx context.Context, invite *Invite) (*Group, error) {
 		// has not, every send below is refused by the server and the refusal is returned.
 		opened:  true,
 		tracked: map[trackedKey]bool{},
+	}
+	if err := self.persistGroup(&GroupRecord{
+		GroupId:        group.id,
+		PqSecret:       group.pqSecret,
+		GroupHandleKey: group.groupHandleKey,
+		Epoch:          group.epoch,
+		Opened:         true,
+	}); err != nil {
+		// the session first and the handle after it, which is [Group.Close]'s own order: the
+		// session owns the loop that the handle is reached through.
+		session.Close()
+		handle.Close()
+		return nil, fmt.Errorf(
+			"urmessage: this group joined and its record could not be persisted, so a restart would not come back into it: %w", err)
 	}
 	self.hold(group)
 	return group, nil
@@ -307,6 +352,20 @@ func (self *Group) AddMember(keyPackage []byte) (*Invite, error) {
 	self.sessionBound = nonceEpoch
 	self.epoch = self.handle.Epoch()
 	self.commit = append([]byte(nil), commit...)
+	// NOTHING IS PERSISTED HERE EITHER, for CreateGroup's reason carried one step further, and
+	// it is written down because a record here LOOKS obviously right and is not.
+	//
+	// The handle is now at the epoch the commit opened and mls has persisted that epoch's state
+	// inside MergePendingCommit above, so a restore could rebuild an MLS member. What it could
+	// not rebuild is a group anybody can USE: [Group.Open] needs the epoch-zero founding session
+	// to self-certify the founding commit, that session is not persisted, and a restored group
+	// therefore answers ErrNoMemberAdded to Open and ErrGroupNotOpen to Send, for ever. A record
+	// written here would make "a founder that died before Open" come back as a conversation the
+	// user can see and cannot ever send in.
+	//
+	// MEASURED rather than reasoned: a record written here was deleted and the whole suite
+	// stayed green, because [Group.Open] writes the founder's record and [Device.Join] writes
+	// the joiner's, and those are the two moments a group becomes usable.
 	return &Invite{
 		GroupId:        append([]byte(nil), self.id...),
 		Welcome:        append([]byte(nil), welcome...),
@@ -449,6 +508,18 @@ func (self *Group) Open(ctx context.Context) error {
 	}
 
 	self.opened = true
+	// The opened bit, so that a restarted device knows the group is publishable rather than
+	// finding out at its first send. The error says what actually happened: the group IS open
+	// on the server, and it is the RECORD that did not land.
+	if err := self.device.persistGroup(&GroupRecord{
+		GroupId:        self.id,
+		PqSecret:       self.pqSecret,
+		GroupHandleKey: self.groupHandleKey,
+		Epoch:          self.epoch,
+		Opened:         true,
+	}); err != nil {
+		return fmt.Errorf("urmessage: this group is open on the server and its record could not be persisted, so a restart would refuse to send in it: %w", err)
+	}
 	return nil
 }
 
@@ -610,10 +681,67 @@ func (self *Group) sendSealedLocked(ctx context.Context, session *messagegroup.G
 // Receive fetches everything the server has for this group since the last call, opens what is a
 // message, and answers the messages in record order.
 //
+// IT PAGES UNTIL THE SERVER SAYS complete, AND WHEN IT CANNOT IT SAYS SO. 4.3.4's FetchResponse
+// carries `complete` -- "false when truncated by limit OR by max_response_bytes; both are NORMAL"
+// -- `next_record_id` and `high_water_record_id`, and an earlier build of this method read none of
+// the three. One page then read as the whole history with a nil error, which is the worst failure
+// an alpha can have, because a user cannot tell half a conversation from a quiet one. So:
+//
+//   - a truncated page is followed by the next one, resuming from `next_record_id`, until the
+//     server answers complete;
+//   - a server that answers incomplete and advances NO cursor is refused with
+//     [ErrFetchNoProgress] rather than looped on forever;
+//   - and reaching [maxFetchPages] returns the messages read so far TOGETHER WITH
+//     [ErrFetchIncomplete], so a caller that ignores the error still sees messages and a caller
+//     that reads it knows there are more.
+//
 // WHAT IT SKIPS IS COUNTED RATHER THAN DROPPED. 6.1's ceremony, this device's own records and
 // classes this build does not open are each their own counter on [Group.Stats]; a record from a
 // member that DID NOT OPEN is counted too AND returns an error, because that is the one case where
 // a message was sent and this device cannot show it.
+//
+// ---------------------------------------------------------------------------------------------
+// 4.3.4'S FETCH ATTESTATION: WHAT IS CHECKED, WHAT IS NOT, AND WHY NOT.
+// ---------------------------------------------------------------------------------------------
+//
+// The attestation is the server's Ed25519 signature over what it returned -- since, until, the
+// record ids, the high water, its own time and its own id. The AEAD catches a server that TAMPERS;
+// nothing but this catches a server that OMITS, so a page with records missing from it is
+// invisible to a client that ignores it.
+//
+// TWO OF THE THREE CHECKS ARE MADE HERE AND THEY NEED NO KEY.
+//
+//  1. THE DOWNGRADE. If the server ADVERTISED `capabilities.attestation_supported` and then
+//     answered a page with no attestation, that is refused with [ErrFetchAttestation]. A server
+//     that can sign and did not is not the same server as one that never could.
+//  2. THE DESCRIPTION. If an attestation IS present, its group_id, its since, its record id
+//     vector and its high water are compared against the page it arrived with. An attestation
+//     that describes a DIFFERENT page -- one replayed from another fetch, or one that lists
+//     records this page does not carry -- is refused. This is what turns the value from
+//     decoration into a statement about these records.
+//
+// THE THIRD -- THE SIGNATURE ITSELF -- IS NOT VERIFIED, AND THAT IS STATED RATHER THAN PAPERED
+// OVER. Verifying it needs the fleet's public key, and 4.3.1 says where that comes from:
+// `HelloResponse.server_keys`, each certified by a FLEET ROOT key the client holds compiled in
+// (Spec A section 7.6). MEASURED against the server this alpha is deployed from, at msgrepo's
+// committed HEAD:
+//
+//	msgrepo/peer/peer.go:392  -- "HelloResponse.server_keys and HelloResponse.kt_gossip ... This
+//	                             process holds no fleet key and observes no log" (declared NotBuilt)
+//	msgrepo/api/api.go:497    -- "FetchAttestation: an Ed25519 signature by the fleet key over
+//	                             nine response fields, and this process holds no fleet key"
+//	msgrepo/api/fetch.go:112  -- "4.3.4's FetchAttestation is absent, not empty"
+//
+// So the deployed server signs nothing, advertises `attestation_supported` false, and publishes no
+// key chain; and there is no compiled-in fleet root anywhere in this workspace to chain one to.
+// VERIFYING AGAINST A KEY THE SERVER ITSELF HANDED OVER WOULD BE WORSE THAN NOT VERIFYING: it
+// would read as verified and would authenticate the server to itself. So it is not done, it is
+// COUNTED -- [Stats.Unattested] moves once per page whose signature this build could not verify,
+// which today is every page -- and the gap is filed. **S2-27: a client cannot verify a fetch
+// attestation until the fleet ships a key chain and this build ships a root to verify it against.
+// Until it does, a message server that silently omits records from a page is undetectable by this
+// client.** It is not this package's to close: the key custody is Spec B section 9.1's, through
+// `kt`, which is the owner msgrepo's own NotBuilt entry names.
 func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
@@ -639,26 +767,6 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	request := &protocol.FetchRequest{
-		GroupId:       self.id,
-		SinceRecordId: self.cursor,
-		ReadEpoch:     self.epoch,
-	}
-	if err := authorizeFetch(request, readKey, nonce); err != nil {
-		return nil, err
-	}
-	response, err := self.device.transport.Call(ctx, request)
-	if err != nil {
-		return nil, fmt.Errorf("urmessage: Fetch: %w", err)
-	}
-	if response.GetReason() != protocol.Reason_REASON_OK {
-		return nil, fmt.Errorf("%w: %v", ErrFetchRefused, response.GetReason())
-	}
-	fetched := response.GetFetch()
-	if fetched == nil {
-		return nil, fmt.Errorf("%w: the response carried no fetch arm", ErrFetchRefused)
-	}
-
 	own, err := self.session.SenderHandle()
 	if err != nil {
 		return nil, fmt.Errorf("urmessage: this device's sender handle: %w", err)
@@ -670,6 +778,68 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 
 	opened := []*Message{}
 	var firstFailure error
+	for page := 0; ; page += 1 {
+		if maxFetchPages <= page {
+			return opened, fmt.Errorf("%w: %d pages, cursor at record %d", ErrFetchIncomplete, page, self.cursor)
+		}
+		since := self.cursor
+		request := &protocol.FetchRequest{
+			GroupId:       self.id,
+			SinceRecordId: since,
+			ReadEpoch:     self.epoch,
+		}
+		if err := authorizeFetch(request, readKey, nonce); err != nil {
+			return opened, err
+		}
+		response, err := self.device.transport.Call(ctx, request)
+		if err != nil {
+			return opened, fmt.Errorf("urmessage: Fetch: %w", err)
+		}
+		if response.GetReason() != protocol.Reason_REASON_OK {
+			return opened, fmt.Errorf("%w: %v", ErrFetchRefused, response.GetReason())
+		}
+		fetched := response.GetFetch()
+		if fetched == nil {
+			return opened, fmt.Errorf("%w: the response carried no fetch arm", ErrFetchRefused)
+		}
+		self.stats.Pages += 1
+		if err := self.checkAttestationLocked(since, fetched); err != nil {
+			return opened, err
+		}
+		self.openPageLocked(fetched, own, leaves, &opened, &firstFailure)
+		if fetched.GetComplete() {
+			break
+		}
+		// 4.3.4's resume cursor. It is taken as a MAXIMUM against what the rows moved the
+		// cursor to rather than as an assignment: a server that answered a next_record_id
+		// BEHIND the records it just sent would otherwise walk this client backwards over
+		// records it has already opened, forever.
+		if self.cursor < fetched.GetNextRecordId() {
+			self.cursor = fetched.GetNextRecordId()
+		}
+		if self.cursor <= since {
+			return opened, fmt.Errorf("%w: %d records, next_record_id %d, cursor still %d",
+				ErrFetchNoProgress, len(fetched.GetRecords()), fetched.GetNextRecordId(), self.cursor)
+		}
+	}
+	return opened, firstFailure
+}
+
+// openPageLocked walks one page's records: it advances the cursor, counts what it skips, and opens
+// what is a message.
+//
+// It is a method rather than the body of the loop above so that "one page" is a thing with a name
+// -- and so that the paging decisions and the record decisions are not one forty-line block where
+// a `continue` could mean either.
+func (self *Group) openPageLocked(fetched *protocol.FetchResponse, own [16]byte,
+	leaves map[[16]byte]uint32, opened *[]*Message, firstFailure *error) {
+
+	fail := func(err error) {
+		self.stats.FailedOpen += 1
+		if *firstFailure == nil {
+			*firstFailure = err
+		}
+	}
 	for _, row := range fetched.GetRecords() {
 		self.stats.Fetched += 1
 		if self.cursor < row.GetRecordId() {
@@ -677,10 +847,7 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 		}
 		parsed, err := message.ParseRecord(row.GetRecordBytes())
 		if err != nil {
-			self.stats.FailedOpen += 1
-			if firstFailure == nil {
-				firstFailure = fmt.Errorf("%w: record %d does not parse: %w", ErrRecordOpen, row.GetRecordId(), err)
-			}
+			fail(fmt.Errorf("%w: record %d does not parse: %w", ErrRecordOpen, row.GetRecordId(), err))
 			continue
 		}
 		header := &parsed.Header
@@ -698,34 +865,22 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 		}
 		leaf, known := leaves[header.SenderHandle]
 		if !known {
-			self.stats.FailedOpen += 1
-			if firstFailure == nil {
-				firstFailure = fmt.Errorf("%w: record %d names sender_handle %x, which is no leaf of this group at epoch %d",
-					ErrRecordOpen, row.GetRecordId(), header.SenderHandle, self.epoch)
-			}
+			fail(fmt.Errorf("%w: record %d names sender_handle %x, which is no leaf of this group at epoch %d",
+				ErrRecordOpen, row.GetRecordId(), header.SenderHandle, self.epoch))
 			continue
 		}
 		if err := self.trackLocked(leaf, header); err != nil {
-			self.stats.FailedOpen += 1
-			if firstFailure == nil {
-				firstFailure = err
-			}
+			fail(err)
 			continue
 		}
 		headPlain, bodyPlain, err := self.session.OpenRecord(parsed)
 		if err != nil {
-			self.stats.FailedOpen += 1
-			if firstFailure == nil {
-				firstFailure = fmt.Errorf("%w: record %d from leaf %d: %w", ErrRecordOpen, row.GetRecordId(), leaf, err)
-			}
+			fail(fmt.Errorf("%w: record %d from leaf %d: %w", ErrRecordOpen, row.GetRecordId(), leaf, err))
 			continue
 		}
 		sentAtMs, err := decodeHead(headPlain)
 		if err != nil {
-			self.stats.FailedOpen += 1
-			if firstFailure == nil {
-				firstFailure = fmt.Errorf("%w: record %d: %w", ErrRecordOpen, row.GetRecordId(), err)
-			}
+			fail(fmt.Errorf("%w: record %d: %w", ErrRecordOpen, row.GetRecordId(), err))
 			continue
 		}
 		self.stats.Opened += 1
@@ -736,10 +891,57 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 			Text:         string(bodyPlain),
 			SentAtMs:     sentAtMs,
 		}
-		opened = append(opened, received)
+		*opened = append(*opened, received)
 		self.log = append(self.log, received)
 	}
-	return opened, firstFailure
+}
+
+// checkAttestationLocked performs the two halves of 4.3.4 that need no key, and counts the half
+// that does. See [Group.Receive] for the whole of the decision and for S2-27.
+func (self *Group) checkAttestationLocked(since uint64, fetched *protocol.FetchResponse) error {
+	attestation := fetched.GetAttestation()
+	if attestation == nil {
+		// THE DOWNGRADE CHECK, and it reads the server's OWN advertisement rather than a
+		// setting of ours: a server that says it signs and then does not is refused, and a
+		// server that never claimed to is counted.
+		if self.device.transport.Capabilities().GetAttestationSupported() {
+			return fmt.Errorf("%w: this server advertises attestation_supported and answered a page with no attestation",
+				ErrFetchAttestation)
+		}
+		self.stats.Unattested += 1
+		return nil
+	}
+	if !bytes.Equal(attestation.GetGroupId(), self.id) {
+		return fmt.Errorf("%w: it names group %x and this fetch was for %x",
+			ErrFetchAttestation, attestation.GetGroupId(), self.id)
+	}
+	if attestation.GetSinceRecordId() != since {
+		return fmt.Errorf("%w: it names since_record_id %d and this fetch asked from %d",
+			ErrFetchAttestation, attestation.GetSinceRecordId(), since)
+	}
+	if attestation.GetHighWaterRecordId() != fetched.GetHighWaterRecordId() {
+		return fmt.Errorf("%w: it names high_water %d and the response carries %d",
+			ErrFetchAttestation, attestation.GetHighWaterRecordId(), fetched.GetHighWaterRecordId())
+	}
+	attested := attestation.GetRecordIds()
+	records := fetched.GetRecords()
+	if len(attested) != len(records) {
+		return fmt.Errorf("%w: it lists %d record ids and the page carries %d records",
+			ErrFetchAttestation, len(attested), len(records))
+	}
+	for at, record := range records {
+		if attested[at] != record.GetRecordId() {
+			return fmt.Errorf("%w: its record id %d at position %d is not the page's record %d",
+				ErrFetchAttestation, attested[at], at, record.GetRecordId())
+		}
+		if attestation.GetHighWaterRecordId() < record.GetRecordId() {
+			return fmt.Errorf("%w: it names high_water %d and the page carries record %d",
+				ErrFetchAttestation, attestation.GetHighWaterRecordId(), record.GetRecordId())
+		}
+	}
+	// AND THE SIGNATURE IS NOT CHECKED. Counted, never claimed. S2-27.
+	self.stats.Unattested += 1
+	return nil
 }
 
 // trackLocked installs this sender's receiver ladder once and only once.

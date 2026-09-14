@@ -40,4 +40,58 @@ var (
 
 	// The head this package writes, read back as something else.
 	ErrHeadFormat = errors.New("urmessage: this record's head is not one this build wrote")
+
+	// ── the durable state store ───────────────────────────────────────────────────────────
+
+	// The directory could not be opened, read, written or flushed. It is the store's "this
+	// disk is not answering", and it is deliberately NOT the same value as a missing record:
+	// J1-4 is that mls.StateStore gives its callers no way to tell those two apart, and
+	// [Device.Restore] is a caller that must.
+	ErrStateStoreState = errors.New("urmessage: the durable state store could not be read or written")
+
+	// A second store over one directory. It is the one refusal that is about another process
+	// rather than about this one.
+	ErrStateStoreLocked = errors.New("urmessage: this state directory is already held by a single-writer exclusion")
+
+	// A file under a name this store computes that is not a record this build wrote: the wrong
+	// magic, the wrong version, the wrong kind, a checksum that does not match, or a record
+	// whose own key octets are not the key that was asked for.
+	ErrStateStoreFormat = errors.New("urmessage: this is not a state record this build wrote")
+
+	// No such value. It is a sentinel and not a nil: "this device was never in that group" and
+	// "the disk is broken" are two readings a restore has to branch on.
+	ErrStateNotFound = errors.New("urmessage: this state store holds no such value")
+
+	// The store holds no device identity yet, which is the ordinary state of a fresh
+	// directory and is what makes [NewDevice] mint one rather than refuse.
+	ErrNoDeviceIdentity = errors.New("urmessage: this state store holds no device identity")
+
+	// ── restoring ─────────────────────────────────────────────────────────────────────────
+
+	// [Device.Restore] was called on a device whose state store cannot persist an identity or
+	// a group record, so there is nothing to restore FROM. Refused by name rather than
+	// answering an empty slice, which reads exactly like "this device was in no groups".
+	ErrNoDeviceStore = errors.New("urmessage: this device's state store is not durable, so there is nothing to restore; OpenDurableStateStore is the one this module ships")
+
+	// A restored group could not be rebuilt. The cause is carried.
+	ErrRestore = errors.New("urmessage: this group could not be restored from the durable state store")
+
+	// A method on the restored-group handle that this package cannot perform. See
+	// restoredHandle for why the two that are refused are refused, and for J1-8.
+	ErrRestoredHandle = errors.New("urmessage: a restored mls group cannot do this through sdk's own handle; it needs connect's GroupEngine to grow a LoadGroup (J1-8)")
+
+	// ── §4.3.4's fetch attestation, and §4.3.4's pagination ───────────────────────────────
+
+	// The server advertised attestation support and then answered a fetch without one, or
+	// with one that does not describe the page it came with. Both are downgrades and both are
+	// detectable WITHOUT a key; the signature is not, and [Group.Receive] says why.
+	ErrFetchAttestation = errors.New("urmessage: this fetch's attestation does not describe the page it came with")
+
+	// The server answered a truncated page and then advanced no cursor, so paging cannot
+	// terminate. Refused rather than looped.
+	ErrFetchNoProgress = errors.New("urmessage: the message server answered an incomplete fetch page that advanced no cursor")
+
+	// The page bound was reached with the server still saying there is more. The messages read
+	// so far are returned WITH this error, never silently.
+	ErrFetchIncomplete = errors.New("urmessage: the message server still has records for this group and this Receive stopped at its page bound")
 )

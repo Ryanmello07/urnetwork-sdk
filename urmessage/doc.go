@@ -52,8 +52,9 @@
 //     established, which today means one process -- the app and the server in one binary. A
 //     message server on another machine is the platform-transport path above, and that is gated on
 //     the credential, not on this package.
-//   - Nothing here survives the app exiting. The MLS state store is in memory (see
-//     [NewMemoryStateStore]) and an in-process server keeps its rows in `store.MemoryStore`.
+//   - An in-process server keeps its rows in `store.MemoryStore`, so the SERVER side of a
+//     loopback wiring survives nothing. The CLIENT side now does: see the state store section
+//     below.
 //   - No NAT traversal, no TLS termination, no reconnection of the connect client itself, no
 //     contract or provide mode. `NewNoContractClientOob` is what removes the contract requirement.
 //   - Nothing here chooses a server id, discovers one, or verifies that the id it was handed is a
@@ -113,14 +114,40 @@
 // CARRIER, and inventing one here would be inventing the rendezvous.
 //
 // ---------------------------------------------------------------------------------------------
-// THE MLS STATE STORE IS IN MEMORY AND SAYS SO.
+// S2-14: THE MLS STATE STORE. THERE ARE TWO, AND WHICH ONE A DEVICE GETS IS THE CALLER'S CHOICE.
 // ---------------------------------------------------------------------------------------------
 //
 // `connect/mls` publishes the `StateStore` INTERFACE and no implementation of it; the only one in
-// the corpus is `messagegroup`'s own `memoryStateStore`, declared in a _test.go file and therefore
-// unreachable from any build. [NewMemoryStateStore] is this package's, it is production code, and
-// it persists NOTHING: close the process and the MLS group is gone. The durable half that does
-// exist is the stream index reserver, which is [sdk.StreamStore] and is crash safe, because a
-// reused stream index is a reused nonce under a reused record key and an MLS group that has to be
-// recreated is only an inconvenience.
+// the corpus was `messagegroup`'s own `memoryStateStore`, declared in a _test.go file and
+// therefore unreachable from any build. This package ships both halves as production code:
+//
+//   - [NewMemoryStateStore] persists NOTHING and the name is the whole warning. Close the process
+//     and every group is gone. It is still the DEFAULT when [DeviceConfig.StateStore] is nil,
+//     because a device that silently started writing private keys into a directory the caller did
+//     not choose would be a worse surprise than one that forgets.
+//   - [OpenDurableStateStore] persists everything, on a directory, under a single-writer
+//     exclusion, fsync'd before a value is observable. A device over one comes back into its
+//     groups after a restart -- [Device.Restore] -- at the same epoch, under the same leaf, able
+//     to open records sealed before the restart and to seal new ones the other side opens.
+//
+// WHAT PROTECTS THE PRIVATE KEYS IN THE DURABLE ONE: FILE PERMISSIONS AND NOTHING ELSE. Every
+// octet is written in the clear -- the MLS epoch state with this member's leaf private key and
+// path-secret ladder in it, every key package's private halves, this device's Ed25519 identity,
+// and each group's `pq_secret` and `group_handle_key`. No passphrase, no key derivation, no
+// keychain. The directory is 0o700 and the files 0o600, which is a real bound on POSIX and is not
+// a bound this code sets on Windows. **S2-24 is what must rule that**, and until it is ruled the
+// sentence above is the whole answer. [DurableStateStore]'s own header states it at length and
+// says what closing it would need.
+//
+// THE OTHER DURABLE HALF IS THE STREAM INDEX RESERVER, which is [sdk.StreamStore], and the
+// asymmetry that used to exist between the two is gone: the reserver is crash safe because a
+// reused stream index is a reused nonce under a reused record key, and the state store now follows
+// the same discipline because a lost MLS group is a lost conversation rather than an
+// inconvenience. `sdk/cp3b`'s restart case measures both across a process boundary at once.
+//
+// WHAT IS STILL OPEN, and it is `connect`'s rather than this package's. `messagegroup.GroupEngine`
+// declares four methods and none of them opens a persisted group, so this package carries its own
+// `messagegroup.GroupHandle` over `mls.LoadGroup` to make the restore reachable at all. That is
+// J1-8, the exact change owed is named at [restoredHandle], and this package's copy is meant to be
+// DELETED the day it lands.
 package urmessage

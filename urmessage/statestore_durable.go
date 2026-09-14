@@ -1,0 +1,872 @@
+package urmessage
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"sync"
+
+	"github.com/urnetwork/connect/mls"
+)
+
+// ── S2-14: the durable mls.StateStore ────────────────────────────────────────────────────────
+
+// DurableStateStore is [mls.StateStore] on a directory, so that a device that is killed comes back
+// into the groups it was in.
+//
+// WHAT PROTECTS THE PRIVATE KEYS IN IT, PLAINLY, BECAUSE THE HONEST ANSWER IS SHORT.
+//
+// FILE PERMISSIONS AND NOTHING ELSE. Every octet this store writes is written in the CLEAR: the
+// MLS epoch state (which carries this member's leaf HPKE private key, its TreeKEM path-secret
+// ladder and the epoch's restore secret), the init and encryption private keys of every key
+// package this device published, this device's Ed25519 identity private key, and each group's
+// `pq_secret` and `group_handle_key`. There is no passphrase, no key derivation, no OS keychain
+// and no hardware. Anything that can read the directory can read every group this device is in,
+// past and future, and can speak as this device.
+//
+// The directory is created 0o700 and every file 0o600, and on a POSIX filesystem that is a real
+// bound: another user on the machine is refused. ON WINDOWS IT IS NOT A BOUND THIS CODE SETS.
+// Go's mode argument is reduced to the read-only bit there, so a file inherits the ACL of the
+// directory it is created in; what actually protects it is wherever the caller put the directory,
+// and a caller that chose a world-readable path gets a world-readable key store with no complaint
+// from here. Any process running as the same user reads it on every platform.
+//
+// WHAT WOULD CLOSE IT IS NOT INVENTED HERE. Encryption at rest needs a key, and a key needs
+// either a passphrase the user types (with a KDF, a rekey story and a lost-passphrase story) or a
+// platform keystore (DPAPI, the macOS Keychain, the Android Keystore, iOS's Secure Enclave) --
+// each of which is a product decision with a different threat model, and none of which this
+// package may take on its own. **FILED AS S2-24: what protects urmessage's private keys at rest.
+// It is open, it has no owner, and until it is ruled the answer above is the whole answer.**
+// Spec A §8.1's "sealed" columns are the server's obligation and say nothing about a client disk.
+//
+// WHAT IT DOES AND DOES NOT INHERIT FROM THE STREAM STORE NEXT DOOR. [sdk.StreamStore] solved
+// crash safety for the stream-index reserver and this follows it rather than inventing a second
+// discipline: a single-writer exclusion held by the operating system over the directory, acquired
+// before anything is read or written; the guard entry BESIDE the data directory and never inside
+// it, so "an entry in the data directory that is not a record is a finding" stays categorical; an
+// fsync that must return before a value is observable; and no liveness heuristic anywhere -- the
+// hold is released by Close and by the death of this process and by nothing else.
+//
+// WHERE IT DELIBERATELY DIFFERS, said at the line rather than here: the stream store's rows are
+// fixed-width append-only records, so it repairs a torn tail in place; these values are
+// variable-width and are REPLACED, so a half-written one can never become observable at all. See
+// [DurableStateStore.writeRecord]. And the stream store has a key-space tag in every row name
+// because messagegroup.StreamKey's field set can change under it; these keys are raw octets that
+// mls hands over, so a format version inside each record is what stands in its place.
+//
+// It is safe for concurrent use. Every method takes the store's lock for the whole of its work,
+// which is what makes the read-modify-erase of DeleteGroupStateBefore one step.
+type DurableStateStore struct {
+	dir     string
+	dataDir string
+
+	// exclusion is the SINGLE-WRITER guard, held by the operating system on an entry beside the
+	// data directory. Two stores over one directory is two devices writing one device's MLS
+	// state: the later writer's epoch overwrites the earlier's, and the earlier device then
+	// restores a group whose ratchet position is another device's.
+	exclusion io.Closer
+
+	lock   sync.Mutex
+	closed bool
+
+	// flushes counts every value fsync this store has PERFORMED, taken AFTER the call returns
+	// rather than before it.
+	//
+	// IT IS THE STREAM STORE'S OWN DISCIPLINE AND IT IS HERE FOR THE SAME MEASURED REASON.
+	// sdk/message_stream_store.go's forceFlush says it: a first version counted at the call
+	// site with the increment ABOVE the Sync, and the mutation "return before the flush" --
+	// written as deleting the Sync and leaving everything around it -- SURVIVED the entire
+	// suite, because the counter still said one. Counted here, the flush cannot be deleted
+	// without this number going to zero, and
+	// TestEveryValueTheDurableStoreNamesWasFlushedFirst is what drives that.
+	//
+	// It counts the VALUE flush and not the directory flush, because the directory flush is a
+	// no-op on Windows by construction (see syncStateDir there) and a counter that read zero
+	// on one platform and one on another would measure the platform rather than the code.
+	flushes int
+
+	// skipRemove is the injected failure point, set by tests in this package and by nothing
+	// else. It is [sdk.StreamStore]'s `interrupt` field one package over, and it is here for
+	// the same reason: the state it stands in for -- a remove that reported success and left
+	// the entry readable -- is not one any filesystem this suite can run on will produce, and
+	// a §5.12 clause that cannot be driven is a §5.12 clause nobody can tell is still there.
+	//
+	// It is a bool and not a path or a count, so it can only ever turn the erase off wholesale
+	// in a test binary; there is no production path that sets it and no way to set it from
+	// outside this package.
+	skipRemove bool
+}
+
+var _ mls.StateStore = (*DurableStateStore)(nil)
+var _ DeviceStore = (*DurableStateStore)(nil)
+
+// DeviceStore is the durable surface a [Device] needs BEYOND [mls.StateStore], so that a restart
+// is a restore rather than a new device.
+//
+// It is a separate interface and not extra methods on the config, because [DeviceConfig.StateStore]
+// is an `mls.StateStore` and a store that cannot persist an identity must go on being legal there.
+// [NewDevice] asks a store whether it satisfies this, and a store that does not gets exactly the
+// behaviour it had before this interface existed: a fresh identity every process, no restore.
+//
+// EVERYTHING ON IT IS SECRET IN FULL. The identity private key speaks as this device in every
+// group it is in; a [GroupRecord] carries two of the [Invite]'s four values, and whoever holds
+// those plus the MLS state this store keeps beside them is in the group.
+type DeviceStore interface {
+	mls.StateStore
+
+	// GetDeviceIdentity answers what PutDeviceIdentity last wrote, or a refusal wrapping
+	// [ErrNoDeviceIdentity] when this store has never held one. It is never (nil, nil, nil, nil).
+	GetDeviceIdentity() (signerPub []byte, signerPriv []byte, leafKeys []byte, err error)
+	PutDeviceIdentity(signerPub []byte, signerPriv []byte, leafKeys []byte) error
+
+	// PutGroupRecord writes the urmessage-side half of one group: the values that are this
+	// package's rather than MLS's, and that a restore cannot be performed without.
+	PutGroupRecord(record *GroupRecord) error
+
+	// GroupRecords is every group this store holds a record for, in no particular order.
+	GroupRecords() ([]*GroupRecord, error)
+
+	// DeleteGroupRecord removes one group's record AND every MLS epoch state beside it. It is
+	// how a device leaves a group without leaving its keys on the disk.
+	DeleteGroupRecord(groupId []byte) error
+}
+
+// GroupRecord is the urmessage-side state of one group: the values that do not live in MLS and
+// that [Device.Restore] cannot rebuild a session without.
+//
+// IT IS SECRET IN FULL. PqSecret and GroupHandleKey are two of the [Invite]'s four values; see
+// [DurableStateStore] for what does and does not protect them on the disk.
+type GroupRecord struct {
+	// The 32 octet group id the server keys its rows by.
+	GroupId []byte
+
+	// §7's pq_secret, drawn by [messagegroup.NewPqSecret] at the founding and carried to the
+	// joiner in the [Invite].
+	PqSecret []byte
+
+	// group_handle_key: the epoch ZERO storage root's expansion. It never moves, which is why it
+	// is stored once rather than per epoch.
+	GroupHandleKey []byte
+
+	// The MLS epoch this device's session was at when the record was written. It is the epoch
+	// [mls.LoadGroup] is asked for, because nothing on [mls.StateStore] enumerates epochs -- J1-8.
+	Epoch uint64
+
+	// Whether [Group.Open] has published this group on the server. A restored group that was
+	// never opened would be refused by the server at its first send, with a REASON the caller
+	// would have to decode; carrying the bit means [Group.Send] refuses it by name instead.
+	Opened bool
+}
+
+// ── the record format ────────────────────────────────────────────────────────────────────────
+
+// Every value this store writes is one record, and the record is self-describing so that a file
+// which is not what the name says is a REFUSAL rather than a wrong answer.
+//
+// The name of a file is a hash of its key, so two keys that collided -- or a directory somebody
+// copied from another device -- would otherwise be read as the value that was asked for. The key
+// octets are therefore INSIDE the record and are compared against the key the caller supplied, on
+// every read.
+const (
+	stateRecordMagic   = "URMSTATE"
+	stateRecordVersion = byte(0x01)
+)
+
+// The kinds. A record read under the wrong kind is refused, so a private key file renamed over a
+// group state cannot be handed to LoadGroup as an epoch.
+const (
+	stateKindGroupState     byte = 1
+	stateKindPrivateKey     byte = 2
+	stateKindKeyPackage     byte = 3
+	stateKindDeviceIdentity byte = 4
+	stateKindGroupRecord    byte = 5
+)
+
+// encodeStateRecord frames one record: magic, version, kind, the parts each length-prefixed, and
+// a SHA-256 over every octet before it.
+//
+// The checksum is NOT a security property and must not be read as one -- anything that can write
+// this directory can recompute it. It is here for the reason the stream store's per-record
+// checksum is: a file that a filesystem returned altered is refused instead of being decoded into
+// a key schedule that then fails somewhere with nothing to point at.
+func encodeStateRecord(kind byte, parts ...[]byte) ([]byte, error) {
+	if len(parts) > 255 {
+		return nil, fmt.Errorf("%w: a record of kind %d carries %d parts", ErrStateStoreFormat, kind, len(parts))
+	}
+	body := bytes.NewBuffer(nil)
+	body.WriteString(stateRecordMagic)
+	body.WriteByte(stateRecordVersion)
+	body.WriteByte(kind)
+	body.WriteByte(byte(len(parts)))
+	for _, part := range parts {
+		if len(part) > int(^uint32(0)>>1) {
+			return nil, fmt.Errorf("%w: a part of %d octets does not fit its length prefix", ErrStateStoreFormat, len(part))
+		}
+		var prefix [4]byte
+		binary.BigEndian.PutUint32(prefix[:], uint32(len(part)))
+		body.Write(prefix[:])
+		body.Write(part)
+	}
+	sum := sha256.Sum256(body.Bytes())
+	body.Write(sum[:])
+	return body.Bytes(), nil
+}
+
+// decodeStateRecord reads back what encodeStateRecord wrote and refuses everything else.
+//
+// EVERY REFUSAL NAMES WHAT IT SAW. A truncated record, a version this build does not write, the
+// wrong kind and a checksum that does not match are four different sentences, because they have
+// four different causes and a caller staring at one at 2am has to be able to tell them apart.
+func decodeStateRecord(raw []byte, kind byte) ([][]byte, error) {
+	header := len(stateRecordMagic) + 3
+	if len(raw) < header+sha256.Size {
+		return nil, fmt.Errorf("%w: %d octets is shorter than an empty record", ErrStateStoreFormat, len(raw))
+	}
+	if string(raw[:len(stateRecordMagic)]) != stateRecordMagic {
+		return nil, fmt.Errorf("%w: the first %d octets are not this store's magic", ErrStateStoreFormat, len(stateRecordMagic))
+	}
+	if version := raw[len(stateRecordMagic)]; version != stateRecordVersion {
+		return nil, fmt.Errorf("%w: the record is at version %#02x and this build writes %#02x",
+			ErrStateStoreFormat, version, stateRecordVersion)
+	}
+	if got := raw[len(stateRecordMagic)+1]; got != kind {
+		return nil, fmt.Errorf("%w: the record is of kind %d and kind %d was asked for",
+			ErrStateStoreFormat, got, kind)
+	}
+	sum := sha256.Sum256(raw[:len(raw)-sha256.Size])
+	if !bytes.Equal(sum[:], raw[len(raw)-sha256.Size:]) {
+		return nil, fmt.Errorf("%w: the record's checksum is not the hash of the record", ErrStateStoreFormat)
+	}
+	count := int(raw[len(stateRecordMagic)+2])
+	parts := make([][]byte, 0, count)
+	at := header
+	end := len(raw) - sha256.Size
+	for index := 0; index < count; index += 1 {
+		if end-at < 4 {
+			return nil, fmt.Errorf("%w: part %d of %d has no length prefix", ErrStateStoreFormat, index, count)
+		}
+		width := int(binary.BigEndian.Uint32(raw[at : at+4]))
+		at += 4
+		if width < 0 || end-at < width {
+			return nil, fmt.Errorf("%w: part %d of %d announces %d octets and %d are left",
+				ErrStateStoreFormat, index, count, width, end-at)
+		}
+		parts = append(parts, append([]byte(nil), raw[at:at+width]...))
+		at += width
+	}
+	if at != end {
+		return nil, fmt.Errorf("%w: %d octets stand after the last part", ErrStateStoreFormat, end-at)
+	}
+	return parts, nil
+}
+
+// ── opening ──────────────────────────────────────────────────────────────────────────────────
+
+// The data directory, and the guard entry BESIDE it. See [DurableStateStore] for why the guard is
+// not inside the directory it excludes.
+const (
+	stateDataDirName = "state"
+	stateGuardName   = "single-writer.lock"
+)
+
+// stateStoreGuardPath is the ONE place the guard's location is decided, so there is no second
+// spelling of it to drift. This is [sdk.StreamStore]'s streamStoreGuardPath one package over and
+// the reason is the same one.
+func stateStoreGuardPath(dir string) string {
+	return filepath.Join(dir, stateGuardName)
+}
+
+// OpenDurableStateStore opens the store at dir, creating it if it is not there.
+//
+// THE EXCLUSION IS ACQUIRED BEFORE ANYTHING IS READ AND BEFORE ANYTHING IS WRITTEN, which is the
+// stream store's ordering and is here for the same reason: a second opener that had already read
+// the directory has already made a decision on state it does not own.
+//
+// It is refused on a platform where this build can hold no exclusion, rather than opened with the
+// property quietly deleted by a build constraint.
+func OpenDurableStateStore(dir string) (*DurableStateStore, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("%w: a durable state store needs a directory", ErrStateStoreState)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("%w: the store directory %s could not be created: %v", ErrStateStoreState, dir, err)
+	}
+	exclusion, err := acquireStateStoreExclusion(dir)
+	if err != nil {
+		return nil, err
+	}
+	released := false
+	defer func() {
+		if !released {
+			exclusion.Close()
+		}
+	}()
+	dataDir := filepath.Join(dir, stateDataDirName)
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return nil, fmt.Errorf("%w: the data directory %s could not be created: %v", ErrStateStoreState, dataDir, err)
+	}
+	released = true
+	return &DurableStateStore{dir: dir, dataDir: dataDir, exclusion: exclusion}, nil
+}
+
+// Close releases the store, and with it the single-writer exclusion, which is the only thing that
+// releases it other than the death of this process.
+//
+// A closed store stops answering rather than answering an empty value, for [MemoryStateStore]'s
+// reason and the stream store's: a store that answered "no group state" after it was closed would
+// send a live device off to re-join a group it is already in.
+func (self *DurableStateStore) Close() error {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if self.closed {
+		return nil
+	}
+	self.closed = true
+	return self.exclusion.Close()
+}
+
+// flushCount is how many value fsyncs this store has performed. It is unexported and read only
+// by this package's own tests, for the reason the stream store gives: it is an OBSERVABLE of where
+// the work happens, not part of the interface.
+func (self *DurableStateStore) flushCount() int {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	return self.flushes
+}
+
+func (self *DurableStateStore) refuseIfClosed() error {
+	if self.closed {
+		return fmt.Errorf("%w: this store is closed", ErrStateStoreState)
+	}
+	return nil
+}
+
+// ── the paths ────────────────────────────────────────────────────────────────────────────────
+
+// stateNameOf is the file name one key gets: the SHA-256 of the key octets, hex.
+//
+// FIXED WIDTH RATHER THAN THE KEY ITSELF, and that is a decision about the FILESYSTEM and not
+// about secrecy -- a key package ref and a group id are public-ish values and hex would carry
+// them fine, but mls's interface admits a key of any width and a name is bounded at 255 octets on
+// every filesystem that matters. The key octets are inside the record and are compared on read,
+// so the hash is a name and never an identity: two keys that hashed alike are refused rather than
+// confused.
+func stateNameOf(key []byte) string {
+	sum := sha256.Sum256(key)
+	return hex.EncodeToString(sum[:])
+}
+
+func (self *DurableStateStore) privatePath(pub []byte) string {
+	return filepath.Join(self.dataDir, "priv", stateNameOf(pub))
+}
+
+func (self *DurableStateStore) keyPackagePath(ref []byte) string {
+	return filepath.Join(self.dataDir, "kp", stateNameOf(ref))
+}
+
+func (self *DurableStateStore) identityPath() string {
+	return filepath.Join(self.dataDir, "device")
+}
+
+func (self *DurableStateStore) groupDir(groupId []byte) string {
+	return filepath.Join(self.dataDir, "group", stateNameOf(groupId))
+}
+
+func (self *DurableStateStore) groupRecordPath(groupId []byte) string {
+	return filepath.Join(self.groupDir(groupId), "meta")
+}
+
+func (self *DurableStateStore) epochDir(groupId []byte) string {
+	return filepath.Join(self.groupDir(groupId), "epoch")
+}
+
+// stateEpochName is one epoch's file name: the epoch as sixteen zero-padded hex digits, so that
+// the lexical order of a directory listing IS the numeric order of the epochs and
+// DeleteGroupStateBefore does not have to sort to be correct.
+func stateEpochName(epoch uint64) string {
+	return fmt.Sprintf("%016x", epoch)
+}
+
+func stateEpochOfName(name string) (uint64, bool) {
+	if len(name) != 16 {
+		return 0, false
+	}
+	epoch, err := strconv.ParseUint(name, 16, 64)
+	if err != nil {
+		return 0, false
+	}
+	return epoch, true
+}
+
+// ── the write, which is the whole of the crash safety ────────────────────────────────────────
+
+// writeRecord makes one value observable, or makes nothing observable.
+//
+// TEMP FILE, FSYNC, RENAME -- AND THE FSYNC IS BEFORE THE RENAME, which is the whole property. A
+// value written in place could be observed half-written by the next process to open this store,
+// and half of an epoch state is a key schedule that rebuilds into a group agreeing with nobody;
+// half of a key-package record is an init private key with no encryption private key beside it.
+// After the fsync returns, the temp file holds the whole value on stable storage; the rename then
+// puts that whole value under the name, and a reader sees the previous whole value or this one.
+//
+// THIS IS WHERE IT DIFFERS FROM THE STREAM STORE NEXT DOOR, and the difference is the shape of the
+// data rather than a different opinion about durability. A stream row is fixed-width append-only
+// records, so the store can and does repair a torn tail in place at open time; these values are
+// variable width and every write REPLACES, so there is no tail to repair and no state in which a
+// partially written value has a name -- the temp file that held it is not a record name and is
+// removed.
+//
+// THE DIRECTORY FSYNC IS WHAT MAKES THE RENAME ITSELF DURABLE, and it is a no-op on Windows; see
+// syncStateDir for exactly what that costs and why there is no second discipline hiding in it.
+func (self *DurableStateStore) writeRecord(path string, kind byte, parts ...[]byte) error {
+	record, err := encodeStateRecord(kind, parts...)
+	if err != nil {
+		return err
+	}
+	// the assembled record is a SECOND copy of whatever secret it carries, and this function is
+	// the only thing that can still reach it once the write has returned. Erasing it costs one
+	// pass and takes the copy out of the heap for the collector to move around, which is
+	// mls.(*Group).persist's own discipline one layer down.
+	defer zeroizeState(record)
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("%w: %s could not be created: %v", ErrStateStoreState, dir, err)
+	}
+	temp, err := os.CreateTemp(dir, ".writing-*")
+	if err != nil {
+		return fmt.Errorf("%w: a temporary file in %s could not be created: %v", ErrStateStoreState, dir, err)
+	}
+	tempPath := temp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			temp.Close()
+			os.Remove(tempPath)
+		}
+	}()
+	// 0o600 explicitly and not CreateTemp's own mode, which is already 0o600 today -- said here
+	// because "the file mode is the whole of what protects these octets" is this type's headline
+	// and a value that important is not left to another package's default.
+	if err := temp.Chmod(0o600); err != nil && !errors.Is(err, os.ErrInvalid) && !errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("%w: %s could not be given mode 0600: %v", ErrStateStoreState, tempPath, err)
+	}
+	if _, err := temp.Write(record); err != nil {
+		return fmt.Errorf("%w: %s could not be written: %v", ErrStateStoreState, tempPath, err)
+	}
+	// NEVER SWALLOWED. A Put that returned after a failed flush has told a caller that a value is
+	// durable when nothing recorded it, and for PutGroupState that caller is a seal that has
+	// already consumed a ratchet generation.
+	syncErr := temp.Sync()
+	self.flushes += 1
+	if syncErr != nil {
+		return fmt.Errorf("%w: %s could not be flushed, so this value is not durable and must not be named: %v",
+			ErrStateStoreState, tempPath, syncErr)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("%w: %s could not be closed: %v", ErrStateStoreState, tempPath, err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("%w: %s could not be renamed onto %s: %v", ErrStateStoreState, tempPath, path, err)
+	}
+	committed = true
+	return syncStateDir(dir)
+}
+
+// readRecord answers the parts of one record, or a refusal that says which of the two absences it
+// is: no such value, or a value this build cannot read.
+//
+// THE NOT-FOUND CASE IS ITS OWN SENTINEL, which J1-4 says mls.StateStore does not give and which
+// this package's callers need: [Device.Restore] has to tell "this device was never in that group"
+// from "the disk is broken", and a bare error makes those one reading.
+func (self *DurableStateStore) readRecord(path string, kind byte) ([][]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", ErrStateNotFound, filepath.Base(path))
+		}
+		return nil, fmt.Errorf("%w: %s could not be read: %v", ErrStateStoreState, path, err)
+	}
+	return decodeStateRecord(raw, kind)
+}
+
+// zeroizeState overwrites one buffer this store assembled. It is this package's only erase and it
+// erases what THIS process can still reach: it does not and cannot erase the file, the filesystem
+// cache or whatever the allocator did with an earlier copy.
+func zeroizeState(octets []byte) {
+	for at := range octets {
+		octets[at] = 0
+	}
+}
+
+// ── mls.StateStore ───────────────────────────────────────────────────────────────────────────
+
+// PutGroupState writes one epoch of one group.
+//
+// IT IS DURABLE BEFORE IT RETURNS, which is J1-11: mls persists inside the seal, before the
+// ciphertext reaches its caller, precisely so that a restored member never re-draws a generation
+// it has already spent. A store that buffered this would hand that guarantee back.
+//
+// The state is COPIED into the record this call writes, because mls erases the buffer it passed
+// as soon as this returns -- the obligation on [mls.StateStore]'s own header. Nothing of the
+// caller's is retained past the call: this store keeps no map.
+func (self *DurableStateStore) PutGroupState(groupId []byte, epoch uint64, state []byte) error {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return err
+	}
+	var epochOctets [8]byte
+	binary.BigEndian.PutUint64(epochOctets[:], epoch)
+	return self.writeRecord(filepath.Join(self.epochDir(groupId), stateEpochName(epoch)),
+		stateKindGroupState, groupId, epochOctets[:], state)
+}
+
+// GetGroupState answers the state PutGroupState wrote at this epoch.
+//
+// The group id and the epoch inside the record are compared against the ones asked for, so a file
+// that is under this name for any reason other than this store having put it there is refused
+// rather than decoded.
+func (self *DurableStateStore) GetGroupState(groupId []byte, epoch uint64) ([]byte, error) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return nil, err
+	}
+	parts, err := self.readRecord(filepath.Join(self.epochDir(groupId), stateEpochName(epoch)), stateKindGroupState)
+	if err != nil {
+		return nil, err
+	}
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("%w: a group state carries %d parts, want 3", ErrStateStoreFormat, len(parts))
+	}
+	if !bytes.Equal(parts[0], groupId) {
+		return nil, fmt.Errorf("%w: the record under this name names group %x and group %x was asked for",
+			ErrStateStoreFormat, parts[0], groupId)
+	}
+	if len(parts[1]) != 8 || binary.BigEndian.Uint64(parts[1]) != epoch {
+		return nil, fmt.Errorf("%w: the record under this name does not name epoch %d", ErrStateStoreFormat, epoch)
+	}
+	return parts[2], nil
+}
+
+// DeleteGroupStateBefore ACTUALLY DELETES, and then reads the directory again to say so.
+//
+// §5.12 discards storage_root[n+1], write_key[n+1], eph_root[n+1] and every X-Wing wrap at once,
+// and the hazard it names is the HALF erase: a surviving half looks exactly like a value somebody
+// may still use, and nothing downstream reports it. So this does three things and not one.
+//
+//   - it removes by UNLINK and never by truncation or overwrite, so every epoch is removed whole:
+//     a crash in the middle of the loop leaves some epochs and no half of one;
+//   - it fsyncs the directory afterwards, so the unlinks are on stable storage rather than only
+//     in the cache -- without which a crash could bring back a state this call reported gone;
+//   - and it RE-READS the directory and refuses if any epoch below the cutoff survived. That is
+//     the clause that makes "deleted" a measurement rather than an intention. A caller that was
+//     told the discard happened, over a disk where it did not, is the exact shape §5.12 warns
+//     about.
+//
+// Deleting NOTHING is success: mls calls this at every commit with a cutoff that is zero for the
+// first thirty-two epochs of every group.
+func (self *DurableStateStore) DeleteGroupStateBefore(groupId []byte, epoch uint64) error {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return err
+	}
+	return self.deleteEpochsLocked(groupId, epoch)
+}
+
+func (self *DurableStateStore) deleteEpochsLocked(groupId []byte, before uint64) error {
+	dir := self.epochDir(groupId)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("%w: %s could not be read: %v", ErrStateStoreState, dir, err)
+	}
+	removed := 0
+	for _, entry := range entries {
+		at, named := stateEpochOfName(entry.Name())
+		if !named || before <= at {
+			continue
+		}
+		if !self.skipRemove {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("%w: epoch %d of group %x could not be discarded: %v",
+					ErrStateStoreState, at, groupId, err)
+			}
+		}
+		removed += 1
+	}
+	if removed == 0 {
+		return nil
+	}
+	if err := syncStateDir(dir); err != nil {
+		return err
+	}
+	// the measurement. It is a second ReadDir and it is the point of this method.
+	entries, err = os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("%w: %s could not be re-read after the discard: %v", ErrStateStoreState, dir, err)
+	}
+	for _, entry := range entries {
+		at, named := stateEpochOfName(entry.Name())
+		if named && at < before {
+			return fmt.Errorf("%w: epoch %d of group %x is still readable after a discard below %d",
+				ErrStateStoreState, at, groupId, before)
+		}
+	}
+	return nil
+}
+
+// PutPrivateKey writes one MLS private key under its public half.
+func (self *DurableStateStore) PutPrivateKey(pub []byte, priv []byte) error {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return err
+	}
+	return self.writeRecord(self.privatePath(pub), stateKindPrivateKey, pub, priv)
+}
+
+func (self *DurableStateStore) GetPrivateKey(pub []byte) ([]byte, error) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return nil, err
+	}
+	parts, err := self.readRecord(self.privatePath(pub), stateKindPrivateKey)
+	if err != nil {
+		return nil, err
+	}
+	if len(parts) != 2 || !bytes.Equal(parts[0], pub) {
+		return nil, fmt.Errorf("%w: the record under this name is not the private key of %x", ErrStateStoreFormat, pub)
+	}
+	return parts[1], nil
+}
+
+// DeletePrivateKey removes one key, durably.
+//
+// J1-12 IS NOT CLOSED BY THIS AND THE NUMBER IS THE POINT: nothing in the corpus calls it. The
+// query, so it is checkable rather than quoted -- over this workspace at the commit that adds
+// this file, `grep -rn "DeletePrivateKey(" --include=*.go connect sdk | grep -v _test.go` answers
+// the declaration on mls.StateStore, this body and MemoryStateStore's, and no call. So
+// `PutPrivateKey` on every ProposeUpdate grows this directory without bound, exactly as it grows
+// the map next door. It is implemented because the interface declares it and because a store that
+// could not perform the erase would make the eventual caller a store change as well.
+func (self *DurableStateStore) DeletePrivateKey(pub []byte) error {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return err
+	}
+	return self.removeLocked(self.privatePath(pub))
+}
+
+func (self *DurableStateStore) removeLocked(path string) error {
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("%w: %s could not be removed: %v", ErrStateStoreState, path, err)
+	}
+	if err := syncStateDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%w: %s is still readable after it was removed", ErrStateStoreState, path)
+	}
+	return nil
+}
+
+func (self *DurableStateStore) PutKeyPackage(ref []byte, kp []byte, initPriv []byte, encPriv []byte) error {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return err
+	}
+	return self.writeRecord(self.keyPackagePath(ref), stateKindKeyPackage, ref, kp, initPriv, encPriv)
+}
+
+// TakeKeyPackage is DESTRUCTIVE, which is mls.StateStore's contract and not this store's choice: a
+// key package is single use, and a second join off one published package is a second device
+// deriving the same init secret.
+//
+// THE ARRAYS IT ANSWERS ARE THIS CALL'S OWN AND ARE RETAINED NOWHERE, which is J1-5. The caller --
+// `mls.JoinKeyMaterial.Zeroize`, through messagegroup's join -- ERASES exactly these three arrays
+// when it is done with them, and a store that handed back storage it kept would have its own
+// records wiped by a correct caller. A store that reads the file on every call cannot make that
+// mistake; a store that cached would have to copy, and would have to remember to.
+//
+// THE REMOVE IS BEFORE THE RETURN AND ITS FAILURE IS THE CALL'S. A take that answered the material
+// and could not delete it has published a single-use key package twice.
+func (self *DurableStateStore) TakeKeyPackage(ref []byte) ([]byte, []byte, []byte, error) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return nil, nil, nil, err
+	}
+	path := self.keyPackagePath(ref)
+	parts, err := self.readRecord(path, stateKindKeyPackage)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(parts) != 4 || !bytes.Equal(parts[0], ref) {
+		return nil, nil, nil, fmt.Errorf("%w: the record under this name is not the key package of %x",
+			ErrStateStoreFormat, ref)
+	}
+	if err := self.removeLocked(path); err != nil {
+		return nil, nil, nil, err
+	}
+	return parts[1], parts[2], parts[3], nil
+}
+
+// ── DeviceStore ──────────────────────────────────────────────────────────────────────────────
+
+func (self *DurableStateStore) PutDeviceIdentity(signerPub []byte, signerPriv []byte, leafKeys []byte) error {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return err
+	}
+	if len(signerPub) == 0 || len(signerPriv) == 0 || len(leafKeys) == 0 {
+		return fmt.Errorf("%w: a device identity is a signature key pair and a leaf keys body, and one of the three is empty",
+			ErrStateStoreFormat)
+	}
+	return self.writeRecord(self.identityPath(), stateKindDeviceIdentity, signerPub, signerPriv, leafKeys)
+}
+
+func (self *DurableStateStore) GetDeviceIdentity() ([]byte, []byte, []byte, error) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return nil, nil, nil, err
+	}
+	parts, err := self.readRecord(self.identityPath(), stateKindDeviceIdentity)
+	if err != nil {
+		if errors.Is(err, ErrStateNotFound) {
+			return nil, nil, nil, fmt.Errorf("%w: %s holds no device identity", ErrNoDeviceIdentity, self.dir)
+		}
+		return nil, nil, nil, err
+	}
+	if len(parts) != 3 {
+		return nil, nil, nil, fmt.Errorf("%w: a device identity carries %d parts, want 3", ErrStateStoreFormat, len(parts))
+	}
+	return parts[0], parts[1], parts[2], nil
+}
+
+func (self *DurableStateStore) PutGroupRecord(record *GroupRecord) error {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return err
+	}
+	if record == nil {
+		return fmt.Errorf("%w: no group record", ErrStateStoreFormat)
+	}
+	if len(record.GroupId) != GroupIdBytes {
+		return fmt.Errorf("%w: a group id is %d octets and this one is %d",
+			ErrStateStoreFormat, GroupIdBytes, len(record.GroupId))
+	}
+	if len(record.PqSecret) == 0 || len(record.GroupHandleKey) == 0 {
+		return fmt.Errorf("%w: a group record with no pq_secret or no group_handle_key is a group no session can be rebuilt for",
+			ErrStateStoreFormat)
+	}
+	var epochOctets [8]byte
+	binary.BigEndian.PutUint64(epochOctets[:], record.Epoch)
+	flags := []byte{0}
+	if record.Opened {
+		flags[0] = 1
+	}
+	return self.writeRecord(self.groupRecordPath(record.GroupId), stateKindGroupRecord,
+		record.GroupId, record.PqSecret, record.GroupHandleKey, epochOctets[:], flags)
+}
+
+// GroupRecords walks the group directory and answers every record it holds.
+//
+// A DIRECTORY WITH NO meta IN IT IS SKIPPED AND NOT A REFUSAL, because that is a real state and
+// not a corruption: mls writes an epoch state at NewGroup, before this package has a pq_secret to
+// write beside it, so a crash between the two leaves exactly that. What it is NOT is a restorable
+// group -- and a group with no record is one this device has to be re-invited to, which is what a
+// missing pq_secret means whatever the MLS state says.
+func (self *DurableStateStore) GroupRecords() ([]*GroupRecord, error) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return nil, err
+	}
+	root := filepath.Join(self.dataDir, "group")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: %s could not be read: %v", ErrStateStoreState, root, err)
+	}
+	names := []string{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	records := []*GroupRecord{}
+	for _, name := range names {
+		parts, err := self.readRecord(filepath.Join(root, name, "meta"), stateKindGroupRecord)
+		if err != nil {
+			if errors.Is(err, ErrStateNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		if len(parts) != 5 || len(parts[3]) != 8 || len(parts[4]) != 1 {
+			return nil, fmt.Errorf("%w: the group record in %s is not one this build wrote", ErrStateStoreFormat, name)
+		}
+		records = append(records, &GroupRecord{
+			GroupId:        parts[0],
+			PqSecret:       parts[1],
+			GroupHandleKey: parts[2],
+			Epoch:          binary.BigEndian.Uint64(parts[3]),
+			Opened:         parts[4][0] == 1,
+		})
+	}
+	return records, nil
+}
+
+// DeleteGroupRecord removes one group's record AND every MLS epoch state beside it.
+//
+// BOTH HALVES, for DeleteGroupStateBefore's reason: a record with no epoch state is a restore that
+// fails at LoadGroup, and an epoch state with no record is this device's leaf private key and its
+// whole path-secret ladder left on the disk for a group it has left. The epoch discard runs FIRST
+// and its failure is the call's, so there is no path on which the record is gone and the keys are
+// not.
+func (self *DurableStateStore) DeleteGroupRecord(groupId []byte) error {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return err
+	}
+	if err := self.deleteEpochsLocked(groupId, ^uint64(0)); err != nil {
+		return err
+	}
+	if err := self.removeLocked(self.groupRecordPath(groupId)); err != nil {
+		return err
+	}
+	// the now-empty epoch and group directories, best effort: an empty directory is not a value
+	// anybody can read, so a failure to remove one is not a failure of this call.
+	os.Remove(self.epochDir(groupId))
+	os.Remove(self.groupDir(groupId))
+	return nil
+}
