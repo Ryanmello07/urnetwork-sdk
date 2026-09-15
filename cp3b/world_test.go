@@ -38,6 +38,11 @@ type world struct {
 	store        *store.MemoryStore
 	peer         *peer.Peer
 	handler      *api.Handler
+
+	// the decorator in front of the store, when this world has one. A case reaches it to say
+	// WHICH record is bent and for how long, which is not something worldOptions can carry: the
+	// record ids do not exist until the group has been founded through this very server.
+	shaped *shapedStore
 }
 
 const worldProtocolVersion = 1
@@ -86,8 +91,10 @@ func newWorldWith(t *testing.T, options worldOptions) *world {
 	}
 	memory := store.NewMemoryStore(store.DefaultLimits())
 	var backing store.Store = memory
+	var shaped *shapedStore
 	if options.fetchShape != fetchNormal {
-		backing = &shapedStore{Store: memory, shape: options.fetchShape}
+		shaped = &shapedStore{Store: memory, shape: options.fetchShape}
+		backing = shaped
 	}
 	handler, err := api.New(api.Config{
 		Store:              backing,
@@ -124,6 +131,7 @@ func newWorldWith(t *testing.T, options worldOptions) *world {
 		store:        memory,
 		peer:         served,
 		handler:      handler,
+		shaped:       shaped,
 	}
 	t.Cleanup(func() {
 		served.Close()

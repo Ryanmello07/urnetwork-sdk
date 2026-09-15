@@ -225,6 +225,12 @@ func main() {
 	} else {
 		_, err := aGroup.AddMember(keyPackage)
 		check(err != nil, "a SECOND AddMember was accepted; the alpha has no second epoch and this build just made one")
+		// THE SAME ASSERTION AS THE -c BRANCH, which this one used to be missing: it held only
+		// `err != nil`, so any refusal at all read as the refusal being tested -- a closed
+		// group, a nil invite, a transport failure. A step that accepts every error is a step
+		// that cannot go red for the reason it is about.
+		check(errors.Is(err, urmessage.ErrAlphaOneAdd) || errors.Is(err, urmessage.ErrGroupOpen),
+			"the second AddMember answered %v, want ErrAlphaOneAdd or ErrGroupOpen", err)
 		fmt.Printf("  refused by name (no -c credential, so B's own key package stood in): %v\n", err)
 	}
 
@@ -258,6 +264,23 @@ func main() {
 	if _, err := aGroup.Send(ctx, beforeTheRestart); err != nil {
 		fail("A Send before B's restart: %v", err)
 	}
+	// AND TWO LINES OF B'S OWN, which is the half this step used to be blind to. It asserted
+	// only that B could read what A sealed -- and `Receive` skipped every record whose
+	// sender_handle was its own while a restored group's log started empty, so a user who
+	// closed the app and reopened it got the other side's half of the conversation and none of
+	// their own, with a nil error. A probe that checks only the far side's half cannot see that.
+	bsOwn := []string{
+		"typed by B ITSELF before the kill -- if this does not come back the user has lost their own half",
+		"and a second line of B's own, before the kill",
+	}
+	for _, text := range bsOwn {
+		if _, err := bGroup.Send(ctx, text); err != nil {
+			fail("B Send before its own restart: %v", err)
+		}
+	}
+	if _, err := aGroup.Receive(ctx); err != nil {
+		fail("A Receive before B's restart: %v", err)
+	}
 	bHandle := append([]byte(nil), back[0].SenderHandle...)
 	bEpoch := bGroup.Epoch()
 	b = mesh.restart(b)
@@ -283,6 +306,22 @@ func main() {
 		}
 	}
 	check(found, "the restarted B read %d messages and none is the one A sealed before the restart", len(afterRestart))
+	// B'S OWN HALF. The Mine bit is held separately from the text, because a device that came
+	// back at a different leaf would open its own records as somebody else's and a check on the
+	// text alone would pass over it.
+	held := bGroup.Messages()
+	for _, text := range bsOwn {
+		mine := false
+		for _, one := range held {
+			if one.Text == text {
+				mine = one.Mine
+			}
+		}
+		check(mine, "the restarted B's log does not hold %q as its own; the user has lost their own half of the conversation. It holds %s",
+			text, texts(held))
+	}
+	fmt.Printf("  and B's own %d pre-restart line(s) came back as B's own, out of %d in its log\n",
+		len(bsOwn), len(held))
 	const afterTheRestart = "typed by the SAME device after it was restarted"
 	if _, err := bGroup.Send(ctx, afterTheRestart); err != nil {
 		fail("the restarted B Send: %v", err)
@@ -488,6 +527,30 @@ func receive(group *urmessage.Group, ctx context.Context, who string) []*urmessa
 		if errors.Is(err, urmessage.ErrFetchIncomplete) {
 			fail("%s Receive stopped at its page bound with %d messages read; the server still has more: %v",
 				who, len(got), err)
+		}
+		if errors.Is(err, urmessage.ErrIdentityInUse) {
+			fail("%s: ANOTHER DEVICE IS SEALING UNDER THIS DEVICE'S IDENTITY IN THIS GROUP. That is a COPY\n"+
+				"  of the app-data directory -- two devices at one leaf, one sender_handle and one stream\n"+
+				"  counter -- and two records under one (epoch, sender_handle, stream_index) are one\n"+
+				"  record_key and one nonce, which 5.6 calls a total break of both AEADs for that record.\n"+
+				"  One of the two copies has to stop -- this is not a probe artefact and not something\n"+
+				"  re-running fixes. NOTE it is NOT what running this probe twice over one -dir does:\n"+
+				"  a second run founds a fresh group id, so the old group's indices still match its own\n"+
+				"  reserver. This means a COPY of the directory exists somewhere: %v", who, err)
+		}
+		if errors.Is(err, urmessage.ErrFetchOmitted) {
+			fail("%s: THE SERVER ANSWERED A COMPLETE PAGE AND NAMED A HIGH WATER ABOVE EVERYTHING IT HANDED\n"+
+				"  OVER. It is holding records back, which is the one failure the AEAD cannot see.\n"+
+				"  THE ONE INNOCENT EXPLANATION IS NOT BUILT YET: 7.2's retention sweep would take rows\n"+
+				"  out from under a high water that is next_record_id-1 and does not come down, and\n"+
+				"  nothing in the server deletes a message_record row today. If you are running against a\n"+
+				"  server new enough to sweep, check its retention settings before reading this as an\n"+
+				"  omission; otherwise read it as one: %v", who, err)
+		}
+		if errors.Is(err, urmessage.ErrRecordAbandoned) {
+			fail("%s: a record did not open after every retry and is no longer being fetched, so this\n"+
+				"  conversation has a hole in it. Records given up on: %v -- %v",
+				who, group.UnopenedRecords(), err)
 		}
 		fail("%s Receive: %v", who, err)
 	}

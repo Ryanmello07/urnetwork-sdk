@@ -20,11 +20,16 @@ import (
 // WHAT A RESTORED GROUP CAN AND CANNOT DO, said here because the list is short and the absence of
 // it would be read as "everything".
 //
-//   - It can SEND: the session is rebuilt at the record's epoch off the MLS exporter, the stream
-//     index continues from the durable reserver, and the server takes the record.
-//   - It can RECEIVE, including records sealed BEFORE the restart: a receiver ladder is followed
-//     from its root (`trackLocked` passes head index 0), and the cursor is not persisted, so a
-//     restored device re-fetches this group's history and re-derives every key it needs for it.
+//   - It can SEND, AFTER IT HAS RECEIVED ONCE: the session is rebuilt at the record's epoch off
+//     the MLS exporter, the stream index continues from the durable reserver, and the server takes
+//     the record -- but the first [Group.Send] on a restored group is refused with
+//     [ErrNotReconciled] until one [Group.Receive] has completed. That ordering is the CLONE
+//     CHECK and it is stated below.
+//   - It can RECEIVE, including records sealed BEFORE the restart AND THE ONES IT SEALED ITSELF: a
+//     receiver ladder is followed from its root (`trackLocked` passes head index 0), and the
+//     cursor is not persisted, so a restored device re-fetches this group's history and
+//     re-derives every key it needs for it. Its own records are opened rather than skipped, which
+//     is what makes a restored conversation the whole conversation; see [Group.openPageLocked].
 //   - It cannot ADD a member or OPEN: both need the epoch-zero founding session, which exists on
 //     the founder before the first commit and is not persisted. A restored group answers
 //     [ErrAlphaOneAdd] and [ErrNoMemberAdded] by name, which is the same answer a joiner gets.
@@ -36,6 +41,69 @@ import (
 // A GROUP THAT WILL NOT RESTORE IS NAMED AND THE REST STILL COME BACK. One unreadable epoch state
 // must not cost a device every other conversation it is in, so the refusals are collected and
 // returned together with whatever did restore.
+//
+// ---------------------------------------------------------------------------------------------
+// ONE COPY OF THE APP-DATA FOLDER IS TWO DEVICES ON ONE IDENTITY, AND THIS IS WHERE THAT IS MET.
+// ---------------------------------------------------------------------------------------------
+//
+// A DURABLE IDENTITY IS WHAT MAKES A RESTART A RESTORE AND IT IS ALSO WHAT MAKES A COPY DANGEROUS.
+// Before the store existed, a restarted device drew a FRESH Ed25519 identity and a fresh MLS
+// group, so a copied directory was harmless: the copy was a different leaf with a different
+// sender_handle and it collided with nothing. With the identity on the disk, a copied folder is a
+// second device at the SAME leaf, the SAME sender_handle, the SAME epoch and the SAME stream
+// counter -- and two records under one (epoch, sender_handle, stream_index) are one record_key and
+// one nonce, which spec A section 5.6 calls a total break of both AEADs for that record. The
+// single-writer exclusion does NOT reach this: it is held per DIRECTORY, and a copy is a second
+// directory, so both opens are granted and neither knows about the other.
+//
+// THE SERVER REFUSING THE DUPLICATE SUBMISSION IS NOT A DEFENCE AND IS NOT TREATED AS ONE. The
+// message server answers REASON_STREAM_INDEX_REGRESSED to the second record, which is real defence
+// in depth for the SERVER'S rows -- and the sealing has already happened by then. Two ciphertexts
+// under one keystream exist on this disk and on the wire whether or not the server stores the
+// second.
+//
+// SO THE CHECK IS BEFORE THE SEAL, AND IT IS TWO CLAUSES.
+//
+//  1. A RESTORED GROUP WILL NOT SEND UNTIL IT HAS RECEIVED. [Group.Receive] walks the group's
+//     whole history -- the cursor is not persisted -- opens every record of this device's own,
+//     and holds the highest stream index it finds against [messagegroup.StreamIndexReserver]'s
+//     HighWater for this stream. Every index on the server under this sender_handle was allocated
+//     by this device's reserver and a reserver never rewinds, so an index ABOVE the high water was
+//     sealed by something else holding these keys. There is no second reading of it. The group
+//     then refuses to seal, for the life of the process, with [ErrIdentityInUse].
+//  2. AFTER IT HAS RECONCILED, an own record that opens under this device's sender_handle and is
+//     not a record this device sealed is the same finding, refused the same way. TWO SHAPES, and
+//     the second is the one an index-only check could not see: an index this device never sealed
+//     at, and an index it DID seal at carrying a body_hash that is not the one it sealed. The
+//     hash is why [Group.ownIndices] is a map and not a set; §3.1's body_hash is authenticated by
+//     both AEADs, so a party without this group's keys cannot produce a record that opens at all.
+//
+// WHAT THIS COVERS: every copy that is BEHIND the original -- a phone backup, a folder copied last
+// week, a partial restore that brought the state directory and not the stream directory -- is
+// caught at its first Receive, BEFORE it has sealed anything. So is a copy that cannot reach the
+// server at all, because clause 1 refuses the send when the reconciliation has not run. And a copy
+// that is exactly level but LISTENS before it speaks is caught by clause 2 with no ciphertext
+// produced at all.
+//
+// WHAT IT DOES NOT COVER, said plainly because a half-stated defence is worse than none. TWO
+// COPIES THAT ARE EXACTLY LEVEL and both SEAL before either fetches again agree with the server
+// and with each other at the moment of the seal, so nothing on either side has any evidence the
+// other exists, and THEY COLLIDE ONCE. That is one record's total break and this build cannot
+// prevent it.
+//
+// WHAT CLAUSE 2 THEN DOES, stated exactly rather than optimistically: the server takes one of the
+// two submissions and refuses the other, and the side that LOST meets the winner's record at the
+// index it sealed at, with a body_hash that is not its own -- so the loser stops. The WINNER sees
+// nothing it did not seal and carries on, which is correct: it is then the only writer of that
+// stream and produces no further collision. So the count is one record, not a stream of them, and
+// the side still capable of making more is the side that is stopped.
+//
+// WHAT WOULD CLOSE IT PROPERLY: a copy that came back under a DIFFERENT leaf, which is an MLS
+// Update commit -- and a restored group cannot ingest a commit (J1-8, see [restoredHandle]) and
+// the alpha has exactly one epoch ([ErrAlphaOneAdd]). **FILED AS S2-28: a copied app-data folder
+// needs a new leaf, not a detection.** Until it is ruled, the two clauses above are the whole
+// answer and the sentences you are reading are the rest of it. `sdk/cp3b/clone_test.go` drives
+// every case in this paragraph, including the residual.
 func (self *Device) Restore(ctx context.Context) ([]*Group, error) {
 	store, durable := self.stateStore.(DeviceStore)
 	if !durable {
@@ -100,8 +168,14 @@ func (self *Device) restoreOne(record *GroupRecord, nonce []byte, nonceEpoch uin
 		sessionBound:   nonceEpoch,
 		epoch:          record.Epoch,
 		opened:         record.Opened,
-		tracked:        map[trackedKey]bool{},
+		// AND NOT RECONCILED. This is the one place a [Group] is built over an identity that
+		// existed before this process did, so it is the one place a SECOND copy of that
+		// identity is possible. [Group.Send] refuses until [Group.Receive] has walked this
+		// group's history once and held the stream indices it finds against this device's own
+		// durable reserver. See Restore's header for what that covers and what it does not.
+		reconciled: false,
 	}
+	restored.initTables()
 	self.hold(restored)
 	return restored, nil
 }

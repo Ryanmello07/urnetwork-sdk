@@ -17,13 +17,33 @@ import (
 // The two strings the restart case turns on. They are typed here and nowhere else, and the second
 // one is what says the restored device is a MEMBER and not a reader of an archive.
 const (
+	// bob's OWN two lines. They are the whole of property (5): a restarted device that cannot
+	// rebuild its own half of a conversation has lost half of what the user typed.
+	bobsFirstLine  = "bob's first line, before anything was killed -- if THIS does not come back, the user has lost their own half"
+	bobsSecondLine = "and bob's second line, still before anything was killed"
+
 	beforeTheRestart = "typed before bob's device was killed -- if this does not come back, the alpha loses the conversation"
 	afterTheRestart  = "typed by the SAME device after it was restarted, on the stream index its dead predecessor left behind"
 	aliceAfterwards  = "and alice speaks again, to a device that has been through a restart"
 )
 
-// S2-14, WHOLE: A DEVICE THAT IS KILLED COMES BACK INTO ITS GROUP AT ITS EPOCH, READS A MESSAGE
-// SEALED BEFORE THE RESTART, AND SEALS ONE THE OTHER SIDE OPENS.
+// S2-14, WHOLE: A DEVICE THAT IS KILLED COMES BACK INTO ITS GROUP AT ITS EPOCH, READS THE WHOLE
+// CONVERSATION INCLUDING ITS OWN HALF OF IT, AND SEALS ONE THE OTHER SIDE OPENS.
+//
+// THIS RESTART IS IN-PROCESS, AND THE SENTENCE THAT USED TO STAND HERE SAID OTHERWISE. It claimed
+// property (4) below was "the only assertion in the suite that measures it across a process
+// boundary". That is FALSE: [world.restart] closes and reopens inside one test process, and there
+// was no os/exec anywhere in `urmessage` or `cp3b` when it was written. What IS true is the
+// sentence this file can support -- everything in memory is dropped and the only thing that
+// crosses is two directories on the disk. THE REAL PROCESS BOUNDARY IS
+// `urmessage/crossprocess_test.go`, which re-executes the test binary and restores the device in a
+// process that did not exist when the records were sealed; it is where the boundary claim now
+// lives and it is the file to read for what a process death costs.
+//
+// WHAT THIS CASE HAS THAT THE CROSS-PROCESS ONE CANNOT. The whole seam: a real message server, a
+// real `connect.Client`, real submissions and real fetches. A second process cannot reach an
+// in-process server -- `connect` has no inbound listener for client frames -- so the two cases
+// measure two different things on purpose and neither replaces the other.
 //
 // THE ONLY THING THAT CROSSES THE RESTART IS TWO DIRECTORIES. [world.restart] closes the device,
 // both stores, the transport and the connect client, and then opens a new everything over the same
@@ -31,7 +51,7 @@ const (
 // `mls.CryptoProvider`, a new engine, a new device. No pointer is shared. A restore that worked
 // because something stayed in memory cannot pass through that function.
 //
-// FOUR PROPERTIES AND NOT ONE, because "it came back" hides at least three ways of being wrong:
+// FIVE PROPERTIES AND NOT ONE, because "it came back" hides at least four ways of being wrong:
 //
 //  1. THE MEMBERSHIP. The restored device is in the group at the SAME epoch, under the SAME leaf,
 //     with the SAME sender_handle. A device that re-joined would have a different leaf; a device
@@ -48,8 +68,17 @@ const (
 //  4. THE STREAM INDEX DOES NOT REWIND. Read off the SERVER'S OWN ROWS: every record this device
 //     ever sealed, before the restart and after it, carries a distinct, increasing stream index.
 //     §5.6 calls a reused index "a total break of both AEADs for that record", and it is the one
-//     failure a restart is most likely to cause -- the durable reserver is what prevents it, and
-//     this is the only assertion in the suite that measures it across a process boundary.
+//     failure a restart is most likely to cause. The durable reserver is what prevents it; this
+//     case measures it through the whole seam, and `urmessage/crossprocess_test.go` measures it
+//     across a real process death.
+//  5. ITS OWN HALF OF THE CONVERSATION. The restored device reads back the lines IT sent, not only
+//     the ones it received. THIS IS THE CLAUSE THAT WAS MISSING AND IT IS WHY THE DEFECT SURVIVED:
+//     this case asserted only that ALICE's pre-restart record came back, and `Group.Receive`
+//     skipped every record whose sender_handle was its own while a restored group's log started
+//     empty. A user closed the app, reopened it, and got the other side's half of the conversation
+//     and none of their own -- with a nil error and one counter that moves on the ordinary echo
+//     case too. The asymmetry of the assertion is exactly what hid it, so the assertion is now
+//     symmetric.
 func TestADeviceKilledAndRestartedComesBackIntoItsGroupAndReadsAMessageSealedBeforeTheRestart(t *testing.T) {
 	world := newWorld(t)
 	ctx := context.Background()
@@ -67,12 +96,13 @@ func TestADeviceKilledAndRestartedComesBackIntoItsGroupAndReadsAMessageSealedBef
 	aliceGroup, bobGroup := openPair(t, ctx, alice, bob, groupId)
 
 	// bob speaks BEFORE the restart, so the restart has a stream index to continue from rather
-	// than a fresh row to allocate the first index of.
-	if _, err := bobGroup.Send(ctx, "bob's first line, before anything was killed"); err != nil {
-		t.Fatalf("bob's Send before the restart: %v", err)
-	}
-	if _, err := bobGroup.Send(ctx, "and bob's second line, still before anything was killed"); err != nil {
-		t.Fatalf("bob's second Send before the restart: %v", err)
+	// than a fresh row to allocate the first index of -- and so that property (5) has two of
+	// HIS OWN lines to come back.
+	bobsOwn := []string{bobsFirstLine, bobsSecondLine}
+	for _, text := range bobsOwn {
+		if _, err := bobGroup.Send(ctx, text); err != nil {
+			t.Fatalf("bob's Send %q before the restart: %v", text, err)
+		}
 	}
 	if _, err := aliceGroup.Receive(ctx); err != nil {
 		t.Fatalf("alice's Receive before the restart: %v", err)
@@ -159,6 +189,33 @@ func TestADeviceKilledAndRestartedComesBackIntoItsGroupAndReadsAMessageSealedBef
 			len(got), textsOf(got))
 	}
 	assertNothingFailedToOpen(t, "bob after the restart", bobGroup)
+
+	// (5) ITS OWN HALF. Both of bob's pre-restart lines, opened by the restored device under a
+	// receiver ladder over its OWN leaf, and marked Mine. The Mine bit is asserted separately
+	// from the text because a restored device that came back with a different sender_handle
+	// would open its own records as somebody else's and this assertion would pass on the text
+	// alone.
+	held := bobGroup.Messages()
+	for _, text := range bobsOwn {
+		mine := false
+		for _, one := range held {
+			if one.Text == text {
+				mine = one.Mine
+			}
+		}
+		if !mine {
+			t.Errorf("the restored device's log does not hold %q as its own; a user who closed the app and reopened it has lost their own half of the conversation. It holds: %v",
+				text, textsOf(held))
+		}
+	}
+	if len(held) != 3 {
+		t.Errorf("the restored device's log holds %d message(s) and the conversation has three: %v",
+			len(held), textsOf(held))
+	}
+	if own := bobGroup.Stats().OpenedOwn; own != uint64(len(bobsOwn)) {
+		t.Errorf("Stats.OpenedOwn is %d and this device sealed %d records before it died", own, len(bobsOwn))
+	}
+	t.Logf("the restored device's whole conversation: %v", textsOf(held))
 
 	// (3) WRITING THE FUTURE
 	sealedAfter, err := bobGroup.Send(ctx, afterTheRestart)

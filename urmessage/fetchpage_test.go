@@ -90,17 +90,31 @@ func TestAnAttestationThatDoesNotDescribeItsOwnPageIsRefused(t *testing.T) {
 	}
 }
 
-// EVERY VALUE THIS STORE NAMES WAS FLUSHED BEFORE IT WAS NAMED.
+// ONE FLUSH PER VALUE AND NOT ONE PER CALL, AND A READ FLUSHES NOTHING.
 //
-// The count is taken AFTER the Sync returns and at no other site, which is
-// sdk/message_stream_store.go's measured discipline: a counter incremented ABOVE the flush
-// survives the mutation "return before the flush", because the number still moves. This case is
-// what makes the fsync in [DurableStateStore.writeRecord] undeletable -- remove that line and this
-// number is zero on every write below.
+// WHAT THIS CASE DOES NOT DO, stated first because the sentence that used to stand here claimed
+// it did: it does NOT make the fsync in [DurableStateStore.writeRecord] undeletable. It said
+// "remove that line and this number is zero on every write below" and that is false. MEASURED at
+// this commit, both directions:
 //
-// ONE FLUSH PER VALUE AND NOT ONE PER CALL, which is the other half: a store that flushed twice
-// per value would be paying twice for the same guarantee, and one that batched would be reporting
-// a value durable before it is.
+//	was:  syncErr := temp.Sync()
+//	made: var syncErr error // the Sync is gone and the counter is not
+//	      self.flushes += 1
+//
+//	go test -count=1 -race -run TestEveryValueTheDurableStoreNamesWasFlushedFirst ./urmessage -> ok
+//	go test -count=1 -race ./urmessage (this gate excluded)                                   -> ok
+//	cd cp3b && go test -count=1 -race ./...                                                   -> ok
+//
+// The increment is unconditional, so it counts a write that passed through writeRecord and not a
+// flush that happened. WHAT HOLDS THE FLUSH IS TestEveryFsyncInThisPackageIsAtASiteThisSuiteNames
+// in sourcegate_test.go, which reads this package's source and goes RED on exactly that mutation
+// -- measured, same commit.
+//
+// WHAT THIS CASE DOES DO, which is worth having and is the whole of its claim: one flush per
+// value and not one per call. A store that flushed twice per value would be paying twice for the
+// same guarantee; one that batched would be reporting a value durable before it is; and one that
+// flushed on a READ would be measuring calls rather than writes. All three move this number and
+// all three are held below.
 func TestEveryValueTheDurableStoreNamesWasFlushedFirst(t *testing.T) {
 	store := openTestStore(t, t.TempDir())
 	if store.flushCount() != 0 {

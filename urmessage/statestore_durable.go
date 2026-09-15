@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/urnetwork/connect/mls"
@@ -77,16 +78,28 @@ type DurableStateStore struct {
 	lock   sync.Mutex
 	closed bool
 
-	// flushes counts every value fsync this store has PERFORMED, taken AFTER the call returns
+	// flushes counts every write that passed through writeRecord, taken AFTER the Sync returns
 	// rather than before it.
 	//
-	// IT IS THE STREAM STORE'S OWN DISCIPLINE AND IT IS HERE FOR THE SAME MEASURED REASON.
-	// sdk/message_stream_store.go's forceFlush says it: a first version counted at the call
-	// site with the increment ABOVE the Sync, and the mutation "return before the flush" --
-	// written as deleting the Sync and leaving everything around it -- SURVIVED the entire
-	// suite, because the counter still said one. Counted here, the flush cannot be deleted
-	// without this number going to zero, and
-	// TestEveryValueTheDurableStoreNamesWasFlushedFirst is what drives that.
+	// WHAT IT MEASURES AND WHAT IT DOES NOT, AND THE SECOND HALF IS A CORRECTION OF WHAT USED
+	// TO STAND HERE. This comment said "counted here, the flush cannot be deleted without this
+	// number going to zero". THAT IS FALSE AND IT WAS FALSIFIED BY DELETING THE FLUSH: replace
+	// `syncErr := temp.Sync()` with `var syncErr error`, leave `self.flushes += 1` exactly
+	// where it is, and TestEveryValueTheDurableStoreNamesWasFlushedFirst still passes and so
+	// does the whole of ./urmessage and ./cp3b. Re-measured at this commit, both directions.
+	// The reason is structural rather than a slip of position: the increment is UNCONDITIONAL,
+	// so it counts the same whether the call above it is there or not, and no rearrangement of
+	// an unconditional statement turns it into a count of work performed.
+	//
+	// SO THE NUMBER IS ONE OF TWO CLAUSES AND IT IS THE WEAKER ONE. This counts that a value
+	// went through the one write path -- one flush per value and not one per call, which is
+	// what TestEveryValueTheDurableStoreNamesWasFlushedFirst actually drives, and it is worth
+	// having. What holds the fsync ITSELF is TestEveryFsyncInThisPackageIsAtASiteThisSuiteNames
+	// in sourcegate_test.go: it parses this package's own source and refuses any Sync call site
+	// that is not writeRecord's or syncStateDir's, so deleting the flush is a RED gate rather
+	// than an unchanged number. That gate is sdk/message_stream_store_test.go's, one package
+	// over, and its absence here was the stream store's discipline copied one layer deep: the
+	// counter came and the thing that made the counter mean something did not.
 	//
 	// It counts the VALUE flush and not the directory flush, because the directory flush is a
 	// no-op on Windows by construction (see syncStateDir there) and a counter that read zero
@@ -275,6 +288,13 @@ func decodeStateRecord(raw []byte, kind byte) ([][]byte, error) {
 const (
 	stateDataDirName = "state"
 	stateGuardName   = "single-writer.lock"
+
+	// The prefix every in-flight write wears. IT IS A CONSTANT BECAUSE THREE PLACES HAVE TO
+	// AGREE ON IT: writeRecord makes them, OpenDurableStateStore sweeps them, and
+	// deleteEpochsLocked has to remove them before it can say a directory is empty of state.
+	// A second spelling of this string is a file nothing ever deletes, which is exactly the
+	// defect the sweep exists for.
+	stateTempPrefix = ".writing-"
 )
 
 // stateStoreGuardPath is the ONE place the guard's location is decided, so there is no second
@@ -313,8 +333,51 @@ func OpenDurableStateStore(dir string) (*DurableStateStore, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("%w: the data directory %s could not be created: %v", ErrStateStoreState, dataDir, err)
 	}
+	if err := sweepStateTempFiles(dataDir); err != nil {
+		return nil, err
+	}
 	released = true
 	return &DurableStateStore{dir: dir, dataDir: dataDir, exclusion: exclusion}, nil
+}
+
+// sweepStateTempFiles removes every in-flight write left behind by a process that died.
+//
+// WHY THERE IS ANYTHING TO SWEEP. [DurableStateStore.writeRecord] is temp file, fsync, rename, and
+// the `defer` that removes the temp on a failure only runs if the CALL RETURNS. A process killed
+// between CreateTemp and Rename returns from nothing, and what it leaves in the epoch directory is
+// a `.writing-XXXXXXXX` holding a COMPLETE epoch state -- this member's leaf HPKE private key and
+// its whole TreeKEM path-secret ladder -- that decodes cleanly under decodeStateRecord. Measured
+// with a real Process.Kill: it is not debris, it is a readable copy.
+//
+// AND NOTHING USED TO REMOVE IT, WHICH IS THE HALF THAT MATTERS. It is not epoch-named, so
+// deleteEpochsLocked walked straight past it, and SO DID THE RE-READ that is sold as making
+// "deleted" a measurement -- section 5.12's total erase reported success over a file holding the
+// keys it had just promised to discard. The sweep here and the refusal in deleteEpochsLocked are
+// the two halves of closing that, and they are deliberately in two places: this one bounds how
+// long a leftover can live (one open), that one makes an erase that cannot see something REFUSE
+// rather than report success.
+//
+// IT IS AN UNLINK AND NOT AN ERASE, which is this store's discipline everywhere and is stated
+// rather than implied: the octets are still wherever the filesystem put them. See
+// [DurableStateStore]'s header for what does and does not protect them.
+//
+// IT RUNS UNDER THE EXCLUSION AND BEFORE ANYTHING IS READ, so it can never race a live writer:
+// the only process that may hold this directory is this one, and it has not written yet.
+func sweepStateTempFiles(dataDir string) error {
+	return filepath.WalkDir(dataDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("%w: %s could not be walked for leftover writes: %v",
+				ErrStateStoreState, dataDir, err)
+		}
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), stateTempPrefix) {
+			return nil
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %s is a write this store did not finish and it could not be removed: %v",
+				ErrStateStoreState, path, err)
+		}
+		return nil
+	})
 }
 
 // Close releases the store, and with it the single-writer exclusion, which is the only thing that
@@ -426,6 +489,13 @@ func stateEpochOfName(name string) (uint64, bool) {
 //
 // THE DIRECTORY FSYNC IS WHAT MAKES THE RENAME ITSELF DURABLE, and it is a no-op on Windows; see
 // syncStateDir for exactly what that costs and why there is no second discipline hiding in it.
+//
+// WHAT THE `defer` BELOW DOES NOT COVER, said here because it used to be nowhere: it removes the
+// temp file only if this CALL RETURNS. A process killed between CreateTemp and Rename leaves a
+// `.writing-*` in the record's own directory holding a complete, decodable value -- for an epoch
+// state, this member's leaf private key and its path-secret ladder. [sweepStateTempFiles] at open
+// is what bounds how long that lives, and deleteEpochsLocked's re-read is what stops a discard
+// reporting success over one.
 func (self *DurableStateStore) writeRecord(path string, kind byte, parts ...[]byte) error {
 	record, err := encodeStateRecord(kind, parts...)
 	if err != nil {
@@ -596,7 +666,26 @@ func (self *DurableStateStore) deleteEpochsLocked(groupId []byte, before uint64)
 	removed := 0
 	for _, entry := range entries {
 		at, named := stateEpochOfName(entry.Name())
-		if !named || before <= at {
+		if !named {
+			// AN IN-FLIGHT WRITE LEFT BY A PROCESS THAT DIED, and section 5.12's discard
+			// has to remove it or it is not a discard. It carries a complete epoch state
+			// of THIS group -- writeRecord makes it in this very directory -- so leaving
+			// it is leaving the leaf private key and the path-secret ladder behind after
+			// reporting the erase succeeded. Anything else that is not epoch-named is left
+			// alone here and REFUSED by the re-read below.
+			if !strings.HasPrefix(entry.Name(), stateTempPrefix) {
+				continue
+			}
+			if !self.skipRemove {
+				if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("%w: %s is an unfinished write of group %x's epoch state and it could not be discarded: %v",
+						ErrStateStoreState, entry.Name(), groupId, err)
+				}
+			}
+			removed += 1
+			continue
+		}
+		if before <= at {
 			continue
 		}
 		if !self.skipRemove {
@@ -623,7 +712,28 @@ func (self *DurableStateStore) deleteEpochsLocked(groupId []byte, before uint64)
 	}
 	for _, entry := range entries {
 		at, named := stateEpochOfName(entry.Name())
-		if named && at < before {
+		if !named {
+			// CATEGORICAL, AND THAT IS THE REPAIR. This loop used to consider only entries
+			// that parse as sixteen hex digits, so the one thing the discard could not see
+			// was the one thing it also could not delete: a `.writing-*` holding a complete
+			// epoch state survived the erase AND survived the measurement that is sold as
+			// proving the erase happened. This store's own header says "an entry in the
+			// data directory that is not a record is a finding"; this is that sentence
+			// enforced instead of asserted.
+			//
+			// WHAT IT COSTS, because a fail-closed rule with an unnamed cost is a trap.
+			// Anything a third party drops in this directory -- a .DS_Store, a Thumbs.db,
+			// an antivirus quarantine stub -- makes a discard REFUSE rather than report
+			// success. That is the right way round: this store must not delete octets it
+			// did not write, and a discard that walked past an entry it could not read
+			// would be the exact half-erase §5.12 names. The exposure is also narrow by
+			// construction -- the loop above returns early when it removed NOTHING, and
+			// with PastEpochWindow at 32 the alpha calls this with cutoff 0 for every
+			// epoch it has, so this re-read runs only when something actually went.
+			return fmt.Errorf("%w: %s stands in group %x's epoch directory after a discard below %d, and it is not an epoch this store wrote",
+				ErrStateStoreState, entry.Name(), groupId, before)
+		}
+		if at < before {
 			return fmt.Errorf("%w: epoch %d of group %x is still readable after a discard below %d",
 				ErrStateStoreState, at, groupId, before)
 		}

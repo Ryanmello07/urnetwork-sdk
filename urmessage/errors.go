@@ -94,4 +94,36 @@ var (
 	// The page bound was reached with the server still saying there is more. The messages read
 	// so far are returned WITH this error, never silently.
 	ErrFetchIncomplete = errors.New("urmessage: the message server still has records for this group and this Receive stopped at its page bound")
+
+	// The server answered a page it called COMPLETE and named a `high_water_record_id` above
+	// every record it handed over. §4.3.4 makes that field the server's own statement of the
+	// highest record it holds for this group, so a complete page that stops below it is the
+	// server holding records back -- the one failure the AEAD cannot see, detectable with no
+	// key and no attestation. Returned WITH whatever did arrive, never instead of it. See
+	// [Group.Receive] for the one honest server that also produces it.
+	ErrFetchOmitted = errors.New("urmessage: the message server answered a complete page and named a high water above every record it handed over")
+
+	// A record that did not open has been re-fetched [maxRecordAttempts] times and is given up
+	// on. It is named ONCE, here, rather than silently dropped: before this error existed the
+	// cursor moved past a failed record on its first sight of it and no later fetch ever asked
+	// for it again.
+	ErrRecordAbandoned = errors.New("urmessage: a record from a member of this group did not open after every retry and is no longer being fetched")
+
+	// ── one identity, two devices ─────────────────────────────────────────────────────────
+
+	// A SECOND WRITER IS SEALING UNDER THIS DEVICE'S IDENTITY IN THIS GROUP, which is what a
+	// COPY of the app-data folder produces: two devices at one leaf, one sender_handle and one
+	// stream counter. Two records under one (epoch, sender_handle, stream_index) are one
+	// record_key and one nonce, which spec A §5.6 calls a total break of both AEADs for that
+	// record. STICKY: a group that has seen this refuses to seal again for the life of the
+	// process, because the alternative is to go on producing the collision. See
+	// [Group.Receive] for exactly what is detected, when, and what is NOT.
+	ErrIdentityInUse = errors.New("urmessage: another device is sealing records under this device's identity in this group, so this group will not seal again")
+
+	// A RESTORED GROUP HAS NOT YET COMPARED ITS STREAM POSITION AGAINST THE SERVER'S ROWS.
+	// [Group.Receive] is what performs that comparison, and until it has run once this group
+	// will not seal -- because the seal is the irreversible half: a copied folder that sends
+	// before it listens has already produced the two-time pad whatever the server then does
+	// with the record.
+	ErrNotReconciled = errors.New("urmessage: this restored group has not reconciled its stream position against the server yet; Receive once before Send")
 )

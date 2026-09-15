@@ -57,7 +57,12 @@ party holds a single-writer exclusion on its own subdirectory — if a second pr
    device, both durable stores, the transport and the connect client are all dropped and a new
    everything is opened; the only thing that crosses is the disk. It holds that B comes back into
    the same group at the same epoch under the same leaf, opens a record A sealed **before** the
-   restart, and seals one A opens after it.
+   restart, **reads back the two lines B ITSELF sent before the kill**, and seals one A opens
+   after it. That middle clause is new and it is the one that used to be missing: a restored
+   group's log starts empty and `Receive` skipped every record whose `sender_handle` was its own,
+   so a user who closed the app and reopened it got the other side's half of the conversation and
+   none of their own — with a nil error. A probe that checks only the far side's half cannot see
+   that, and this one could not.
 8. **Two senders at once.** Both parties send 20 lines concurrently. Each line is distinct, so a
    lost one and a duplicated one are both visible in the counts.
 
@@ -69,9 +74,58 @@ pages unattested`. **`FAILED` must be 0.**
 - **That the plaintext is absent from the server's `message_record` rows.** It is (measured on the
   first deployment: 6 rows, 0 matches), but this probe holds no database credential and should
   not. Read it out of the server's database by hand.
-- **That the server returned everything it has.** §4.3.4's fetch attestation is the Ed25519
-  signature that would say so, and the deployed server holds no fleet key and signs nothing
+- **That the server returned everything it has — in full.** §4.3.4's fetch attestation is the
+  Ed25519 signature that would say so, and the deployed server holds no fleet key and signs nothing
   (`msgrepo/api/fetch.go:112`). The client checks the two halves that need no key — a server that
   *advertises* attestation and sends none is refused, and an attestation that describes a
   different page is refused — and **counts** every page whose signature it could not verify in
-  `unattested`. A server that silently omits records is still undetectable. That is **S2-27**.
+  `unattested`.
+
+  **The gross case is now caught, and it was free.** §4.3.4's `high_water_record_id` is the
+  server's own statement of the highest record it holds for this group, it arrives on every page,
+  and it needs no key. A page the server calls `complete` that names a high water above everything
+  it handed over is `ErrFetchOmitted`, and this probe fails on it by name. This used to say "a
+  server that silently omits records is still undetectable", flat, and that was too strong.
+
+  **What is still undetectable, and is genuinely S2-27's:** a server omitting records from the
+  *middle* of a page, and a server that lies about its own high water. Both need the signature
+  over the record-id vector and nothing else will do.
+
+  **The false positive, and it is not live yet.** §7.2's retention sweep would prune records out
+  from under a high water that is `next_record_id - 1` and never comes down, so a group whose
+  oldest records had expired would produce exactly this signal with no dishonesty anywhere. That
+  sweep is **not built**: over the server repo, `grep -rn "DELETE FROM" --include=*.go
+  --include=*.sql .` answers two lines, both `DELETE FROM migration_audit` in a startup test, and
+  nothing deletes a `message_record` row. The `prune_after` column and the sweep's worklist index
+  exist and the sweep does not. So today a red run here is an omission; against a server new
+  enough to sweep, check its retention settings first.
+
+- **That two copies of a `-dir` are safe.** They are not. A COPIED app-data directory -- a backup
+  restored onto a second machine, a `cp -r` of the folder -- is two devices at one leaf with one
+  stream counter, and two records under one `(epoch, sender_handle, stream_index)` are one record
+  key and one nonce. (This is *not* the same as running the probe twice over one `-dir` in
+  sequence: a second run founds a fresh group id, so the old group's indices still match its own
+  reserver. What a second run over one `-dir` actually hits is step 7's `B was in one group and N
+  came back from the disk`, because `Restore` brings back every group the directory holds. Use a
+  fresh `-dir` per run.) A restored group refuses to seal until it has
+  compared its stream position against the server, and a group that finds an index its own
+  reserver never allocated refuses to seal at all (`ErrIdentityInUse`). That catches every copy
+  that is *behind* the original, before it seals. It does not catch two copies that are exactly
+  level and both send before either fetches — that is **S2-28**, and closing it needs a new leaf
+  for the copy, which is an MLS Update commit a restored group cannot make.
+
+## Building it
+
+There is no committed binary and there should not be: this probe's audience is an operator on a
+deployed Linux VPS, and the `windows/amd64` executable that used to be tracked here was 35 MB of
+git weight that served nobody, had to be rebuilt anyway, and was the single artefact in this tree
+most likely to be picked up and run by mistake. It also went stale the moment `main.go` changed.
+
+```sh
+cd sdk/liveprobe
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o liveprobe .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o liveprobe-arm64 .
+```
+
+`CGO_ENABLED=0` is what makes the result a static binary an operator can copy onto a host that has
+no toolchain on it.

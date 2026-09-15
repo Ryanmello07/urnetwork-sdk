@@ -87,15 +87,47 @@ type Stats struct {
 	// the epoch's wraps, the marker that closes them.
 	SkippedCeremony uint64
 
-	// Records skipped because this device sealed them. It holds its own plaintext already and
-	// tracking its own ladder as a receiver would derive a second copy of keys it has.
+	// Records skipped because this device sealed them AND ALREADY HOLDS THEM: their record id
+	// is in this group's log, so they are the ordinary echo of a send this process made.
+	//
+	// IT USED TO COUNT EVERY OWN RECORD AND THAT IS THE DEFECT IT WAS PART OF. A restored
+	// group's log starts empty, so "this device sealed it" and "this device still has it" came
+	// apart at exactly the moment a user reopened the app -- and a counter that moves on both
+	// readings cannot tell a UI which one happened. The two are now two numbers.
 	SkippedOwn uint64
+
+	// Records this device sealed that were opened into a [Message] because this group does NOT
+	// already hold them: the whole of a restarted device's own half of the conversation, and a
+	// record whose submit response was lost after the server had stored it.
+	OpenedOwn uint64
+
+	// Records skipped because this group's log already holds them under that record id. It
+	// moves when a fetch is REWOUND -- which is what a record that failed to open now causes,
+	// see [Group.Receive] -- and it is what keeps that rewind from delivering a message twice.
+	SkippedSeen uint64
+
+	// Records that did not open after [maxRecordAttempts] fetches and are no longer asked for.
+	// [Group.UnopenedRecords] is which ones. A number here is a hole in the conversation that
+	// this build has stopped trying to fill, and it is the number that must stay zero.
+	Unopened uint64
+
+	// Fetch pages the server called COMPLETE while naming a `high_water_record_id` above every
+	// record it handed over -- §4.3.4's own statement that it is holding records back. See
+	// [Group.Receive] for the one honest server that also moves this.
+	Omitted uint64
 
 	// Records skipped because they are not a class this build opens.
 	SkippedClass uint64
 
-	// Records from a member of this group that did not open. This is the number that must stay
-	// zero, and [Group.Receive] returns an error naming the first one whenever it does not.
+	// ATTEMPTS to open a record from a member of this group that did not open -- one per
+	// fetch, so a record retried [maxRecordAttempts] times moves this three times. It counts
+	// attempts and not records because that is what it can honestly count: the retry is what
+	// repairs a transient, and a counter that deduplicated would hide how hard this group is
+	// working. [Stats.Unopened] is the one that counts RECORDS, and it counts the ones given
+	// up on.
+	//
+	// This is the number that must stay zero, and [Group.Receive] returns an error naming the
+	// first one whenever it does not.
 	FailedOpen uint64
 
 	// Records submitted, and records the server refused on the first attempt and accepted after
@@ -155,10 +187,48 @@ type Group struct {
 	opened bool
 	closed bool
 
+	// cursor is the RESOLVED position: the highest record id below which every record has been
+	// opened, skipped for a reason this build names, or given up on. It is deliberately NOT the
+	// highest record id the server has handed over -- see [Group.Receive] and openPageLocked,
+	// where a record that did not open holds this back so that the next fetch asks for it again.
 	cursor  uint64
 	log     []*Message
 	tracked map[trackedKey]bool
 	stats   Stats
+
+	// delivered is the record ids that are in log. A fetch that is rewound over a record that
+	// did not open re-reads everything after it, and this is what makes that free of duplicates.
+	delivered map[uint64]bool
+
+	// attempts is how many times one record id has been fetched and failed to open.
+	attempts map[uint64]int
+
+	// unopened is the record ids this group has given up on, ascending.
+	unopened []uint64
+
+	// ── one identity, two devices ────────────────────────────────────────────────────────
+	//
+	// ownIndices is every §5.6 stream index this group has accounted for as its own, AND THE
+	// body_hash OF WHAT WAS SEALED AT IT.
+	//
+	// THE HASH IS WHY THIS IS NOT A SET, and it is what catches the hardest case. An index is
+	// recorded at the SEAL and not at the submit, because a submit whose response was lost is
+	// still a record this device sealed. So when two copies of one folder are EXACTLY level,
+	// both seal at the same index, one submission wins and one is refused -- and the loser then
+	// meets, on the server, a record under its own sender_handle at an index it DID seal, whose
+	// body is not the body it sealed. An index alone cannot tell those apart. The hash can, and
+	// 3.1's body_hash is authenticated by both AEADs, so a server cannot forge one that opens.
+	ownIndices map[uint64][32]byte
+
+	// reconciled is whether this group has compared its own stream position against the
+	// server's rows since it came back. A group created or joined in THIS process is
+	// reconciled by construction -- its identity was drawn here and nothing else holds it. A
+	// RESTORED group is not, and [Group.Send] refuses until [Group.Receive] has run once.
+	reconciled bool
+
+	// identityInUse is sticky and is the whole of the clone refusal. Once set, every Send is
+	// refused with it. See [Group.Receive].
+	identityInUse error
 }
 
 // ── founding and joining ─────────────────────────────────────────────────────────────────────
@@ -219,8 +289,11 @@ func (self *Device) CreateGroup(ctx context.Context, groupId []byte) (*Group, er
 		pqSecret:       pqSecret,
 		founding:       founding,
 		foundingBound:  nonceEpoch,
-		tracked:        map[trackedKey]bool{},
+		// a group founded in THIS process holds an identity drawn in this process. There is
+		// no earlier writer of its stream to reconcile against.
+		reconciled: true,
 	}
+	group.initTables()
 	self.hold(group)
 	// NOTHING IS PERSISTED HERE AND THAT IS DELIBERATE. A group at epoch zero with no second
 	// member cannot be restored into anything a caller can use -- [Group.AddMember] needs the
@@ -275,9 +348,11 @@ func (self *Device) Join(ctx context.Context, invite *Invite) (*Group, error) {
 		epoch:          handle.Epoch(),
 		// The founder opened it. A joiner cannot observe that and does not pretend to: if it
 		// has not, every send below is refused by the server and the refusal is returned.
-		opened:  true,
-		tracked: map[trackedKey]bool{},
+		opened: true,
+		// as for a founded group: this device's stream in this group starts here.
+		reconciled: true,
 	}
+	group.initTables()
 	if err := self.persistGroup(&GroupRecord{
 		GroupId:        group.id,
 		PqSecret:       group.pqSecret,
@@ -559,6 +634,14 @@ func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 	if !self.opened {
 		return nil, ErrGroupNotOpen
 	}
+	// BEFORE THE REBIND AND BEFORE THE SEAL, because the seal is the irreversible half: a
+	// record sealed under a reused (key, nonce) exists whatever this method then returns.
+	if self.identityInUse != nil {
+		return nil, self.identityInUse
+	}
+	if !self.reconciled {
+		return nil, fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
+	}
 	if err := self.rebindLocked(); err != nil {
 		return nil, err
 	}
@@ -571,6 +654,12 @@ func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 		}
 		return nil, fmt.Errorf("urmessage: sealing this message: %w", err)
 	}
+	// THE INDEX IS NOTED AT THE SEAL AND NOT AT THE SUBMIT, and the ordering is the whole of
+	// why this is here rather than three lines down. A submit whose response never arrived is
+	// still a record this device SEALED under this index -- the ciphertext exists and the
+	// server may well hold it -- and a device that only recorded acknowledged indices would
+	// meet its own lost record on a later fetch and read it as a second writer.
+	self.ownIndices[record.Header.StreamIndex] = record.Header.BodyHash
 	recordId, err := self.submitLocked(ctx, self.session, record, "a message")
 	if err != nil {
 		return nil, err
@@ -584,6 +673,7 @@ func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 		SentAtMs:     sentAtMs,
 	}
 	self.log = append(self.log, sent)
+	self.delivered[recordId] = true
 	return sent, nil
 }
 
@@ -695,10 +785,35 @@ func (self *Group) sendSealedLocked(ctx context.Context, session *messagegroup.G
 //     [ErrFetchIncomplete], so a caller that ignores the error still sees messages and a caller
 //     that reads it knows there are more.
 //
-// WHAT IT SKIPS IS COUNTED RATHER THAN DROPPED. 6.1's ceremony, this device's own records and
-// classes this build does not open are each their own counter on [Group.Stats]; a record from a
-// member that DID NOT OPEN is counted too AND returns an error, because that is the one case where
-// a message was sent and this device cannot show it.
+// WHAT IT SKIPS IS COUNTED RATHER THAN DROPPED. 6.1's ceremony, records this group's log already
+// holds, and classes this build does not open are each their own counter on [Group.Stats]; a
+// record from a member that DID NOT OPEN is counted too AND returns an error, because that is the
+// one case where a message was sent and this device cannot show it.
+//
+// THIS DEVICE'S OWN RECORDS ARE OPENED AND NOT SKIPPED, and the sentence that used to stand here
+// said the opposite. Every own record was skipped on the ground that this device "holds its own
+// plaintext already" -- which is true of a device that has been running since it sent them, and
+// FALSE of a restored one, whose log starts empty and whose cursor is not persisted. A user closed
+// the app, reopened it, and got the other side's half of the conversation and none of their own,
+// with a nil error and one counter that moves on the ordinary echo case too. Now an own record is
+// opened unless its record id is already in this group's log, and the two readings are two
+// counters: [Stats.SkippedOwn] and [Stats.OpenedOwn].
+//
+// A RECORD THAT DID NOT OPEN IS ASKED FOR AGAIN, up to [maxRecordAttempts] times, and then GIVEN
+// UP ON BY NAME. The cursor this method resumes from is the RESOLVED position and not the paging
+// one -- see [pageWalk] -- because an earlier build advanced one number over every row before the
+// fail paths, so one transient cost the conversation that message for ever and the retry answered
+// nothing with a nil error. At the bound the record is [ErrRecordAbandoned], [Stats.Unopened] and
+// [Group.UnopenedRecords], which is a hole a caller can show.
+//
+// A SERVER HOLDING RECORDS BACK IS CAUGHT BY ITS OWN `high_water_record_id`, WITH NO KEY. See the
+// complete-page branch in the body for the check, and for the one honest server that also trips
+// it. This is the half of S2-27 below that is not blocked on key custody.
+//
+// AND A SECOND DEVICE SEALING UNDER THIS DEVICE'S IDENTITY -- a copied app-data folder -- IS
+// REFUSED HERE, before this group seals again. [Device.Restore] carries the whole of that
+// decision: what it covers, what it does not, and why the server's refusal of the duplicate is
+// not a defence.
 //
 // ---------------------------------------------------------------------------------------------
 // 4.3.4'S FETCH ATTESTATION: WHAT IS CHECKED, WHAT IS NOT, AND WHY NOT.
@@ -739,9 +854,19 @@ func (self *Group) sendSealedLocked(ctx context.Context, session *messagegroup.G
 // COUNTED -- [Stats.Unattested] moves once per page whose signature this build could not verify,
 // which today is every page -- and the gap is filed. **S2-27: a client cannot verify a fetch
 // attestation until the fleet ships a key chain and this build ships a root to verify it against.
-// Until it does, a message server that silently omits records from a page is undetectable by this
-// client.** It is not this package's to close: the key custody is Spec B section 9.1's, through
+// Until it does, a message server that omits records from the MIDDLE of a page, or that lies about
+// its own high water, is undetectable by this client.** (It used to say "omits records from a
+// page", flat, and that was too strong; the paragraph below is the correction and the measurement.) It is not this package's to close: the key custody is Spec B section 9.1's, through
 // `kt`, which is the owner msgrepo's own NotBuilt entry names.
+//
+// S2-27 IS NARROWED AND NOT CLOSED, AND THE NARROWING IS THE HALF THAT NEEDED NO KEY. The sentence
+// above -- "a message server that silently omits records from a page is undetectable by this
+// client" -- was too strong. `high_water_record_id` is the server's own statement of the highest
+// record it holds for this group, it arrives on every page, and it needs no signature to read. A
+// complete page that names a high water above everything it handed over is now counted in
+// [Stats.Omitted] and returned as [ErrFetchOmitted]. What remains S2-27's, and genuinely does need
+// the key: a server omitting records from the MIDDLE of a page, or one that lies about its own
+// high water. Both are caught by a signature over the record id vector and by nothing else.
 func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
@@ -776,123 +901,426 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 		return nil, err
 	}
 
-	opened := []*Message{}
-	var firstFailure error
+	walk := &pageWalk{
+		own:        own,
+		leaves:     leaves,
+		opened:     []*Message{},
+		from:       self.cursor,
+		reached:    self.cursor,
+		resolvedTo: self.cursor,
+		reconciled: self.reconciled,
+	}
 	for page := 0; ; page += 1 {
 		if maxFetchPages <= page {
-			return opened, fmt.Errorf("%w: %d pages, cursor at record %d", ErrFetchIncomplete, page, self.cursor)
+			self.commitWalkLocked(walk)
+			return walk.opened, fmt.Errorf("%w: %d pages, cursor at record %d", ErrFetchIncomplete, page, self.cursor)
 		}
-		since := self.cursor
+		since := walk.from
 		request := &protocol.FetchRequest{
 			GroupId:       self.id,
 			SinceRecordId: since,
 			ReadEpoch:     self.epoch,
 		}
 		if err := authorizeFetch(request, readKey, nonce); err != nil {
-			return opened, err
+			self.commitWalkLocked(walk)
+			return walk.opened, err
 		}
 		response, err := self.device.transport.Call(ctx, request)
 		if err != nil {
-			return opened, fmt.Errorf("urmessage: Fetch: %w", err)
+			self.commitWalkLocked(walk)
+			return walk.opened, fmt.Errorf("urmessage: Fetch: %w", err)
 		}
 		if response.GetReason() != protocol.Reason_REASON_OK {
-			return opened, fmt.Errorf("%w: %v", ErrFetchRefused, response.GetReason())
+			self.commitWalkLocked(walk)
+			return walk.opened, fmt.Errorf("%w: %v", ErrFetchRefused, response.GetReason())
 		}
 		fetched := response.GetFetch()
 		if fetched == nil {
-			return opened, fmt.Errorf("%w: the response carried no fetch arm", ErrFetchRefused)
+			self.commitWalkLocked(walk)
+			return walk.opened, fmt.Errorf("%w: the response carried no fetch arm", ErrFetchRefused)
 		}
 		self.stats.Pages += 1
 		if err := self.checkAttestationLocked(since, fetched); err != nil {
-			return opened, err
+			self.commitWalkLocked(walk)
+			return walk.opened, err
 		}
-		self.openPageLocked(fetched, own, leaves, &opened, &firstFailure)
+		self.openPageLocked(fetched, walk)
 		if fetched.GetComplete() {
+			// 4.3.4'S HIGH WATER, AND IT COSTS NOTHING. `high_water_record_id` is the
+			// server's own statement of the highest record it holds for this group. On a
+			// page it calls COMPLETE, a high water above everything it handed over is the
+			// server saying it kept records back -- which is the one failure the AEAD
+			// cannot see, and the half of it that needs no key, no fleet root and no
+			// attestation. Before this clause the field was read in exactly one place,
+			// inside checkAttestationLocked, which returns at its first branch when there
+			// is no attestation -- which on the deployed server is every page.
+			//
+			// IT IS HELD AGAINST `reached` AND NOT AGAINST THE CURSOR. A record this device
+			// could not open is still a record the server DID hand over, and naming the
+			// server for this device's failure would be a true-sounding sentence about the
+			// wrong party.
+			//
+			// THE ONE HONEST SERVER THAT WOULD ALSO MOVE IT, AND IT IS NOT BUILT YET.
+			// high_water_record_id is `next_record_id - 1` off a monotone allocator on the
+			// group row (msgrepo/store/pgx.go:501, store/memory.go:236), so it does NOT
+			// come down when rows go. 7.2's retention sweep is what would take rows out
+			// from under it, and a group whose oldest records had been pruned would answer
+			// a complete page that stops short of its own high water with no dishonesty
+			// anywhere.
+			//
+			// MEASURED rather than assumed, over msgrepo at ca8662d, because "there is a
+			// legitimate cause" is the sentence that would quietly excuse every future
+			// failure of this check:
+			//
+			//	grep -rn "DELETE FROM" --include=*.go --include=*.sql .
+			//
+			// answers TWO lines, both `DELETE FROM migration_audit` in a startup test.
+			// NOTHING DELETES A message_record ROW. The `prune_after` column is written
+			// and the sweep worklist index exists (store/migrations.go:155, :233) and the
+			// sweep itself is NOT BUILT. So today this check has no known false positive
+			// on the deployed server, and it acquires one the day 7.2 lands.
+			//
+			// It is a COUNTER and a returned error rather than a refusal anyway, and that
+			// is the right way round for the same reason: the day the sweep lands, a
+			// client that REFUSED the page would refuse an honest server doing its own
+			// retention, and it would do it in a release nobody connected to this line.
+			if walk.reached < fetched.GetHighWaterRecordId() {
+				self.stats.Omitted += 1
+				if walk.omitted == nil {
+					walk.omitted = fmt.Errorf(
+						"%w: group %x: it names high_water %d and handed over nothing above record %d",
+						ErrFetchOmitted, self.id, fetched.GetHighWaterRecordId(), walk.reached)
+				}
+			}
+			walk.complete = true
 			break
 		}
 		// 4.3.4's resume cursor. It is taken as a MAXIMUM against what the rows moved the
-		// cursor to rather than as an assignment: a server that answered a next_record_id
-		// BEHIND the records it just sent would otherwise walk this client backwards over
-		// records it has already opened, forever.
-		if self.cursor < fetched.GetNextRecordId() {
-			self.cursor = fetched.GetNextRecordId()
+		// paging position to rather than as an assignment: a server that answered a
+		// next_record_id BEHIND the records it just sent would otherwise walk this client
+		// backwards over records it has already opened, forever.
+		if walk.from < fetched.GetNextRecordId() {
+			walk.from = fetched.GetNextRecordId()
 		}
-		if self.cursor <= since {
-			return opened, fmt.Errorf("%w: %d records, next_record_id %d, cursor still %d",
-				ErrFetchNoProgress, len(fetched.GetRecords()), fetched.GetNextRecordId(), self.cursor)
+		if walk.from <= since {
+			self.commitWalkLocked(walk)
+			return walk.opened, fmt.Errorf("%w: %d records, next_record_id %d, position still %d",
+				ErrFetchNoProgress, len(fetched.GetRecords()), fetched.GetNextRecordId(), walk.from)
 		}
 	}
-	return opened, firstFailure
+	return walk.opened, self.commitWalkLocked(walk)
 }
 
-// openPageLocked walks one page's records: it advances the cursor, counts what it skips, and opens
-// what is a message.
+// How many times one record is fetched and allowed to fail to open before this group gives up on
+// it and says so.
+//
+// IT IS A BOUND ON A RETRY THAT DID NOT EXIST AT ALL. The cursor used to move past a record on the
+// first sight of it, BEFORE the fail paths, so a transient -- a ciphertext bent in flight, a
+// truncated body, a page a middlebox chewed -- cost the conversation that message for ever, and
+// the next call answered no messages and a nil error while the record sat on the server.
+//
+// IT IS SMALL BECAUSE THE FAILURES A RETRY CAN REPAIR ARE TRANSIENT BY DEFINITION: a record that
+// will not open three times will not open on the thousandth, and an unbounded retry is a group
+// that re-reads its whole tail on every fetch for ever -- one bent record turned into a permanent
+// cost, which is a shape an unfriendly peer would reach for.
+//
+// WHAT HAPPENS AT THE BOUND IS THE POINT: the record is named with [ErrRecordAbandoned], counted
+// in [Stats.Unopened] and listed by [Group.UnopenedRecords]. A hole in a conversation this build
+// has stopped trying to fill is a thing a user can be told about.
+const maxRecordAttempts = 3
+
+// pageWalk is one [Group.Receive]'s state across the pages it reads.
+//
+// IT IS A TYPE BECAUSE THE PAGING POSITION AND THE RESOLVED POSITION USED TO BE ONE NUMBER, and
+// that is the whole of how a record that did not open was dropped for ever: `self.cursor` advanced
+// over every row before the fail paths, so the next fetch asked from ABOVE the record that failed
+// and no later call ever asked for it again. Two numbers cannot be confused for one another by an
+// edit; one number could only be right for one of the two jobs.
+type pageWalk struct {
+	own    [16]byte
+	leaves map[[16]byte]uint32
+
+	opened       []*Message
+	firstFailure error
+	omitted      error
+
+	// from is where the NEXT page is asked from. It moves over every row, always, so that one
+	// record that will not open cannot loop this call.
+	from uint64
+
+	// reached is the highest record id the server has handed over in this call, and it is what
+	// 4.3.4's high_water_record_id is held against.
+	reached uint64
+
+	// resolvedTo is the highest record id below which every row has been opened, skipped by a
+	// name this build prints, or given up on. It becomes this group's cursor, so a row that did
+	// not open is asked for again by the NEXT Receive.
+	resolvedTo uint64
+	blocked    bool
+
+	complete bool
+
+	// reconciled is [Group.reconciled] as it stood when this walk STARTED. A walk that is doing
+	// the reconciling absorbs the own records it finds; one that is not treats an own record
+	// this device never sealed as what it is.
+	reconciled bool
+
+	// ownIndexSeen is the highest 5.6 stream index on a record of this device's own that OPENED
+	// in this walk.
+	//
+	// OFF RECORDS THAT OPENED AND NEVER OFF A HEADER. A record header is plaintext and nothing
+	// authenticates it until the aead runs; the server can write any sender_handle and any
+	// stream_index it likes into one. Taken off the header, a server could wedge any client it
+	// pleased by writing one forged row -- so the number is read only once the record has
+	// opened, which no party without this group's keys can make happen.
+	ownIndexSeen uint64
+
+	// the first own record that opened at a stream index this device did not seal THIS record
+	// at. foreignBody distinguishes the two ways that happens, because they are two different
+	// sentences to show a user.
+	foreignIndex  uint64
+	foreignRecord uint64
+	foreignBody   bool
+}
+
+// commitWalkLocked folds one walk back into the group and answers what its caller must be told.
+//
+// THE CURSOR BECOMES THE RESOLVED POSITION AND NOT THE PAGING ONE. That is the repair: a record
+// that did not open holds this back, so the next [Group.Receive] asks the server for it again.
+//
+// THE ORDER THE THREE ERRORS ARE RETURNED IN IS A DECISION. The identity refusal first, because it
+// is the only one that stops this device sealing and because carrying on would carry on producing
+// the collision; then the record that did not open, which is the existing contract and names a
+// specific record; then the server that held records back, which moves [Stats.Omitted] whether or
+// not it is the value returned.
+func (self *Group) commitWalkLocked(walk *pageWalk) error {
+	self.cursor = walk.resolvedTo
+	if walk.complete && !self.reconciled {
+		// THE RECONCILIATION. It runs once per restored group, on the first walk of its
+		// history the server called complete, and it is the half of the clone check that
+		// happens BEFORE this device has sealed anything.
+		//
+		// THE INVARIANT IS ONE SENTENCE: every stream index on the server under this
+		// device's sender_handle was allocated by this device's durable reserver, and a
+		// reserver never rewinds. So a record of this device's own that OPENS at an index
+		// the reserver has never handed out was sealed by something else holding these keys,
+		// and there is no other reading of it.
+		//
+		// WHAT THIS WALK CANNOT SEE: an own record that did NOT open contributes no index,
+		// because an index is only read off a record the aead authenticated -- so a server
+		// bending one of this device's own records suppresses the evidence for that record.
+		// It suppresses it LOUDLY: the same walk returns [ErrRecordOpen] naming it and
+		// [Stats.FailedOpen] moves, so the reading is "this group could not be checked"
+		// rather than "this group is clean".
+		highWater, err := self.ownHighWaterLocked(walk.own)
+		if err != nil {
+			// NOT reconciled, so Send stays refused. A reserver that will not answer is
+			// not evidence that this device is alone with its identity.
+			return fmt.Errorf("urmessage: this device's own stream position could not be read, so this restored group cannot reconcile: %w", err)
+		}
+		if highWater < walk.ownIndexSeen {
+			self.identityInUse = fmt.Errorf(
+				"%w: group %x epoch %d: the server holds a record this group's keys opened at stream index %d under this device's own sender_handle, and this device's durable reserver has never allocated past %d",
+				ErrIdentityInUse, self.id, self.epoch, walk.ownIndexSeen, highWater)
+		}
+		self.reconciled = true
+	}
+	if self.identityInUse == nil && walk.foreignIndex != 0 {
+		if walk.foreignBody {
+			// THE COLLISION ITSELF, AFTER THE FACT. Two records under one
+			// (epoch, sender_handle, stream_index) is one record_key and one nonce, and
+			// this device is holding the OTHER plaintext.
+			self.identityInUse = fmt.Errorf(
+				"%w: group %x epoch %d: record %d opened under this device's own sender_handle at stream index %d, and it is NOT the record this device sealed at that index -- two records under one (epoch, sender_handle, stream_index) are one record_key and one nonce",
+				ErrIdentityInUse, self.id, self.epoch, walk.foreignRecord, walk.foreignIndex)
+		} else {
+			self.identityInUse = fmt.Errorf(
+				"%w: group %x epoch %d: record %d opened under this device's own sender_handle at stream index %d, and this device never sealed at that index",
+				ErrIdentityInUse, self.id, self.epoch, walk.foreignRecord, walk.foreignIndex)
+		}
+	}
+	if self.identityInUse != nil {
+		return self.identityInUse
+	}
+	if walk.firstFailure != nil {
+		return walk.firstFailure
+	}
+	return walk.omitted
+}
+
+// ownHighWaterLocked is the highest stream index this device's DURABLE reserver has ever allocated
+// for this group's own stream. It is the reserver's number and never a recomputed one.
+func (self *Group) ownHighWaterLocked(own [16]byte) (uint64, error) {
+	key := messagegroup.StreamKey{SenderHandle: own}
+	copy(key.GroupId[:], self.id)
+	return self.device.reserver.HighWater(key)
+}
+
+// openPageLocked walks one page's records: it advances the two positions, counts what it skips,
+// and opens what is a message.
 //
 // It is a method rather than the body of the loop above so that "one page" is a thing with a name
 // -- and so that the paging decisions and the record decisions are not one forty-line block where
 // a `continue` could mean either.
-func (self *Group) openPageLocked(fetched *protocol.FetchResponse, own [16]byte,
-	leaves map[[16]byte]uint32, opened *[]*Message, firstFailure *error) {
-
-	fail := func(err error) {
-		self.stats.FailedOpen += 1
-		if *firstFailure == nil {
-			*firstFailure = err
+//
+// THIS DEVICE'S OWN RECORDS ARE OPENED HERE AND ARE NOT SKIPPED, which is the repair for the worst
+// user-facing defect the durable store introduced. A restored group's log starts EMPTY and the
+// cursor is not persisted, so a restarted device re-reads its whole history -- and while this
+// method skipped every record whose sender_handle was its own, a user who closed the app and
+// reopened it got the other side's half of the conversation and none of their own, with a nil
+// error and one counter that moved on the ordinary echo case too.
+//
+// WHAT IT COSTS AND WHAT IT BUYS. An own record opens under a receiver ladder derived from the
+// same class key the sender ladder is rooted at, so this is a second in-memory copy of keys this
+// device already holds -- which is the sentence the old skip was written on, and it priced the
+// copy without pricing the conversation. What keeps it from delivering a message twice is
+// [Group.delivered], the record ids this group's log already holds.
+func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWalk) {
+	resolve := func(recordId uint64) {
+		if !walk.blocked && walk.resolvedTo < recordId {
+			walk.resolvedTo = recordId
 		}
+	}
+	fail := func(recordId uint64, err error) {
+		self.stats.FailedOpen += 1
+		self.attempts[recordId] += 1
+		if self.attempts[recordId] < maxRecordAttempts {
+			if walk.firstFailure == nil {
+				walk.firstFailure = err
+			}
+			// and the cursor stops here, so the NEXT Receive asks for this record again.
+			walk.blocked = true
+			return
+		}
+		// THE BOUND. The record is given up on, and an abandonment OUTRANKS whatever
+		// retryable failure was already held: a hole that will not be filled is worse news
+		// than one that might be, and the caller gets the worse of the two.
+		self.unopened = append(self.unopened, recordId)
+		self.stats.Unopened += 1
+		walk.firstFailure = fmt.Errorf("%w: record %d, after %d attempts: %w",
+			ErrRecordAbandoned, recordId, self.attempts[recordId], err)
+		resolve(recordId)
 	}
 	for _, row := range fetched.GetRecords() {
 		self.stats.Fetched += 1
-		if self.cursor < row.GetRecordId() {
-			self.cursor = row.GetRecordId()
+		recordId := row.GetRecordId()
+		if walk.from < recordId {
+			walk.from = recordId
+		}
+		if walk.reached < recordId {
+			walk.reached = recordId
+		}
+		if maxRecordAttempts <= self.attempts[recordId] {
+			// already given up on. It is here only as a passenger of a rewind over some
+			// earlier record, and it must not block the cursor a second time.
+			resolve(recordId)
+			continue
 		}
 		parsed, err := message.ParseRecord(row.GetRecordBytes())
 		if err != nil {
-			fail(fmt.Errorf("%w: record %d does not parse: %w", ErrRecordOpen, row.GetRecordId(), err))
+			fail(recordId, fmt.Errorf("%w: record %d does not parse: %w", ErrRecordOpen, recordId, err))
 			continue
 		}
 		header := &parsed.Header
 		if header.IsCommit || len(header.ServerAttachment) != 0 {
 			self.stats.SkippedCeremony += 1
+			resolve(recordId)
 			continue
 		}
-		if header.SenderHandle == own {
-			self.stats.SkippedOwn += 1
+		mine := header.SenderHandle == walk.own
+		if self.delivered[recordId] {
+			// this group's log already holds it. The two readings are counted apart: the
+			// ordinary echo of a send this process made, and a record re-read because a
+			// rewind over an earlier failure passed back over it.
+			if mine {
+				self.stats.SkippedOwn += 1
+			} else {
+				self.stats.SkippedSeen += 1
+			}
+			resolve(recordId)
 			continue
 		}
 		if header.RetentionClass != message.RetentionDurable {
 			self.stats.SkippedClass += 1
+			resolve(recordId)
 			continue
 		}
-		leaf, known := leaves[header.SenderHandle]
+		leaf, known := walk.leaves[header.SenderHandle]
 		if !known {
-			fail(fmt.Errorf("%w: record %d names sender_handle %x, which is no leaf of this group at epoch %d",
-				ErrRecordOpen, row.GetRecordId(), header.SenderHandle, self.epoch))
+			fail(recordId, fmt.Errorf("%w: record %d names sender_handle %x, which is no leaf of this group at epoch %d",
+				ErrRecordOpen, recordId, header.SenderHandle, self.epoch))
 			continue
 		}
 		if err := self.trackLocked(leaf, header); err != nil {
-			fail(err)
+			fail(recordId, err)
 			continue
 		}
 		headPlain, bodyPlain, err := self.session.OpenRecord(parsed)
 		if err != nil {
-			fail(fmt.Errorf("%w: record %d from leaf %d: %w", ErrRecordOpen, row.GetRecordId(), leaf, err))
+			fail(recordId, fmt.Errorf("%w: record %d from leaf %d: %w", ErrRecordOpen, recordId, leaf, err))
 			continue
 		}
 		sentAtMs, err := decodeHead(headPlain)
 		if err != nil {
-			fail(fmt.Errorf("%w: record %d: %w", ErrRecordOpen, row.GetRecordId(), err))
+			fail(recordId, fmt.Errorf("%w: record %d: %w", ErrRecordOpen, recordId, err))
 			continue
 		}
 		self.stats.Opened += 1
+		if mine {
+			self.stats.OpenedOwn += 1
+			self.noteOwnIndexLocked(walk, recordId, header.StreamIndex, header.BodyHash)
+		}
 		received := &Message{
-			RecordId:     row.GetRecordId(),
+			RecordId:     recordId,
 			SenderHandle: append([]byte(nil), header.SenderHandle[:]...),
-			Mine:         false,
+			Mine:         mine,
 			Text:         string(bodyPlain),
 			SentAtMs:     sentAtMs,
 		}
-		*opened = append(*opened, received)
+		walk.opened = append(walk.opened, received)
 		self.log = append(self.log, received)
+		self.delivered[recordId] = true
+		resolve(recordId)
+	}
+}
+
+// noteOwnIndexLocked accounts for one record that opened under this device's own sender_handle.
+//
+// THE FOUR READINGS, AND THEY ARE NOT THE SAME EVENT.
+//
+//   - THIS RECORD, AT AN INDEX THIS PROCESS SEALED IT AT. The ordinary case, and it includes a
+//     record whose submit response never arrived: [Group.Send] notes index and body_hash at the
+//     SEAL, so the record comes back as this device's own rather than as a stranger holding its
+//     keys.
+//   - AN INDEX FOUND DURING THE RECONCILING WALK of a restored group. This is this lineage's own
+//     history and it is absorbed; commitWalkLocked holds the maximum of it against the reserver
+//     afterwards, which is the check that needs the whole walk rather than one record.
+//   - A DIFFERENT RECORD AT AN INDEX THIS DEVICE SEALED AT. This is the hard case and it is the
+//     one an index-only check could not see: two copies of one folder that were EXACTLY level
+//     both seal at this index, one submission wins, and the loser finds the winner's record here.
+//     Conclusive: this device knows what it sealed at this index and this is not it.
+//   - AN INDEX THIS DEVICE NEVER SEALED, after this group has reconciled. A copy that is ahead.
+//
+// WHY THE BODY HASH CAN BE TRUSTED HERE: this runs only after the record OPENED, and §3.1's
+// body_hash is inside aad_head and is compared against the ciphertext before either AEAD runs. A
+// party without this group's keys cannot produce a record that opens at all, let alone one whose
+// body_hash it chose.
+func (self *Group) noteOwnIndexLocked(walk *pageWalk, recordId uint64, index uint64, bodyHash [32]byte) {
+	if walk.ownIndexSeen < index {
+		walk.ownIndexSeen = index
+	}
+	sealed, mine := self.ownIndices[index]
+	switch {
+	case mine && sealed == bodyHash:
+	case mine:
+		if walk.foreignIndex == 0 {
+			walk.foreignIndex, walk.foreignRecord = index, recordId
+			walk.foreignBody = true
+		}
+	case !walk.reconciled:
+		self.ownIndices[index] = bodyHash
+	case walk.foreignIndex == 0:
+		walk.foreignIndex, walk.foreignRecord = index, recordId
 	}
 }
 
@@ -942,6 +1370,24 @@ func (self *Group) checkAttestationLocked(since uint64, fetched *protocol.FetchR
 	// AND THE SIGNATURE IS NOT CHECKED. Counted, never claimed. S2-27.
 	self.stats.Unattested += 1
 	return nil
+}
+
+// initTables allocates the per-group bookkeeping every constructor owes, IN ONE PLACE.
+//
+// THREE CONSTRUCTORS BUILD A [Group] -- [Device.CreateGroup], [Device.Join] and
+// [Device.restoreOne] -- and each of them used to spell its own map literals. A fourth that
+// forgot one would not fail to compile and would not fail a type check: it would panic on the
+// first write to a nil map, inside [Group.Receive], on a device in somebody's hand. Four maps
+// spelled in three places is the drift this removes.
+//
+// It is called AFTER the literal rather than replacing it, because the fields that differ between
+// the three -- the founding session, the epoch, the opened bit, whether the group is reconciled --
+// are the interesting ones and belong where a reader can see all of them at once.
+func (self *Group) initTables() {
+	self.tracked = map[trackedKey]bool{}
+	self.delivered = map[uint64]bool{}
+	self.attempts = map[uint64]int{}
+	self.ownIndices = map[uint64][32]byte{}
 }
 
 // trackLocked installs this sender's receiver ladder once and only once.
@@ -1008,6 +1454,39 @@ func (self *Group) Messages() []*Message {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 	return append([]*Message(nil), self.log...)
+}
+
+// UnopenedRecords is the record ids this group has GIVEN UP on: fetched [maxRecordAttempts] times,
+// refused by the AEAD or the parser every time, and no longer asked for. Ascending, a copy.
+//
+// IT EXISTS SO THAT A HOLE IN A CONVERSATION HAS A NAME. [Stats.Unopened] is how many; this is
+// which. A caller that shows nothing here is showing a conversation with records silently missing
+// from it, which is the reading this whole method set exists to prevent.
+func (self *Group) UnopenedRecords() []uint64 {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return append([]uint64(nil), self.unopened...)
+}
+
+// IdentityInUse is the refusal this group is wedged on, or nil.
+//
+// NON-NIL MEANS ANOTHER DEVICE IS SEALING UNDER THIS DEVICE'S IDENTITY IN THIS GROUP -- a copy of
+// the app-data folder. It is sticky, every [Group.Send] answers it, and a caller that shows it has
+// the only sentence a user can act on: one of the two copies has to stop. See [Device.Restore] for
+// what is detected and what is not.
+func (self *Group) IdentityInUse() error {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return self.identityInUse
+}
+
+// Reconciled reports whether this group has compared its own stream position against the server's
+// rows. A group created or joined in this process is reconciled from birth; a RESTORED one is not
+// until [Group.Receive] has completed once, and [Group.Send] refuses until it has.
+func (self *Group) Reconciled() bool {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return self.reconciled
 }
 
 // Stats is what this group has seen.

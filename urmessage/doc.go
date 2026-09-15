@@ -128,7 +128,8 @@
 //   - [OpenDurableStateStore] persists everything, on a directory, under a single-writer
 //     exclusion, fsync'd before a value is observable. A device over one comes back into its
 //     groups after a restart -- [Device.Restore] -- at the same epoch, under the same leaf, able
-//     to open records sealed before the restart and to seal new ones the other side opens.
+//     to open records sealed before the restart, INCLUDING THE ONES IT SEALED ITSELF, and to seal
+//     new ones the other side opens once it has reconciled.
 //
 // WHAT PROTECTS THE PRIVATE KEYS IN THE DURABLE ONE: FILE PERMISSIONS AND NOTHING ELSE. Every
 // octet is written in the clear -- the MLS epoch state with this member's leaf private key and
@@ -143,7 +144,44 @@
 // asymmetry that used to exist between the two is gone: the reserver is crash safe because a
 // reused stream index is a reused nonce under a reused record key, and the state store now follows
 // the same discipline because a lost MLS group is a lost conversation rather than an
-// inconvenience. `sdk/cp3b`'s restart case measures both across a process boundary at once.
+// inconvenience.
+//
+// WHERE EACH HALF IS MEASURED, AND THIS SENTENCE IS A CORRECTION. It used to say "`sdk/cp3b`'s
+// restart case measures both across a process boundary at once", and that was FALSE: cp3b's
+// restart closes both stores and reopens them INSIDE ONE TEST PROCESS, and no `os/exec` existed
+// anywhere in this package or in cp3b. The two measurements are now in two places and each says
+// what it is:
+//
+//   - `sdk/cp3b`'s restart case is the WHOLE SEAM -- a real message server, real submissions, real
+//     fetches -- across an in-process restart in which everything held in memory is dropped and
+//     the only thing that crosses is two directories on the disk.
+//   - `urmessage/crossprocess_test.go` is a REAL PROCESS BOUNDARY: it re-executes the test binary,
+//     and a process that did not exist when the records were sealed re-derives the same MLS
+//     exporter, comes back at the same sender_handle, opens a record sealed before the death, and
+//     seals again at the index after the dead process's last one. There is no server in it, on
+//     purpose -- the server holds no key material, so the property is entirely between the disk
+//     and the key schedule, and a second process cannot reach an in-process server in any case.
+//
+// ---------------------------------------------------------------------------------------------
+// WHAT A DURABLE IDENTITY COSTS: ONE COPY OF THE APP-DATA FOLDER IS TWO DEVICES ON ONE IDENTITY.
+// ---------------------------------------------------------------------------------------------
+//
+// Persisting the identity is what makes a restart a RESTORE, and it is also what makes a COPY
+// dangerous. Before the store existed a restarted device drew a fresh key and a fresh group, so a
+// copied directory was harmless. Now a copied folder is a second device at the same leaf, the same
+// sender_handle and the same stream counter -- and two records under one
+// (epoch, sender_handle, stream_index) are one record_key and one nonce, which spec A §5.6 calls a
+// total break of both AEADs for that record. The single-writer exclusion does not reach it: it is
+// held per DIRECTORY and a copy is a second directory.
+//
+// SO A RESTORED GROUP WILL NOT SEAL UNTIL IT HAS LISTENED. [Group.Receive] holds the stream
+// indices it finds on the server against the durable reserver's own high water, and a group that
+// finds an index its reserver never allocated refuses to seal for the life of the process with
+// [ErrIdentityInUse]. [Device.Restore] states exactly what that covers -- every copy that is
+// behind the original, and every copy that cannot reach the server -- and what it does not: two
+// copies that are exactly level can still collide ONCE before either sees the other. Closing that
+// needs a new leaf for the copy, which is an MLS Update commit a restored group cannot make. It is
+// filed as S2-28.
 //
 // WHAT IS STILL OPEN, and it is `connect`'s rather than this package's. `messagegroup.GroupEngine`
 // declares four methods and none of them opens a persisted group, so this package carries its own

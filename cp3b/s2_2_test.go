@@ -64,6 +64,47 @@ func TestAMessageSentAfterAReconnectThisBindingPerformedIsReboundBeforeItIsSeale
 	if received[0].RecordId != sent.RecordId {
 		t.Fatalf("bob opened record %d and alice was told %d", received[0].RecordId, sent.RecordId)
 	}
+
+	// AND THE SENDER MEETS ITS OWN REBOUND RECORD WITHOUT READING IT AS A SECOND WRITER.
+	//
+	// This clause is here because S2-2's recovery and the clone check touch the same record from
+	// two directions. [urmessage.Group.Send] notes the stream index AND the body_hash of what it
+	// sealed, and the clone check refuses when a record opens under this device's own
+	// sender_handle at an index it sealed carrying a DIFFERENT body_hash. The recovery re-MACs an
+	// already-sealed record -- `ReauthRecord` recomputes `write_auth` and touches neither ct_body
+	// nor body_hash -- so nothing about the record that the check reads has moved. If it had,
+	// every rebound send would wedge its own sender at its next fetch, permanently, with a
+	// sentence accusing the user of running a copy of their app data.
+	//
+	// WHAT ACTUALLY HAPPENS HERE, and it is worth naming rather than inferring: the record is
+	// already in this group's log, so the fetch SKIPS it by record id before any hash is
+	// compared -- Stats.SkippedOwn moves and nothing is re-opened. That is the ordinary echo
+	// path. The case where the hash IS compared is a submit whose answer never came back, and
+	// `TestARecordWhoseSubmitAnswerWasLostComesBackAsItsSendersOwn` drives that one.
+	before := pair.aliceGroup.Stats().SkippedOwn
+	fresh, err := pair.aliceGroup.Receive(ctx)
+	if err != nil {
+		t.Fatalf("alice's Receive after a rebound send: %v", err)
+	}
+	if err := pair.aliceGroup.IdentityInUse(); err != nil {
+		t.Fatalf("a device that re-MAC'd its own record read it back as a second writer: %v", err)
+	}
+	if len(fresh) != 0 {
+		t.Errorf("alice re-opened %d record(s) she already holds", len(fresh))
+	}
+	if after := pair.aliceGroup.Stats().SkippedOwn; after <= before {
+		t.Errorf("Stats.SkippedOwn did not move (%d -> %d), so alice's own rebound record was not the thing she skipped",
+			before, after)
+	}
+	mine := false
+	for _, one := range pair.aliceGroup.Messages() {
+		if one.Text == text {
+			mine = one.Mine
+		}
+	}
+	if !mine {
+		t.Fatal("alice's log does not hold her own rebound record as her own")
+	}
 }
 
 // S2-2, CLAUSE 2: A CONNECTION REPLACED UNDERNEATH THIS BINDING, WHICH IS FINDING E REPRODUCED.
@@ -149,6 +190,47 @@ func TestAMessageSentOnAConnectionNothingToldThisBindingWasReplacedStillArrives(
 	}
 	if received[0].RecordId != sent.RecordId {
 		t.Fatalf("bob opened record %d and alice was told %d", received[0].RecordId, sent.RecordId)
+	}
+
+	// AND THE SENDER MEETS ITS OWN REBOUND RECORD WITHOUT READING IT AS A SECOND WRITER.
+	//
+	// This clause is here because S2-2's recovery and the clone check touch the same record from
+	// two directions. [urmessage.Group.Send] notes the stream index AND the body_hash of what it
+	// sealed, and the clone check refuses when a record opens under this device's own
+	// sender_handle at an index it sealed carrying a DIFFERENT body_hash. The recovery re-MACs an
+	// already-sealed record -- `ReauthRecord` recomputes `write_auth` and touches neither ct_body
+	// nor body_hash -- so nothing about the record that the check reads has moved. If it had,
+	// every rebound send would wedge its own sender at its next fetch, permanently, with a
+	// sentence accusing the user of running a copy of their app data.
+	//
+	// WHAT ACTUALLY HAPPENS HERE, and it is worth naming rather than inferring: the record is
+	// already in this group's log, so the fetch SKIPS it by record id before any hash is
+	// compared -- Stats.SkippedOwn moves and nothing is re-opened. That is the ordinary echo
+	// path. The case where the hash IS compared is a submit whose answer never came back, and
+	// `TestARecordWhoseSubmitAnswerWasLostComesBackAsItsSendersOwn` drives that one.
+	before := pair.aliceGroup.Stats().SkippedOwn
+	fresh, err := pair.aliceGroup.Receive(ctx)
+	if err != nil {
+		t.Fatalf("alice's Receive after a rebound send: %v", err)
+	}
+	if err := pair.aliceGroup.IdentityInUse(); err != nil {
+		t.Fatalf("a device that re-MAC'd its own record read it back as a second writer: %v", err)
+	}
+	if len(fresh) != 0 {
+		t.Errorf("alice re-opened %d record(s) she already holds", len(fresh))
+	}
+	if after := pair.aliceGroup.Stats().SkippedOwn; after <= before {
+		t.Errorf("Stats.SkippedOwn did not move (%d -> %d), so alice's own rebound record was not the thing she skipped",
+			before, after)
+	}
+	mine := false
+	for _, one := range pair.aliceGroup.Messages() {
+		if one.Text == text {
+			mine = one.Mine
+		}
+	}
+	if !mine {
+		t.Fatal("alice's log does not hold her own rebound record as her own")
 	}
 }
 

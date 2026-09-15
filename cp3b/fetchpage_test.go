@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/urnetwork/message-server/store"
@@ -247,6 +248,27 @@ const (
 	// no records, complete false, next_record_id one past where it was asked: a server that
 	// makes progress and never finishes.
 	fetchNeverCompletes
+
+	// THE SILENT OMISSION. The ceremony goes over, every MESSAGE is held back, and `complete`
+	// and `high_water_record_id` are left exactly as the real store computed them -- so the
+	// server is TRUTHFUL about what it holds and simply does not hand it over. It is the one
+	// failure the AEAD cannot see: nothing is tampered with, records are merely absent, and a
+	// client that reads neither field answers an empty conversation with a nil error.
+	fetchDropsMessages
+
+	// THE SUBMIT LANDS AND THE ANSWER DOES NOT COME BACK. The record is written through the
+	// real §6.1 transaction and then the RESPONSE is lost, which is what a connection dropping
+	// between the server's commit and the client's read of the reply looks like from the
+	// client: the send failed, and the record is on the server anyway. It is the one state in
+	// which a device meets, on a later fetch, a record of its OWN that its log has never held.
+	fetchLosesOneSubmitAnswer
+
+	// ONE RECORD'S ct_body BENT ON ITS WAY OUT, for a bounded number of fetches. It is the
+	// transient: a ciphertext a middlebox chewed, a body truncated in flight. The record on the
+	// server is untouched -- this bends the RESULT -- so a later fetch of the same record is
+	// the record, which is what makes "the client never asked again" the finding rather than
+	// "the record was destroyed".
+	fetchBendsOneRecord
 )
 
 // shapedStore is `store.Store` with ONE method overridden.
@@ -259,12 +281,91 @@ const (
 type shapedStore struct {
 	store.Store
 	shape fetchShape
+
+	// what fetchBendsOneRecord bends, and for how many more fetches. Under a mutex because a
+	// case sets it from the test goroutine and the server reads it on its own.
+	mutex        sync.Mutex
+	bendRecordId uint64
+	bendsLeft    int
+
+	// how many more submit ANSWERS to lose, under fetchLosesOneSubmitAnswer.
+	loseAnswers int
+}
+
+// loseSubmitAnswers makes the next n submissions land and then fail to answer.
+func (self *shapedStore) loseSubmitAnswers(n int) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	self.loseAnswers = n
+}
+
+// Submit writes through the real transaction and THEN loses the answer, which is the ordering
+// that matters: a shape that refused before writing would be an ordinary rejection and would
+// leave the server with nothing, which is the opposite of the state under test.
+func (self *shapedStore) Submit(ctx context.Context, request *store.SubmitRequest) (*store.SubmitResponse, error) {
+	response, err := self.Store.Submit(ctx, request)
+	if err != nil || self.shape != fetchLosesOneSubmitAnswer {
+		return response, err
+	}
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if self.loseAnswers <= 0 {
+		return response, err
+	}
+	self.loseAnswers -= 1
+	return nil, errors.New("the answer to this submission did not come back")
+}
+
+// bend names the record whose ct_body is bent on its way out of the store, and how many more
+// fetches it is bent on. A count of one is the transient; a large one is the record that will
+// never open.
+func (self *shapedStore) bend(recordId uint64, fetches int) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	self.bendRecordId, self.bendsLeft = recordId, fetches
 }
 
 func (self *shapedStore) Fetch(ctx context.Context, request *store.FetchRequest) (*store.FetchResult, error) {
 	result, err := self.Store.Fetch(ctx, request)
 	if err != nil || self.shape == fetchNormal {
 		return result, err
+	}
+	if self.shape == fetchLosesOneSubmitAnswer {
+		// that shape is about the SUBMIT path and bends nothing on the way out. It is
+		// named here rather than left to fall through the switch below, because falling
+		// through would silently give it fetchStandsStill's behaviour -- which is how a
+		// case can be over a server nobody meant to build.
+		return result, nil
+	}
+	if self.shape == fetchDropsMessages {
+		// the ceremony goes, the messages do not, and NOTHING ELSE IS TOUCHED: complete
+		// and high_water_record_id are the real store's own numbers.
+		kept := []*store.Record{}
+		for _, record := range result.Records {
+			if record.IsCommit || len(record.ServerAttachment) != 0 {
+				kept = append(kept, record)
+			}
+		}
+		result.Records = kept
+		return result, nil
+	}
+	if self.shape == fetchBendsOneRecord {
+		self.mutex.Lock()
+		defer self.mutex.Unlock()
+		if self.bendsLeft <= 0 {
+			return result, nil
+		}
+		for _, record := range result.Records {
+			if record.RecordId != self.bendRecordId || len(record.CtBody) == 0 {
+				continue
+			}
+			bent := append([]byte(nil), record.CtBody...)
+			bent[0] ^= 0xFF
+			record.CtBody = bent
+			self.bendsLeft -= 1
+			break
+		}
+		return result, nil
 	}
 	// the first page is the honest one, so a case can hold what came back BEFORE the bending
 	// started. After it, nothing but the shape.
