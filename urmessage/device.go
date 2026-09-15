@@ -106,7 +106,9 @@ type ConnectPolicy struct {
 	Budget time.Duration
 
 	// AttemptTimeout is how long ONE Hello is given before it is abandoned and the next attempt
-	// is scheduled. Zero takes [defaultConnectAttempt].
+	// is scheduled. Zero takes [defaultConnectAttempt]. An attempt is never given more than what
+	// is left of [ConnectPolicy.Budget], so a Budget shorter than this is one attempt of the
+	// Budget's length and not one of this.
 	//
 	// IT IS SHORTER THAN THE TRANSPORT'S OWN 30s DEADLINE ON PURPOSE. Inside the window the
 	// server answers nothing at all, so waiting the transport's full deadline spends the budget
@@ -140,8 +142,9 @@ type ConnectAttempt struct {
 	Attempt int
 	// Elapsed is how long [Device.Connect] has been trying.
 	Elapsed time.Duration
-	// Backoff is how long it is about to wait before the next attempt. Zero when there will
-	// not be one.
+	// Backoff is how long it is about to wait before the next attempt. Zero when there will not
+	// be one, AND zero when the next attempt is the last and follows at once because a full pause
+	// would have left the budget nothing to try with (see [Device.Connect]).
 	Backoff time.Duration
 	// Err is why this attempt did not connect.
 	Err error
@@ -374,13 +377,35 @@ func deviceIdentity(crypto mls.CryptoProvider, stateStore mls.StateStore, random
 //
 // THE CALLER'S OWN ctx STILL ENDS IT IMMEDIATELY. A cancelled or expired caller context is not
 // "not yet": it is the caller saying stop, and it is returned rather than retried.
+//
+// THE BUDGET BOUNDS THE CALL, AND UNTIL THIS PARAGRAPH IT DID NOT. The budget used to be consulted
+// only AFTER an attempt returned, and nothing asked whether the NEXT attempt fitted in what was
+// left, so one call could return a whole AttemptTimeout past its budget: a 500 ms budget blocked
+// for the 10 s default attempt, and the defaults' own schedule returned at about 100 s against the
+// 90 s the C header states. For a UI that is a hang. Now every attempt is CUT TO WHAT IS LEFT of the
+// budget -- so a budget shorter than one attempt is one attempt of the budget's length -- and when a
+// full pause would leave nothing for another attempt, the rest of the budget is spent on one last
+// attempt at once rather than on a pause no attempt follows.
+// TestTheConnectBudgetBoundsTheCallWhateverTheAttemptTimeout holds it.
 func (self *Device) Connect(ctx context.Context) error {
 	policy := self.connect
 	started := time.Now()
 	backoff := policy.FirstBackoff
 	var lastErr error
+	lastChance := false
 	for attempt := 1; ; attempt += 1 {
-		reason, hello, err := self.helloOnce(ctx, policy.AttemptTimeout)
+		timeout := policy.AttemptTimeout
+		if remaining := policy.Budget - time.Since(started); remaining < timeout {
+			timeout = remaining
+		}
+		if timeout <= 0 {
+			// reachable only when a pause overran what was left of the budget. An attempt with
+			// no time is not an attempt, and it is not reported as one. NOTHING GOES RED WITHOUT
+			// THIS CLAUSE, measured: a pause is only taken when strictly more than it is left, so
+			// only a timer firing late reaches here, and no case can make one.
+			return self.reconnecting(attempt-1, time.Since(started), lastErr)
+		}
+		reason, hello, err := self.helloOnce(ctx, timeout)
 		switch {
 		case err == nil && reason != protocol.Reason_REASON_OK:
 			// THE SERVER SPOKE. Not this window, and not retried.
@@ -397,21 +422,26 @@ func (self *Device) Connect(ctx context.Context) error {
 		lastErr = err
 		elapsed := time.Since(started)
 		remaining := policy.Budget - elapsed
+		final := lastChance || remaining <= 0
 		pause := backoff
-		if remaining <= 0 {
+		switch {
+		case final:
 			pause = 0
-		} else if remaining < pause {
-			pause = remaining
+		case remaining <= pause:
+			// A FULL PAUSE WOULD LEAVE NOTHING TO TRY WITH. The pause exists to space attempts
+			// out, and a pause that no attempt follows only lengthens the block; so the rest of
+			// the budget is ONE attempt, at once, and then the call ends whatever it answers --
+			// which is also what stops an attempt that fails instantly from looping here.
+			pause = 0
+			lastChance = true
 		}
 		if policy.OnAttempt != nil {
 			policy.OnAttempt(ConnectAttempt{
 				Attempt: attempt, Elapsed: elapsed, Backoff: pause, Err: err,
 			})
 		}
-		if remaining <= 0 {
-			return fmt.Errorf(
-				"%w: %d Hello attempts over %v were not answered; a reconnecting client_id is not routed to for about 60s on this server (msgrepo operator item 5), so this is 'not yet' rather than 'failed': %w",
-				ErrReconnecting, attempt, elapsed.Round(time.Millisecond), lastErr)
+		if final {
+			return self.reconnecting(attempt, elapsed, lastErr)
 		}
 		if err := self.pause(ctx, pause); err != nil {
 			return fmt.Errorf("urmessage: Hello: %w", err)
@@ -423,6 +453,13 @@ func (self *Device) Connect(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// reconnecting is the "not yet, ask again" answer a budget spent on silence gets.
+func (self *Device) reconnecting(attempts int, elapsed time.Duration, lastErr error) error {
+	return fmt.Errorf(
+		"%w: %d Hello attempts over %v were not answered; a reconnecting client_id is not routed to for about 60s on this server (msgrepo operator item 5), so this is 'not yet' rather than 'failed': %w",
+		ErrReconnecting, attempts, elapsed.Round(time.Millisecond), lastErr)
 }
 
 // helloOnce is one Hello under its own deadline, so that a server answering nothing costs this

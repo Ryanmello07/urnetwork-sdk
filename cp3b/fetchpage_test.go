@@ -287,6 +287,12 @@ const (
 	// nothing in the suite puts an HONEST device at a consumed index with a live answer coming
 	// back; `fetchLosesOneSubmitAnswer` loses the answer, so no REASON is ever seen at all.
 	submitRefusesOnceAfterWriting
+
+	// ONE RECORD HANDED BACK A SECOND TIME UNDER A RECORD ID THE SERVER NEVER ALLOCATED, appended
+	// after everything the real store returned. The octets are the real record's, so every key
+	// check passes; only the number is new. It is the replay a receiver ladder used to refuse, and
+	// the one a record shown from this device's own copy has to refuse without a ladder.
+	fetchRepeatsOneRecord
 )
 
 // shapedStore is `store.Store` with ONE method overridden.
@@ -315,6 +321,16 @@ type shapedStore struct {
 
 	// how many more submissions to DROP before writing, under submitDropsBeforeWriting.
 	dropSubmissions int
+
+	// the record fetchRepeatsOneRecord hands back a second time, zero for none.
+	repeatRecordId uint64
+}
+
+// repeat names the record fetchRepeatsOneRecord hands back twice.
+func (self *shapedStore) repeat(recordId uint64) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	self.repeatRecordId = recordId
 }
 
 // dropNextSubmissions makes the next n submissions fail without reaching the store at all.
@@ -408,6 +424,21 @@ func (self *shapedStore) Fetch(ctx context.Context, request *store.FetchRequest)
 		// case can be over a server nobody meant to build. It is not hypothetical: the
 		// second of these two was written without this line and its first run answered
 		// ErrFetchNoProgress from a fetch nobody had asked to bend.
+		return result, nil
+	}
+	if self.shape == fetchRepeatsOneRecord {
+		self.mutex.Lock()
+		defer self.mutex.Unlock()
+		for _, record := range result.Records {
+			if self.repeatRecordId == 0 || record.RecordId != self.repeatRecordId {
+				continue
+			}
+			again := *record
+			// above the high water, so the page is not also read as a server holding records back
+			again.RecordId = result.HighWaterRecordId + 1000
+			result.Records = append(result.Records, &again)
+			break
+		}
 		return result, nil
 	}
 	if self.shape == fetchDropsMessages {

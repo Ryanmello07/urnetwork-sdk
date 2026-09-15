@@ -143,12 +143,86 @@ func TestAnUnansweredHelloIsRetriedAcrossTheBudgetAndAnsweredAsReconnecting(t *t
 
 	// AND IT SPENT THE BUDGET RATHER THAN GIVING UP EARLY. The upper bound is loose on purpose:
 	// it is here to catch a loop that never terminates, not to assert a schedule, which is
-	// [TestTheConnectBackoffIsTheDeclaredSchedule]'s job.
+	// [TestTheConnectBackoffIsTheDeclaredSchedule]'s job -- and not the budget's bound either,
+	// which is [TestTheConnectBudgetBoundsTheCallWhateverTheAttemptTimeout]'s.
 	if elapsed < policy.Budget {
 		t.Errorf("gave up after %v, which is inside its own %v budget", elapsed, policy.Budget)
 	}
 	if 5*policy.Budget < elapsed {
 		t.Errorf("took %v against a %v budget", elapsed, policy.Budget)
+	}
+}
+
+// THE BUDGET BOUNDS HOW LONG THE CALL BLOCKS, WHATEVER THE ATTEMPT TIMEOUT SAYS.
+//
+// THE REVIEW THAT FOUND IT, MEASURED FROM C against an unroutable server: a 500 ms budget with the
+// default attempt blocked for 10,000 ms; 2,000 over a 3,000 attempt blocked 3,000; 4,000 over a
+// 1,000 attempt blocked 5,000. The budget was consulted only after an attempt RETURNED and nothing
+// asked whether the next one fitted, so a call overshot by up to one attempt timeout -- and the
+// defaults' own schedule returned at about 100 s against the 90 s the C header states.
+//
+// THE ROWS ARE THE REVIEW'S SHAPES SCALED DOWN, and the row that matters most is the first: a
+// budget SHORTER than one attempt, with the attempt left at its default. The bound is the budget
+// plus a slack for the scheduler, and the floor is that the call did not give up early either.
+//
+// WHAT WOULD GO RED: take the cut of each attempt to what is left of the budget out of
+// Device.Connect, and the first row blocks for the default attempt's 10 s.
+func TestTheConnectBudgetBoundsTheCallWhateverTheAttemptTimeout(t *testing.T) {
+	const slack = 150 * time.Millisecond
+	for _, one := range []struct {
+		name    string
+		budget  time.Duration
+		attempt time.Duration
+		backoff time.Duration
+	}{
+		// each row's comment is what the build before this case returned at, so that every row
+		// is one the old loop overshot by more than the slack and none is here for decoration.
+		{"a budget under the DEFAULT attempt", 300 * time.Millisecond, 0, 0},                                                      // 10,000 ms
+		{"a budget under a longer attempt", 200 * time.Millisecond, time.Second, 50 * time.Millisecond},                           // 1,000 ms
+		{"a budget that ends inside a later attempt", 500 * time.Millisecond, 400 * time.Millisecond, 50 * time.Millisecond},      // 850 ms
+		{"a budget whose last pause would leave nothing", 350 * time.Millisecond, 300 * time.Millisecond, 200 * time.Millisecond}, // 650 ms
+	} {
+		t.Run(one.name, func(t *testing.T) {
+			var reported []ConnectAttempt
+			var mutex sync.Mutex
+			device, client := newUnansweredDevice(t, ConnectPolicy{
+				Budget:         one.budget,
+				AttemptTimeout: one.attempt,
+				FirstBackoff:   one.backoff,
+				MaxBackoff:     one.backoff,
+				OnAttempt: func(attempt ConnectAttempt) {
+					mutex.Lock()
+					reported = append(reported, attempt)
+					mutex.Unlock()
+				},
+			})
+			started := time.Now()
+			err := device.Connect(context.Background())
+			elapsed := time.Since(started)
+			if !errors.Is(err, ErrReconnecting) {
+				t.Fatalf("answered %v, want ErrReconnecting", err)
+			}
+			if one.budget+slack < elapsed {
+				t.Fatalf("a %v budget blocked for %v", one.budget, elapsed)
+			}
+			if elapsed < one.budget {
+				t.Fatalf("a %v budget gave up after %v", one.budget, elapsed)
+			}
+			mutex.Lock()
+			defer mutex.Unlock()
+			if client.sent() < len(reported) {
+				t.Fatalf("%d attempts were reported and %d frames reached the wire", len(reported), client.sent())
+			}
+			backoffs := []time.Duration{}
+			for _, attempt := range reported {
+				backoffs = append(backoffs, attempt.Backoff)
+			}
+			if len(reported) == 0 || reported[len(reported)-1].Backoff != 0 {
+				t.Errorf("the last attempt reported a pause no attempt followed: %v", backoffs)
+			}
+			t.Logf("%v budget: returned after %v, %d attempt(s), pauses %v",
+				one.budget, elapsed.Round(time.Millisecond), len(reported), backoffs)
+		})
 	}
 }
 
@@ -220,22 +294,28 @@ func TestTheConnectBackoffIsTheDeclaredSchedule(t *testing.T) {
 // WHAT WOULD GO RED IF THE LOOP IGNORED THE CALLER'S CONTEXT: this takes the full budget instead of
 // the cancellation, and the error names reconnecting rather than the cancellation.
 func TestTheCallersContextEndsAReconnectAtOnce(t *testing.T) {
-	// THE BUDGET IS DELIBERATELY SHORTER THAN THE CANCELLATION, and that is what makes this case
-	// discriminating rather than decorative. With a long budget the pause between attempts
-	// notices the cancellation on its own and the explicit check costs nothing -- the first
-	// draft of this case was written that way and deleting the check left it GREEN. Here the
-	// budget is ALREADY spent when the cancellation arrives, so a loop that did not ask the
-	// caller's context would fall through to its own "budget exhausted" arm and answer
-	// ErrReconnecting: telling a caller that cancelled to ask again.
+	// THE CANCELLATION LANDS WHERE THE LOOP HAS NO PAUSE LEFT TO NOTICE IT IN, and that is what
+	// makes this case discriminating rather than decorative. With a long budget the pause between
+	// attempts notices the cancellation on its own and the explicit check costs nothing -- the
+	// first draft of this case was written that way and deleting the check left it GREEN.
+	//
+	// IT WAS "THE BUDGET IS ALREADY SPENT WHEN THE CANCELLATION ARRIVES" -- a 50 ms budget under a
+	// 200 ms caller deadline -- and that arrangement stopped existing when the budget started to
+	// bound the call: the attempt is now cut to the 50 ms, so the call ends at the budget before
+	// the caller has cancelled anything, and "reconnecting" is then the true answer. So the caller
+	// now cancels INSIDE the one attempt, at a moment when what is left of the budget is shorter
+	// than a pause: a loop that did not ask the caller's context would take its last-chance
+	// attempt with a dead context, fail it at once, and answer ErrReconnecting -- telling a caller
+	// that cancelled to ask again.
 	policy := ConnectPolicy{
-		Budget:         50 * time.Millisecond,
+		Budget:         200 * time.Millisecond,
 		AttemptTimeout: 10 * time.Second,
-		FirstBackoff:   10 * time.Millisecond,
-		MaxBackoff:     10 * time.Millisecond,
+		FirstBackoff:   100 * time.Millisecond,
+		MaxBackoff:     100 * time.Millisecond,
 	}
 	device, _ := newUnansweredDevice(t, policy)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	started := time.Now()
 	err := device.Connect(ctx)
@@ -250,7 +330,60 @@ func TestTheCallersContextEndsAReconnectAtOnce(t *testing.T) {
 	if 2*time.Second < elapsed {
 		t.Fatalf("the cancellation took %v to be noticed", elapsed)
 	}
-	t.Logf("cancelled after %v, with the budget already spent: %v", elapsed.Round(time.Millisecond), err)
+	t.Logf("cancelled after %v, inside the one attempt, with less of the budget left than a pause: %v", elapsed.Round(time.Millisecond), err)
+}
+
+// AN ATTEMPT THAT FAILS AT ONCE DOES NOT TURN THE LAST STRETCH OF THE BUDGET INTO A TIGHT LOOP.
+//
+// The last-chance attempt is taken WITHOUT a pause, because a pause that no attempt follows only
+// lengthens the block. That is safe only while the last chance ENDS the call whatever it answers:
+// against a transport that refuses a frame instantly -- a dead socket, not the operator's silence
+// -- an attempt returns in microseconds, and a loop that went on taking pause-free attempts while
+// any budget was left would send thousands of Hellos in its last few hundred milliseconds.
+//
+// WHAT WOULD GO RED: take lastChance out of Device.Connect's `final`.
+func TestAnAttemptThatFailsAtOnceIsNotRetriedInATightLoop(t *testing.T) {
+	var attempts int
+	var mutex sync.Mutex
+	streamStore, err := sdk.OpenStreamStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("sdk.OpenStreamStore: %v", err)
+	}
+	t.Cleanup(func() { streamStore.Close() })
+	device, err := NewDevice(DeviceConfig{
+		Transport: newSilentTransport(t),
+		Reserver:  sdk.NewStreamIndexReserver(streamStore),
+		Connect: ConnectPolicy{
+			Budget:         300 * time.Millisecond,
+			AttemptTimeout: time.Second,
+			FirstBackoff:   200 * time.Millisecond,
+			MaxBackoff:     200 * time.Millisecond,
+			OnAttempt: func(ConnectAttempt) {
+				mutex.Lock()
+				attempts += 1
+				mutex.Unlock()
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewDevice: %v", err)
+	}
+	t.Cleanup(func() { device.Close() })
+	started := time.Now()
+	err = device.Connect(context.Background())
+	elapsed := time.Since(started)
+	mutex.Lock()
+	defer mutex.Unlock()
+	if errors.Is(err, ErrHelloRefused) {
+		t.Fatalf("a frame the transport refused was reported as the server refusing: %v", err)
+	}
+	if 10 < attempts {
+		t.Fatalf("%d Hello attempts in %v against a transport that fails at once", attempts, elapsed)
+	}
+	if time.Second < elapsed {
+		t.Fatalf("took %v against a 300ms budget", elapsed)
+	}
+	t.Logf("%d attempts in %v: %v", attempts, elapsed.Round(time.Millisecond), err)
 }
 
 // AND THE DEFAULT BUDGET COVERS THE WINDOW IT EXISTS FOR.

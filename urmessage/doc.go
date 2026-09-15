@@ -128,8 +128,10 @@
 //   - [OpenDurableStateStore] persists everything, on a directory, under a single-writer
 //     exclusion, fsync'd before a value is observable. A device over one comes back into its
 //     groups after a restart -- [Device.Restore] -- at the same epoch, under the same leaf, able
-//     to open records sealed before the restart, INCLUDING THE ONES IT SEALED ITSELF, and to seal
-//     new ones the other side opens once it has reconciled.
+//     to open the other members' records sealed before the restart, to SHOW THE ONES IT SEALED
+//     ITSELF from the copies it persisted before submitting them, and to seal new ones the other
+//     side opens once it has reconciled. It shows its own from copies because since connect
+//     4c030dc a member cannot open its own application record (connect messagegroup MG-4).
 //
 // WHAT PROTECTS THE PRIVATE KEYS IN THE DURABLE ONE: FILE PERMISSIONS AND NOTHING ELSE. Every
 // octet is written in the clear -- the MLS epoch state with this member's leaf private key and

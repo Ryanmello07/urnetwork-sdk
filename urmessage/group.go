@@ -10,6 +10,7 @@ import (
 
 	"github.com/urnetwork/connect/message"
 	"github.com/urnetwork/connect/messagegroup"
+	"github.com/urnetwork/connect/mls"
 	"github.com/urnetwork/connect/protocol"
 )
 
@@ -80,7 +81,9 @@ type Stats struct {
 	// Records the server answered a fetch with.
 	Fetched uint64
 
-	// Records opened into a [Message].
+	// Records OPENED into a [Message]: decrypted, and their inner MLS frame authenticated to the
+	// member whose sender_handle they carry. This device's own records are never among them; see
+	// [Stats.OpenedOwn].
 	Opened uint64
 
 	// Records skipped because they are 6.1's ceremony rather than a message: the founding commit,
@@ -96,10 +99,29 @@ type Stats struct {
 	// readings cannot tell a UI which one happened. The two are now two numbers.
 	SkippedOwn uint64
 
-	// Records this device sealed that were opened into a [Message] because this group does NOT
-	// already hold them: the whole of a restarted device's own half of the conversation, and a
-	// record whose submit response was lost after the server had stored it.
+	// Records this device sealed that became a [Message] because this group does NOT already hold
+	// them: the whole of a restarted device's own half of the conversation, and a record whose
+	// submit response was lost after the server had stored it.
+	//
+	// THEY ARE RENDERED FROM THE COPY THIS DEVICE KEPT AND ARE NEVER DECRYPTED, and the name is
+	// older than that. Since connect 4c030dc an application record's body is an MLS
+	// PrivateMessage, and a member cannot open its own: Protect spends a generation of the leaf's
+	// own ratchet and MLS keeps no receiving ratchet for it (connect messagegroup OPENITEMS MG-4).
+	// So what moves this is a record whose stream index and body_hash are the ones [Group.Send]
+	// sealed and kept -- see [Group.openOwnFromCopyLocked] -- and [Stats.Opened] does NOT move
+	// with it, because nothing was opened.
 	OpenedOwn uint64
+
+	// Records under this device's own sender_handle that this group's keys AUTHENTICATED and that
+	// it CANNOT SHOW, because it keeps no copy of what it sealed at that index.
+	//
+	// A NUMBER HERE IS A HOLE IN THIS DEVICE'S OWN HALF OF THE CONVERSATION. The ordinary ways
+	// to reach it: a state directory written before this build kept copies, and a copy of the
+	// app-data folder meeting a record the original sealed after the copy was taken (which
+	// [Group.Receive] also refuses as [ErrIdentityInUse]). The record is not a failure -- it is
+	// this device's own, and it moves [Stats.FailedOpen] never -- and it is resolved past, so it
+	// costs one MLS peek per Receive that re-reads it and nothing else.
+	OwnWithoutCopy uint64
 
 	// Records skipped because this group's log already holds them under that record id. It
 	// moves when a fetch is REWOUND -- which is what a record that failed to open now causes,
@@ -158,6 +180,25 @@ type trackedKey struct {
 	ephWindow     uint64
 }
 
+// ownSealed is what this group knows about one stream index of its own.
+type ownSealed struct {
+	// The body_hash of the record sealed at this index.
+	bodyHash [32]byte
+
+	// hasCopy is whether this device SEALED it and kept what it sealed. False for an index a
+	// reconciling walk learned off a record the group's keys authenticated and this device holds
+	// no copy of -- which is this lineage's own history, sealed before this build kept copies or
+	// by a copy of the folder.
+	hasCopy  bool
+	body     []byte
+	sentAtMs int64
+
+	// recordId is the record id this copy has been shown under, zero until it has been. A second
+	// record id carrying the same index and the same body_hash is one record shown twice, and a
+	// server is the only party that numbers records.
+	recordId uint64
+}
+
 // Group is one group on one device.
 type Group struct {
 	device         *Device
@@ -209,7 +250,8 @@ type Group struct {
 	// ── one identity, two devices ────────────────────────────────────────────────────────
 	//
 	// ownIndices is every §5.6 stream index this group has accounted for as its own, AND THE
-	// body_hash OF WHAT WAS SEALED AT IT.
+	// body_hash OF WHAT WAS SEALED AT IT -- and, for an index THIS DEVICE sealed, the copy of what
+	// it sealed there.
 	//
 	// THE HASH IS WHY THIS IS NOT A SET, and it is what catches the hardest case. An index is
 	// recorded at the SEAL and not at the submit, because a submit whose response was lost is
@@ -218,7 +260,38 @@ type Group struct {
 	// meets, on the server, a record under its own sender_handle at an index it DID seal, whose
 	// body is not the body it sealed. An index alone cannot tell those apart. The hash can, and
 	// 3.1's body_hash is authenticated by both AEADs, so a server cannot forge one that opens.
-	ownIndices map[uint64][32]byte
+	//
+	// THE COPY IS WHY IT CARRIES MORE THAN A HASH, and it is connect MG-4 read from this side. A
+	// member cannot open its own application record any more, so this device's own half of a
+	// conversation exists in exactly one place it can read: here, and in the durable store's copy
+	// of it ([DeviceStore.PutSentRecord]), which [Device.Restore] reads back into this map.
+	ownIndices map[uint64]*ownSealed
+
+	// withoutCopy is every record id this group has authenticated as its own and cannot show. See
+	// [Stats.OwnWithoutCopy].
+	//
+	// IT EXISTS BECAUSE A REWIND RE-READS THESE: without it a record re-fetched behind an earlier
+	// failure is authenticated and counted again (cp3b.TestAnOwnRecordThisDeviceKeptNoCopyOf...).
+	// IT KEEPS NO INDEX, and it used to: the skip re-noted the index it was authenticated at, and
+	// deleting that re-note turned nothing red in urmessage or cp3b, because the index is already in
+	// [Group.ownIndexSeen], which is the group's and not the walk's.
+	withoutCopy map[uint64]bool
+
+	// ownIndexSeen is the highest §5.6 stream index on a record of this device's own that this
+	// group's keys AUTHENTICATED, across every walk since the group came up.
+	//
+	// IT IS THE GROUP'S AND NOT ONE WALK'S, and it used to be one walk's. The reconciliation holds
+	// it against the reserver's high water on the first clean walk -- and a clean walk that comes
+	// after a dirty one does not re-open the records the dirty one already resolved: a delivered
+	// record is skipped by record id and contributes nothing. So a copy whose evidence arrived in
+	// a walk that ALSO lost some other record reconciled on the next, clean walk with the evidence
+	// forgotten, and sealed at an index the original had already used.
+	// cp3b.TestACopyWhoseEvidenceArrivedInADirtyWalkIsStillCaught drives that.
+	ownIndexSeen uint64
+
+	// ownHeads is the head the receiver ladder over this device's OWN leaf was last tracked at, per
+	// ladder. See [Group.advanceOwnLadderLocked].
+	ownHeads map[trackedKey]uint64
 
 	// reconciled is whether this group has compared its own stream position against the
 	// server's rows since it came back. A group created or joined in THIS process is
@@ -616,9 +689,14 @@ func (self *Group) wrapTargetsLocked() ([][16]byte, error) {
 // Send seals one line of text as a DURABLE record and submits it.
 //
 // The size bucket is whatever the text needs: [messagegroup.GroupSession.SealRecord] walks the
-// ladder and takes the smallest rung the padded body fits, so a short message is padded to 256
-// octets and leaks its rung rather than its length. A text too long for the largest inline rung is
-// refused with [ErrTextTooLong]; blob-backed bodies are out of scope.
+// ladder and takes the smallest rung the padded body fits, so a message leaks its rung rather than
+// its length. THE RUNGS ARE NOT WHAT THEY WERE. Since connect 4c030dc the text is carried inside an
+// MLS PrivateMessage that itself sits inside the rung, and the usable text per rung, measured through
+// this method and a real server's rows by cp3b.TestEveryRecordTypeUrmessageSealsLandsOnTheRungItsBodyNeeds,
+// is 59 / 826 / 3,898 / 16,186 / 65,334 octets where it was 252 / 1,020 / 4,092 / 16,380 / 65,532.
+// So a text over 59 octets is stored at 1,040 octets where one up to 252 used to be stored at 272,
+// and a text over 65,334 octets -- including the 198 octets up to the old ceiling -- is refused with
+// [ErrTextTooLong]; blob-backed bodies are out of scope.
 //
 // IT NEVER RETURNS NIL ON A MESSAGE THAT DID NOT LAND. The record is accepted by the server, or
 // this returns an error naming the refusal -- including after S2-2's single re-Hello and re-MAC.
@@ -659,11 +737,32 @@ func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 	// still a record this device SEALED under this index -- the ciphertext exists and the
 	// server may well hold it -- and a device that only recorded acknowledged indices would
 	// meet its own lost record on a later fetch and read it as a second writer.
-	self.ownIndices[record.Header.StreamIndex] = record.Header.BodyHash
+	//
+	// AND THE COPY IS KEPT AT THE SAME MOMENT AND FOR THE SAME REASON, and since connect 4c030dc it
+	// is the ONLY copy. The body is an MLS PrivateMessage and a member cannot open its own, so a
+	// record whose answer was lost comes back on the next fetch as ciphertext this device will
+	// never read again -- unless it kept what it sealed.
+	//
+	// IT IS DURABLE BEFORE THE SUBMIT, OR THE SUBMIT DOES NOT HAPPEN. A record that reached the
+	// server with no copy on the disk is a line the user typed that a restart of this device can
+	// never show them again, and nothing afterwards could repair it. Refusing here costs one
+	// stream index and one MLS generation, both legal gaps, and the user sees the send fail and
+	// types it again.
+	sealed := &ownSealed{
+		bodyHash: record.Header.BodyHash,
+		hasCopy:  true,
+		body:     []byte(text),
+		sentAtMs: sentAtMs,
+	}
+	self.ownIndices[record.Header.StreamIndex] = sealed
+	if err := self.device.persistSent(self.id, record.Header.StreamIndex, sealed); err != nil {
+		return nil, fmt.Errorf("urmessage: this message was sealed and NOT sent, because the copy a restart would show it from could not be persisted: %w", err)
+	}
 	recordId, err := self.submitLocked(ctx, self.session, record, "a message")
 	if err != nil {
 		return nil, err
 	}
+	sealed.recordId = recordId
 	handle := append([]byte(nil), record.Header.SenderHandle[:]...)
 	sent := &Message{
 		RecordId:     recordId,
@@ -849,14 +948,18 @@ func (self *Group) cloneRefusalLocked(reason protocol.Reason, record *message.Re
 // record from a member that DID NOT OPEN is counted too AND returns an error, because that is the
 // one case where a message was sent and this device cannot show it.
 //
-// THIS DEVICE'S OWN RECORDS ARE OPENED AND NOT SKIPPED, and the sentence that used to stand here
-// said the opposite. Every own record was skipped on the ground that this device "holds its own
-// plaintext already" -- which is true of a device that has been running since it sent them, and
+// THIS DEVICE'S OWN RECORDS ARE SHOWN AND NOT SKIPPED, and the sentence that stood here before
+// that said the opposite. Every own record was skipped on the ground that this device "holds its
+// own plaintext already" -- which is true of a device that has been running since it sent them, and
 // FALSE of a restored one, whose log starts empty and whose cursor is not persisted. A user closed
 // the app, reopened it, and got the other side's half of the conversation and none of their own,
 // with a nil error and one counter that moves on the ordinary echo case too. Now an own record is
-// opened unless its record id is already in this group's log, and the two readings are two
-// counters: [Stats.SkippedOwn] and [Stats.OpenedOwn].
+// shown unless its record id is already in this group's log, and the readings are counters:
+// [Stats.SkippedOwn], [Stats.OpenedOwn] and [Stats.OwnWithoutCopy].
+//
+// SHOWN, AND SINCE connect 4c030dc NOT OPENED: a member cannot open its own application record
+// (MG-4), so this device's own lines come from the copy [Group.Send] kept and the durable store
+// holds. [Group.openPageLocked] carries the three roads an own record takes.
 //
 // A RECORD THAT DID NOT OPEN IS ASKED FOR AGAIN, up to [maxRecordAttempts] times, and then GIVEN
 // UP ON BY NAME. The cursor this method resumes from is the RESOLVED position and not the paging
@@ -1124,15 +1227,15 @@ type pageWalk struct {
 	// this device never sealed as what it is.
 	reconciled bool
 
-	// ownIndexSeen is the highest 5.6 stream index on a record of this device's own that OPENED
-	// in this walk.
-	//
-	// OFF RECORDS THAT OPENED AND NEVER OFF A HEADER. A record header is plaintext and nothing
-	// authenticates it until the aead runs; the server can write any sender_handle and any
-	// stream_index it likes into one. Taken off the header, a server could wedge any client it
-	// pleased by writing one forged row -- so the number is read only once the record has
-	// opened, which no party without this group's keys can make happen.
-	ownIndexSeen uint64
+	// THE HIGHEST OWN INDEX IS NOT HERE ANY MORE: it is [Group.ownIndexSeen], because one walk's
+	// number forgot what an earlier, dirty walk had already authenticated. It is still read OFF
+	// RECORDS THE GROUP'S KEYS AUTHENTICATED AND NEVER OFF A HEADER -- a record header is plaintext,
+	// the server writes any sender_handle and stream_index it likes into one, and a number taken
+	// off a header would let it wedge any client with one forged row. The three sources it IS
+	// taken from: an own record that OPENED, which since MG-4 only a copy of this folder ahead of
+	// this one can have sealed; an own record whose inner frame reached MLS's spent-generation
+	// refusal (see ownFrameAlreadySpent); and an own record shown from this device's copy, whose
+	// index is by construction one this device sealed at (see [Group.openOwnFromCopyLocked]).
 
 	// the first own record that opened at a stream index this device did not seal THIS record
 	// at. foreignBody distinguishes the two ways that happens, because they are two different
@@ -1161,11 +1264,13 @@ func (self *Group) commitWalkLocked(walk *pageWalk) error {
 		//
 		// THE INVARIANT IS ONE SENTENCE: every stream index on the server under this
 		// device's sender_handle was allocated by this device's durable reserver, and a
-		// reserver never rewinds. So a record of this device's own that OPENS at an index
-		// the reserver has never handed out was sealed by something else holding these keys,
-		// and there is no other reading of it.
+		// reserver never rewinds. So a record of this device's own that the group's keys
+		// AUTHENTICATE at an index the reserver has never handed out was sealed by something else
+		// holding these keys, and there is no other reading of it. ("Authenticate" and not
+		// "open" since MG-4: see ownFrameAlreadySpent, and [Group.ownIndexSeen] for why the
+		// number compared is every walk's since the group came up and not this walk's.)
 		//
-		// WHAT THIS WALK CANNOT SEE: an own record that did NOT open contributes no index,
+		// WHAT THIS WALK CANNOT SEE: an own record that did NOT authenticate contributes no index,
 		// because an index is only read off a record the aead authenticated -- so a server
 		// bending one of this device's own records suppresses the evidence for that record.
 		// THAT IS WHY THE GATE IS [Group.walkReconcilesLocked] AND NOT `walk.complete` ALONE.
@@ -1178,10 +1283,10 @@ func (self *Group) commitWalkLocked(walk *pageWalk) error {
 			// not evidence that this device is alone with its identity.
 			return fmt.Errorf("urmessage: this device's own stream position could not be read, so this restored group cannot reconcile: %w", err)
 		}
-		if highWater < walk.ownIndexSeen {
+		if highWater < self.ownIndexSeen {
 			self.identityInUse = fmt.Errorf(
-				"%w: group %x epoch %d: the server holds a record this group's keys opened at stream index %d under this device's own sender_handle, and this device's durable reserver has never allocated past %d",
-				ErrIdentityInUse, self.id, self.epoch, walk.ownIndexSeen, highWater)
+				"%w: group %x epoch %d: the server holds a record this group's keys authenticated at stream index %d under this device's own sender_handle, and this device's durable reserver has never allocated past %d",
+				ErrIdentityInUse, self.id, self.epoch, self.ownIndexSeen, highWater)
 		}
 		self.reconciled = true
 	}
@@ -1261,18 +1366,33 @@ func (self *Group) ownHighWaterLocked(own [16]byte) (uint64, error) {
 // -- and so that the paging decisions and the record decisions are not one forty-line block where
 // a `continue` could mean either.
 //
-// THIS DEVICE'S OWN RECORDS ARE OPENED HERE AND ARE NOT SKIPPED, which is the repair for the worst
+// THIS DEVICE'S OWN RECORDS ARE SHOWN HERE AND ARE NOT SKIPPED, which is the repair for the worst
 // user-facing defect the durable store introduced. A restored group's log starts EMPTY and the
 // cursor is not persisted, so a restarted device re-reads its whole history -- and while this
 // method skipped every record whose sender_handle was its own, a user who closed the app and
 // reopened it got the other side's half of the conversation and none of their own, with a nil
 // error and one counter that moved on the ordinary echo case too.
 //
-// WHAT IT COSTS AND WHAT IT BUYS. An own record opens under a receiver ladder derived from the
-// same class key the sender ladder is rooted at, so this is a second in-memory copy of keys this
-// device already holds -- which is the sentence the old skip was written on, and it priced the
-// copy without pricing the conversation. What keeps it from delivering a message twice is
-// [Group.delivered], the record ids this group's log already holds.
+// AND THEY ARE SHOWN FROM THE COPY THIS DEVICE KEPT, NOT OPENED, which is a change connect forced
+// rather than one this method chose. Until connect 4c030dc an own record opened under a receiver
+// ladder derived from the class key every member holds. Since it, the body is an MLS PrivateMessage
+// and a member cannot open its own (MG-4), and at d368fea every own record here answered "mls:
+// ratchet generation already consumed" -- which, while this method still asked for it, turned every
+// restart, every clone case and the lost answer red in sdk/cp3b. So an own record now takes one of
+// three roads, in this order, and each is its own counter:
+//
+//   - [Group.openOwnFromCopyLocked]: this device sealed at that index, kept what it sealed, and the
+//     record carries that body_hash over that ct_body. Shown from the copy. [Stats.OpenedOwn].
+//   - OpenRecord OPENS it: sealed by something else holding this leaf's signature key at a
+//     generation this device never spent, which is a copy of this folder ahead of this one. Shown,
+//     and read as the clone evidence it is. [Stats.OpenedOwn].
+//   - OpenRecord refuses it at the spent generation: authenticated to this group's keys and not
+//     showable. [Stats.OwnWithoutCopy], resolved past, and read as evidence the same way; see
+//     ownFrameAlreadySpent for exactly how strong that evidence is.
+//
+// Every other refusal of an own record is an ordinary record that did not open. What keeps any of
+// it from delivering a message twice is [Group.delivered] and, for the copy, the record id it was
+// shown under.
 func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWalk) {
 	resolve := func(recordId uint64) {
 		if !walk.blocked && walk.resolvedTo < recordId {
@@ -1343,6 +1463,24 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			resolve(recordId)
 			continue
 		}
+		if self.withoutCopy[recordId] {
+			// authenticated as this device's own on an earlier walk, and still not showable. Its
+			// evidence is already in [Group.ownIndexSeen] and, when it was a copy's, already in
+			// identityInUse, so nothing is taken from the header re-fetched here.
+			resolve(recordId)
+			continue
+		}
+		if mine {
+			shown, err := self.openOwnFromCopyLocked(walk, recordId, parsed)
+			if err != nil {
+				fail(recordId, err)
+				continue
+			}
+			if shown {
+				resolve(recordId)
+				continue
+			}
+		}
 		leaf, known := walk.leaves[header.SenderHandle]
 		if !known {
 			fail(recordId, fmt.Errorf("%w: record %d names sender_handle %x, which is no leaf of this group at epoch %d",
@@ -1353,8 +1491,36 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			fail(recordId, err)
 			continue
 		}
+		if mine {
+			if err := self.advanceOwnLadderLocked(leaf, header); err != nil {
+				fail(recordId, err)
+				continue
+			}
+		}
 		headPlain, bodyPlain, err := self.session.OpenRecord(parsed)
 		if err != nil {
+			if mine && ownFrameAlreadySpent(err) {
+				// connect MG-4, and the ONE refusal on this path that is not a failure. See
+				// ownFrameAlreadySpent for exactly what it establishes and what it does not.
+				//
+				// ONE RECORD UNDER TWO RECORD IDS IS STILL ONE RECORD SHOWN TWICE, whether it is shown
+				// from a copy or only counted: the same (index, body_hash) already accounted for under
+				// another number is refused, as openOwnFromCopyLocked refuses it.
+				if known, held := self.ownIndices[header.StreamIndex]; held && known.bodyHash == header.BodyHash &&
+					known.recordId != 0 && known.recordId != recordId {
+					fail(recordId, fmt.Errorf("%w: record %d carries this device's own record at stream index %d, which this group already holds as record %d",
+						ErrRecordOpen, recordId, header.StreamIndex, known.recordId))
+					continue
+				}
+				self.stats.OwnWithoutCopy += 1
+				self.withoutCopy[recordId] = true
+				self.noteOwnIndexLocked(walk, recordId, header.StreamIndex, header.BodyHash)
+				if known, held := self.ownIndices[header.StreamIndex]; held && known.bodyHash == header.BodyHash && known.recordId == 0 {
+					known.recordId = recordId
+				}
+				resolve(recordId)
+				continue
+			}
 			fail(recordId, fmt.Errorf("%w: record %d from leaf %d: %w", ErrRecordOpen, recordId, leaf, err))
 			continue
 		}
@@ -1365,6 +1531,11 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 		}
 		self.stats.Opened += 1
 		if mine {
+			// A RECORD OF THIS DEVICE'S OWN THAT OPENED. This device cannot open what IT sealed
+			// (MG-4), so what just opened was sealed by something else holding this leaf's
+			// signature key at a generation this device has not spent: a copy of the folder,
+			// ahead of this one. noteOwnIndexLocked reads it as exactly that. It is still shown,
+			// because it is a message somebody in this group really wrote.
 			self.stats.OpenedOwn += 1
 			self.noteOwnIndexLocked(walk, recordId, header.StreamIndex, header.BodyHash)
 		}
@@ -1404,22 +1575,130 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 // party without this group's keys cannot produce a record that opens at all, let alone one whose
 // body_hash it chose.
 func (self *Group) noteOwnIndexLocked(walk *pageWalk, recordId uint64, index uint64, bodyHash [32]byte) {
-	if walk.ownIndexSeen < index {
-		walk.ownIndexSeen = index
+	if self.ownIndexSeen < index {
+		self.ownIndexSeen = index
 	}
 	sealed, mine := self.ownIndices[index]
 	switch {
-	case mine && sealed == bodyHash:
+	case mine && sealed.bodyHash == bodyHash:
 	case mine:
 		if walk.foreignIndex == 0 {
 			walk.foreignIndex, walk.foreignRecord = index, recordId
 			walk.foreignBody = true
 		}
 	case !walk.reconciled:
-		self.ownIndices[index] = bodyHash
+		self.ownIndices[index] = &ownSealed{bodyHash: bodyHash}
 	case walk.foreignIndex == 0:
 		walk.foreignIndex, walk.foreignRecord = index, recordId
 	}
+}
+
+// openOwnFromCopyLocked shows one record of this device's own from the copy [Group.Send] kept, and
+// answers whether it did.
+//
+// WHY THERE IS A COPY TO SHOW IT FROM. Since connect 4c030dc an application record's body is an MLS
+// PrivateMessage, and a member cannot open its own: Protect spends a generation of this leaf's own
+// ratchet and MLS keeps no receiving ratchet for a leaf's own messages, so OpenRecord of a record
+// this device sealed answers "mls: ratchet generation already consumed". That is connect's
+// messagegroup OPENITEMS MG-4, and of the three answers it lists this is the first -- a sender
+// renders its own message from the copy it kept -- because the second is a change to connect and
+// the third, exempting self-attributed records from the inner open, re-opens the forgery 4c030dc
+// closed and is written down there as refused.
+//
+// WHAT HAS TO HOLD BEFORE A COPY IS SHOWN, and why each clause is there:
+//
+//   - THIS DEVICE SEALED AT THIS INDEX AND KEPT WHAT IT SEALED. An index it only learned from the
+//     server has no copy and is not shown from one.
+//   - THE RECORD'S body_hash IS THE ONE SEALED THERE. Two copies of one folder both seal at an
+//     index; the one whose record the server kept is not this device's, and it is not shown as
+//     this device's text. It falls through to OpenRecord, which is what authenticates it and what
+//     lets the clone check read it.
+//   - THE HASH IS THE HASH OF THIS ct_body, and the group and epoch are this group's. A header is
+//     plaintext; checking the hash against the ciphertext in hand is what ties the claim to
+//     octets this device produced, because nobody can produce a second ct_body under one SHA-256.
+//     What is NOT checked is ct_head, and nothing is lost by it: the head this device wrote is
+//     the clock reading it kept, and it is shown from the copy.
+//   - THE COPY HAS NOT ALREADY BEEN SHOWN UNDER ANOTHER RECORD ID. An honest server numbers one
+//     record once -- an honest resubmission is answered with the record id it already holds -- so
+//     a second number for the same (index, body_hash) is one record shown twice. It is refused as
+//     a record that did not open rather than delivered again, which is what the receiver ladder
+//     used to do for it when this device could still open its own records.
+//
+// A record that fails any of the first three is not an error here: it answers false, and the
+// ordinary open path decides what it is.
+func (self *Group) openOwnFromCopyLocked(walk *pageWalk, recordId uint64, parsed *message.Record) (bool, error) {
+	header := &parsed.Header
+	sealed, found := self.ownIndices[header.StreamIndex]
+	if !found || !sealed.hasCopy || sealed.bodyHash != header.BodyHash {
+		return false, nil
+	}
+	// THE GROUP AND EPOCH HALF OF THIS DEFENDS NOTHING A TEST CAN SEE, measured by deleting it over
+	// urmessage and cp3b with nothing going red, and that is argued rather than hoped: a ct_body this
+	// device sealed in another group or epoch hashes to a body_hash no copy in THIS group's table
+	// holds, so the hash half already refuses it. It stays because it is free and says what a copy
+	// is for.
+	if sha256.Sum256(parsed.CtBody) != header.BodyHash || !bytes.Equal(header.GroupId[:], self.id) ||
+		header.Epoch != self.epoch {
+		return false, nil
+	}
+	if sealed.recordId != 0 && sealed.recordId != recordId {
+		return false, fmt.Errorf("%w: record %d carries this device's own record at stream index %d, which this group already holds as record %d",
+			ErrRecordOpen, recordId, header.StreamIndex, sealed.recordId)
+	}
+	sealed.recordId = recordId
+	self.stats.OpenedOwn += 1
+	self.noteOwnIndexLocked(walk, recordId, header.StreamIndex, header.BodyHash)
+	received := &Message{
+		RecordId:     recordId,
+		SenderHandle: append([]byte(nil), header.SenderHandle[:]...),
+		Mine:         true,
+		Text:         string(sealed.body),
+		SentAtMs:     sealed.sentAtMs,
+	}
+	walk.opened = append(walk.opened, received)
+	self.log = append(self.log, received)
+	self.delivered[recordId] = true
+	return true, nil
+}
+
+// ownFrameAlreadySpent reports whether OpenRecord refused a record for exactly one reason: its inner
+// MLS frame names a generation of this device's own leaf that this device has already spent. It is
+// asked only of a record under this device's own sender_handle.
+//
+// WHAT THAT REFUSAL ESTABLISHES, READ OFF connect AT d368fea RATHER THAN ASSUMED, because the whole
+// clone check leans on it. OpenRecord reaches the inner frame only after body_hash matched ct_body,
+// the record key derived for this sender_handle at this stream_index, and BOTH record AEADs opened
+// (messagegroup/seal.go, openRecordOnLoop) -- so a record that gets as far as ErrRecordInnerFrame
+// was written by a holder of this group's class keys, at this position, with this body_hash. The
+// frame's sender data then opened under the group's sender_data_secret, MASTER section 8.4.3's R1
+// found the frame's leaf to be the one this sender_handle belongs to and R2 found its aad to be this
+// record's own position (messagegroup/mlsframe.go, unframeBodyOnLoop, the PEEK half), and only then
+// did mls refuse the generation (mls/secret_tree.go, classify, reached from MessageKey) -- BEFORE
+// the content AEAD and BEFORE the signature.
+//
+// SO IT IS EXACTLY AS STRONG AS "IT OPENED" WAS BEFORE 4c030dc, AND NO STRONGER. The signature is
+// never checked on this path and cannot be: the key it would need is the one this device erased
+// when it sealed. Any MEMBER of the group can build a record that reaches this refusal at this
+// device's handle -- which any member could also do, and have OPEN, before the ruling. The clone
+// check therefore goes on resting on "a holder of this group's keys wrote this", which is what it
+// rested on; what it does NOT get is "this device's own signature key wrote this", and a member that
+// wants to wedge this device as a copy of itself can still do so for the price of one record. That
+// is the residue connect's TestAnyMemberCanStillSquatAnotherLeafsStreamIndex already measures one
+// layer down, reached from the clone check's side.
+//
+// cp3b.TestAnOwnRecordBentInFlightIsAFailureAndNotAnOwnRecord holds the half of this that a
+// reordering inside connect would break: an own record whose ciphertext does not open never
+// reaches this refusal and is a failure, not an own record.
+//
+// EACH HALF OF THE CONJUNCTION ALONE DEFENDS NOTHING A TEST HERE CAN SEE, measured by deleting each
+// over urmessage and cp3b with nothing going red. Without the mls half, an own record whose inner
+// frame fails for another reason -- a peek that does not parse, a generation too far ahead -- would
+// be counted as this device's own; reaching those needs a record built at this device's handle with
+// group keys and a bad frame, which nothing in sdk can build. Without the messagegroup half nothing
+// changes at all, because no refusal on OpenRecord's path wraps the mls sentinel except through
+// ErrRecordInnerFrame. The conjunction is kept because it names MG-4's one refusal exactly.
+func ownFrameAlreadySpent(err error) bool {
+	return errors.Is(err, messagegroup.ErrRecordInnerFrame) && errors.Is(err, mls.ErrRatchetGenerationConsumed)
 }
 
 // checkAttestationLocked performs the two halves of 4.3.4 that need no key, and counts the half
@@ -1485,7 +1764,52 @@ func (self *Group) initTables() {
 	self.tracked = map[trackedKey]bool{}
 	self.delivered = map[uint64]bool{}
 	self.attempts = map[uint64]int{}
-	self.ownIndices = map[uint64][32]byte{}
+	self.ownIndices = map[uint64]*ownSealed{}
+	self.withoutCopy = map[uint64]bool{}
+	self.ownHeads = map[trackedKey]uint64{}
+}
+
+// advanceOwnLadderLocked moves the receiver ladder over this device's OWN leaf up to the position
+// this group has already authenticated, when the own record about to be opened lies past that
+// ladder's window.
+//
+// WHY IT EXISTS, MEASURED AND NOT REASONED. Before MG-4 every own record was OPENED, in order, and
+// each open committed a rung, so the ladder over this device's own leaf walked along behind them.
+// Since MG-4 an own record shown from the copy, or authenticated at the spent generation, commits
+// nothing -- so the own ladder stayed at its root, and the first own record that DID need opening
+// past index 1,024 (messagegroup.DefaultRecordWindowSize) was ErrOutOfWindow. Measured over 1,030
+// lines: a copy of the folder that was behind the original by one line reconciled cleanly and was
+// NOT caught before it sealed -- the evidence record was retried three times, abandoned, and the
+// next walk was clean -- and a restart with no copies left six abandoned holes.
+//
+// THE HEAD IS [Group.ownIndexSeen] + 1, WHICH IS CALLER STATE AND NOT A HEADER. TrackSender's
+// head is walked from the root, so a number a server wrote would be a number of expansions a server
+// chose; ownIndexSeen is read only off own records the group's keys authenticated or that this
+// device sealed. The header's stream_index decides only WHETHER to move, never where to, and a
+// move that would not raise the head is not made -- so a server that writes far-ahead indices buys
+// nothing but a comparison. What moving costs is the indices below the new head: an own record
+// there no longer opens. In a walk those are behind it already, because a server refuses a stream
+// index that regresses.
+func (self *Group) advanceOwnLadderLocked(leaf uint32, header *message.RecordHeader) error {
+	retentionWire, err := message.RetentionClassWire(header.RetentionClass, header.EphBucket)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrRecordOpen, err)
+	}
+	key := trackedKey{leaf: leaf, retentionWire: retentionWire, ephWindow: header.EphWindow}
+	head := self.ownHeads[key]
+	if header.StreamIndex <= head+uint64(messagegroup.DefaultRecordWindowSize) {
+		return nil
+	}
+	next := self.ownIndexSeen + 1
+	if next <= head {
+		return nil
+	}
+	if err := self.session.TrackSender(leaf, header.RetentionClass, header.EphBucket, header.EphWindow, next); err != nil {
+		return fmt.Errorf("%w: moving this device's own ladder to index %d: %w", ErrRecordOpen, next, err)
+	}
+	self.ownHeads[key] = next
+	self.tracked[key] = true
+	return nil
 }
 
 // trackLocked installs this sender's receiver ladder once and only once.

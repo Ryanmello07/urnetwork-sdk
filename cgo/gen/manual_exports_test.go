@@ -121,48 +121,58 @@ func TestTheLoopbackHarnessIsNotInTheShippingLibrarysDef(t *testing.T) {
 	}
 }
 
-// The messaging surface is hand-written and the .def is generated, so the .def is STALE with
-// respect to it until someone runs `make generate`. That is stated in exports_message.go and it
-// is harmless -- a .def is only read to build an MSVC import library -- but it must be a known
-// staleness rather than a surprise, so this case names the size of it.
-func TestTheDefIsStaleWithRespectToTheHandWrittenMessagingSurface(t *testing.T) {
+// EVERY HAND-WRITTEN EXPORT THAT SHIPS IS NAMED IN THE .def, AND THE MESSAGING SURFACE IS ALL OF IT.
+//
+// THIS CASE USED TO BE TestTheDefIsStaleWithRespectToTheHandWrittenMessagingSurface, AND IT PASSED
+// ON THE DEFECT. It counted how many of the messaging exports the .def named and LOGGED "0 of 34;
+// `make generate` is owed" -- so a .def an MSVC consumer could link none of the messaging surface
+// through was a green run. Measured against the shipping library at sdk cfe3ce4, the gap was wider
+// than the case knew: the DLL's cgo header declared 654 urnet_ exports and the .def named 609,
+// and the 45 missing were the 34 messaging exports AND all 11 of exports_manual.go's byte-buffer
+// exports. The .def now names all 654, and this is a gate rather than a log line.
+//
+// THE SET IS manualExports() ITSELF, run from the cgo module root the way the generator runs it, so
+// a new //export in any shipped hand-written file that is not in the .def is red here, and the
+// build-tag exclusion is the generator's own and not a second reading of it.
+//
+// WHAT IT DOES NOT HOLD: that the GENERATED exports and the .def agree. That is
+// TestExportedSymbolCompatibilityBaseline's half, over its own list.
+func TestTheDefNamesEveryHandWrittenExportThatShips(t *testing.T) {
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("could not resolve test path")
 	}
 	root := filepath.Join(filepath.Dir(filename), "..")
-	b, err := os.ReadFile(filepath.Join(root, "exports_message.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !inAnyShippedBuild(string(b)) {
-		t.Fatal("exports_message.go is behind a build constraint, so the messaging abi does not ship")
-	}
-	exports := exportDirective.FindAllStringSubmatch(string(b), -1)
-	if len(exports) == 0 {
-		t.Fatal("exports_message.go declares no //export")
-	}
 	defBytes, err := os.ReadFile(filepath.Join(root, "include", "urnetwork_sdk.def"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	present := 0
-	for _, m := range exports {
-		if strings.Contains(string(defBytes), "\n\t"+m[1]+"\n") {
-			present += 1
+	def := "\n" + strings.ReplaceAll(string(defBytes), "\r\n", "\n") + "\n"
+	t.Chdir(root)
+	manual := manualExports()
+	messaging := 0
+	missing := []string{}
+	for _, name := range manual {
+		if strings.HasPrefix(name, "urnet_message_") {
+			messaging += 1
+		}
+		if !strings.Contains(def, "\n\t"+name+"\n") {
+			missing = append(missing, name)
 		}
 	}
-	// This is the state today and it is the state the commit describes. If someone regenerates,
-	// present becomes len(exports) and this case says so rather than passing quietly on both.
-	switch present {
-	case 0:
-		t.Logf("include/urnetwork_sdk.def names 0 of the %d messaging exports; `make generate` is owed",
-			len(exports))
-	case len(exports):
-		t.Logf("include/urnetwork_sdk.def names all %d messaging exports; the generator has been run",
-			len(exports))
-	default:
-		t.Errorf("include/urnetwork_sdk.def names %d of the %d messaging exports, which is neither "+
-			"the pre-generate state nor the post-generate one", present, len(exports))
+	// the control that stops an empty scan passing: the messaging file declares its exports, and
+	// the scan must find every one of them
+	b, err := os.ReadFile("exports_message.go")
+	if err != nil {
+		t.Fatal(err)
 	}
+	declared := len(exportDirective.FindAllStringSubmatch(string(b), -1))
+	if declared == 0 || messaging != declared {
+		t.Fatalf("exports_message.go declares %d //export and manualExports found %d urnet_message_ names", declared, messaging)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("include/urnetwork_sdk.def does not name %d of the %d hand-written exports that ship, so an MSVC consumer linking through the import library cannot reach them: %v",
+			len(missing), len(manual), missing)
+	}
+	t.Logf("include/urnetwork_sdk.def names all %d hand-written exports that ship, %d of them messaging", len(manual), messaging)
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -222,5 +223,61 @@ func TestTheMessageMetadataProjectionCarriesNoBody(t *testing.T) {
 	}
 	if messageInfoOf(nil) != nil {
 		t.Error("a nil message projected to something")
+	}
+}
+
+// PROTOCOL_VERSION: 0 IS THIS BUILD'S VERSION, THE BUILD'S VERSION IS ITSELF, AND NOTHING ELSE IS
+// ACCEPTED.
+//
+// The review that found this passed 0 by analogy with every other 0 in this abi and lost a whole
+// conversation to a Hello the server refused two calls later. The C consumer holds the export end to
+// end (2 and 3 refused at transport_new, 0 connecting); this holds the whole range of the rule at
+// its edges, which C would need a server per value to reach.
+//
+// WHAT WOULD GO RED: pass protocol_version straight through again, or map 0 to itself.
+func TestProtocolVersionZeroIsThisBuildsAndEveryOtherValueIsRefused(t *testing.T) {
+	for _, one := range []struct {
+		in   uint32
+		want uint32
+		ok   bool
+	}{
+		{0, messageProtocolVersion, true},
+		{messageProtocolVersion, messageProtocolVersion, true},
+		{messageProtocolVersion + 1, 0, false},
+		{messageProtocolVersion + 2, 0, false},
+		{^uint32(0), 0, false},
+	} {
+		got, err := messageProtocolVersionOf(one.in)
+		if (err == nil) != one.ok || got != one.want {
+			t.Errorf("protocol_version %d answered %d, %v; want %d and ok=%v", one.in, got, err, one.want, one.ok)
+		}
+		if err != nil && !strings.Contains(err.Error(), "URNET_MESSAGE_PROTOCOL_VERSION") {
+			t.Errorf("the refusal of %d does not name the constant that works: %v", one.in, err)
+		}
+	}
+}
+
+// THE STATS JSON CARRIES EVERY COUNTER urmessage KEEPS, BY NAME.
+//
+// urnet_message_group_stats's own comment says "every counter urmessage keeps is carried", and until
+// this case that sentence was held by nobody: a counter added to urmessage.Stats and not to the json
+// projection would leave a C caller unable to see it with every test green. OwnWithoutCopy is the
+// counter that made it matter -- the number of this device's own lines it cannot show.
+//
+// WHAT WOULD GO RED: add a field to urmessage.Stats and not to messageGroupStats.
+func TestTheStatsJsonCarriesEveryCounterUrmessageKeeps(t *testing.T) {
+	kept := reflect.TypeOf(urmessage.Stats{})
+	carried := reflect.TypeOf(messageGroupStats{})
+	names := map[string]bool{}
+	for at := 0; at < carried.NumField(); at += 1 {
+		names[carried.Field(at).Name] = true
+	}
+	for at := 0; at < kept.NumField(); at += 1 {
+		if name := kept.Field(at).Name; !names[name] {
+			t.Errorf("urmessage.Stats keeps %s and urnet_message_group_stats does not carry it", name)
+		}
+	}
+	if kept.NumField() != carried.NumField() {
+		t.Errorf("urmessage.Stats has %d counters and the json carries %d", kept.NumField(), carried.NumField())
 	}
 }

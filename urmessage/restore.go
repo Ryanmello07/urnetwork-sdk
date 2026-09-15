@@ -28,8 +28,11 @@ import (
 //   - It can RECEIVE, including records sealed BEFORE the restart AND THE ONES IT SEALED ITSELF: a
 //     receiver ladder is followed from its root (`trackLocked` passes head index 0), and the
 //     cursor is not persisted, so a restored device re-fetches this group's history and
-//     re-derives every key it needs for it. Its own records are opened rather than skipped, which
-//     is what makes a restored conversation the whole conversation; see [Group.openPageLocked].
+//     re-derives every key it needs for it. Its own records are SHOWN rather than skipped, which
+//     is what makes a restored conversation the whole conversation -- and since connect 4c030dc
+//     they are shown from the copies [Group.Send] persisted ([DeviceStore.SentRecords]) and never
+//     opened, because a member cannot open its own application record (MG-4). An own record the
+//     store holds no copy of is counted in [Stats.OwnWithoutCopy]; see [Group.openPageLocked].
 //   - It cannot ADD a member or OPEN: both need the epoch-zero founding session, which exists on
 //     the founder before the first commit and is not persisted. A restored group answers
 //     [ErrAlphaOneAdd] and [ErrNoMemberAdded] by name, which is the same answer a joiner gets.
@@ -83,8 +86,10 @@ import (
 // SO THE CHECK IS BEFORE THE SEAL WHERE IT CAN BE, AND IT IS THREE CLAUSES.
 //
 //  1. A RESTORED GROUP WILL NOT SEND UNTIL IT HAS RECEIVED A CLEAN, COMPLETE WALK.
-//     [Group.Receive] walks the group's whole history -- the cursor is not persisted -- opens
-//     every record of this device's own, and holds the highest stream index it finds against
+//     [Group.Receive] walks the group's whole history -- the cursor is not persisted --
+//     authenticates every record of this device's own (since MG-4 without opening it; see
+//     ownFrameAlreadySpent for what that establishes), and holds the highest stream index it has
+//     found, over every walk since the restore, against
 //     [messagegroup.StreamIndexReserver]'s HighWater for this stream. Every index on the server
 //     under this sender_handle was allocated by this device's reserver and a reserver never
 //     rewinds, so an index ABOVE the high water was sealed by something else holding these keys.
@@ -204,7 +209,7 @@ func (self *Device) Restore(ctx context.Context) ([]*Group, error) {
 		if self.holdsGroup(record.GroupId) {
 			continue
 		}
-		group, err := self.restoreOne(record, nonce, nonceEpoch)
+		group, err := self.restoreOne(store, record, nonce, nonceEpoch)
 		if err != nil {
 			if firstFailure == nil {
 				firstFailure = err
@@ -217,7 +222,7 @@ func (self *Device) Restore(ctx context.Context) ([]*Group, error) {
 }
 
 // restoreOne rebuilds one group: the MLS state at the record's epoch, then the session over it.
-func (self *Device) restoreOne(record *GroupRecord, nonce []byte, nonceEpoch uint64) (*Group, error) {
+func (self *Device) restoreOne(store DeviceStore, record *GroupRecord, nonce []byte, nonceEpoch uint64) (*Group, error) {
 	group, err := mls.LoadGroup(&mls.GroupConfig{
 		Crypto:  self.crypto,
 		Store:   self.stateStore,
@@ -257,8 +262,45 @@ func (self *Device) restoreOne(record *GroupRecord, nonce []byte, nonceEpoch uin
 		reconciled: false,
 	}
 	restored.initTables()
+	// AND THE COPIES OF WHAT THIS DEVICE SAID IN IT, which since connect 4c030dc are the only
+	// place its own half of the conversation can be read from (MG-4: a member cannot open its own
+	// application record). A store that will not answer refuses THIS group by name rather than
+	// bringing it back without them: a restored conversation missing every line the user typed,
+	// with a nil error, is the defect S2-14's own-half clause exists to keep out.
+	sent, err := store.SentRecords(record.GroupId)
+	if err != nil {
+		session.Close()
+		handle.Close()
+		return nil, fmt.Errorf("%w: group %x: the copies of this device's own records: %w", ErrRestore, record.GroupId, err)
+	}
+	for _, one := range sent {
+		restored.ownIndices[one.StreamIndex] = &ownSealed{
+			bodyHash: one.BodyHash,
+			hasCopy:  true,
+			body:     one.Body,
+			sentAtMs: one.SentAtMs,
+		}
+	}
 	self.hold(restored)
 	return restored, nil
+}
+
+// persistSent writes the copy of one record this device sealed, when the store can hold one.
+//
+// A NO-OP ON A STORE THAT IS NOT DURABLE, for persistGroup's reason: a device over a map loses its
+// groups at exit, and with them any use for a copy of what it said in them. The in-memory copy on
+// [Group.ownIndices] is what shows a lost answer's record in THIS process on either store.
+func (self *Device) persistSent(groupId []byte, streamIndex uint64, sealed *ownSealed) error {
+	store, durable := self.stateStore.(DeviceStore)
+	if !durable {
+		return nil
+	}
+	return store.PutSentRecord(groupId, &SentRecord{
+		StreamIndex: streamIndex,
+		BodyHash:    sealed.bodyHash,
+		SentAtMs:    sealed.sentAtMs,
+		Body:        sealed.body,
+	})
 }
 
 // holdsGroup reports whether this device already has a live view of that group, so that a second

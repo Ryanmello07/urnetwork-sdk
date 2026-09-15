@@ -53,6 +53,13 @@
 extern "C" {
 #endif
 
+/* ----- constants ----- */
+
+/* the one message server protocol version this build speaks, which is what
+ * urnet_message_transport_new's protocol_version takes. 0 takes it too, as every other 0 in this
+ * abi takes a default; any other value is refused at transport_new, by name. */
+#define URNET_MESSAGE_PROTOCOL_VERSION 1
+
 /* ----- callback types ----- */
 
 /* one Hello that did not connect. fires on the thread inside urnet_message_device_connect --
@@ -91,7 +98,9 @@ bool urnet_message_durable_state_store_close(uint64_t self, char** out_error);
 /* ----- the transport ----- */
 
 /* bind to one message server over a connect client YOU own: nothing here dials, authenticates or
- * closes it. server_client_id is a uuid string. timeout_ms 0 takes the binding's default.
+ * closes it. server_client_id is a uuid string. protocol_version is URNET_MESSAGE_PROTOCOL_VERSION,
+ * or 0 for it; any other value answers 0 and out_error here, rather than a Hello the server refuses
+ * later. timeout_ms 0 takes the binding's default.
  *
  * NO EXPORT IN THIS ABI PRODUCES THE client HANDLE TODAY. a connect.Client receives a frame only
  * through an in-process route or through a platform transport dialling an operator with a minted
@@ -105,11 +114,13 @@ void urnet_message_transport_close(uint64_t self);
 
 /* state_store may be 0, which takes an IN-MEMORY store: it persists nothing and every group is
  * gone when the process ends. connect_budget_ms and connect_attempt_timeout_ms 0 take 90s and
- * 10s. connect_attempt_cb may be NULL; when it is not it fires for every Hello that did not
+ * 10s. THE BUDGET BOUNDS HOW LONG urnet_message_device_connect BLOCKS whatever the attempt timeout
+ * says: every attempt is cut to what is left of it, so a 500ms budget returns at about 500ms even
+ * with the 10s default attempt. connect_attempt_cb may be NULL; when it is not it fires for every Hello that did not
  * connect, on the thread inside urnet_message_device_connect -- it is how you say
  * "Reconnecting..." DURING the window rather than after it. */
 uint64_t urnet_message_device_new(uint64_t transport, uint64_t reserver, uint64_t state_store, int64_t connect_budget_ms, int64_t connect_attempt_timeout_ms, urnet_message_connect_attempt_cb connect_attempt_cb, void* connect_attempt_user_data, char** out_error);
-/* say Hello. BLOCKS for up to the budget. a budget spent on silence is "not yet, ask again" and
+/* say Hello. BLOCKS for up to the budget, and not an attempt past it. a budget spent on silence is "not yet, ask again" and
  * is NOT a failure: on the deployed server a reconnecting client_id is not routed to for about
  * sixty seconds. showing a user "could not connect" here tells them something false. */
 bool urnet_message_device_connect(uint64_t self, uint64_t ctx, char** out_error);
@@ -134,6 +145,10 @@ uint64_t urnet_message_group_add_member(uint64_t self, const uint8_t* key_packag
 /* buffer-out. WHAT COMES OUT IS KEY MATERIAL: an invite that reaches a third party is a group
  * that third party is in. move it like a private key and destroy it afterwards. */
 bool urnet_message_invite_encode(uint64_t self, uint8_t* out, int32_t* inout_len, char** out_error);
+/* an invite ends with a checksum of everything before it, so a damaged one -- truncated, a mangled
+ * paste, one octet rewritten -- answers 0 and out_error HERE, where a user pasting it can be told,
+ * and never joins. the checksum is not an authentication: move the invite over a channel that is
+ * already authenticated. */
 uint64_t urnet_message_parse_invite(const uint8_t* encoded, int32_t encoded_len, char** out_error);
 
 /* ----- the group ----- */
@@ -164,8 +179,10 @@ bool urnet_message_group_id(uint64_t self, uint8_t* out, int32_t* inout_len);
 uint64_t urnet_message_group_epoch(uint64_t self);
 bool urnet_message_group_is_open(uint64_t self);
 /* what this group has SEEN, as json: fetched, opened, skipped_ceremony, skipped_own, opened_own,
- * skipped_seen, unopened, omitted, skipped_class, failed_open, submitted, rebound, pages,
- * unattested. it exists so that "nothing arrived" and "something arrived and this build would
+ * own_without_copy, skipped_seen, unopened, omitted, skipped_class, failed_open, submitted,
+ * rebound, pages, unattested. opened_own counts this device's own records shown from the copy it
+ * persisted when it sent them -- a member cannot decrypt its own records -- and own_without_copy
+ * counts its own records it has no copy of and cannot show. it exists so that "nothing arrived" and "something arrived and this build would
  * not open it" are two readings rather than one silence. free with urnet_free_string. */
 char* urnet_message_group_stats(uint64_t self);
 bool urnet_message_group_close(uint64_t self, char** out_error);

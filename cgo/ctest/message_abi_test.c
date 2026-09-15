@@ -167,7 +167,7 @@ static bool party_open(party* self, const char* name, uint64_t client, const cha
   char* err = NULL;
   self->name = name;
   self->client = client;
-  self->transport = urnet_message_transport_new(client, server_id, 1, 30000, &err);
+  self->transport = urnet_message_transport_new(client, server_id, URNET_MESSAGE_PROTOCOL_VERSION, 30000, &err);
   if (self->transport == 0) {
     show_error("transport_new", err);
     return false;
@@ -367,12 +367,7 @@ int main(void) {
   }
   REQUIRE(carried != 0, "the encoded invite would not parse back");
   /* A BLOB FROM ANOTHER BUILD IS REFUSED RATHER THAN READ AS THIS ONE: the first two octets are
-   * the invite version, and ParseInvite refuses a version it did not write.
-   *
-   * WHAT IT DOES NOT CHECK, MEASURED HERE AND NOT ASSUMED: an invite is length-prefixed fields
-   * and NOT an integrity-checked container, so a bit flipped INSIDE the welcome or the ratchet
-   * tree parses cleanly and fails later, in MLS, at Join. This test asserted the opposite at
-   * first and was wrong; the assertion below is what the code actually promises. */
+   * the invite version, and ParseInvite refuses a version it did not write. */
   encoded[0] ^= 0xFF;
   err = NULL;
   uint64_t wrong_version = urnet_message_parse_invite(encoded, invite_len, &err);
@@ -381,6 +376,36 @@ int main(void) {
     urnet_release(wrong_version);
   }
   CHECK(err != NULL, "the refused invite came back with no error text");
+  if (err != NULL) {
+    urnet_free_string(err);
+    err = NULL;
+  }
+  encoded[0] ^= 0xFF;
+  /* AND A DAMAGED ONE IS REFUSED AT THE PASTE, which this comment used to say it was not: an
+   * invite was length-prefixed fields and nothing else, so one bit flipped inside group_handle_key
+   * PARSED, JOINED as the intended recipient, and then never received a message. It now ends with
+   * a checksum of everything before it. One bit, 40 octets from the end -- inside
+   * group_handle_key, the field the review corrupted -- and it must not parse. */
+  encoded[invite_len - 40] ^= 0x01;
+  err = NULL;
+  uint64_t damaged = urnet_message_parse_invite(encoded, invite_len, &err);
+  CHECK(damaged == 0, "an invite with one bit flipped inside group_handle_key was parsed");
+  if (damaged != 0) {
+    urnet_release(damaged);
+  }
+  CHECK(err != NULL && strstr(err, "damaged") != NULL,
+        "the damaged invite was refused without saying it is damaged: %s", err != NULL ? err : "(no error text)");
+  if (err != NULL) {
+    urnet_free_string(err);
+    err = NULL;
+  }
+  encoded[invite_len - 40] ^= 0x01;
+  err = NULL;
+  uint64_t restored_invite = urnet_message_parse_invite(encoded, invite_len, &err);
+  CHECK(restored_invite != 0, "the same invite with the bit put back did not parse, so the refusal above was not about the bit");
+  if (restored_invite != 0) {
+    urnet_release(restored_invite);
+  }
   if (err != NULL) {
     urnet_free_string(err);
     err = NULL;
@@ -528,6 +553,7 @@ int main(void) {
   REQUIRE(stats != NULL, "B's group answered no stats");
   printf("      B: %s\n", stats);
   CHECK(strstr(stats, "\"opened\":") != NULL, "the stats carry no opened counter");
+  CHECK(strstr(stats, "\"own_without_copy\":") != NULL, "the stats carry no own_without_copy counter");
   urnet_free_string(stats);
 
   step("the device's own group list, which is a second handle onto the same group");
@@ -602,10 +628,29 @@ int main(void) {
     uint64_t volatile_client = urnet_message_loopback_world_client(world);
     char* vs_id = urnet_message_loopback_world_server_id(world);
     REQUIRE(vs_id != NULL, "the world named no server");
+    /* PROTOCOL_VERSION IS URNET_MESSAGE_PROTOCOL_VERSION OR 0, AND ANYTHING ELSE IS REFUSED HERE.
+     * It used to be accepted whatever it was and refused two calls later, at Hello, by the server;
+     * and 0, which every other parameter of this abi reads as "the default", offered no version
+     * at all. */
+    for (uint32_t bad = 2; bad <= 3; bad += 1) {
+      err = NULL;
+      uint64_t refused = urnet_message_transport_new(volatile_client, vs_id, bad, 30000, &err);
+      CHECK(refused == 0, "protocol_version %u was accepted at transport_new", (unsigned)bad);
+      CHECK(err != NULL, "protocol_version %u was refused with no error text", (unsigned)bad);
+      if (refused != 0) {
+        urnet_message_transport_close(refused);
+        urnet_release(refused);
+      }
+      if (err != NULL) {
+        urnet_free_string(err);
+        err = NULL;
+      }
+    }
     err = NULL;
-    uint64_t vt = urnet_message_transport_new(volatile_client, vs_id, 1, 30000, &err);
+    /* and 0 is the version this build speaks: the in-memory device below connects over it */
+    uint64_t vt = urnet_message_transport_new(volatile_client, vs_id, 0, 30000, &err);
     urnet_free_string(vs_id);
-    REQUIRE(vt != 0, "the transport for the in-memory device would not open");
+    REQUIRE(vt != 0, "the transport for the in-memory device would not open with protocol_version 0");
     char vdir[MAX_PATH + 64];
     REQUIRE(temp_dir(vdir, sizeof(vdir)), "no temp dir");
     err = NULL;
@@ -654,6 +699,35 @@ int main(void) {
     CHECK(urnet_message_stream_store_close(vss, &err), "the in-memory device's stream store would not close");
     CHECK(urnet_release(vss), "releasing that stream store answered false");
     CHECK(urnet_release(volatile_client), "releasing that client answered false");
+  }
+
+  step("a budget SHORTER than one attempt is the bound, with nobody cancelling anything");
+  {
+    /* THE REVIEW MEASURED THIS BLOCKING FOR 10,000ms: a 500ms budget over the 10s default attempt,
+     * because the budget was only consulted after an attempt returned. A ui that passed 500ms to
+     * keep the call short got a ten second hang. Here the budget is 500ms, the attempt timeout is
+     * left at its default, the server is unroutable, and nothing cancels. */
+    attempt_counter counter_d = {0, 0};
+    party d = {0};
+    char* unrouted_server = urnet_message_loopback_world_server_id(world);
+    REQUIRE(party_open(&d, "D", urnet_message_loopback_world_unrouted_client(world), unrouted_server,
+                       &counter_d, 500, 0),
+            "D would not open");
+    urnet_free_string(unrouted_server);
+    ULONGLONG bound_started = GetTickCount64();
+    err = NULL;
+    bool bound_connected = urnet_message_device_connect(d.device, ctx, &err);
+    ULONGLONG bound_elapsed = GetTickCount64() - bound_started;
+    printf("      a 500ms budget returned after %llums\n", (unsigned long long)bound_elapsed);
+    if (err != NULL) {
+      printf("      %s\n", err);
+      urnet_free_string(err);
+      err = NULL;
+    }
+    CHECK(!bound_connected, "a device with no route to the server reported that it connected");
+    CHECK(bound_elapsed < 2000, "a 500ms budget blocked for %llums", (unsigned long long)bound_elapsed);
+    CHECK(bound_elapsed >= 400, "a 500ms budget gave up after %llums", (unsigned long long)bound_elapsed);
+    party_close(&d);
   }
 
   step("a blocking call that is cancelled from another thread, instead of waiting its 90s budget");

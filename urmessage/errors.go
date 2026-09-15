@@ -35,6 +35,11 @@ var (
 	// sentence about its message rather than about a size bucket.
 	ErrTextTooLong = errors.New("urmessage: this text does not fit the largest inline size bucket; blob-backed bodies are out of scope for the alpha")
 
+	// An invite whose octets are not the octets that were encoded: truncated, mangled in a paste, or
+	// rewritten by a carrier. It is refused at ParseInvite, which is where a user pasting one can be
+	// told, and never at the join or at the first Receive after it.
+	ErrInviteDamaged = errors.New("urmessage: this invite is damaged: it is not the octets the founder encoded")
+
 	// A record came back that a key should have opened and did not.
 	ErrRecordOpen = errors.New("urmessage: a record from a member of this group did not open")
 

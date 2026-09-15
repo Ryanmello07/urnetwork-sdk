@@ -3,6 +3,7 @@ package urmessage
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"reflect"
 	"testing"
@@ -133,14 +134,85 @@ func TestAnInviteFromAnotherVersionOrWithOctetsAfterItIsRefused(t *testing.T) {
 		t.Error("an invite at a version this build does not write parsed without complaint")
 	}
 
-	trailing := append(append([]byte(nil), encoded...), 0x00)
+	// an octet after the last field UNDER A CHECKSUM THAT COVERS IT, so the refusal is the framing's
+	// and not the checksum's: this is the blob another encoder would produce, not a damaged one.
+	body := append(append([]byte(nil), encoded[:len(encoded)-inviteChecksumBytes]...), 0x00)
+	sum := sha256.Sum256(body)
+	trailing := append(body, sum[:]...)
 	if _, err := ParseInvite(trailing); err == nil {
 		t.Error("an invite with an octet after its last field parsed without complaint")
+	} else if errors.Is(err, ErrInviteDamaged) {
+		t.Errorf("an invite whose checksum covers an extra octet was refused as damaged rather than by its framing: %v", err)
 	}
 
 	if _, err := ParseInvite(nil); err == nil {
 		t.Error("no octets at all parsed as an invite")
 	}
+}
+
+// EVERY SINGLE BIT FLIPPED ANYWHERE IN AN INVITE IS REFUSED AT PARSE.
+//
+// THE REVIEW THAT FOUND THIS flipped one bit at each of 3,408 positions of a real invite and 3,386
+// PARSED -- only the 22 that broke the length framing were caught -- and one that corrupted
+// group_handle_key JOINED as the intended recipient and then never received a message, the precise
+// error arriving at Receive. A user who pastes a damaged invite is told at the paste now, which is
+// what this measures: every bit of the encoding, flipped one at a time, and not one parses.
+//
+// It is every BIT and not every octet, because a check that caught a whole-octet change and missed a
+// single-bit one would pass an octet sweep. The bits this cannot refuse as DAMAGED are the version's,
+// which are refused by version instead; the case holds that every refusal is one or the other.
+//
+// WHAT WOULD GO RED: take the checksum comparison out of ParseInvite, and almost every flip parses.
+func TestEveryBitFlippedAnywhereInAnInviteIsRefusedAtParse(t *testing.T) {
+	whole := &Invite{
+		GroupId:        bytes.Repeat([]byte{0x71}, GroupIdBytes),
+		Welcome:        bytes.Repeat([]byte("a welcome of some length "), 12),
+		RatchetTree:    []byte("a ratchet tree"),
+		PqSecret:       bytes.Repeat([]byte{0x2A}, messagegroup.PqSecretBytes),
+		GroupHandleKey: bytes.Repeat([]byte{0x5C}, 32),
+	}
+	encoded, err := whole.Encode()
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if _, err := ParseInvite(encoded); err != nil {
+		t.Fatalf("the untouched invite does not parse: %v", err)
+	}
+	parsed, damaged, byVersion := 0, 0, 0
+	for at := 0; at < len(encoded)*8; at += 1 {
+		bent := append([]byte(nil), encoded...)
+		bent[at/8] ^= 1 << (at % 8)
+		_, err := ParseInvite(bent)
+		switch {
+		case err == nil:
+			parsed += 1
+			if parsed <= 3 {
+				t.Errorf("bit %d (octet %d) flipped and the invite parsed", at, at/8)
+			}
+		case errors.Is(err, ErrInviteDamaged):
+			damaged += 1
+		case at < 16:
+			byVersion += 1
+		default:
+			t.Errorf("bit %d flipped and was refused by something other than the checksum: %v", at, err)
+		}
+	}
+	if parsed != 0 {
+		t.Fatalf("%d of %d single-bit flips parsed", parsed, len(encoded)*8)
+	}
+	if byVersion != 16 {
+		t.Errorf("%d version bits were refused by version, want all 16", byVersion)
+	}
+	// AND EVERY TRUNCATION, which is the other thing a carrier does, including the ones shorter than
+	// the checksum itself: a paste cut off after the version must be a refusal and not a slice
+	// bounds panic in the parser.
+	for keep := 0; keep < len(encoded); keep += 1 {
+		if _, err := ParseInvite(encoded[:keep]); err == nil {
+			t.Fatalf("the first %d of %d octets parsed as an invite", keep, len(encoded))
+		}
+	}
+	t.Logf("%d octets, %d single-bit flips: %d refused as damaged, %d by version, 0 parsed",
+		len(encoded), len(encoded)*8, damaged, byVersion)
 }
 
 // ── the head ─────────────────────────────────────────────────────────────────────────────────

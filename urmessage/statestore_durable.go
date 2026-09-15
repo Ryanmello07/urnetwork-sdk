@@ -152,9 +152,50 @@ type DeviceStore interface {
 	// GroupRecords is every group this store holds a record for, in no particular order.
 	GroupRecords() ([]*GroupRecord, error)
 
-	// DeleteGroupRecord removes one group's record AND every MLS epoch state beside it. It is
-	// how a device leaves a group without leaving its keys on the disk.
+	// DeleteGroupRecord removes one group's record AND every MLS epoch state beside it AND every
+	// copy of a record this device sent in it. It is how a device leaves a group without leaving
+	// its keys, or what it said, on the disk.
 	DeleteGroupRecord(groupId []byte) error
+
+	// PutSentRecord writes the copy of one record this device sealed in one group, BEFORE that
+	// record is submitted. SentRecords answers every copy one group holds, ascending by stream
+	// index. See [SentRecord] for why the copy exists at all.
+	PutSentRecord(groupId []byte, record *SentRecord) error
+	SentRecords(groupId []byte) ([]*SentRecord, error)
+}
+
+// SentRecord is this device's copy of one application record it sealed: the only place its own
+// half of a conversation can be read back from.
+//
+// WHY THERE IS A COPY. Since connect 4c030dc an application record's body is an MLS PrivateMessage,
+// and a member cannot open its own -- Protect spends a generation of the leaf's own ratchet and MLS
+// keeps no receiving ratchet for a leaf's own messages (connect messagegroup OPENITEMS MG-4). So a
+// restarted device that re-fetches its history reads the other members' lines off the server and
+// can read its OWN lines off nothing but this.
+//
+// IT IS PLAINTEXT ON THE DISK, AND THAT IS NOT A NEW EXPOSURE OF THIS DIRECTORY, said carefully
+// because it would be easy to say too much. The epoch state beside it lets anything that can read
+// this directory re-derive every OTHER member's record keys for this epoch and read their lines off
+// the server; this is the same user's own lines, next to it. What it DOES change is what is readable
+// with the server's rows gone: the directory alone now holds what this device said. [DurableStateStore]'s
+// header is the answer on what protects any of it, and S2-24 is still what must rule that.
+//
+// IT GROWS WITHOUT BOUND, one file per line sent, until the group is left. Nothing prunes it, for
+// the same reason nothing prunes the server's rows (7.2's sweep is not built): there is no retention
+// decision yet for it to follow.
+type SentRecord struct {
+	// The §5.6 stream index the record was sealed at, and the name of this copy.
+	StreamIndex uint64
+
+	// The record's body_hash, which is how a record fetched back from the server is matched to the
+	// copy without opening it.
+	BodyHash [32]byte
+
+	// The sender's clock reading the record's head carries, unix milliseconds.
+	SentAtMs int64
+
+	// What was sealed. Octets, never interpreted.
+	Body []byte
 }
 
 // GroupRecord is the urmessage-side state of one group: the values that do not live in MLS and
@@ -206,6 +247,7 @@ const (
 	stateKindKeyPackage     byte = 3
 	stateKindDeviceIdentity byte = 4
 	stateKindGroupRecord    byte = 5
+	stateKindSentRecord     byte = 6
 )
 
 // encodeStateRecord frames one record: magic, version, kind, the parts each length-prefixed, and
@@ -502,6 +544,13 @@ func (self *DurableStateStore) groupRecordPath(groupId []byte) string {
 
 func (self *DurableStateStore) epochDir(groupId []byte) string {
 	return filepath.Join(self.groupDir(groupId), "epoch")
+}
+
+// sentDir is where one group's [SentRecord] copies live, each named by its stream index as sixteen
+// hex digits -- stateEpochName's shape, and for its reason: the listing's lexical order is the
+// numeric order.
+func (self *DurableStateStore) sentDir(groupId []byte) string {
+	return filepath.Join(self.groupDir(groupId), "sent")
 }
 
 // stateEpochName is one epoch's file name: the epoch as sixteen zero-padded hex digits, so that
@@ -1024,12 +1073,154 @@ func (self *DurableStateStore) DeleteGroupRecord(groupId []byte) error {
 	if err := self.deleteEpochsLocked(groupId, ^uint64(0)); err != nil {
 		return err
 	}
+	// the copies of what this device said, SECOND and before the record for the same reason the
+	// epochs go first: a failure leaves a group that can still be restored and left again, never a
+	// directory of plaintext lines belonging to a group this device no longer knows it was in.
+	if err := self.deleteSentLocked(groupId); err != nil {
+		return err
+	}
 	if err := self.removeLocked(self.groupRecordPath(groupId)); err != nil {
 		return err
 	}
-	// the now-empty epoch and group directories, best effort: an empty directory is not a value
-	// anybody can read, so a failure to remove one is not a failure of this call.
+	// the now-empty epoch, sent and group directories, best effort: an empty directory is not a
+	// value anybody can read, so a failure to remove one is not a failure of this call.
 	os.Remove(self.epochDir(groupId))
+	os.Remove(self.sentDir(groupId))
 	os.Remove(self.groupDir(groupId))
+	return nil
+}
+
+// PutSentRecord writes one [SentRecord], durably, before it returns.
+//
+// IT IS WRITE-ONCE BY INDEX AND A SECOND WRITE AT ONE INDEX IS REFUSED, because a reserver never
+// hands one index out twice and this device seals once per index. A second copy at an index already
+// held is therefore either a reserver that rewound -- the stream directory lost and the state
+// directory kept, which [Group.Receive] refuses as [ErrIdentityInUse] -- or a caller bug, and in
+// neither case may the copy of what the user said at that index be silently replaced with a
+// different line.
+func (self *DurableStateStore) PutSentRecord(groupId []byte, record *SentRecord) error {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return err
+	}
+	if record == nil {
+		return fmt.Errorf("%w: no sent record", ErrStateStoreFormat)
+	}
+	if len(groupId) != GroupIdBytes {
+		return fmt.Errorf("%w: a group id is %d octets and this one is %d", ErrStateStoreFormat, GroupIdBytes, len(groupId))
+	}
+	path := filepath.Join(self.sentDir(groupId), stateEpochName(record.StreamIndex))
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%w: group %x already holds a copy of this device's record at stream index %d, and a reserver never hands an index out twice",
+			ErrStateStoreState, groupId, record.StreamIndex)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: %s could not be examined: %v", ErrStateStoreState, path, err)
+	}
+	var indexOctets [8]byte
+	binary.BigEndian.PutUint64(indexOctets[:], record.StreamIndex)
+	var sentAtOctets [8]byte
+	binary.BigEndian.PutUint64(sentAtOctets[:], uint64(record.SentAtMs))
+	return self.writeRecord(path, stateKindSentRecord,
+		groupId, indexOctets[:], record.BodyHash[:], sentAtOctets[:], record.Body)
+}
+
+// SentRecords answers every [SentRecord] one group holds, ascending by stream index.
+//
+// AN ENTRY IN THE DIRECTORY THAT IS NOT A COPY IS A REFUSAL, which is this store's discipline
+// everywhere: the one exception is an unfinished write a killed process left, which the sweep at
+// open already tried to remove and which is not a record. A copy whose own group id or index is not
+// the one its name says is refused rather than shown, because a copy moved under another index would
+// be shown as the user's line at a position where they said something else.
+func (self *DurableStateStore) SentRecords(groupId []byte) ([]*SentRecord, error) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return nil, err
+	}
+	dir := self.sentDir(groupId)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []*SentRecord{}, nil
+		}
+		return nil, fmt.Errorf("%w: %s could not be read: %v", ErrStateStoreState, dir, err)
+	}
+	records := []*SentRecord{}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), stateTempPrefix) {
+			continue
+		}
+		index, named := stateEpochOfName(entry.Name())
+		if !named || entry.IsDir() {
+			return nil, fmt.Errorf("%w: %s stands in group %x's sent directory and it is not a copy this store wrote",
+				ErrStateStoreFormat, entry.Name(), groupId)
+		}
+		parts, err := self.readRecord(filepath.Join(dir, entry.Name()), stateKindSentRecord)
+		if err != nil {
+			return nil, err
+		}
+		if len(parts) != 5 || len(parts[1]) != 8 || len(parts[2]) != 32 || len(parts[3]) != 8 {
+			return nil, fmt.Errorf("%w: the sent record %s is not one this build wrote", ErrStateStoreFormat, entry.Name())
+		}
+		if !bytes.Equal(parts[0], groupId) || binary.BigEndian.Uint64(parts[1]) != index {
+			return nil, fmt.Errorf("%w: the sent record under %s names group %x index %d",
+				ErrStateStoreFormat, entry.Name(), parts[0], binary.BigEndian.Uint64(parts[1]))
+		}
+		one := &SentRecord{
+			StreamIndex: index,
+			SentAtMs:    int64(binary.BigEndian.Uint64(parts[3])),
+			Body:        parts[4],
+		}
+		copy(one.BodyHash[:], parts[2])
+		records = append(records, one)
+	}
+	sort.Slice(records, func(a, b int) bool { return records[a].StreamIndex < records[b].StreamIndex })
+	return records, nil
+}
+
+// deleteSentLocked removes every copy one group holds, and then reads the directory again to say
+// so -- deleteEpochsLocked's discipline, and for §5.12's reason carried one step over: a copy that
+// survived a discard reported as done is the user's own words left behind for a group they left.
+func (self *DurableStateStore) deleteSentLocked(groupId []byte) error {
+	dir := self.sentDir(groupId)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("%w: %s could not be read: %v", ErrStateStoreState, dir, err)
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	for _, entry := range entries {
+		_, named := stateEpochOfName(entry.Name())
+		if !named && !strings.HasPrefix(entry.Name(), stateTempPrefix) {
+			// not ours, and not removed: this store does not delete octets it did not write. The
+			// re-read below refuses over it.
+			continue
+		}
+		if !self.skipRemove {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("%w: the sent copy %s of group %x could not be discarded: %v",
+					ErrStateStoreState, entry.Name(), groupId, err)
+			}
+		}
+	}
+	if err := syncStateDir(dir); err != nil {
+		return err
+	}
+	entries, err = os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("%w: %s could not be re-read after the discard: %v", ErrStateStoreState, dir, err)
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("%w: %s still stands in group %x's sent directory after every copy was discarded",
+			ErrStateStoreState, entries[0].Name(), groupId)
+	}
 	return nil
 }

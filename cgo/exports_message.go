@@ -11,6 +11,7 @@ import "C"
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"time"
 	"unsafe"
 
@@ -36,9 +37,10 @@ import (
 //   - include/urnetwork_message.h is the header for this file and is hand-written too. The
 //     generated include/urnetwork_sdk.h does not declare these; the two headers are independent
 //     and both ship. The cgo-generated header emitted next to the library declares both.
-//   - include/urnetwork_sdk.def is STALE with respect to this file until the next
-//     `make generate`, which picks these names up through gen.go's manualExports(). The .def is
-//     read only to build an MSVC import library; nothing at runtime reads it.
+//   - include/urnetwork_sdk.def names every export in this file because gen.go's manualExports()
+//     picks them up. It used to be STALE -- 0 of 34 names, so an MSVC consumer linking through the
+//     import library found none of the messaging surface -- and it is now held by
+//     gen.TestTheDefNamesEveryHandWrittenMessagingExport rather than by this sentence.
 //
 // ── WHAT IS EXPOSED IS WHAT IS PROVEN, AND THE SILENCES ARE DELIBERATE ───────────────────────
 //
@@ -217,6 +219,14 @@ func urnet_message_durable_state_store_close(self C.uint64_t, outError **C.char)
 // urnet_message_transport_new binds §10.1 to one message server over a connect client the CALLER
 // owns: nothing here dials, authenticates or closes that client.
 //
+// PROTOCOL_VERSION IS URNET_MESSAGE_PROTOCOL_VERSION, OR 0 FOR IT, AND NOTHING ELSE. It used to be
+// passed straight through with no value documented anywhere, and 0 was the trap: every other
+// numeric parameter in this abi uses 0 for "the default", and a caller who passed 0 by that analogy
+// got a transport that offered no version at all, which the server answers two calls later, at
+// Hello, as REASON_UNSUPPORTED_VERSION. A review built a whole conversation that way and lost every
+// check after it. So 0 now takes the version this build speaks, like every other 0 here, and any
+// other value is refused HERE, by name, before it can become a Hello the server refuses.
+//
 // THE CLIENT HANDLE HAS NO SOURCE IN THIS ABI TODAY AND THAT IS NOT AN OVERSIGHT. A
 // connect.Client receives a frame in exactly two ways -- an in-process connect.Route, or a
 // connect.PlatformTransport that dials wss://connect.<host> with an operator-minted ByJwt for a
@@ -232,6 +242,11 @@ func urnet_message_transport_new(client C.uint64_t, serverClientId *C.char, prot
 	if !ok {
 		return 0
 	}
+	version, err := messageProtocolVersionOf(uint32(protocolVersion))
+	if err != nil {
+		setErrorOut(outError, err)
+		return 0
+	}
 	server, err := connect.ParseId(goString(serverClientId))
 	if err != nil {
 		setErrorOut(outError, err)
@@ -240,7 +255,7 @@ func urnet_message_transport_new(client C.uint64_t, serverClientId *C.char, prot
 	transport, err := sdk.NewMessageTransport(&sdk.MessageTransportConfig{
 		Client:          client_,
 		Server:          server,
-		ProtocolVersion: uint32(protocolVersion),
+		ProtocolVersion: version,
 		Timeout:         time.Duration(timeoutMs) * time.Millisecond,
 	})
 	if err != nil {
@@ -248,6 +263,24 @@ func urnet_message_transport_new(client C.uint64_t, serverClientId *C.char, prot
 		return 0
 	}
 	return C.uint64_t(newHandle(transport))
+}
+
+// messageProtocolVersion is the one §4.3.1 protocol version this build speaks, and it is
+// URNET_MESSAGE_PROTOCOL_VERSION in include/urnetwork_message.h. The server this alpha is deployed
+// from declares the same number, as `const protocolVersion = 1` in msgrepo
+// cmd/message-server/server.go, and answers anything else REASON_UNSUPPORTED_VERSION.
+const messageProtocolVersion uint32 = 1
+
+// messageProtocolVersionOf is protocol_version as the abi takes it: 0 is this build's version, the
+// build's version is itself, and every other value is refused with a sentence naming the one that
+// works.
+func messageProtocolVersionOf(protocolVersion uint32) (uint32, error) {
+	switch protocolVersion {
+	case 0, messageProtocolVersion:
+		return messageProtocolVersion, nil
+	}
+	return 0, fmt.Errorf("urnet_message_transport_new: protocol_version %d is not a version this build speaks; pass %d (URNET_MESSAGE_PROTOCOL_VERSION), or 0 for it",
+		protocolVersion, messageProtocolVersion)
 }
 
 // urnet_message_transport_close stops receiving. The connect client under it is the caller's and
@@ -299,6 +332,10 @@ func (self *cAdapterMessageConnectAttempt) onAttempt(attempt urmessage.ConnectAt
 // the worse surprise. Pass a urnet_message_durable_state_store_open handle to persist.
 //
 // connect_budget_ms and connect_attempt_timeout_ms are 0 for urmessage's defaults (90s and 10s).
+// THE BUDGET IS THE BOUND ON HOW LONG urnet_message_device_connect BLOCKS, whatever the attempt
+// timeout: an attempt is cut to what is left of the budget, so a budget under one attempt is one
+// attempt of the budget's length. It used to be checked only after an attempt returned, and a
+// 500 ms budget blocked for the whole 10 s default attempt.
 // connect_attempt_cb may be NULL; when it is not it fires for every Hello that did not connect,
 // on the thread inside urnet_message_device_connect, which is how a caller says "Reconnecting..."
 // DURING the ~60s operator window rather than after it.
@@ -679,6 +716,7 @@ func urnet_message_group_stats(self C.uint64_t) *C.char {
 		SkippedCeremony: stats.SkippedCeremony,
 		SkippedOwn:      stats.SkippedOwn,
 		OpenedOwn:       stats.OpenedOwn,
+		OwnWithoutCopy:  stats.OwnWithoutCopy,
 		SkippedSeen:     stats.SkippedSeen,
 		Unopened:        stats.Unopened,
 		Omitted:         stats.Omitted,
@@ -784,6 +822,7 @@ type messageGroupStats struct {
 	SkippedCeremony uint64 `json:"skipped_ceremony"`
 	SkippedOwn      uint64 `json:"skipped_own"`
 	OpenedOwn       uint64 `json:"opened_own"`
+	OwnWithoutCopy  uint64 `json:"own_without_copy"`
 	SkippedSeen     uint64 `json:"skipped_seen"`
 	Unopened        uint64 `json:"unopened"`
 	Omitted         uint64 `json:"omitted"`
