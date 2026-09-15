@@ -1,0 +1,250 @@
+//go:build urnet_message_loopback
+
+package main
+
+/*
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+*/
+import "C"
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"sync"
+	"time"
+
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
+	"github.com/urnetwork/message-server/api"
+	"github.com/urnetwork/message-server/peer"
+	"github.com/urnetwork/message-server/store"
+)
+
+// A RUNNING MESSAGE SERVER AND ITS CLIENTS, FOR THE C CONSUMER TEST AND FOR NOTHING ELSE.
+//
+// IT IS NOT IN THE SHIPPING LIBRARY. This file is behind `//go:build urnet_message_loopback`, so
+// `go build`, `go vet` and every Makefile target compile it out entirely; only
+// ctest/run.sh passes the tag, and it builds a SECOND library into build/ctest/ that nothing
+// ships. The measurement that says so is in ctest/run.sh: it counts urnet_message_loopback_*
+// in both headers and requires 0 in the shipping one.
+//
+// WHY IT HAS TO EXIST AT ALL. urnet_message_transport_new takes a connect client handle and no
+// export in this abi produces one, for the reason stated at that function: a connect.Client
+// receives a frame only through an in-process connect.Route or through a PlatformTransport
+// dialling an operator with a minted ByJwt, and the second needs a credential no code in this
+// workspace can mint. So a C program cannot reach a message server through the shipping abi
+// alone -- not because the binding is incomplete but because S2-7 is open. These four exports
+// are the in-process half, exactly as sdk/cp3b's world_test.go wires it, so that the C-level
+// test of the binding can be a REAL conversation through the REAL server rather than a mock of
+// one. Nothing here is a double: peer.Peer dispatches §4.2 frames, api.Handler runs §5.1's
+// pipeline, store.MemoryStore holds the rows, and the client half is entirely the shipping abi.
+//
+// WHY IT IS HERE AND NOT IN A MODULE OF ITS OWN. It must be in package main, because the handles
+// it hands back have to land in this package's own registry (handles.go) -- a second module is a
+// second registry and urnet_release could not reach across. And it must NOT be in cgo/go.mod,
+// because a `require github.com/urnetwork/message-server` there would make the whole cgo module
+// unbuildable from an sdk checkout that has no message-server beside it, which sdk/test.sh
+// already has to skip cp3b for. The dependency lives in loopback.go.mod instead, passed with
+// `-modfile`, and cgo/go.mod is untouched.
+
+// loopbackWorld is one server and the clients routed to it.
+type loopbackWorld struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	server  *connect.Client
+	peer    *peer.Peer
+	clients []*connect.Client
+	shaped  *omittingStore
+}
+
+// omittingStore is the ONE way this harness bends the server, and it bends it the way a real
+// server can fail: it drops the HIGHEST message record out of a fetch page and touches nothing
+// else, so `complete` and `high_water_record_id` stay the real store's own numbers. The client
+// then sees a page the server called complete whose high water is above everything it handed
+// over -- §4.3.4's records-held-back, which is the one failure the AEAD cannot see -- and
+// urmessage answers it with ErrFetchOmitted AND the messages that did arrive.
+//
+// It exists because that is the only cheap way to make urnet_message_group_receive return a
+// non-zero list and a non-NULL out_error at once, and "a caller that reads an error as nothing
+// arrived drops real messages" is the most consequential sentence in that export's document. A
+// clause nothing can make fail is a clause that defends nothing. It is modelled on
+// sdk/cp3b's own fetchDropsMessages shape.
+type omittingStore struct {
+	store.Store
+	mutex sync.Mutex
+	on    bool
+}
+
+func (self *omittingStore) omit(on bool) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	self.on = on
+}
+
+func (self *omittingStore) Fetch(ctx context.Context, request *store.FetchRequest) (*store.FetchResult, error) {
+	result, err := self.Store.Fetch(ctx, request)
+	if err != nil || result == nil {
+		return result, err
+	}
+	self.mutex.Lock()
+	on := self.on
+	self.mutex.Unlock()
+	if !on {
+		return result, nil
+	}
+	highest := -1
+	for at, record := range result.Records {
+		if record.IsCommit || len(record.ServerAttachment) != 0 {
+			continue
+		}
+		if highest < 0 || result.Records[highest].RecordId < record.RecordId {
+			highest = at
+		}
+	}
+	if highest < 0 {
+		return result, nil
+	}
+	kept := make([]*store.Record, 0, len(result.Records)-1)
+	kept = append(kept, result.Records[:highest]...)
+	kept = append(kept, result.Records[highest+1:]...)
+	result.Records = kept
+	return result, nil
+}
+
+// urnet_message_loopback_world_omit_highest turns the shape above on or off.
+//
+//export urnet_message_loopback_world_omit_highest
+func urnet_message_loopback_world_omit_highest(self C.uint64_t, on C.bool) {
+	defer cgoGuard("urnet_message_loopback_world_omit_highest")
+	self_, ok := resolveHandle[*loopbackWorld](uint64(self), "urnet_message_loopback_world_omit_highest")
+	if !ok || self_ == nil || self_.shaped == nil {
+		return
+	}
+	self_.shaped.omit(bool(on))
+}
+
+const loopbackProtocolVersion = 1
+
+//export urnet_message_loopback_world_new
+func urnet_message_loopback_world_new(outError **C.char) C.uint64_t {
+	defer cgoGuard("urnet_message_loopback_world_new")
+	ctx, cancel := context.WithCancel(context.Background())
+	server := connect.NewClient(ctx, connect.NewId(), connect.NewNoContractClientOob(),
+		connect.DefaultClientSettings())
+	fail := func(err error) C.uint64_t {
+		setErrorOut(outError, err)
+		server.Close()
+		cancel()
+		return 0
+	}
+	connections, err := peer.NewConnections(rand.Reader, time.Now, time.Hour)
+	if err != nil {
+		return fail(err)
+	}
+	checks, err := peer.NewChecks(connections, peer.DefaultMaxRequestBytes)
+	if err != nil {
+		return fail(err)
+	}
+	shaped := &omittingStore{Store: store.NewMemoryStore(store.DefaultLimits())}
+	handler, err := api.New(api.Config{
+		Store:       shaped,
+		KnownGroups: api.NewMemoryKnownGroups(),
+		Front:       checks,
+	})
+	if err != nil {
+		return fail(err)
+	}
+	served, err := peer.New(peer.Config{
+		Client:      server,
+		Handler:     handler,
+		Connections: connections,
+		Checks:      checks,
+		Capabilities: &protocol.Capabilities{
+			MaxRequestBytes: peer.DefaultMaxRequestBytes,
+		},
+		ProtocolVersion: loopbackProtocolVersion,
+		ServerId:        bytes.Repeat([]byte{0x5A}, 16),
+	})
+	if err != nil {
+		return fail(err)
+	}
+	return C.uint64_t(newHandle(&loopbackWorld{
+		ctx: ctx, cancel: cancel, server: server, peer: served, shaped: shaped,
+	}))
+}
+
+// urnet_message_loopback_world_server_id is the destination urnet_message_transport_new wants.
+// Free with urnet_free_string.
+//
+//export urnet_message_loopback_world_server_id
+func urnet_message_loopback_world_server_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_message_loopback_world_server_id")
+	self_, ok := resolveHandle[*loopbackWorld](uint64(self), "urnet_message_loopback_world_server_id")
+	if !ok || self_ == nil {
+		return nil
+	}
+	return cString(self_.server.ClientId().String())
+}
+
+// urnet_message_loopback_world_client stands up one more real connect.Client and routes it to
+// the server, both ways. The returned handle is what urnet_message_transport_new takes.
+//
+//export urnet_message_loopback_world_client
+func urnet_message_loopback_world_client(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_message_loopback_world_client")
+	self_, ok := resolveHandle[*loopbackWorld](uint64(self), "urnet_message_loopback_world_client")
+	if !ok || self_ == nil {
+		return 0
+	}
+	client := connect.NewClient(self_.ctx, connect.NewId(), connect.NewNoContractClientOob(),
+		connect.DefaultClientSettings())
+	toServer := make(connect.Route)
+	toClient := make(connect.Route)
+	client.RouteManager().UpdateTransport(connect.NewSendGatewayTransport(), []connect.Route{toServer})
+	client.RouteManager().UpdateTransport(connect.NewReceiveGatewayTransport(), []connect.Route{toClient})
+	client.ContractManager().AddNoContractPeer(self_.server.ClientId())
+	self_.server.RouteManager().UpdateTransport(
+		connect.NewSendClientTransport(connect.DestinationId(client.ClientId())), []connect.Route{toClient})
+	self_.server.RouteManager().UpdateTransport(
+		connect.NewReceiveGatewayTransport(), []connect.Route{toServer})
+	self_.server.ContractManager().AddNoContractPeer(client.ClientId())
+	self_.clients = append(self_.clients, client)
+	return C.uint64_t(newHandle(client))
+}
+
+// urnet_message_loopback_world_unrouted_client is a real connect.Client with NO route to
+// anything. A transport over it sends Hellos that are never answered, which is what the ~60s
+// operator reconnect window looks like from the client, and is what the cancellation case needs
+// in order to have something real to cancel.
+//
+//export urnet_message_loopback_world_unrouted_client
+func urnet_message_loopback_world_unrouted_client(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_message_loopback_world_unrouted_client")
+	self_, ok := resolveHandle[*loopbackWorld](uint64(self), "urnet_message_loopback_world_unrouted_client")
+	if !ok || self_ == nil {
+		return 0
+	}
+	client := connect.NewClient(self_.ctx, connect.NewId(), connect.NewNoContractClientOob(),
+		connect.DefaultClientSettings())
+	self_.clients = append(self_.clients, client)
+	return C.uint64_t(newHandle(client))
+}
+
+//export urnet_message_loopback_world_close
+func urnet_message_loopback_world_close(self C.uint64_t) {
+	defer cgoGuard("urnet_message_loopback_world_close")
+	self_, ok := resolveHandle[*loopbackWorld](uint64(self), "urnet_message_loopback_world_close")
+	if !ok || self_ == nil {
+		return
+	}
+	for _, client := range self_.clients {
+		client.Close()
+	}
+	self_.clients = nil
+	self_.peer.Close()
+	self_.server.Close()
+	self_.cancel()
+}

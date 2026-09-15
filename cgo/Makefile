@@ -91,6 +91,21 @@ smoke: build_host
 	clang++ -std=c++17 -Iinclude -o build/host/smoke smoke/smoke.cpp build/host/libURnetworkSdk.dylib && \
 	DYLD_LIBRARY_PATH=build/host ./build/host/smoke;
 
+# THE MESSAGING ABI's OWN TEST, AND IT IS A C PROGRAM RATHER THAN A GO ONE.
+# Builds the library twice -- once as it ships, once with the loopback harness behind
+# `-tags urnet_message_loopback` and `-modfile=loopback.go.mod` -- compiles
+# ctest/message_abi_test.c against include/urnetwork_message.h, and runs it: two devices, one
+# group, octets that are not text, a handle-count check across the whole conversation and a
+# blocking Connect cancelled from a second OS thread. It FAILS if the shipping header declares
+# one urnet_message_loopback_* symbol. See ctest/run.sh and the README.
+# .PHONY BECAUSE `ctest` IS ALSO A DIRECTORY, and without it make answers "'ctest' is up to
+# date" and runs nothing at all -- which is a test target that silently never runs. The
+# `build` target above has the same shape and is left alone here.
+.PHONY: ctest
+ctest:
+	export PATH="$$PATH:/usr/local/go/bin:$$HOME/go/bin"; \
+	bash ctest/run.sh;
+
 # c++ wrapper (hpp) smoke test against the host library
 smoke_hpp: build_host
 	clang++ -std=c++17 -Iinclude -I$(NLOHMANN_INCLUDE) -o build/host/smoke_hpp smoke/smoke_hpp.cpp build/host/libURnetworkSdk.dylib && \
