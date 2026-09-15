@@ -63,6 +63,127 @@ type DeviceConfig struct {
 	// Where this device's signature keys, X-Wing seed and pq_secret are drawn from.
 	// crypto/rand.Reader when nil.
 	Random io.Reader
+
+	// How [Device.Connect] rides out a reconnect window. The zero value is the default policy
+	// and is what every caller that says nothing gets; see [ConnectPolicy].
+	Connect ConnectPolicy
+}
+
+// ── §4.3.1's Hello, across an operator window this package does not own ──────────────────────
+
+// THE WINDOW, MEASURED ON THE DEPLOYED SERVER RATHER THAN INFERRED. One client, one client_id,
+// nothing else running:
+//
+//	baseline, a fresh connection                            Hello OK in 27ms
+//	close the client, then re-dial and Hello repeatedly:
+//	  +12s FAILED  +24s FAILED  +37s FAILED  +49s FAILED  +1m1s FAILED  +1m1s OK in 32ms
+//
+// Attempts 5 and 6 fall in the SAME SECOND, so it is a hard edge at about 60 seconds and not a
+// gradual recovery; reproduced three times with different gaps. From the client the new connection
+// attaches, routes register, the Hello goes out and NOTHING COMES BACK -- no error, no refusal,
+// silence until the transport's own deadline. Filed against the operator in msgrepo
+// `docs/reports/2026-09-15-operator-and-connect-findings.md` item 5, and it is THEIRS: the
+// candidate causes are two 60-second settings in the operator's own resident, and whether the fix
+// is to invalidate the old route when a new connection for the same client_id registers is not this
+// package's call.
+//
+// WHAT IS OURS IS THAT WE USED TO CALL IT A FAILURE. [Device.Connect] sent one Hello and returned a
+// hard error, and EVERY REAL CLIENT RECONNECTS -- app resume, laptop lid, network flap, a restart --
+// so every one of those was an error where the truth was "not yet".
+//
+// THIS DOES NOT REMOVE THE SIXTY SECONDS AND NOTHING HERE CAN. The user still waits them and the
+// operator item stays open. What it does is stop calling them a failure, and stop making the caller
+// invent the retry loop.
+type ConnectPolicy struct {
+	// Budget is the total elapsed time [Device.Connect] will keep trying for. Zero takes
+	// [defaultConnectBudget].
+	//
+	// IT BOUNDS HOW LONG ONE CALL BLOCKS AND IT IS NOT A CLAIM THAT THE WINDOW IS OVER. That
+	// distinction is the whole reason [ErrReconnecting] exists: when the budget is spent and
+	// every attempt looked like silence, the answer is "not yet, ask again" rather than
+	// "failed", so a budget that runs out before the operator's window closes costs a caller one
+	// more call and never a false verdict.
+	Budget time.Duration
+
+	// AttemptTimeout is how long ONE Hello is given before it is abandoned and the next attempt
+	// is scheduled. Zero takes [defaultConnectAttempt].
+	//
+	// IT IS SHORTER THAN THE TRANSPORT'S OWN 30s DEADLINE ON PURPOSE. Inside the window the
+	// server answers nothing at all, so waiting the transport's full deadline spends the budget
+	// on silence and buys three attempts where it could buy seven. A Hello is idempotent by
+	// construction -- the server replaces its nonce at every one -- and a late answer to an
+	// abandoned attempt is dropped rather than adopted, because the nonce is taken in
+	// `messageTransport.Hello` AFTER its Call returns and an abandoned Call has already
+	// forgotten its waiter.
+	AttemptTimeout time.Duration
+
+	// FirstBackoff and MaxBackoff are the pause between attempts, doubling from the first up to
+	// the maximum. Zero takes [defaultConnectFirstBackoff] and [defaultConnectMaxBackoff].
+	//
+	// THERE IS NO JITTER, AND THAT IS A DECISION RATHER THAN AN OMISSION. Jitter buys spread
+	// over a CONTENDED resource; this window is per client_id -- it is the operator's own route
+	// state for one client and no other client's reconnect makes it longer or shorter -- so
+	// there is nothing here to spread, and a deterministic schedule is one a case can assert
+	// exactly. The day this rides out something shared, jitter is the change.
+	FirstBackoff time.Duration
+	MaxBackoff   time.Duration
+
+	// OnAttempt, when set, is called after every Hello that did not connect, before the pause.
+	// It is how a caller says "Reconnecting..." to a user DURING the window rather than after
+	// it, which a blocking call cannot otherwise do. It must not call back into this device.
+	OnAttempt func(ConnectAttempt)
+}
+
+// ConnectAttempt is one Hello that did not connect, as [ConnectPolicy.OnAttempt] sees it.
+type ConnectAttempt struct {
+	// Attempt counts from 1.
+	Attempt int
+	// Elapsed is how long [Device.Connect] has been trying.
+	Elapsed time.Duration
+	// Backoff is how long it is about to wait before the next attempt. Zero when there will
+	// not be one.
+	Backoff time.Duration
+	// Err is why this attempt did not connect.
+	Err error
+}
+
+const (
+	// defaultConnectBudget covers the measured ~60s window with margin.
+	//
+	// NINETY SECONDS, AND THE NUMBER IS ARGUED RATHER THAN ROUND. The measured edge is at about
+	// 61s from the close of the previous connection. The two candidate causes named in the
+	// operator report are both 60-second settings, so a mechanism that starts its 60s at some
+	// point AFTER the disconnect rather than at it puts the worst case somewhat past 61s; 90s is
+	// half as long again as anything measured. A bound UNDER the window would be a bound that
+	// does not cover the case it exists for, which is why this is not 30s.
+	defaultConnectBudget = 90 * time.Second
+
+	// defaultConnectAttempt is one Hello's deadline. Ten seconds is generous for a round trip
+	// that measures 27ms on a good connection and short enough that the budget buys attempts
+	// rather than silence.
+	defaultConnectAttempt = 10 * time.Second
+
+	defaultConnectFirstBackoff = 1 * time.Second
+	defaultConnectMaxBackoff   = 8 * time.Second
+)
+
+func (self ConnectPolicy) withDefaults() ConnectPolicy {
+	if self.Budget <= 0 {
+		self.Budget = defaultConnectBudget
+	}
+	if self.AttemptTimeout <= 0 {
+		self.AttemptTimeout = defaultConnectAttempt
+	}
+	if self.FirstBackoff <= 0 {
+		self.FirstBackoff = defaultConnectFirstBackoff
+	}
+	if self.MaxBackoff <= 0 {
+		self.MaxBackoff = defaultConnectMaxBackoff
+	}
+	if self.MaxBackoff < self.FirstBackoff {
+		self.MaxBackoff = self.FirstBackoff
+	}
+	return self
 }
 
 // Device is one device: its MLS engine and identity, the transport it speaks over, and the groups
@@ -93,6 +214,11 @@ type Device struct {
 	identityPub []byte
 	nowMs       func() int64
 	random      io.Reader
+
+	// connect is [DeviceConfig.Connect] with its defaults filled in ONCE, at construction. It
+	// is read without a lock and never written after, which is what lets [Device.Connect] be
+	// called concurrently without the policy being a second thing to synchronise.
+	connect ConnectPolicy
 
 	mutex  sync.Mutex
 	groups map[string]*Group
@@ -164,6 +290,7 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 	return &Device{
 		transport:   config.Transport,
 		reserver:    config.Reserver,
+		connect:     config.Connect.withDefaults(),
 		crypto:      crypto,
 		engine:      engine,
 		leafKeys:    leafKeys,
@@ -231,18 +358,103 @@ func deviceIdentity(crypto mls.CryptoProvider, stateStore mls.StateStore, random
 // IT IS THE ONLY PLACE A NONCE ENTERS THIS PACKAGE and it is idempotent: calling it again is a
 // reconnect, which is the S2-2 case the package document states. A group whose session refuses the
 // new nonce is reported here rather than at its next send.
+//
+// IT RETRIES A HELLO THAT IS NOT ANSWERED, ACROSS THE OPERATOR WINDOW DESCRIBED AT [ConnectPolicy],
+// AND IT SAYS "NOT YET" RATHER THAN "FAILED". A reconnecting client_id is not routed to for about
+// sixty seconds on the deployed server; this call rides that out and, if its budget runs out first,
+// answers [ErrReconnecting] so that a caller can tell "keep waiting" from "something is wrong".
+//
+// AND THE TWO KINDS OF FAILURE ARE NOT THE SAME KIND, which is the whole of what makes the retry
+// safe. SILENCE is retried: no answer arrived, and the one thing known about the server is that it
+// has said nothing. AN ANSWER IS NOT: a Hello the server REFUSED by reason, or one that issued no
+// server_nonce, is the server speaking, and speaking is not the state this window produces --
+// retrying it would turn one clear refusal into ninety seconds of the same refusal. So
+// [ErrHelloRefused] and [ErrNotConnected] come straight back on the first attempt, exactly as
+// before.
+//
+// THE CALLER'S OWN ctx STILL ENDS IT IMMEDIATELY. A cancelled or expired caller context is not
+// "not yet": it is the caller saying stop, and it is returned rather than retried.
 func (self *Device) Connect(ctx context.Context) error {
-	reason, hello, err := self.transport.Hello(ctx)
+	policy := self.connect
+	started := time.Now()
+	backoff := policy.FirstBackoff
+	var lastErr error
+	for attempt := 1; ; attempt += 1 {
+		reason, hello, err := self.helloOnce(ctx, policy.AttemptTimeout)
+		switch {
+		case err == nil && reason != protocol.Reason_REASON_OK:
+			// THE SERVER SPOKE. Not this window, and not retried.
+			return fmt.Errorf("%w: %v", ErrHelloRefused, reason)
+		case err == nil && len(hello.GetServerNonce()) == 0:
+			return fmt.Errorf("%w: Hello issued no server_nonce", ErrNotConnected)
+		case err == nil:
+			return self.rebindAll()
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// the CALLER's context, not the per-attempt one. Stop means stop.
+			return fmt.Errorf("urmessage: Hello: %w", ctxErr)
+		}
+		lastErr = err
+		elapsed := time.Since(started)
+		remaining := policy.Budget - elapsed
+		pause := backoff
+		if remaining <= 0 {
+			pause = 0
+		} else if remaining < pause {
+			pause = remaining
+		}
+		if policy.OnAttempt != nil {
+			policy.OnAttempt(ConnectAttempt{
+				Attempt: attempt, Elapsed: elapsed, Backoff: pause, Err: err,
+			})
+		}
+		if remaining <= 0 {
+			return fmt.Errorf(
+				"%w: %d Hello attempts over %v were not answered; a reconnecting client_id is not routed to for about 60s on this server (msgrepo operator item 5), so this is 'not yet' rather than 'failed': %w",
+				ErrReconnecting, attempt, elapsed.Round(time.Millisecond), lastErr)
+		}
+		if err := self.pause(ctx, pause); err != nil {
+			return fmt.Errorf("urmessage: Hello: %w", err)
+		}
+		if backoff < policy.MaxBackoff {
+			backoff *= 2
+			if policy.MaxBackoff < backoff {
+				backoff = policy.MaxBackoff
+			}
+		}
+	}
+}
+
+// helloOnce is one Hello under its own deadline, so that a server answering nothing costs this
+// attempt's timeout rather than the transport's.
+//
+// THE PER-ATTEMPT CONTEXT IS DERIVED FROM THE CALLER'S, so a cancelled caller cancels the attempt
+// in flight and the loop above can tell the two apart by asking the CALLER's context afterwards.
+func (self *Device) helloOnce(ctx context.Context, timeout time.Duration) (
+	protocol.Reason, *protocol.HelloResponse, error) {
+
+	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	reason, hello, err := self.transport.Hello(attemptCtx)
 	if err != nil {
-		return fmt.Errorf("urmessage: Hello: %w", err)
+		return protocol.Reason_REASON_INTERNAL, nil, fmt.Errorf("urmessage: Hello: %w", err)
 	}
-	if reason != protocol.Reason_REASON_OK {
-		return fmt.Errorf("%w: %v", ErrHelloRefused, reason)
+	return reason, hello, nil
+}
+
+// pause waits, or answers the caller's context ending first.
+func (self *Device) pause(ctx context.Context, howLong time.Duration) error {
+	if howLong <= 0 {
+		return nil
 	}
-	if len(hello.GetServerNonce()) == 0 {
-		return fmt.Errorf("%w: Hello issued no server_nonce", ErrNotConnected)
+	timer := time.NewTimer(howLong)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return self.rebindAll()
 }
 
 // rebindAll moves every live session onto the nonce this transport now holds.

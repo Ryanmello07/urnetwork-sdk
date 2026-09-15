@@ -46,6 +46,10 @@ type dialer struct {
 	host    string
 	root    string
 	timeout time.Duration
+
+	// connect is handed to every device this dialer stands up, so that a re-dial rides out the
+	// operator's reconnect window instead of reporting it as a failure.
+	connect urmessage.ConnectPolicy
 }
 
 var (
@@ -65,6 +69,8 @@ func main() {
 	lines := flag.Int("lines", 600, "how many messages step 4 sends; must exceed the server's max_records_per_fetch to reach the truncation path")
 	bigBytes := flag.Int("big", 40000, "how many octets step 6's message carries; anything over 2048 crosses the fragmentation cut")
 	timeout := flag.Duration("timeout", 60*time.Second, "per-request transport timeout")
+	reconnect := flag.Duration("reconnect", 0,
+		"how long Device.Connect rides out the ~60s reconnect window; 0 takes urmessage's own default")
 	flag.Parse()
 
 	server, err := connect.ParseId(*serverId)
@@ -74,7 +80,16 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	lineCount := *lines
-	mesh := &dialer{ctx: ctx, server: server, host: *host, root: *dir, timeout: *timeout}
+	// THE RECONNECT WINDOW IS THE OPERATOR'S AND THIS PROBE HAS TO SURVIVE IT RATHER THAN TRIP
+	// OVER IT. Measured on the deployed server: a client_id that has just re-dialled is NOT
+	// ROUTED TO for about sixty seconds -- the connection attaches, the Hello goes out and
+	// nothing comes back. Step 7 re-dials B for the same client_id, so step 7 lands in that
+	// window every time, and before urmessage.Device.Connect retried, step 7 reported a hard
+	// failure for something that was simply not ready. Filed against the operator as item 5 of
+	// docs/reports/2026-09-15-operator-and-connect-findings.md; NOT closed by this, and the
+	// user still waits the sixty seconds.
+	mesh := &dialer{ctx: ctx, server: server, host: *host, root: *dir, timeout: *timeout,
+		connect: urmessage.ConnectPolicy{Budget: *reconnect, OnAttempt: printConnectAttempt}}
 
 	a := mesh.dial("A", *aJwt)
 	b := mesh.dial("B", *bJwt)
@@ -285,9 +300,22 @@ func main() {
 	bEpoch := bGroup.Epoch()
 	b = mesh.restart(b)
 	defer b.close()
+	// THIS IS THE CALL THAT MEETS THE RECONNECT WINDOW, every run: B has just re-dialled under
+	// the same client_id. It retries with backoff across the window and prints each attempt, so
+	// an operator watching this sees "reconnecting" rather than a probe that looks hung and then
+	// fails. If it comes back ErrReconnecting the WINDOW outlasted the budget, which is a
+	// different finding from a broken restore and is named as one.
+	restartConnect := time.Now()
 	if err := b.device.Connect(ctx); err != nil {
+		if errors.Is(err, urmessage.ErrReconnecting) {
+			fail("the restarted B was still not routed to after %v of retrying: %v\n"+
+				"  THIS IS THE OPERATOR WINDOW AND NOT A RESTORE FAILURE (operator item 5).\n"+
+				"  Raise -reconnect above the window and run again; the restore itself is untested\n"+
+				"  until this call returns.", time.Since(restartConnect).Round(time.Second), err)
+		}
 		fail("the restarted B Connect: %v", err)
 	}
+	fmt.Printf("  the restarted B was routed to after %v\n", time.Since(restartConnect).Round(time.Millisecond))
 	restored, err := b.device.Restore(ctx)
 	if err != nil {
 		fail("the restarted B Restore: %v", err)
@@ -443,6 +471,7 @@ func (self *dialer) dial(name string, jwtPath string) *party {
 		Transport:  transport,
 		Reserver:   sdk.NewStreamIndexReserver(streamStore),
 		StateStore: stateStore,
+		Connect:    self.connect,
 	})
 	if err != nil {
 		fail("%s NewDevice: %v", name, err)
@@ -503,6 +532,15 @@ func (self *party) close() {
 }
 
 // ── the harness ──────────────────────────────────────────────────────────────────────────────
+
+// printConnectAttempt is what makes "reconnecting" a thing an operator SEES rather than a thing
+// the error says afterwards. A blocking Connect that prints nothing for ninety seconds is
+// indistinguishable from a hang, which is most of why the old hard failure was tolerable.
+func printConnectAttempt(attempt urmessage.ConnectAttempt) {
+	fmt.Printf("  reconnecting: Hello attempt %d was not answered after %v; waiting %v (%v)\n",
+		attempt.Attempt, attempt.Elapsed.Round(time.Millisecond),
+		attempt.Backoff.Round(time.Millisecond), attempt.Err)
+}
 
 func step(s string) {
 	steps += 1

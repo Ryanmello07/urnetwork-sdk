@@ -120,6 +120,21 @@ var (
 	// [Group.Receive] for exactly what is detected, when, and what is NOT.
 	ErrIdentityInUse = errors.New("urmessage: another device is sealing records under this device's identity in this group, so this group will not seal again")
 
+	// ── reconnecting is not failing ───────────────────────────────────────────────────────
+
+	// [Device.Connect]'s Hellos were NOT ANSWERED for the whole of its budget. It is "not yet",
+	// and it is a different value from every other refusal here for exactly one reason: on the
+	// deployed server a reconnecting client_id is not routed to for about sixty seconds
+	// (measured; msgrepo docs/reports/2026-09-15-operator-and-connect-findings.md item 5), so
+	// the ordinary state of a client that just woke up is this one. A caller that shows a user
+	// "could not connect" here is telling them something false; the sentence is "reconnecting".
+	//
+	// IT IS NOT A CLAIM THAT THE WINDOW IS STILL OPEN. The budget bounds how long one call
+	// blocks, nothing more, and the answer to this error is to call [Device.Connect] again.
+	// A server that ANSWERS -- a refusal by reason, or a Hello carrying no nonce -- is
+	// [ErrHelloRefused] or [ErrNotConnected] on the first attempt and is never this.
+	ErrReconnecting = errors.New("urmessage: this device is reconnecting: the message server has not answered Hello yet, which is the ordinary state of a client_id that has just re-dialled")
+
 	// A RESTORED GROUP HAS NOT YET COMPARED ITS STREAM POSITION AGAINST THE SERVER'S ROWS.
 	// [Group.Receive] is what performs that comparison, and until it has run once this group
 	// will not seal -- because the seal is the irreversible half: a copied folder that sends

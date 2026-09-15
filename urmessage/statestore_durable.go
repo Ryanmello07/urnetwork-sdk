@@ -78,6 +78,11 @@ type DurableStateStore struct {
 	lock   sync.Mutex
 	closed bool
 
+	// unswept is every `.writing-*` [sweepStateTempFiles] found at open and could NOT remove.
+	// It is a field and not a returned error because the sweep is not fatal; see that function
+	// for why, and [DurableStateStore.UnsweptWrites] for what a caller is owed.
+	unswept []string
+
 	// flushes counts every write that passed through writeRecord, taken AFTER the Sync returns
 	// rather than before it.
 	//
@@ -333,11 +338,25 @@ func OpenDurableStateStore(dir string) (*DurableStateStore, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("%w: the data directory %s could not be created: %v", ErrStateStoreState, dataDir, err)
 	}
-	if err := sweepStateTempFiles(dataDir); err != nil {
+	unswept, err := sweepStateTempFiles(dataDir)
+	if err != nil {
 		return nil, err
 	}
 	released = true
-	return &DurableStateStore{dir: dir, dataDir: dataDir, exclusion: exclusion}, nil
+	return &DurableStateStore{dir: dir, dataDir: dataDir, exclusion: exclusion, unswept: unswept}, nil
+}
+
+// UnsweptWrites is every leftover write [sweepStateTempFiles] found at open and could not remove,
+// by path. Empty on the ordinary open, which is every open on a machine where nothing else is
+// holding this directory's files.
+//
+// IT EXISTS SO THAT "THE SWEEP DID NOT REFUSE THE OPEN" IS NOT THE SAME SENTENCE AS "THERE WAS
+// NOTHING TO SWEEP". A caller that wants to tell a user, or a probe that wants to assert the clean
+// case, has one place to read it; nothing in this package makes a decision on it.
+func (self *DurableStateStore) UnsweptWrites() []string {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	return append([]string(nil), self.unswept...)
 }
 
 // sweepStateTempFiles removes every in-flight write left behind by a process that died.
@@ -361,10 +380,41 @@ func OpenDurableStateStore(dir string) (*DurableStateStore, error) {
 // rather than implied: the octets are still wherever the filesystem put them. See
 // [DurableStateStore]'s header for what does and does not protect them.
 //
-// IT RUNS UNDER THE EXCLUSION AND BEFORE ANYTHING IS READ, so it can never race a live writer:
-// the only process that may hold this directory is this one, and it has not written yet.
-func sweepStateTempFiles(dataDir string) error {
-	return filepath.WalkDir(dataDir, func(path string, entry os.DirEntry, err error) error {
+// IT RUNS UNDER THE EXCLUSION AND BEFORE ANYTHING IS READ, so it can never race a live WRITER: the
+// only process that may hold this directory for writing is this one, and it has not written yet.
+// THAT SENTENCE USED TO SAY "a live writer: the only process that may hold this directory is this
+// one", and it was reasoning about the wrong party -- the exclusion binds writers, and the party
+// that breaks this is a third-party READER.
+//
+// A LEFTOVER THAT WILL NOT DELETE IS A WARNING AND NOT A REFUSAL, AND THAT IS THE DECISION.
+// On Windows `os.Remove` of a file another handle holds without FILE_SHARE_DELETE answers
+// ERROR_ACCESS_DENIED -- the same mechanism, from the same causes (a scanner, the search indexer, a
+// backup agent), that `statestore_rename_windows_test.go` pins for MoveFileEx. Returning that error
+// from here made the WHOLE STORE FAIL TO OPEN: a crash-recovery path turning a recoverable state
+// into an unopenable one, and a transient third-party handle turning into "the app does not start".
+// It was measured; it is not a hypothesis.
+//
+// WHY NON-FATAL IS RIGHT HERE AND FATAL IS STILL RIGHT IN deleteEpochsLocked, because the two look
+// alike and are not. THE DIFFERENCE IS WHOSE PROMISE IT IS. §5.12's erase is a caller asking for
+// octets to be gone, so an erase that cannot see a file MUST refuse rather than report success --
+// that is the defect this store was carrying and it stays closed. Nobody asked this function for
+// anything: it is opportunistic hygiene that bounds how long a leftover lives, and a leftover it
+// cannot remove today is removed at the next open. Refusing the open makes the debris no smaller
+// and costs the user their device.
+//
+// WHAT IS NOT SILENT. The paths are carried out to [DurableStateStore.UnsweptWrites], so a caller
+// that wants to say something about them can, and the clean case is assertable rather than assumed.
+// A WALK that fails is still fatal: a data directory this process cannot even enumerate is not a
+// leftover problem, and the store is about to need that directory for every read it performs.
+//
+// NO RETRY BUDGET IS INVENTED HERE. S2-29's repair at writeRecord's rename is a bounded retry on
+// ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION, and 1141236's successor deliberately did not
+// take it because the budget is somebody's to own; inventing one here, on a path where carrying on
+// is free, would be taking that decision sideways. The day S2-29's retry lands, this site is the
+// second caller of the same primitive.
+func sweepStateTempFiles(dataDir string) ([]string, error) {
+	unswept := []string{}
+	err := filepath.WalkDir(dataDir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("%w: %s could not be walked for leftover writes: %v",
 				ErrStateStoreState, dataDir, err)
@@ -373,11 +423,14 @@ func sweepStateTempFiles(dataDir string) error {
 			return nil
 		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("%w: %s is a write this store did not finish and it could not be removed: %v",
-				ErrStateStoreState, path, err)
+			unswept = append(unswept, path)
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return unswept, nil
 }
 
 // Close releases the store, and with it the single-writer exclusion, which is the only thing that

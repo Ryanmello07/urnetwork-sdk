@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/message-server/store"
 	"github.com/urnetwork/sdk/urmessage"
 )
@@ -269,6 +270,23 @@ const (
 	// the record, which is what makes "the client never asked again" the finding rather than
 	// "the record was destroyed".
 	fetchBendsOneRecord
+
+	// THE SUBMIT NEVER REACHES THE SERVER AT ALL. It is a partition, and it is the one shape in
+	// which a device SEALS -- consuming a stream index and producing a ciphertext -- while the
+	// server learns nothing. Every other shape here lets the record land, which is what makes
+	// the server able to answer REASON_STREAM_INDEX_REUSED to a second writer; this one is what
+	// happens when there is no answer to be had.
+	submitDropsBeforeWriting
+
+	// THE SUBMIT LANDS AND IS ANSWERED A REFUSAL ANYWAY, which is the ONE shape that drives
+	// S2-2's recovery into a server that already holds the record. The record goes through the
+	// real §6.1 transaction and the RESULT's reason is then overwritten, so the client sees a
+	// refusal, performs its one Hello + re-MAC + resubmission, and the resubmission arrives at
+	// an index the server has a claim at ALREADY -- which is the exact state
+	// [urmessage.Group.cloneRefusalLocked] must not read as a second writer. Without this shape
+	// nothing in the suite puts an HONEST device at a consumed index with a live answer coming
+	// back; `fetchLosesOneSubmitAnswer` loses the answer, so no REASON is ever seen at all.
+	submitRefusesOnceAfterWriting
 )
 
 // shapedStore is `store.Store` with ONE method overridden.
@@ -290,6 +308,20 @@ type shapedStore struct {
 
 	// how many more submit ANSWERS to lose, under fetchLosesOneSubmitAnswer.
 	loseAnswers int
+
+	// how many more submit answers to REFUSE after writing, under
+	// submitRefusesOnceAfterWriting.
+	refuseAnswers int
+
+	// how many more submissions to DROP before writing, under submitDropsBeforeWriting.
+	dropSubmissions int
+}
+
+// dropNextSubmissions makes the next n submissions fail without reaching the store at all.
+func (self *shapedStore) dropNextSubmissions(n int) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	self.dropSubmissions = n
 }
 
 // loseSubmitAnswers makes the next n submissions land and then fail to answer.
@@ -303,17 +335,55 @@ func (self *shapedStore) loseSubmitAnswers(n int) {
 // that matters: a shape that refused before writing would be an ordinary rejection and would
 // leave the server with nothing, which is the opposite of the state under test.
 func (self *shapedStore) Submit(ctx context.Context, request *store.SubmitRequest) (*store.SubmitResponse, error) {
+	if self.shape == submitDropsBeforeWriting {
+		self.mutex.Lock()
+		drop := 0 < self.dropSubmissions
+		if drop {
+			self.dropSubmissions -= 1
+		}
+		self.mutex.Unlock()
+		if drop {
+			// BEFORE the real transaction, which is the whole difference from
+			// fetchLosesOneSubmitAnswer: the server ends up holding nothing at this index.
+			return nil, errors.New("this submission never reached the server")
+		}
+	}
 	response, err := self.Store.Submit(ctx, request)
-	if err != nil || self.shape != fetchLosesOneSubmitAnswer {
+	if err != nil {
 		return response, err
 	}
+	switch self.shape {
+	case fetchLosesOneSubmitAnswer:
+		self.mutex.Lock()
+		defer self.mutex.Unlock()
+		if self.loseAnswers <= 0 {
+			return response, err
+		}
+		self.loseAnswers -= 1
+		return nil, errors.New("the answer to this submission did not come back")
+	case submitRefusesOnceAfterWriting:
+		self.mutex.Lock()
+		defer self.mutex.Unlock()
+		if self.refuseAnswers <= 0 || response == nil {
+			return response, err
+		}
+		self.refuseAnswers -= 1
+		// the REASON only. The rows the real transaction wrote are untouched, which is
+		// the whole point: the resubmission has to meet them.
+		for _, result := range response.Results {
+			result.Reason = protocol.Reason_REASON_INTERNAL
+			result.RecordId = 0
+		}
+		return response, nil
+	}
+	return response, err
+}
+
+// refuseSubmitAnswers makes the next n submissions land and then be answered REASON_INTERNAL.
+func (self *shapedStore) refuseSubmitAnswers(n int) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
-	if self.loseAnswers <= 0 {
-		return response, err
-	}
-	self.loseAnswers -= 1
-	return nil, errors.New("the answer to this submission did not come back")
+	self.refuseAnswers = n
 }
 
 // bend names the record whose ct_body is bent on its way out of the store, and how many more
@@ -330,11 +400,14 @@ func (self *shapedStore) Fetch(ctx context.Context, request *store.FetchRequest)
 	if err != nil || self.shape == fetchNormal {
 		return result, err
 	}
-	if self.shape == fetchLosesOneSubmitAnswer {
-		// that shape is about the SUBMIT path and bends nothing on the way out. It is
+	if self.shape == fetchLosesOneSubmitAnswer || self.shape == submitRefusesOnceAfterWriting ||
+		self.shape == submitDropsBeforeWriting {
+		// those shapes are about the SUBMIT path and bend nothing on the way out. They are
 		// named here rather than left to fall through the switch below, because falling
-		// through would silently give it fetchStandsStill's behaviour -- which is how a
-		// case can be over a server nobody meant to build.
+		// through would silently give them fetchStandsStill's behaviour -- which is how a
+		// case can be over a server nobody meant to build. It is not hypothetical: the
+		// second of these two was written without this line and its first run answered
+		// ErrFetchNoProgress from a fetch nobody had asked to bend.
 		return result, nil
 	}
 	if self.shape == fetchDropsMessages {

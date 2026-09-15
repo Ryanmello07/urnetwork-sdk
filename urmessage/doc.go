@@ -174,12 +174,21 @@
 // total break of both AEADs for that record. The single-writer exclusion does not reach it: it is
 // held per DIRECTORY and a copy is a second directory.
 //
-// SO A RESTORED GROUP WILL NOT SEAL UNTIL IT HAS LISTENED. [Group.Receive] holds the stream
-// indices it finds on the server against the durable reserver's own high water, and a group that
-// finds an index its reserver never allocated refuses to seal for the life of the process with
-// [ErrIdentityInUse]. [Device.Restore] states exactly what that covers -- every copy that is
-// behind the original, and every copy that cannot reach the server -- and what it does not: two
-// copies that are exactly level can still collide ONCE before either sees the other. Closing that
+// SO A RESTORED GROUP WILL NOT SEAL UNTIL IT HAS LISTENED, AND IT WILL NOT GO ON SEALING ONCE THE
+// SERVER HAS TOLD IT WHY. [Group.Receive] holds the stream indices it finds on the server against
+// the durable reserver's own high water -- over a walk that was COMPLETE AND CLEAN, never over one
+// the server said was short or one that lost a record -- and a group that finds an index its
+// reserver never allocated refuses to seal for the life of the process with [ErrIdentityInUse].
+// A §4.5 REASON_STREAM_INDEX_REUSED at the SUBMIT is the same refusal, which is what bounds a copy
+// whose user keeps typing without ever fetching.
+//
+// [Device.Restore] states exactly what that covers -- every copy that is behind the original, and
+// every copy that cannot reach the server at all -- and what it does not, WITH THE BOUND ON THE
+// RESIDUAL AND THE BOUND'S PRECONDITION: for a copy whose submissions are ANSWERED, two copies that
+// are exactly level both seal at one index before either can see the other and the cost is ONE
+// CONTESTED INDEX PER GROUP PER PROCESS LIFETIME of the losing copy. A copy that reconciled and
+// THEN went dark is bounded by nothing at all, because every clause of the check is fed by
+// something the server said. Both are measured rather than asserted, in `sdk/cp3b`. Closing either
 // needs a new leaf for the copy, which is an MLS Update commit a restored group cannot make. It is
 // filed as S2-28.
 //

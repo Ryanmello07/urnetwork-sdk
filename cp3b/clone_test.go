@@ -30,10 +30,13 @@ import (
 // defence here.
 //
 // AND THE SERVER REFUSING THE DUPLICATE IS NOT THE DEFENCE EITHER. The message server answers
-// REASON_STREAM_INDEX_REGRESSED to the second record under one index -- real defence in depth for
-// its own rows, and far too late for this: the sealing has already happened, the two ciphertexts
-// exist, and the S2-2 recovery re-MACs and resubmits the same record. So what is asserted below is
-// that the clone never SEALS, not that the server refused it.
+// REASON_STREAM_INDEX_REUSED to the second record under one index -- this comment said REGRESSED
+// until it was read out of `msgrepo/store/memory.go:452`, and REGRESSED is a different gate (step
+// (3)'s monotonicity check at `memory.go:610`, inside the transaction) that a clone never reaches,
+// because step (0)'s idempotency probe answers first. Either way it is real defence in depth for
+// the server's own rows and far too late for this: the sealing has already happened and the two
+// ciphertexts exist. So what is asserted below is that the clone never SEALS, not that the server
+// refused it.
 //
 // WHAT WOULD GO RED WITHOUT THE FIX: the clone's Send succeeds, and the server's own rows then
 // hold two records for one sender at one stream index.
@@ -248,7 +251,7 @@ func TestAnOrdinaryRestartReconcilesAndIsNotMistakenForACopy(t *testing.T) {
 	}
 }
 
-// TWO COPIES THAT ARE EXACTLY LEVEL COLLIDE ONCE, AND THE SIDE THAT LOST THE RACE FINDS OUT.
+// TWO COPIES THAT ARE EXACTLY LEVEL CONTEST ONE INDEX, AND THE SIDE THAT LOST THE RACE FINDS OUT.
 //
 // THIS IS THE RESIDUAL AND IT IS WRITTEN DOWN AS A TEST RATHER THAN ONLY AS PROSE. The check in
 // [TestACopiedAppDataFolderIsRefusedBeforeItSealsAnything] catches every copy that is BEHIND the
@@ -259,15 +262,23 @@ func TestAnOrdinaryRestartReconcilesAndIsNotMistakenForACopy(t *testing.T) {
 // §5.6's total break of both AEADs for that record -- and no client-side check can prevent it,
 // because at the moment of the seal neither copy has any evidence the other exists.
 //
-// WHAT THIS BUILD DOES IS STOP IT AT ONE. The server accepts one of the two submissions and
-// refuses the other; the loser has SEALED at that index and now meets, on the server, a record
-// under its own sender_handle at that very index whose body_hash is not the body_hash it sealed.
-// That is conclusive -- §3.1's body_hash is authenticated by both AEADs, and a party without this
-// group's keys cannot produce a record that opens at all -- and the loser stops sealing. The
-// winner is then the only writer of that stream and produces no further collision.
+// WHAT THIS BUILD DOES IS STOP IT AT ONE, AND IT STOPS IT AT THE SUBMIT RATHER THAN AT THE NEXT
+// FETCH. The server accepts one of the two submissions and answers the other
+// REASON_STREAM_INDEX_REUSED, which is its statement that it already holds DIFFERENT content at
+// that (sender_handle, stream_index); [urmessage.Group.cloneRefusalLocked] reads that as the
+// finding it is and the loser stops sealing there and then. The winner is then the only writer of
+// that stream and produces no further collision.
 //
-// AN INDEX-ONLY CHECK COULD NOT SEE THIS, which is why [Group.ownIndices] carries the hash: both
-// copies sealed at that index, so "is this an index I sealed at?" answers yes on both sides.
+// THIS CASE USED TO ASSERT THE REFUSAL AS AN ORDINARY ErrSubmitRefused AND THEN CALL Receive, and
+// that ordering is why it could not see the real defect: a user types the next line, they do not
+// fetch first, and until the check reached the seal path two level copies collided on EVERY index
+// rather than once. [TestTwoCopiesThatKeepSendingCollideAtExactlyOneIndex] is the case that never
+// fetches at all; this one keeps the fetch, because the RECEIVE arm is still what catches a copy
+// that never submits.
+//
+// AN INDEX-ONLY CHECK COULD NOT SEE THE RECEIVE ARM, which is why [Group.ownIndices] carries the
+// hash: both copies sealed at that index, so "is this an index I sealed at?" answers yes on both
+// sides.
 //
 // WHAT WOULD CLOSE IT PROPERLY: a copy that came back under a DIFFERENT LEAF, which is an MLS
 // Update commit. A restored group cannot ingest a commit (J1-8, [urmessage.ErrRestoredHandle]) and
@@ -329,19 +340,23 @@ func TestTwoCopiesThatAreExactlyLevelCollideOnceAndTheLoserFindsOut(t *testing.T
 	if _, err := cloneGroup.Send(ctx, byTheClone); err != nil {
 		t.Fatalf("the clone's Send: %v", err)
 	}
-	// the original seals at the same index and the server refuses the submission -- which is
-	// defence in depth for the server's ROWS and is not a mitigation of anything: the ciphertext
-	// was produced before the submission and it exists whatever the server then says.
-	if _, err := bobGroup.Send(ctx, byTheOriginal); !errors.Is(err, urmessage.ErrSubmitRefused) {
-		t.Fatalf("the original's colliding Send answered %v, want ErrSubmitRefused", err)
+	// THE ORIGINAL SEALS AT THE SAME INDEX -- that ciphertext exists before any server has said
+	// anything and nothing below is a mitigation of it -- and its SUBMISSION is where it finds
+	// out. The refusal must be the identity finding and not a bare ErrSubmitRefused: a
+	// non-sticky refusal is what let the next Send seal at the next index and collide there too.
+	if _, err := bobGroup.Send(ctx, byTheOriginal); !errors.Is(err, urmessage.ErrIdentityInUse) {
+		t.Fatalf("the original's colliding Send answered %v, want ErrIdentityInUse", err)
+	}
+	if bobGroup.IdentityInUse() == nil {
+		t.Fatal("the loser's refusal is not sticky, so its next Send seals again")
 	}
 	indices := streamIndicesOf(t, world, groupId, bobHandle)
 	t.Logf("the server's rows for this sender after the collision: %v (it stored one of the two)", indices)
 
-	// ── the loser finds out, at its next Receive, before it seals again ───────────────────
+	// ── and its next Receive says the same thing rather than a different one ──────────────
 	_, err = bobGroup.Receive(ctx)
 	if !errors.Is(err, urmessage.ErrIdentityInUse) {
-		t.Fatalf("the side that lost the race answered %v at its next Receive, want ErrIdentityInUse; it has already produced one two-time pad and nothing is stopping it producing more", err)
+		t.Fatalf("the side that lost the race answered %v at its next Receive, want ErrIdentityInUse", err)
 	}
 	t.Logf("the loser finds out: %v", err)
 	if _, err := bobGroup.Send(ctx, "and the loser must not seal again"); !errors.Is(err, urmessage.ErrIdentityInUse) {

@@ -63,6 +63,17 @@ party holds a single-writer exclusion on its own subdirectory — if a second pr
    so a user who closed the app and reopened it got the other side's half of the conversation and
    none of their own — with a nil error. A probe that checks only the far side's half cannot see
    that, and this one could not.
+
+   **This step lands in the operator's reconnect window every time, and that is expected.**
+   Measured on the deployed server: a `client_id` that has just re-dialled **is not routed to for
+   about sixty seconds** — the connection attaches, the Hello goes out and nothing comes back.
+   Step 7 re-dials B under the same `client_id`, so its `Connect` meets that window on every run.
+   `Device.Connect` now **retries with backoff across it** and prints `reconnecting: Hello attempt
+   N ...` for each unanswered try, so the step takes up to a minute and says why rather than
+   failing. `-reconnect <duration>` raises the budget above urmessage's 90s default. If it ends in
+   `ErrReconnecting` the window outlasted the budget — **that is the operator finding (item 5 of
+   `msgrepo/docs/reports/2026-09-15-operator-and-connect-findings.md`), not a restore failure**,
+   and the step says so by name. None of this removes the sixty seconds; the user waits them.
 8. **Two senders at once.** Both parties send 20 lines concurrently. Each line is distinct, so a
    lost one and a duplicated one are both visible in the counts.
 

@@ -1,4 +1,9 @@
 **/bin
+
+# the two names liveprobe/README.md tells an operator to build into this tracked directory.
+# `**/bin` does not match them, and the tracked 35 MB binary this replaced is why they are here.
+liveprobe/liveprobe
+liveprobe/liveprobe-arm64
 build/apple*
 build/ios*
 build/android*

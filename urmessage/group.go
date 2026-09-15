@@ -715,6 +715,8 @@ func (self *Group) submitLocked(ctx context.Context, session *messagegroup.Group
 // IT IS ONE AND IT IS NOT A LOOP. A second refusal is a fact about the group, the epoch or the
 // record rather than about the nonce, and a client that kept trying would turn a visible failure
 // into a busy one. Both reasons are carried in the error.
+//
+// AND ONE REASON IS NOT A NONCE FACT AND IS NOT TREATED AS ONE: see [Group.cloneRefusalLocked].
 func (self *Group) sendSealedLocked(ctx context.Context, session *messagegroup.GroupSession,
 	record *message.Record, what string,
 	send func(*protocol.Record) (protocol.Reason, uint64, error)) (uint64, error) {
@@ -730,6 +732,9 @@ func (self *Group) sendSealedLocked(ctx context.Context, session *messagegroup.G
 	if reason == protocol.Reason_REASON_OK {
 		self.stats.Submitted += 1
 		return recordId, nil
+	}
+	if refusal := self.cloneRefusalLocked(reason, record, what); refusal != nil {
+		return 0, refusal
 	}
 
 	// S2-2: one Hello, one rebind, one re-MAC, one resubmission.
@@ -757,6 +762,9 @@ func (self *Group) sendSealedLocked(ctx context.Context, session *messagegroup.G
 	if err != nil {
 		return 0, fmt.Errorf("urmessage: resubmitting %s: %w", what, err)
 	}
+	if refusal := self.cloneRefusalLocked(retryReason, record, what); refusal != nil {
+		return 0, refusal
+	}
 	if retryReason != protocol.Reason_REASON_OK {
 		return 0, fmt.Errorf("%w: %s was answered %v, and %v again after a fresh Hello and a re-MAC",
 			ErrSubmitRefused, what, reason, retryReason)
@@ -764,6 +772,57 @@ func (self *Group) sendSealedLocked(ctx context.Context, session *messagegroup.G
 	self.stats.Submitted += 1
 	self.stats.Rebound += 1
 	return retryRecordId, nil
+}
+
+// cloneRefusalLocked is the clone check ON THE SEAL PATH: §4.5's REASON_STREAM_INDEX_REUSED, read
+// as the finding it is rather than pasted into an error string.
+//
+// WHY IT HAD TO EXIST. Clause 2 of the clone check (see [Device.Restore]) lives only in
+// [Group.Receive], and [Group.Send] consulted nothing but `identityInUse` and `reconciled`. So two
+// level copies that kept SENDING collided on every index, not once: the refusal was returned
+// non-sticky, and the next Send sealed at the next index and collided there too. The published
+// bound -- "one record, not a stream of them" -- was FALSE by measurement, at four collisions from
+// four typed messages, every one of them a two-time pad the ct_body XOR shows octet for octet.
+//
+// WHAT THE REASON MEANS, READ OUT OF THE SERVER'S SOURCE RATHER THAN ASSUMED. Both stores answer it
+// from the same place: step (0)'s idempotency probe, BEFORE any gate, any allocation and the row
+// lock, compares the submitted record's body_hash AND the hash of its ct_head against the
+// `message_stream_claim` already standing at this (group_id, sender_handle, stream_index).
+// Equal on both is `probeIdentical` and REASON_OK; different is `probeDiffers` and
+// REASON_STREAM_INDEX_REUSED (msgrepo `store/memory.go:452`, `store/pgx.go:994`). So the reason is
+// exactly one sentence: SOMETHING ELSE HAS ALREADY WRITTEN DIFFERENT CONTENT AT AN INDEX THIS
+// DEVICE'S RESERVER HANDED OUT. A reserver never rewinds and this device seals once per index, so
+// there is no second reading of that, and it is the same finding [ErrIdentityInUse] names.
+//
+// AND THE HONEST RETRY IS PRICED, WHICH IS THE THING THAT HAD TO BE CHECKED FIRST. The one way a
+// healthy device resubmits at a consumed index is S2-2's recovery and a lost answer, and
+// [messagegroup.GroupSession.ReauthRecord] writes EXACTLY ONE field -- `record.WriteAuth` -- which
+// the probe does not read. So an honest resubmission is byte-identical where the probe looks and is
+// answered REASON_OK, never REUSED. That is measured rather than reasoned:
+// `cp3b.TestAnHonestResubmissionOfTheSameRecordIsAnsweredOkAndNotReadAsAClone`.
+//
+// IT IS TAKEN BEFORE S2-2'S RECOVERY AND NOT AFTER, and that ordering is the point. The recovery
+// repairs a NONCE, and a reused index is not a nonce fact -- so running it here would buy nothing
+// and would put the colliding ciphertext on the wire a SECOND time, which is exactly what was
+// measured: "3 submissions, 2 distinct ciphertexts" at every collided index.
+//
+// THE COST, SAID PLAINLY. The reason is PLAINTEXT and unauthenticated, so a hostile or broken
+// server can answer REUSED to a device that has no copy and stop that group sealing for the life of
+// the process. That is accepted, for two reasons that are worth more than the risk: a server can
+// already deny every submit outright, so this buys it only stickiness; and the failure direction is
+// "this device will not send", never "this device sends under a reused key and nonce". A restart
+// clears it and the next [Group.Receive] decides again on records that OPENED, which is evidence a
+// server cannot forge.
+func (self *Group) cloneRefusalLocked(reason protocol.Reason, record *message.Record, what string) error {
+	if reason != protocol.Reason_REASON_STREAM_INDEX_REUSED {
+		return nil
+	}
+	if self.identityInUse == nil {
+		self.identityInUse = fmt.Errorf(
+			"%w: group %x epoch %d: the server answered %v to %s at stream index %d, which is its statement that a record it already holds at that index under this device's own sender_handle carries different content -- two records under one (epoch, sender_handle, stream_index) are one record_key and one nonce",
+			ErrIdentityInUse, self.id, self.epoch, reason, what, record.Header.StreamIndex)
+	}
+	return self.identityInUse
 }
 
 // ── receiving ────────────────────────────────────────────────────────────────────────────────
@@ -1095,10 +1154,10 @@ type pageWalk struct {
 // not it is the value returned.
 func (self *Group) commitWalkLocked(walk *pageWalk) error {
 	self.cursor = walk.resolvedTo
-	if walk.complete && !self.reconciled {
-		// THE RECONCILIATION. It runs once per restored group, on the first walk of its
-		// history the server called complete, and it is the half of the clone check that
-		// happens BEFORE this device has sealed anything.
+	if self.walkReconcilesLocked(walk) {
+		// THE RECONCILIATION. It runs once per restored group, on the first walk of this
+		// group's history that was COMPLETE AND CLEAN, and it is the half of the clone check
+		// that happens BEFORE this device has sealed anything.
 		//
 		// THE INVARIANT IS ONE SENTENCE: every stream index on the server under this
 		// device's sender_handle was allocated by this device's durable reserver, and a
@@ -1109,9 +1168,10 @@ func (self *Group) commitWalkLocked(walk *pageWalk) error {
 		// WHAT THIS WALK CANNOT SEE: an own record that did NOT open contributes no index,
 		// because an index is only read off a record the aead authenticated -- so a server
 		// bending one of this device's own records suppresses the evidence for that record.
-		// It suppresses it LOUDLY: the same walk returns [ErrRecordOpen] naming it and
-		// [Stats.FailedOpen] moves, so the reading is "this group could not be checked"
-		// rather than "this group is clean".
+		// THAT IS WHY THE GATE IS [Group.walkReconcilesLocked] AND NOT `walk.complete` ALONE.
+		// The evidence this walk is missing is named by the walk itself, and a sentence as
+		// strong as "this device is alone with its identity" is not written down over a walk
+		// that is admittedly short of records.
 		highWater, err := self.ownHighWaterLocked(walk.own)
 		if err != nil {
 			// NOT reconciled, so Send stays refused. A reserver that will not answer is
@@ -1146,6 +1206,44 @@ func (self *Group) commitWalkLocked(walk *pageWalk) error {
 		return walk.firstFailure
 	}
 	return walk.omitted
+}
+
+// walkReconcilesLocked is whether THIS walk is one the clone check may conclude anything from.
+//
+// IT IS A SEPARATE PREDICATE BECAUSE IT IS A SEPARATE QUESTION, and running the two together in an
+// `if` was how the answer came out wrong. "Did the server finish handing over the page" and "did
+// this walk see the group's history" are not the same sentence, and only the second one licenses
+// [Group.reconciled].
+//
+// THE CHEAPEST WAY PAST A CHECK IS A FAILURE THE CHECKER ALREADY PRINTED. `walk.complete` means
+// only that the server called one page COMPLETE. The same walk carries two fields that say it did
+// not see the history, BOTH OF WHICH THIS CLIENT COMPUTED AND RETURNED TO ITS CALLER:
+//
+//   - `walk.omitted` -- §4.3.4's own `high_water_record_id`, above every record the server handed
+//     over. The server's admission, in its own field, that a page it called complete is short.
+//   - `walk.firstFailure` -- a record that did not open. An index is read only off a record the
+//     aead authenticated, so a record that did not open contributes NO index, and the header is
+//     plaintext so this build cannot even tell whether the lost record was its own. A walk with a
+//     hole in it is a walk whose missing index could be the one the check exists to find.
+//
+// Reconciling over either of those is declaring "every index on the server under this handle is
+// one my reserver allocated" on the strength of records that were never seen. Both were measured
+// past the old gate: a copy two indices BEHIND the original -- the case [Device.Restore]'s header
+// says is caught before it seals anything -- reconciled with [Stats.Omitted] at 1 and
+// [ErrFetchOmitted] on its way back to the caller, and then sealed at an index the original had
+// already used. One bent own record did the same.
+//
+// WHAT IT COSTS, BOUNDED RATHER THAN HAND-WAVED. A group that has not had a clean walk stays
+// [ErrNotReconciled] and the caller calls [Group.Receive] again -- which is what the transport-error
+// path above already does, so this is the shape the function already had rather than a new one. The
+// cost is NOT unbounded: a record that will not open is retried [maxRecordAttempts] times and then
+// ABANDONED, and an abandoned record is resolved past without calling `fail`, so it sets no
+// `firstFailure` on any later walk. So one permanently bent record delays the reconciliation by at
+// most maxRecordAttempts+1 Receives and then stops delaying it. A server that permanently omits is
+// the case that stays refused, and that is the intended reading: this device cannot check itself
+// against a server that will not show it its own history.
+func (self *Group) walkReconcilesLocked(walk *pageWalk) bool {
+	return walk.complete && walk.omitted == nil && walk.firstFailure == nil && !self.reconciled
 }
 
 // ownHighWaterLocked is the highest stream index this device's DURABLE reserver has ever allocated
