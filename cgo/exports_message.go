@@ -10,6 +10,7 @@ import "C"
 
 import (
 	"context"
+	"encoding/hex"
 	"time"
 	"unsafe"
 
@@ -794,16 +795,17 @@ type messageGroupStats struct {
 	Unattested      uint64 `json:"unattested"`
 }
 
-const messageHexDigits = "0123456789abcdef"
-
 func messageInfoOf(message *urmessage.Message) *messageInfo {
 	if message == nil {
 		return nil
 	}
-	handle := make([]byte, 0, 2*len(message.SenderHandle))
-	for _, b := range message.SenderHandle {
-		handle = append(handle, messageHexDigits[b>>4], messageHexDigits[b&0x0F])
-	}
+	// encoding/hex rather than hand-rolled nibbles. The hand-rolled form was correct, and it
+	// tripped connect/message TestClassBucketJoinIsConfinedToRecordGo -- a gate that scans this
+	// repository too and forbids splitting a byte as >>4 / &0x0F outside record.go, because that
+	// is how a retention-class wire byte is split into its class and its eph bucket. This code
+	// was splitting a byte into hex digits: the same SHAPE, an unrelated PROPERTY. Filed against
+	// the gate as a false-positive class; the standard library is the better answer either way.
+	handle := []byte(hex.EncodeToString(message.SenderHandle))
 	return &messageInfo{
 		RecordId:     message.RecordId,
 		SenderHandle: string(handle),
