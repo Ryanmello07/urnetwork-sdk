@@ -6,6 +6,7 @@ import (
 
 	"github.com/urnetwork/connect/messagegroup"
 	"github.com/urnetwork/connect/mls"
+	"github.com/urnetwork/connect/mls/syntax"
 )
 
 // ── S2-14's other half: coming back ──────────────────────────────────────────────────────────
@@ -456,19 +457,62 @@ func (self *restoredHandle) Protect(aad []byte, plaintext []byte) ([]byte, error
 	return self.group.Protect(aad, plaintext)
 }
 
-// Unprotect projects mls's application message down to three values, refusing the nil-with-nil-error
-// shape mls cannot produce -- because the alternative to refusing it is three zero values that read
-// as an empty message from leaf 0.
-func (self *restoredHandle) Unprotect(message []byte) ([]byte, []byte, uint32, error) {
+// The three methods connect 4a70be8 added to messagegroup.GroupHandle for MASTER section 8.4.2's
+// aad_mls v2. A restored group has to satisfy the same interface a live one does, and it did not:
+// sdk was written against the pre-v2 interface in the same wave that changed it, so this file was
+// the whole of the drift -- three methods and one import, caught by go build and by nothing else.
+//
+// ProtectBound takes an AAD BUILDER rather than an AAD because v2's preimage carries the
+// generation, which mls chooses INSIDE the seal: the caller cannot know it beforehand, so mls hands
+// it to the builder under the same lock that then consumes it.
+func (self *restoredHandle) ProtectBound(aad func(generation uint32) ([]byte, error),
+	plaintext []byte) ([]byte, error) {
+
+	return self.group.ProtectBound(aad, plaintext)
+}
+
+// PeekSender is MASTER section 8.4.3's pre-ratchet reading. It is written out here rather than
+// delegated because messagegroup's own peekWithGroupSecrets is unexported: the crypto provider has
+// to be rebuilt out of this group's own context on every application record.
+func (self *restoredHandle) PeekSender(frame []byte) (uint32, []byte, uint32, error) {
+	contextBytes, err := self.group.GroupContext()
+	if err != nil {
+		return 0, nil, 0, err
+	}
+	groupContext := &mls.GroupContext{}
+	if err := syntax.Unmarshal(contextBytes, groupContext); err != nil {
+		return 0, nil, 0, err
+	}
+	crypto, err := mls.NewCryptoProvider(groupContext.CipherSuite)
+	if err != nil {
+		return 0, nil, 0, err
+	}
+	senderDataSecret, err := self.group.EpochSecret(mls.EpochSecretSenderData)
+	if err != nil {
+		return 0, nil, 0, err
+	}
+	leaf, authenticatedData, generation, err := mls.PeekPrivateMessageSender(
+		crypto, senderDataSecret, frame)
+	if err != nil {
+		return 0, nil, 0, err
+	}
+	return uint32(leaf), authenticatedData, generation, nil
+}
+
+// Unprotect projects mls's application message down to four values, refusing the nil-with-nil-error
+// shape mls cannot produce -- because the alternative to refusing it is four zero values that read
+// as an empty message from leaf 0 at generation 0.
+func (self *restoredHandle) Unprotect(message []byte) ([]byte, []byte, uint32, uint32, error) {
 	application, err := self.group.Unprotect(message)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, 0, err
 	}
 	if application == nil {
-		return nil, nil, 0, fmt.Errorf("%w: an opened application message with no content",
+		return nil, nil, 0, 0, fmt.Errorf("%w: an opened application message with no content",
 			messagegroup.ErrEngineProcessedArm)
 	}
-	return application.AuthenticatedData, application.Plaintext, uint32(application.SenderLeaf), nil
+	return application.AuthenticatedData, application.Plaintext,
+		uint32(application.SenderLeaf), application.Generation, nil
 }
 
 func (self *restoredHandle) Close() error { return self.group.Close() }
