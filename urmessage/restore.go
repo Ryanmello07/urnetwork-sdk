@@ -397,6 +397,20 @@ func (self *restoredHandle) Export(label string, context []byte, length int) ([]
 	return self.group.Export(label, context, length)
 }
 
+// PairwiseExport is the method connect added to messagegroup.GroupHandle for ledger item 228's
+// read-receipt tag ruling, and it lands here for the reason the three aad_mls v2 methods above it
+// did: a restored group has to satisfy the same interface a live one does, and the compile-time
+// assertion at the top of this block is what says so before any caller finds out.
+//
+// IT IS A FORWARDER AND NOT A REIMPLEMENTATION, which matters more here than for the other
+// delegating methods. The key is a static-static diffie-hellman over this device's own leaf
+// encryption scalar -- the octets mls.LoadGroup rebuilt out of groupStateBlob.OwnEncPriv -- and mls
+// keeps that scalar on its own side of the seam. A version of this method that did the exchange in
+// this package would need the scalar handed across, which is exactly what the ruling forbids.
+func (self *restoredHandle) PairwiseExport(label string, peer uint32, length int) ([]byte, error) {
+	return self.group.PairwiseExport(label, mls.LeafIndex(peer), length)
+}
+
 func (self *restoredHandle) SenderDataSecret() ([]byte, error) {
 	return self.group.EpochSecret(mls.EpochSecretSenderData)
 }
