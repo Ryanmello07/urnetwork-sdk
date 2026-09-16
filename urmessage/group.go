@@ -113,7 +113,22 @@ type Message struct {
 	// [Message.MessageId], [Message.Text] is empty, and a UI shows one closed placeholder
 	// rather than a line of garbage attributed to a real sender. [ContentKind.String] names the
 	// codes this registry has and prints the value of one it does not.
+	//
+	// ON A GAP IT IS THE CODE THE RECORD ARRIVED UNDER AND NOT WHAT THE RECORD IS. A malformed
+	// REPLY carries [KindReply] here and is still a gap; what a reader branches on is
+	// [Message.Gap], which is set on every gap and on nothing else. See [GapReason].
 	Kind ContentKind
+
+	// SET IFF THIS ENTRY IS A GAP: something is at this position in the conversation and this
+	// build cannot show it. Empty on every message that is a message.
+	//
+	// IT IS THE FIELD A UI BRANCHES ON, and the reason it exists is that a gap and a blank line
+	// were the same value before it. An unsupported record used to reach a caller as a [Message]
+	// with an unknown [Message.Kind] and an EMPTY [Message.Text] -- indistinguishable, without
+	// the registry in hand, from somebody sending nothing -- and a malformed one did not reach a
+	// caller at all. Spec A section 7.4's `MessageEntry.GapReason` is this value; spec C section
+	// 5.1's render table is the copy each one owes.
+	Gap GapReason
 
 	// REPLY only: the raw 32-octet message_id of the message being replied to. The quoted text
 	// never travels -- the reply renders by looking its parent up -- and the parent may be
@@ -129,6 +144,51 @@ type Message struct {
 	// holds for it whenever one arrives. Empty on a message nobody has reacted to.
 	Reactions []Reaction
 }
+
+// GapReason is WHY a position in the conversation holds a gap rather than a message: spec A
+// section 7.4's closed set, which this package renders into [Message.Gap].
+//
+// A GAP IS A FIRST-CLASS ENTRY AND NOT AN ERROR, which is the whole reason it is a field and not a
+// refusal: something IS at this record id, this build cannot show it, and "a messenger that silently
+// drops what it cannot read is a messenger that cannot be trusted to have shown you everything"
+// (spec A section 7.4, verbatim). The position is kept, the message_id is kept, and the record after
+// it arrives.
+//
+// THE SET IS CLOSED AT SEVEN AND THIS BUILD PRODUCES TWO. The two below are the two the receive walk
+// can reach. THE OTHER FIVE ARE DELIBERATELY NOT DECLARED HERE -- a constant with no producer is a
+// constant the next reader assumes is reachable, and each of these is waiting on something this
+// package does not have:
+//
+//   - "expired"          a DESTROYED disappearing key. Needs the disappearing-message timer and
+//     `DeleteGroupStateBefore`, and EPH(1..5) is not a class this walk opens.
+//   - "out_of_window"    the read-key window closed on a device that was offline across too many
+//     epochs. Needs multi-epoch key history, which this build does not keep.
+//   - "not_a_member_yet" a record from before this device joined. The alpha's groups are two
+//     members added in one commit, so there is no such record.
+//   - "withheld"         section 9.6's attestation refusal. The deployed server signs nothing;
+//     see [Group.Receive] and S2-27.
+//   - "no_wrap"          this device has no key wrap for the record's class yet. The wrap ceremony
+//     is section 6.1's and no walk here reaches its absence as a gap.
+//
+// A sixth value for "the server erased the body" is OWED and does not exist in the closed set yet:
+// that is ledger item 220, and a pruned DURABLE body refuses at the body-hash compare BEFORE either
+// AEAD, so it is a pre-open refusal and is a fail() here today. It is deliberately not invented.
+type GapReason string
+
+const (
+	// THE SENDER BROKE A RULE THAT IS ALREADY WRITTEN: [ContentMalformed]. It is NOT
+	// [GapUnsupported], and the distinction is load-bearing in both directions -- a build that
+	// called a future kind "malformed" would ACCUSE CORRECT SENDERS, and one that called a
+	// genuinely malformed body "unsupported" would tell a user to upgrade out of a bug that no
+	// upgrade fixes. Spec C section 5.1's copy for it carries NO upgrade affordance for exactly
+	// that reason.
+	GapMalformed GapReason = "malformed"
+
+	// A CODE THIS BUILD DOES NOT KNOW, on a class its range allows: [ContentUnsupported]. The
+	// record opened and its signature verified, so the sender did nothing wrong -- it is a newer
+	// feature, and spec C section 5.1's copy for it is the one that offers the upgrade.
+	GapUnsupported GapReason = "unsupported"
+)
 
 // Reaction is one emoji standing on one message, from one member.
 //
@@ -266,6 +326,25 @@ type Stats struct {
 
 	// Records skipped because they are not a class this build opens.
 	SkippedClass uint64
+
+	// Records that OPENED and became a GAP rather than a message: the two values of [GapReason]
+	// this build produces, counted apart because they are two different sentences about the
+	// group and only one of them is anybody's fault.
+	//
+	// GapMalformed IS THE LOUD HALF OF LEDGER ITEM 224 AND IT IS WHY IT IS A COUNTER AT ALL.
+	// Before it, a malformed body was a fail(): the cursor was held, the record was re-fetched
+	// [maxRecordAttempts] times and then named by [ErrRecordAbandoned] -- three retries spent on
+	// a disagreement about GRAMMAR, which no re-fetch can repair, and a loud error at the end of
+	// them. The retries are gone and the record now resolves once, so this counter and
+	// [Message.Gap] are the whole of what is left to be loud WITH: [Stats.FailedOpen] does not
+	// move, [Stats.Unopened] does not move, and [Group.Receive] answers a nil error. A caller
+	// that watches only the error no longer learns that a record could not be read, and that is
+	// the cost of the repair, paid deliberately and written down here rather than discovered.
+	//
+	// GapUnsupported is not a fault in either direction: it is a member running a newer build.
+	// A number here that keeps growing is this build getting old.
+	GapMalformed   uint64
+	GapUnsupported uint64
 
 	// ATTEMPTS to open a record from a member of this group that did not open -- one per
 	// fetch, so a record retried [maxRecordAttempts] times moves this three times. It counts
@@ -1046,6 +1125,13 @@ func (self *Group) sendableLocked() error {
 // somebody deletes the kind check below: this group's [Group.byMessage] holds only records that
 // BECAME a [Message], and a reaction, a tombstone and a COVER become none. The clause is what makes
 // the rule survive a later kind that does become a message and still may not be reacted to.
+//
+// AND A GAP IS REFUSED BEFORE THE KIND IS READ AT ALL, for the same reason [Group.deliverLocked]
+// checks it first: a gap's [Message.Kind] is the code the record ARRIVED under, so a malformed REPLY
+// body carries [KindReply] and would fall straight through the switch below into "yes, react to
+// this" -- a reaction sealed against a record this device could not read, quoting an id whose
+// content nobody in the group can agree on. T-a's own words are that a target must be a stored
+// CONTENT message, and a gap is by definition the absence of one.
 func (self *Group) reactableLocked(target []byte) (*Message, error) {
 	if len(target) != MessageIdBytes {
 		return nil, fmt.Errorf("%w: a message_id is %d octets and this one is %d",
@@ -1054,6 +1140,10 @@ func (self *Group) reactableLocked(target []byte) (*Message, error) {
 	held, found := self.byMessage[messageKeyOf(target)]
 	if !found {
 		return nil, fmt.Errorf("%w: %x", ErrNoSuchMessage, target)
+	}
+	if held.Gap != "" {
+		return nil, fmt.Errorf("%w: message %x is a %s gap, which is a record this build could not show",
+			ErrNoSuchMessage, target, held.Gap)
 	}
 	switch held.Kind {
 	case KindText, KindReply:
@@ -1141,6 +1231,10 @@ func (self *Group) sendContentLocked(ctx context.Context, plaintext []byte, what
 		return nil, err
 	}
 	sealed.recordId = recordId
+	// NO GAP IS REACHABLE HERE AND IT IS A PRECONDITION RATHER THAN A CHOICE: this method refuses
+	// every verdict but [ContentParsed] at its first line, BEFORE the seal, so a record this device
+	// sends is by construction one it can read back. A send path that could produce a gap would be a
+	// device showing itself a placeholder for a message it had just written.
 	sent := newMessage(entry, recordId, record.Header.SenderHandle[:], true, sentAtMs, messageId[:])
 	self.deliverLocked(sent, entry)
 	// THIS IS A SEND AND NOT A WALK, SO THE REBUILD CANNOT WAIT FOR ONE. A reaction or a tombstone
@@ -1915,30 +2009,69 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 		// THE THREE NON-PARSED ANSWERS ARE THREE DIFFERENT ACCOUNTINGS and that is the whole
 		// reason the codec answers a verdict rather than an error:
 		//
-		//   - MALFORMED is a fail(), which is this walk's existing refusal channel: the record is
-		//     re-fetched, and after [maxRecordAttempts] it is named by [ErrRecordAbandoned] and
-		//     counted in [Stats.Unopened]. It is NOT the right long-term answer -- spec A §7.4's
-		//     closed GapReason set has a "malformed" value and sdk has no gap entry to render it
-		//     into, so a malformed body is currently reported as a hole rather than as a bad
-		//     record, and the retries before the hole are spent on something a retry cannot
-		//     repair. What it is NOT is silent, and that is why it is this way rather than
-		//     resolved past while somebody designs the gap entry.
+		//   - MALFORMED and UNSUPPORTED are both GAPS, and they are gaps with two different
+		//     [GapReason]s. Neither is a fail(). Both are handled BELOW, with the parsed case,
+		//     because a gap is a first-class ENTRY: it keeps its position and its message_id, it
+		//     does not count toward [ErrRecordAbandoned], and it becomes one closed placeholder.
 		//   - DROPPED is a transient on EPH(0): nothing was persisted, so there is nothing to
 		//     render and nothing to be a hole. UNREACHABLE FROM THIS WALK TODAY -- the class skip
 		//     above resolves every non-DURABLE record before this point -- and it is here because
 		//     the codec can answer it and a reader of this switch should not have to prove that.
-		//   - UNSUPPORTED is the unknown-kind rule and is handled BELOW, with the parsed case,
-		//     because it is not a failure: the record keeps its position and its message_id, it
-		//     does not count toward [ErrRecordAbandoned], and it becomes one closed placeholder.
-		entry, verdict, why := ParseContent(bodyPlain, header.RetentionClass, header.EphBucket)
-		switch verdict {
-		case ContentMalformed:
-			fail(recordId, fmt.Errorf("%w: record %d: %w", ErrRecordOpen, recordId, why))
-			continue
-		case ContentDropped:
+		//     IT IS THE ONE VERDICT THIS CHANGE DID NOT TOUCH.
+		//
+		// WHY MALFORMED IS NO LONGER A fail(), WHICH IS LEDGER ITEM 224 AND IS A BOUNDARY RATHER
+		// THAN A PREFERENCE. Everything above this line is a refusal that a RE-FETCH CAN REPAIR:
+		// a record that did not parse, a sender_handle that is no leaf of this epoch, a ladder
+		// that would not install, an AEAD that would not open, a head this build did not write.
+		// Every refusal raised from HERE DOWN is raised AFTER OpenRecord returned -- so the key
+		// schedule and the ratchet are already satisfied AND COMMITTED, the signature verified,
+		// and what is left in dispute is GRAMMAR. Asking the server for the same octets a second
+		// time cannot change the answer, and the old path spent [maxRecordAttempts] fetches
+		// finding that out before naming the record in [ErrRecordAbandoned].
+		//
+		// WHAT THAT COSTS AND WHAT IT BUYS, both stated because the trade is real. It buys the
+		// record its POSITION: a malformed body used to hold the cursor for three Receives and
+		// then become a hole this build had given up on, and it is now one visible gap the walk
+		// moves past. It costs LOUDNESS: [Group.Receive] answered ErrContentMalformed through
+		// ErrRecordOpen, and then ErrRecordAbandoned, and it now answers nil. What is left to be
+		// loud with is [Stats.GapMalformed] and [Message.Gap], which is why both exist.
+		//
+		// AND WHY THE ERROR IS NOT KEPT AS WELL, which is the obvious third option and is WRONG:
+		// [Group.walkReconcilesLocked] gates the clone check on `walk.firstFailure == nil`, and
+		// the cursor is not persisted, so a restored group re-walks its whole history on every
+		// launch. A malformed record that set firstFailure would set it on EVERY launch, for
+		// ever, and that group would never reconcile -- so [Group.Send] would stay
+		// [ErrNotReconciled] permanently. One malformed record from any member would take away
+		// every restarted device's ability to send, which is a wedge handed to any member. The
+		// bound that keeps the EXISTING fail() path from doing this is abandonment, and a record
+		// that is no longer retried never reaches it. A record that opened also contributes its
+		// own stream index as clone evidence, which is what firstFailure's presence in that gate
+		// is protecting; so a gap is not evidence-poor and has no business in it.
+		//
+		// THE CODEC'S REFUSAL SENTENCE IS DISCARDED HERE AND THAT IS A NAMED LOSS. It used to
+		// reach a caller wrapped in [ErrRecordOpen], and this package has no logger to put it
+		// in; spec C §5.1's copy for a gap is one sentence with NO error code, deliberately, so
+		// putting it on the [Message] would be an error code by another name. What survives is
+		// which reason it was, in [Message.Gap] and in [Stats].
+		entry, verdict, _ := ParseContent(bodyPlain, header.RetentionClass, header.EphBucket)
+		if verdict == ContentDropped {
 			self.stats.SkippedClass += 1
 			resolve(recordId)
 			continue
+		}
+		gap := GapReason("")
+		switch verdict {
+		case ContentMalformed:
+			// THE CODEC ANSWERS NO ENTRY FOR A MALFORMED PLAINTEXT and the gap still owes a
+			// reader the code the record arrived under, so one is built from octet 0 -- and
+			// from NOTHING ELSE, because a body this build refused is a body it must not
+			// quote.
+			gap = GapMalformed
+			self.stats.GapMalformed += 1
+			entry = &Content{Kind: contentKindOf(bodyPlain)}
+		case ContentUnsupported:
+			gap = GapUnsupported
+			self.stats.GapUnsupported += 1
 		}
 		messageId, err := self.session.MessageIdOf(header)
 		if err != nil {
@@ -1961,7 +2094,12 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			self.stats.OpenedOwn += 1
 			self.noteOwnIndexLocked(walk, recordId, header.StreamIndex, header.BodyHash)
 		}
-		received := newMessage(entry, recordId, header.SenderHandle[:], mine, sentAtMs, messageId[:])
+		var received *Message
+		if gap == "" {
+			received = newMessage(entry, recordId, header.SenderHandle[:], mine, sentAtMs, messageId[:])
+		} else {
+			received = newGap(gap, entry, recordId, header.SenderHandle[:], mine, sentAtMs, messageId[:])
+		}
 		// WHAT A RECORD BECOMES IS ONE DECISION AND IT IS TAKEN IN ONE PLACE. A reaction, a
 		// tombstone and a COVER are records that add no line, and [Group.deliverLocked] is what
 		// says so -- for this walk, for the own-copy path and for [Group.Send] alike, because
@@ -2131,7 +2269,17 @@ func (self *Group) openOwnFromCopyLocked(walk *pageWalk, recordId uint64, parsed
 	sealed.recordId = recordId
 	self.stats.OpenedOwn += 1
 	self.noteOwnIndexLocked(walk, recordId, header.StreamIndex, header.BodyHash)
+	// AND THE PLACEHOLDER HALF OF THE SPLIT ABOVE IS A GAP LIKE ANY OTHER. The 32 printable first
+	// octets that answer [ContentUnsupported] reach a caller from HERE, not from the walk, and if
+	// this site alone left [Message.Gap] empty then this device's own pre-kinds line would be the one
+	// blank message in a build that has no others -- the exact failure this whole change is for,
+	// surviving at the one call site nobody was looking at. The malformed 63 never reach this line:
+	// they answered false above and are counted in [Stats.OwnWithoutCopy] by the ordinary path.
 	received := newMessage(entry, recordId, header.SenderHandle[:], true, sealed.sentAtMs, messageId[:])
+	if verdict == ContentUnsupported {
+		self.stats.GapUnsupported += 1
+		received = newGap(GapUnsupported, entry, recordId, header.SenderHandle[:], true, sealed.sentAtMs, messageId[:])
+	}
 	if self.deliverLocked(received, entry) {
 		walk.opened = append(walk.opened, received)
 	}
@@ -2175,6 +2323,29 @@ func newMessage(entry *Content, recordId uint64, senderHandle []byte, mine bool,
 	return received
 }
 
+// newGap builds the [Message] one record that OPENED and cannot be SHOWN becomes: spec A section
+// 7.4's gap entry, with the [GapReason] that says which of the two this build can produce it is.
+//
+// IT IS A SECOND CONSTRUCTOR AND NOT A SECOND WAY TO FILL A [Message]: it builds through
+// [newMessage], so every field a gap shares with a message is still filled in exactly one place, and
+// all it adds is the one field that makes it a gap. A gap built by assigning [Message.Gap] at a call
+// site would be a gap somebody can forget to mark, and [Group.deliverLocked] and
+// [Group.reactableLocked] both branch on that field -- an unmarked malformed REACTION_ADD would be
+// read as an effect on a target of thirty-two zero octets and never shown at all.
+//
+// A GAP'S TEXT AND ReplyToId ARE EMPTY BY CONSTRUCTION AND ARE NOT CLEARED HERE. Both come off the
+// entry, and the only two entries a gap is ever built from carry neither: [ContentUnsupported]
+// answers the code and the raw body and nothing else, and a malformed gap's entry is synthesised in
+// [Group.openPageLocked] from octet 0 alone. A line that cleared them would be a line no mutation
+// could kill, so there is none.
+func newGap(reason GapReason, entry *Content, recordId uint64, senderHandle []byte, mine bool,
+	sentAtMs int64, messageId []byte) *Message {
+
+	received := newMessage(entry, recordId, senderHandle, mine, sentAtMs, messageId)
+	received.Gap = reason
+	return received
+}
+
 // deliverLocked folds one opened record into this group and answers whether it became a LINE of the
 // conversation.
 //
@@ -2189,13 +2360,24 @@ func newMessage(entry *Content, recordId uint64, senderHandle []byte, mine bool,
 // IT IS ONE FUNCTION BECAUSE THREE CALLERS ASK IT. [Group.openPageLocked], [Group.openOwnFromCopyLocked]
 // and [Group.sendContentLocked] each hold a [Message] and an entry, and a rule about what a record
 // becomes that lived in three places would be three rules the day one of them grew a case.
+//
+// A GAP IS ALWAYS A LINE, AND THAT CLAUSE IS LOAD-BEARING RATHER THAN TIDY. [Message.Kind] on a gap
+// is the code the record ARRIVED under, not what the record is, and both rules below read that code:
+// a malformed REACTION_ADD body -- a target shorter than thirty-two octets, say -- carries
+// [KindReactionAdd], so without this clause effectOf would turn it into an effect standing on a
+// target of thirty-two zero octets, deliverLocked would answer false, and THE GAP WOULD NEVER BE
+// SHOWN. A malformed COVER would disappear the same way, and "discarded, never receipted" is a
+// promise about a COVER this build could READ. A gap that is silent is the one thing a gap may not
+// be, and the sender chooses the octets that decide which of these two rules it would have hit.
 func (self *Group) deliverLocked(received *Message, entry *Content) bool {
-	if effect, isEffect := effectOf(received, entry); isEffect {
-		self.noteEffectLocked(effect)
-		return false
-	}
-	if received.Kind == KindCover {
-		return false
+	if received.Gap == "" {
+		if effect, isEffect := effectOf(received, entry); isEffect {
+			self.noteEffectLocked(effect)
+			return false
+		}
+		if received.Kind == KindCover {
+			return false
+		}
 	}
 	self.log = append(self.log, received)
 	key := messageKeyOf(received.MessageId)

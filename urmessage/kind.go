@@ -187,16 +187,17 @@ const (
 
 	// The SENDER broke a rule the code alone decides: a body too short for its layout, trailing
 	// octets after a layout with no tail, an empty required tail, a code of 0x00, or a code
-	// outside its range's classes (rule R-d). Spec A section 7.4's "malformed" gap is the value
-	// this owes and sdk has no gap entry to render it into; see [Group.openPageLocked] for what
-	// the walk does with it today.
+	// outside its range's classes (rule R-d). It becomes a [GapMalformed] gap in the receive
+	// walk: RESOLVED ONCE and never retried, because every refusal raised after OpenRecord
+	// returns is a disagreement about GRAMMAR and the record already opened. See
+	// [Group.openPageLocked].
 	ContentMalformed
 
 	// A CODE THIS BUILD DOES NOT KNOW, on a class its range allows. The record keeps its
 	// position and its message_id, it is NOT a failure, it does not count toward
 	// [ErrRecordAbandoned], it renders as one closed placeholder, and IT IS NEVER PARSED AS ANY
-	// KNOWN KIND. A "Kind unsupported" value in spec A section 7.4's closed set is owner choice
-	// 11 and is owed; [Message.Kind] carries the code itself in the meantime.
+	// KNOWN KIND. It becomes a [GapUnsupported] gap in the receive walk, which is spec A section
+	// 7.4's closed-set value for it; [Message.Kind] carries the code that arrived beside it.
 	ContentUnsupported
 
 	// An unknown code on EPH(0): dropped silently. Nothing was persisted, so there is no history
@@ -270,7 +271,7 @@ func ParseContent(plaintext []byte, retentionClass message.RetentionClass, ephBu
 		return nil, ContentMalformed, fmt.Errorf("%w: the application plaintext is empty, so it carries no kind",
 			ErrContentMalformed)
 	}
-	kind := ContentKind(plaintext[0])
+	kind := contentKindOf(plaintext)
 
 	// THE RANGE RULE, FIRST AMONG THE POST-OPEN CHECKS, for known and unknown codes alike.
 	switch spanOf(kind) {
@@ -323,6 +324,23 @@ func ParseContent(plaintext []byte, retentionClass message.RetentionClass, ephBu
 	entry.Kind = kind
 	entry.Body = body
 	return entry, ContentParsed, nil
+}
+
+// contentKindOf is the code at octet 0, and [KindReserved] for a plaintext that has no octet 0.
+//
+// IT IS ONE READER OF OCTET 0 AND NOT TWO. [ParseContent] reads it to dispatch; the receive walk
+// reads it again to say what code a MALFORMED record arrived under, because the parse answers no
+// entry for one and a gap still owes a reader the code it was refused on.
+//
+// AN EMPTY PLAINTEXT ANSWERS [KindReserved] AND THAT IS NOT A SUBSTITUTION. 0x00 is the code that is
+// refused on every retention class, always, and the registry above already rules that "the plaintext
+// is empty" and "the plaintext says nothing" are ONE refusal rather than two -- so the code that
+// means "no grammar this build will read" is exactly what was concluded about an empty one.
+func contentKindOf(plaintext []byte) ContentKind {
+	if len(plaintext) == 0 {
+		return KindReserved
+	}
+	return ContentKind(plaintext[0])
 }
 
 // contentParsers is the layouts this build reads. A code in the registry and NOT in this table is a

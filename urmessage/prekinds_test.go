@@ -77,6 +77,18 @@ func TestAPreKindsCopyIsReadAsAKindAndIsNotShownAsText(t *testing.T) {
 			// AND WHAT IS SHOWN IS A PLACEHOLDER AND NOT THE LINE. The whole point of
 			// headVersion 0x02 was that a body this build cannot parse must never be
 			// rendered as text attributed to a real sender.
+			//
+			// IT CARRIES [GapUnsupported] AND THIS IS THE ONLY CASE THAT SAYS SO. The
+			// walk's unsupported records are gaps because [Group.openPageLocked] marks
+			// them; these reach a caller from [Group.openOwnFromCopyLocked] instead,
+			// which is a SECOND site, and a build that marked only the first would leave
+			// this device's own pre-kinds line as the one blank entry in a build that has
+			// no others -- exactly the "a UI cannot tell a newer feature from a blank
+			// message" failure, surviving at the call site nobody was looking at.
+			if received.Gap != GapUnsupported {
+				t.Errorf("%q came back as a %q entry, want the %q gap every other unknown code becomes",
+					one.text, received.Gap, GapUnsupported)
+			}
 			if received.Text != "" {
 				t.Errorf("%q came back carrying Text %q; a code this build does not know has no text",
 					one.text, received.Text)

@@ -185,7 +185,10 @@ func (self *kindWalk) held(messageId []byte) *Message {
 //     answers a nil error;
 //   - it keeps its POSITION: the cursor resolves past it, and the records after it are delivered;
 //   - it keeps its message_id, which is what a later kind naming it would quote;
-//   - it renders as one closed PLACEHOLDER: a [Message] with the code and no text;
+//   - it renders as one closed PLACEHOLDER: a [Message] carrying [GapUnsupported], the code that
+//     arrived, and no text. The reason is what makes it a placeholder rather than a blank line: a
+//     UI holding an entry with an unknown Kind and an empty Text cannot tell a newer feature from
+//     somebody sending nothing, and that was the whole of ledger item 221's sdk half;
 //   - AND IT IS NEVER PARSED AS A KNOWN KIND, which is why the body below would be a perfectly
 //     good REPLY if anything guessed.
 //
@@ -216,6 +219,14 @@ func TestAnUnknownKindKeepsItsPositionAndIsNotAFailure(t *testing.T) {
 	}
 
 	placeholder := opened[1]
+	if placeholder.Gap != GapUnsupported {
+		t.Errorf("the placeholder carries gap reason %q, want %q: without it a UI cannot tell a newer feature from a blank message",
+			placeholder.Gap, GapUnsupported)
+	}
+	if stats.GapUnsupported != 1 || stats.GapMalformed != 0 {
+		t.Errorf("GapUnsupported %d and GapMalformed %d over one unknown kind; a future kind is not malformed",
+			stats.GapUnsupported, stats.GapMalformed)
+	}
 	if placeholder.Kind != KindEdit {
 		t.Errorf("the placeholder carries kind %s, want the code that arrived", placeholder.Kind)
 	}
@@ -238,54 +249,265 @@ func TestAnUnknownKindKeepsItsPositionAndIsNotAFailure(t *testing.T) {
 	}
 }
 
-// A MALFORMED BODY IS A REFUSAL, AND THE REFUSAL IS THE WALK'S EXISTING ONE.
+// A MALFORMED BODY IS A GAP, RESOLVED ONCE, AND IS NEVER RETRIED. THIS IS LEDGER ITEM 224.
 //
-// It is a fail(): it moves [Stats.FailedOpen], it holds the cursor back so the next fetch asks for
-// the record again, and it names [ErrContentMalformed] through [ErrRecordOpen] rather than being
-// resolved past in silence. That is NOT the answer this owes forever -- spec A §7.4's closed
-// GapReason set has a "malformed" value and sdk has no gap entry to render it into -- and it is
-// the answer that cannot lose a record while somebody designs one.
-func TestAMalformedBodyIsARefusalThatHoldsTheCursor(t *testing.T) {
+// THE CASE THIS REPLACES asserted the opposite and is worth stating, because the two properties are
+// mutually exclusive and only one of them can be the contract. It was
+// TestAMalformedBodyIsARefusalThatHoldsTheCursor, and it asserted a fail(): FailedOpen at 1, the
+// cursor held at the record BEFORE the malformed one, [ErrContentMalformed] through [ErrRecordOpen]
+// on the way back, then [maxRecordAttempts] re-deliveries ending in [ErrRecordAbandoned] with
+// Unopened at 1. Every one of those is now false, deliberately.
+//
+// THE BOUNDARY IS STRUCTURAL AND IT IS WHY. A malformed body is raised AFTER OpenRecord returned, so
+// the AEADs opened, the signature verified and the ratchet generation is already spent. What is left
+// in dispute is grammar, and the server has no other octets to hand over -- so the three re-fetches
+// the old path spent could not have changed the answer, and the loud failure at the end of them was
+// a hole where a readable gap belongs.
+//
+// AND THE LOUDNESS IS WHAT THIS CASE GUARDS, because that is what the repair spends. [Group.Receive]
+// now answers nil for this record, so a caller watching only the error learns nothing. Two things
+// are left to be loud with and BOTH are asserted here: [Stats.GapMalformed] moves, and the entry
+// itself comes back carrying [GapMalformed]. Delete either and a malformed record becomes silent,
+// which is the regression this repair must not be.
+func TestAMalformedBodyIsAGapResolvedOnceAndIsNotRetried(t *testing.T) {
 	world := newKindWalk(t)
 
 	good := world.seal(mustEncodeText(t, "a line"))
 	// a TEXT whose required tail is empty: one octet of plaintext, and R-d's third clause
 	malformed := world.seal([]byte{byte(KindText)})
+	after := world.seal(mustEncodeText(t, "a line after"))
 
-	opened, err := world.deliver(good, malformed)
-	if !errors.Is(err, ErrContentMalformed) {
-		t.Errorf("the walk answered %v, want a refusal carrying ErrContentMalformed", err)
+	opened, err := world.deliver(good, malformed, after)
+	if err != nil {
+		t.Fatalf("the walk answered %v, and a malformed body is a gap rather than a failure", err)
 	}
-	if !errors.Is(err, ErrRecordOpen) {
-		t.Errorf("the walk answered %v, want it carried through the walk's own ErrRecordOpen", err)
+	if len(opened) != 3 {
+		t.Fatalf("the walk delivered %d message(s) over three records; the gap is an entry and not a silence",
+			len(opened))
 	}
-	if len(opened) != 1 {
-		t.Fatalf("the walk delivered %d message(s), want only the good one", len(opened))
+
+	// ── it is LOUD: the two carriers the error used to be ───────────────────────────────────
+	gap := opened[1]
+	if gap.Gap != GapMalformed {
+		t.Errorf("the gap carries reason %q, want %q", gap.Gap, GapMalformed)
 	}
-	if world.bob.stats.FailedOpen != 1 {
-		t.Errorf("FailedOpen is %d, want 1", world.bob.stats.FailedOpen)
+	if world.bob.stats.GapMalformed != 1 {
+		t.Errorf("Stats.GapMalformed is %d, want 1; with the error gone this counter is half of what is left to be loud with",
+			world.bob.stats.GapMalformed)
 	}
-	if world.bob.cursor != good.recordId {
-		t.Errorf("the cursor resolved to %d and the malformed record is %d; a record the next fetch will not ask for again is a record lost in silence",
-			world.bob.cursor, malformed.recordId)
+	if world.bob.stats.GapUnsupported != 0 {
+		t.Errorf("a malformed body moved Stats.GapUnsupported to %d; the two reasons are counted apart because they are two different sentences",
+			world.bob.stats.GapUnsupported)
 	}
-	// AND IT IS GIVEN UP ON AFTER THE BOUND, which is the existing contract and is what keeps a
-	// body no retry can repair from being re-fetched for ever.
-	for attempt := 2; attempt <= maxRecordAttempts; attempt += 1 {
-		_, err = world.deliver(malformed)
-		if err == nil {
-			t.Fatalf("attempt %d of the malformed record answered a nil error", attempt)
+	if gap.Text != "" {
+		t.Errorf("a body this build refused was quoted back as text %q", gap.Text)
+	}
+	if !bytes.Equal(gap.MessageId, malformed.messageId) {
+		t.Errorf("the gap's message_id is %x and the record's is %x", gap.MessageId, malformed.messageId)
+	}
+	if gap.RecordId != malformed.recordId {
+		t.Errorf("the gap is record %d and the record is %d", gap.RecordId, malformed.recordId)
+	}
+
+	// ── and it is NOT a fail(): no retry, no abandonment, the cursor moves ───────────────────
+	if world.bob.stats.FailedOpen != 0 || world.bob.stats.Unopened != 0 {
+		t.Errorf("a malformed body moved FailedOpen to %d and Unopened to %d, and a record that OPENED is neither",
+			world.bob.stats.FailedOpen, world.bob.stats.Unopened)
+	}
+	if world.bob.cursor != after.recordId {
+		t.Errorf("the cursor resolved to %d and the page ended at record %d, so the malformed record held it back",
+			world.bob.cursor, after.recordId)
+	}
+	if attempts := world.bob.attempts[malformed.recordId]; attempts != 0 {
+		t.Errorf("the malformed record was counted as %d attempt(s); a disagreement about grammar has nothing to retry",
+			attempts)
+	}
+	if opened[0].Text != "a line" || opened[2].Text != "a line after" {
+		t.Errorf("the lines around the gap came back as %q and %q", opened[0].Text, opened[2].Text)
+	}
+
+	// AND NO LATER WALK ASKS FOR IT AGAIN. Under the old contract this loop was the abandonment
+	// bound and each turn of it answered an error; the record is now already resolved, so a rewind
+	// that passes back over it skips it as one this group holds.
+	for attempt := 2; attempt <= maxRecordAttempts+1; attempt += 1 {
+		again, err := world.deliver(malformed)
+		if err != nil {
+			t.Fatalf("re-delivery %d of the malformed record answered %v", attempt, err)
+		}
+		if len(again) != 0 {
+			t.Fatalf("re-delivery %d of the malformed record delivered it a second time", attempt)
 		}
 	}
-	if !errors.Is(err, ErrRecordAbandoned) {
-		t.Errorf("after %d attempts the malformed record answered %v, want ErrRecordAbandoned", maxRecordAttempts, err)
+	if world.bob.stats.GapMalformed != 1 {
+		t.Errorf("Stats.GapMalformed is %d after %d re-deliveries, want 1: one record is one gap",
+			world.bob.stats.GapMalformed, maxRecordAttempts)
 	}
-	if world.bob.stats.Unopened != 1 {
-		t.Errorf("Unopened is %d after the bound, want 1", world.bob.stats.Unopened)
+	if world.bob.stats.Unopened != 0 {
+		t.Errorf("Unopened is %d, and past the old bound there is now nothing to abandon", world.bob.stats.Unopened)
 	}
-	if world.bob.cursor != malformed.recordId {
-		t.Errorf("the abandoned record left the cursor at %d, and a record given up on must not block it for ever",
-			world.bob.cursor)
+}
+
+// THE TWO GAP REASONS ARE NOT INTERCHANGEABLE, AND THE DISTINCTION IS LOAD-BEARING IN BOTH
+// DIRECTIONS.
+//
+// Spec A §7.4 states it as a rule about what a user is TOLD, which is why a build may not pick
+// either value and be done: a build that reported a future kind as "malformed" would ACCUSE CORRECT
+// SENDERS, and one that reported a genuinely malformed body as "unsupported" would tell a user to
+// upgrade out of a bug that no upgrade fixes. Spec C §5.1 carries the two sentences and only the
+// unsupported one has an upgrade affordance.
+//
+// ONE PAGE, BOTH RECORDS, SO NEITHER VALUE CAN BE A CONSTANT. A build that hard-coded either reason
+// passes every case that carries one record and fails this one.
+func TestAFutureKindAndABrokenBodyAreTwoDifferentGaps(t *testing.T) {
+	world := newKindWalk(t)
+	target := aTarget(0x77)
+
+	// 0x08 is EDIT: in the registry, no grammar in this build, legal on a stored class
+	future := world.seal(append(append([]byte{byte(KindEdit)}, target...), "a body a later build reads"...))
+	// a REACTION_ADD whose target is one octet short: a rule that is already written, broken
+	broken := world.seal(append([]byte{byte(KindReactionAdd)}, target[:MessageIdBytes-1]...))
+
+	opened, err := world.deliver(future, broken)
+	if err != nil {
+		t.Fatalf("the walk answered %v", err)
+	}
+	if len(opened) != 2 {
+		t.Fatalf("two gaps delivered %d entr(ies)", len(opened))
+	}
+	if opened[0].Gap != GapUnsupported {
+		t.Errorf("a kind this build does not know came back as %q, and a future kind is not malformed",
+			opened[0].Gap)
+	}
+	if opened[1].Gap != GapMalformed {
+		t.Errorf("a body that broke a rule already written came back as %q, which would tell a user to upgrade out of a bug no upgrade fixes",
+			opened[1].Gap)
+	}
+	stats := world.bob.stats
+	if stats.GapUnsupported != 1 || stats.GapMalformed != 1 {
+		t.Errorf("GapUnsupported %d and GapMalformed %d over one of each", stats.GapUnsupported, stats.GapMalformed)
+	}
+}
+
+// A MALFORMED RECORD WHOSE CODE IS AN EFFECT'S IS STILL A VISIBLE GAP.
+//
+// THIS IS THE CLAUSE A READER WOULD DELETE AS TIDY-UP. [Message.Kind] on a gap is the code the
+// record ARRIVED under and not what the record is, so a REACTION_ADD with a short target carries
+// [KindReactionAdd] -- and the sender chooses those octets. Without the gap check at the head of
+// [Group.deliverLocked], effectOf reads it as an effect standing on a target of thirty-two zero
+// octets, deliverLocked answers false, and the gap is never shown: a record any member can make
+// disappear from any other member's screen by sending a broken reaction body.
+//
+// The COVER arm is the same hole through the other rule: a malformed COVER would be swallowed by
+// "a COVER adds no line", which is a promise about a COVER this build could read.
+func TestAMalformedEffectAndAMalformedCoverAreGapsAndNotSilences(t *testing.T) {
+	world := newKindWalk(t)
+	target := aTarget(0x88)
+
+	shortTarget := world.seal(append([]byte{byte(KindReactionAdd)}, target[:MessageIdBytes-1]...))
+	tombstoneWithATail := world.seal(append(append([]byte{byte(KindTombstone)}, target...), 0x00))
+	fatCover := world.seal([]byte{byte(KindCover), 0x00})
+
+	opened, err := world.deliver(shortTarget, tombstoneWithATail, fatCover)
+	if err != nil {
+		t.Fatalf("the walk answered %v", err)
+	}
+	if len(opened) != 3 {
+		kinds := []ContentKind{}
+		for _, one := range opened {
+			kinds = append(kinds, one.Kind)
+		}
+		t.Fatalf("three malformed records whose codes are effect and cover codes delivered %d entr(ies): %v; a gap that is swallowed is a record made to vanish",
+			len(opened), kinds)
+	}
+	for index, one := range opened {
+		if one.Gap != GapMalformed {
+			t.Errorf("entry %d carries reason %q, want %q", index, one.Gap, GapMalformed)
+		}
+	}
+	if world.bob.stats.GapMalformed != 3 {
+		t.Errorf("Stats.GapMalformed is %d over three malformed records", world.bob.stats.GapMalformed)
+	}
+	// AND NONE OF THEM LANDED AS AN EFFECT. effectsOn is keyed by target, and a gap read as an
+	// effect would be held under thirty-two zero octets.
+	if held := world.bob.effectsOn[messageKeyOf(make([]byte, MessageIdBytes))]; len(held) != 0 {
+		t.Errorf("%d malformed record(s) were held as effects on a target of zero octets", len(held))
+	}
+}
+
+// A GAP REPORTS THE CODE THE RECORD ARRIVED UNDER, AND 0x00 WHEN IT ARRIVED UNDER NONE.
+//
+// The codec answers NO entry for a malformed plaintext, so the walk builds one from octet 0 -- and
+// the two arms of that are separately wrong-able. A gap that reported no code at all would leave a
+// caller with "something is here" and nothing else; a gap that reported a code for a plaintext with
+// no octet 0 would be reporting a code nobody sent.
+//
+// AN EMPTY APPLICATION PLAINTEXT ANSWERS [KindReserved] AND THAT IS NOT A SUBSTITUTION. 0x00 is the
+// code refused on every retention class always, and kind.go's registry already rules that "the
+// plaintext is empty" and "the plaintext says nothing" are ONE refusal rather than two -- so 0x00 is
+// exactly what was concluded. IT IS REACHABLE: an empty plaintext seals and fetches like any other,
+// measured here rather than assumed.
+func TestAGapReportsTheCodeItArrivedUnderAndZeroWhenThereWasNone(t *testing.T) {
+	world := newKindWalk(t)
+
+	empty := world.seal([]byte{})
+	shortText := world.seal([]byte{byte(KindText)})
+
+	opened, err := world.deliver(empty, shortText)
+	if err != nil {
+		t.Fatalf("the walk answered %v", err)
+	}
+	if len(opened) != 2 {
+		t.Fatalf("two malformed records delivered %d entr(ies)", len(opened))
+	}
+	if opened[0].Gap != GapMalformed || opened[0].Kind != KindReserved {
+		t.Errorf("an EMPTY application plaintext came back as a %q gap of kind %s, want a %q gap of %s",
+			opened[0].Gap, opened[0].Kind, GapMalformed, KindReserved)
+	}
+	if opened[1].Gap != GapMalformed || opened[1].Kind != KindText {
+		t.Errorf("a TEXT with an empty tail came back as a %q gap of kind %s, want a %q gap of %s: a gap says what arrived",
+			opened[1].Gap, opened[1].Kind, GapMalformed, KindText)
+	}
+	if world.bob.stats.GapMalformed != 2 {
+		t.Errorf("Stats.GapMalformed is %d over two malformed records", world.bob.stats.GapMalformed)
+	}
+}
+
+// A GAP CANNOT BE REACTED TO OR DELETED, WHATEVER CODE IT ARRIVED UNDER.
+//
+// T-a is that a tombstone and a reaction apply to a stored CONTENT message, and a gap is by
+// definition the absence of one. The clause is load-bearing for the same reason the one in
+// deliverLocked is: a malformed REPLY body carries [KindReply], which is a kind the switch in
+// reactableLocked ALLOWS, so without the gap check a member could seal a reaction against a record
+// this device could not read -- quoting a message_id whose content no two members can agree on.
+func TestAGapIsNotReactableWhateverCodeItArrivedUnder(t *testing.T) {
+	world := newKindWalk(t)
+	target := aTarget(0x66)
+
+	// a REPLY with a whole reply_to and an empty text: malformed, and its code is KindReply
+	brokenReply := world.seal(append([]byte{byte(KindReply)}, target...))
+	line := world.seal(mustEncodeText(t, "a line that is reactable"))
+
+	opened, err := world.deliver(brokenReply, line)
+	if err != nil {
+		t.Fatalf("the walk answered %v", err)
+	}
+	if len(opened) != 2 {
+		t.Fatalf("the walk delivered %d entr(ies)", len(opened))
+	}
+	if opened[0].Gap != GapMalformed || opened[0].Kind != KindReply {
+		t.Fatalf("this case needs a gap whose code is REPLY, and it is a %q gap of kind %s",
+			opened[0].Gap, opened[0].Kind)
+	}
+
+	world.bob.mutex.Lock()
+	defer world.bob.mutex.Unlock()
+	if _, err := world.bob.reactableLocked(brokenReply.messageId); !errors.Is(err, ErrNoSuchMessage) {
+		t.Errorf("a malformed REPLY gap answered %v to reactableLocked, want a refusal", err)
+	}
+	// THE CONTROL, which is what says the refusal is about the GAP and not about this group holding
+	// nothing: the TEXT beside it in the same page is reactable.
+	if _, err := world.bob.reactableLocked(line.messageId); err != nil {
+		t.Errorf("the control: the TEXT in the same page answered %v", err)
 	}
 }
 
