@@ -391,6 +391,32 @@ type Group struct {
 	// application.
 	effectsOn map[[MessageIdBytes]byte][]*contentEffect
 
+	// dirtyTargets is the messages whose effect set changed during the walk in progress and whose
+	// rebuild has NOT happened yet. It is drained by [Group.rebuildDirtyLocked], once, where the
+	// walk commits.
+	//
+	// IT EXISTS BECAUSE A REBUILD PER EFFECT IS A CUBE. Every arriving effect used to call
+	// [Group.reapplyLocked] on its target, so n effects on ONE message cost n rebuilds of n
+	// effects, and the ADD arm's dedupe scanned the reactions it had already appended -- n from the
+	// walk, n from the rebuild, n from the scan. Measured on the real codec before this set
+	// existed: 4,000 REACTION_ADD records on one message cost 8,087,950 mallocs and 41 seconds on
+	// every OTHER member's client, growing as n^3 in time and n^2 in allocations (4x per doubling,
+	// exactly), and the victim pays it ON EVERY LAUNCH because the cursor is not persisted. The
+	// CONTROL that localises it: n effects over n DIFFERENT targets was already LINEAR, so the cost
+	// was never the walk.
+	//
+	// WHAT IT DOES NOT CHANGE, AND THIS IS THE WHOLE OF WHY IT IS SAFE. The rebuild still happens,
+	// still from the full sorted effect set, so [Group.reapplyLocked]'s rebuild-not-accumulate
+	// property is untouched. The only new state is a target that is stale PART-WAY THROUGH A WALK,
+	// and no caller outside this file can observe that: [Group.Receive] holds [Group.mutex] across
+	// every page and across the commit, and [Group.Messages] takes the same mutex.
+	//
+	// THE TWO PLACES THAT NEED AN EFFECT'S ANSWER IMMEDIATELY DO NOT GO THROUGH THIS SET, and both
+	// are outside a walk or are the walk's own repair: [Group.sendContentLocked] drains it before
+	// it returns the message it just sealed, and [Group.deliverLocked] rebuilds a target directly
+	// at the moment the target itself arrives.
+	dirtyTargets map[[MessageIdBytes]byte]struct{}
+
 	// ── one identity, two devices ────────────────────────────────────────────────────────
 	//
 	// ownIndices is every §5.6 stream index this group has accounted for as its own, AND THE
@@ -1117,6 +1143,10 @@ func (self *Group) sendContentLocked(ctx context.Context, plaintext []byte, what
 	sealed.recordId = recordId
 	sent := newMessage(entry, recordId, record.Header.SenderHandle[:], true, sentAtMs, messageId[:])
 	self.deliverLocked(sent, entry)
+	// THIS IS A SEND AND NOT A WALK, SO THE REBUILD CANNOT WAIT FOR ONE. A reaction or a tombstone
+	// this device has just sealed is one the caller is about to read back off [Group.Messages], and
+	// there is no [Group.commitWalkLocked] between here and that read.
+	self.rebuildDirtyLocked()
 	self.delivered[recordId] = true
 	return sent, nil
 }
@@ -1602,6 +1632,10 @@ type pageWalk struct {
 // not it is the value returned.
 func (self *Group) commitWalkLocked(walk *pageWalk) error {
 	self.cursor = walk.resolvedTo
+	// AND THE EFFECTS THIS WALK NOTED ARE REBUILT HERE, ONCE PER TARGET. Every [Group.Receive] exit
+	// runs through this function, including the ones that return an error, so a walk that ended
+	// badly still leaves the targets it touched consistent with the effects it recorded.
+	self.rebuildDirtyLocked()
 	if self.walkReconcilesLocked(walk) {
 		// THE RECONCILIATION. It runs once per restored group, on the first walk of this
 		// group's history that was COMPLETE AND CLEAN, and it is the half of the clone check
@@ -2054,15 +2088,37 @@ func (self *Group) openOwnFromCopyLocked(walk *pageWalk, recordId uint64, parsed
 	//
 	// A COPY THIS BUILD CANNOT READ IS NOT SHOWN AND IS NOT A SECOND KIND OF SILENCE. The one
 	// population that reaches it is a state directory written by a PRE-KINDS build, whose copies
-	// are raw text with no code: under the codec a line beginning "h" is kind 0x68, which is
-	// unassigned, so it renders as one closed placeholder under the unknown-kind rule -- the same
-	// answer every other member's build gives an unknown code, and NOT the line rendered wrong. A
-	// copy that is malformed under the codec falls through to the ordinary path instead, where it
-	// is authenticated as this device's own and counted in [Stats.OwnWithoutCopy]: a hole this
-	// device names, which is what "this build cannot read what it wrote" honestly is. The local
-	// copy has no version byte of its own to refuse on, and buying one would cost the state store's
-	// single version lever -- which every OTHER record in the directory, the device identity
-	// included, is read under.
+	// are raw text with no code, so the first octet of somebody's sentence is read as a kind.
+	//
+	// WHAT THAT COSTS, MEASURED OVER THE WHOLE FIRST-OCTET SPACE ON DURABLE AND NOT REASONED. Of
+	// the 95 printable ASCII characters, 63 ARE MALFORMED and 32 render as a placeholder:
+	//
+	//	MALFORMED   0x40..0x7E -- '@', EVERY LETTER, and [ \ ] ^ _ ` { | } ~
+	//	PLACEHOLDER 0x20..0x3F -- space, the punctuation of the first column, and the digits
+	//
+	// The 63 are malformed because 0x40..0x7F is the TRANSIENT range, which is legal on EPH(0) and
+	// on no stored class, and a transient code on DURABLE is a rule the code alone decides. THAT IS
+	// EVERY ENGLISH SENTENCE: a line beginning "h" is kind 0x68, which is 104, which is inside that
+	// range -- not an unassigned code, and not a placeholder. This comment said the opposite and
+	// said it for four reviews; the split is now a number that
+	// TestTheMeasuredSplitOfAPrintableFirstOctetOnADurableCopy re-measures.
+	//
+	// SO THE COMMON CASE IS THE FALL-THROUGH, WHICH IS THE HONEST ONE. A copy that is malformed
+	// under the codec is not shown here at all: it falls to the ordinary path, where it is
+	// authenticated as this device's own and counted in [Stats.OwnWithoutCopy] -- a hole this device
+	// NAMES, which is what "this build cannot read what it wrote" honestly is. The 32 that do render
+	// render as one closed placeholder under the unknown-kind rule, which is the same answer every
+	// other member's build gives an unknown code.
+	//
+	// AND NO OLD LINE IS EVER SILENTLY REINTERPRETED, which is the half of this that would have been
+	// the real failure. The six codes this build has a grammar for are 0x01, 0x02, 0x04, 0x05, 0x06
+	// and 0x07 -- all non-printable -- so NO printable-ASCII first character parses as a known kind
+	// AT ANY LENGTH, swept and not argued. A pre-kinds line can be a named hole or a placeholder; it
+	// cannot come back as a reply, a tombstone or a reaction.
+	//
+	// The local copy has no version byte of its own to refuse on, and buying one would cost the
+	// state store's single version lever -- which every OTHER record in the directory, the device
+	// identity included, is read under.
 	entry, verdict, _ := ParseContent(sealed.body, header.RetentionClass, header.EphBucket)
 	if verdict == ContentMalformed || verdict == ContentDropped {
 		return false, nil
@@ -2216,7 +2272,30 @@ func (self *Group) noteEffectLocked(effect *contentEffect) {
 		self.effects[effect.messageId] = effect
 		self.effectsOn[effect.target] = append(self.effectsOn[effect.target], effect)
 	}
-	self.reapplyLocked(effect.target)
+	// AND THE TARGET IS MARKED, NOT REBUILT. A rebuild here is a rebuild PER EFFECT, which is the
+	// outer factor of the cube [Group.dirtyTargets] exists to remove: n effects on one message
+	// rebuild that message n times, and each rebuild reads all n effects. The rebuild happens once
+	// per walk instead, in [Group.rebuildDirtyLocked], from the same full sorted effect set.
+	self.dirtyTargets[effect.target] = struct{}{}
+}
+
+// rebuildDirtyLocked runs the rebuild every effect noted since the last drain is owed, once per
+// target rather than once per effect, and empties the set.
+//
+// THE ORDER IT WALKS THE SET IN IS A MAP'S ORDER AND THAT IS NOT A HAZARD: one rebuild reads one
+// message's own effects and writes that message's own fields, so no two of them can see each other.
+// The order INSIDE a rebuild is server order and is decided by [effectOrder], which is the ordering
+// that is load-bearing and is held by TestEffectsAreAppliedInServerOrderAndNotArrivalOrder.
+//
+// A DIRTY TARGET THIS GROUP DOES NOT HOLD IS DROPPED FROM THE SET AND NOTHING IS LOST.
+// [Group.reapplyLocked] answers nothing for a target that has not arrived, and the effects stay
+// held under [Group.effectsOn]; the rebuild that owes them is the one [Group.deliverLocked] runs at
+// the moment the target is indexed.
+func (self *Group) rebuildDirtyLocked() {
+	for target := range self.dirtyTargets {
+		self.reapplyLocked(target)
+	}
+	clear(self.dirtyTargets)
 }
 
 // reapplyLocked rebuilds one message's effects from every effect record this group holds for it, in
@@ -2249,9 +2328,32 @@ func (self *Group) reapplyLocked(target [MessageIdBytes]byte) {
 	slices.SortStableFunc(effects, effectOrder)
 	held.Deleted = false
 	held.Reactions = nil
+	// THE DEDUPE SET IS THE REBUILD'S AND IS BUILT BESIDE THE SLICE IT MIRRORS. The ADD arm used to
+	// answer "has this reactor already reacted with this emoji" by SCANNING [Message.Reactions],
+	// which is a scan of everything the rebuild had appended so far: m reactions cost m^2 comparisons
+	// inside one rebuild, and that is the inner factor of the cube [Group.dirtyTargets] removes the
+	// outer one of. With the set, one rebuild costs the sort it already paid for and nothing more.
+	//
+	// THE KEY IS A CONCATENATED STRING AND NOT A STRUCT, DELIBERATELY: a struct with a []byte field
+	// is not comparable and cannot be a map key at all, and a string of the handle with a separator
+	// is the same equality the scan computed -- bytes.Equal on the handle AND equality on the emoji.
+	// The separator is 0x00, which no emoji tail can carry and no sender_handle ends on ambiguously,
+	// so (handle, emoji) pairs cannot collide across the join.
+	//
+	// IT IS HANDED DOWN RATHER THAN HELD ON THE GROUP because it is only ever true of ONE rebuild:
+	// the slice it mirrors is cleared two lines above, so a set that outlived this call would be a
+	// set describing reactions that no longer exist.
+	seen := make(map[string]struct{}, len(effects))
 	for _, effect := range effects {
-		effect.applyTo(held)
+		effect.applyTo(held, seen)
 	}
+}
+
+// reactionKey is the (reactor, emoji) pair [Group.reapplyLocked]'s dedupe set is keyed on, and it is
+// the SAME equality the scan it replaced computed: the raw sender_handle octets and the raw emoji
+// octets, joined by a separator neither can contain.
+func reactionKey(senderHandle []byte, emoji string) string {
+	return string(senderHandle) + "\x00" + emoji
 }
 
 // effectOrder is server order: `record_id` ascending, which is what §5.3 says decides which of two
@@ -2280,7 +2382,14 @@ func effectOrder(first *contentEffect, second *contentEffect) int {
 }
 
 // applyTo is one effect, against the message it names.
-func (self *contentEffect) applyTo(target *Message) {
+//
+// `seen` IS THE REBUILD'S DEDUPE SET AND BOTH REACTION ARMS OWE IT AN UPDATE. It mirrors
+// [Message.Reactions] exactly -- a key is added where a reaction is appended and deleted where one
+// is filtered out -- because the two are read against each other across a replay: an ADD replayed
+// AFTER a REMOVE of the same (reactor, emoji) has to land, and it only lands if the REMOVE took the
+// key out as well as the row. See [Group.reapplyLocked], which is the only caller and which owns
+// the set's lifetime.
+func (self *contentEffect) applyTo(target *Message, seen map[string]struct{}) {
 	switch self.kind {
 	case KindTombstone:
 		// T-b, THE SAME-SENDER RULE, and it is what MASTER §12.1's "a deletion cannot be
@@ -2301,11 +2410,11 @@ func (self *contentEffect) applyTo(target *Message) {
 		}
 		target.Deleted = true
 	case KindReactionAdd:
-		for _, standing := range target.Reactions {
-			if standing.Emoji == self.emoji && bytes.Equal(standing.SenderHandle, self.senderHandle) {
-				return
-			}
+		key := reactionKey(self.senderHandle, self.emoji)
+		if _, standing := seen[key]; standing {
+			return
 		}
+		seen[key] = struct{}{}
 		target.Reactions = append(target.Reactions, Reaction{
 			SenderHandle: append([]byte(nil), self.senderHandle...),
 			Emoji:        self.emoji,
@@ -2316,6 +2425,12 @@ func (self *contentEffect) applyTo(target *Message) {
 		// The reactor is the sender_handle: D7 is what would make it a person rather than a
 		// leaf, and until it is ruled a second device of one person cannot take back the
 		// first's reaction.
+		//
+		// AND IT CANCELS THE KEY AS WELL AS THE ROW. Without the delete, an ADD that sorts
+		// after this REMOVE -- which is the ordinary shape of react, un-react, react again --
+		// would find its key still standing and return without appending, and the reaction the
+		// user made last would not be shown.
+		delete(seen, reactionKey(self.senderHandle, self.emoji))
 		kept := make([]Reaction, 0, len(target.Reactions))
 		for _, standing := range target.Reactions {
 			if standing.Emoji == self.emoji && bytes.Equal(standing.SenderHandle, self.senderHandle) {
@@ -2436,6 +2551,7 @@ func (self *Group) initTables() {
 	self.byMessage = map[[MessageIdBytes]byte]*Message{}
 	self.effects = map[[MessageIdBytes]byte]*contentEffect{}
 	self.effectsOn = map[[MessageIdBytes]byte][]*contentEffect{}
+	self.dirtyTargets = map[[MessageIdBytes]byte]struct{}{}
 }
 
 // advanceOwnLadderLocked moves the receiver ladder over this device's OWN leaf up to the position

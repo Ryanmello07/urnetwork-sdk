@@ -484,11 +484,11 @@ func TestAReDeliveredEffectIsStillOneEffect(t *testing.T) {
 	effectId := aTarget(0xE2)
 	text := &Content{Kind: KindText, Text: "a line"}
 	target := newMessage(text, 10, sender, false, 0, lineId)
-	group.deliverLocked(target, text)
+	deliverOneThroughAWalk(group, target, text)
 
 	reaction := &Content{Kind: KindReactionAdd, Target: lineId, Emoji: "👍"}
-	group.deliverLocked(newMessage(reaction, 11, sender, false, 0, effectId), reaction)
-	group.deliverLocked(newMessage(reaction, 11, sender, false, 0, effectId), reaction)
+	deliverOneThroughAWalk(group, newMessage(reaction, 11, sender, false, 0, effectId), reaction)
+	deliverOneThroughAWalk(group, newMessage(reaction, 11, sender, false, 0, effectId), reaction)
 	if count := len(group.effectsOn[messageKeyOf(lineId)]); count != 1 {
 		t.Errorf("one effect record delivered twice is held %d times", count)
 	}
@@ -498,6 +498,28 @@ func TestAReDeliveredEffectIsStillOneEffect(t *testing.T) {
 }
 
 // ── the effect rules, at the unit the walk cannot reach ──────────────────────────────────────
+
+// deliverOneThroughAWalk is one record through a ONE-RECORD WALK: [Group.deliverLocked] to fold the
+// record in, then [Group.rebuildDirtyLocked] to run the rebuild the effects it noted are owed. It
+// answers what deliverLocked answers.
+//
+// IT IS TWO CALLS BECAUSE THE PRODUCTION PATH IS TWO, and it was one until the replay was measured
+// at n^3. An effect MARKS its target dirty as it lands and the rebuild happens ONCE per walk, at
+// [Group.commitWalkLocked] -- see [Group.dirtyTargets] for what a rebuild per effect cost. The cases
+// below drive deliverLocked BELOW the walk, because each needs something no session in this suite
+// can produce -- a third party's sender_handle, a record id of zero, a kind this build cannot send
+// -- so each owes itself the commit step a walk would have run for it. Nothing they assert is about
+// WHEN the rebuild happens.
+//
+// WHAT IT STILL CATCHES: delete the dirty mark in [Group.noteEffectLocked] and this helper drains an
+// empty set, so every case below goes red. Delete the drain from [Group.commitWalkLocked] instead
+// and these stay green while every walk-driven case above goes red -- which is the split that says
+// these cases are under the walk and those are through it.
+func deliverOneThroughAWalk(group *Group, received *Message, entry *Content) bool {
+	line := group.deliverLocked(received, entry)
+	group.rebuildDirtyLocked()
+	return line
+}
 
 // A TOMBSTONE FROM ANYBODY BUT THE TARGET'S OWN SENDER IS IGNORED (T-b), AND IT IS IGNORED RATHER
 // THAN REFUSED.
@@ -518,18 +540,18 @@ func TestATombstoneFromAnotherSenderIsIgnored(t *testing.T) {
 	lineId := aTarget(0xA1)
 
 	line := newMessage(&Content{Kind: KindText, Text: "a line"}, 10, mine, false, 0, lineId)
-	if !group.deliverLocked(line, &Content{Kind: KindText, Text: "a line"}) {
+	if !deliverOneThroughAWalk(group, line, &Content{Kind: KindText, Text: "a line"}) {
 		t.Fatal("a TEXT did not become a line of the conversation")
 	}
 
 	stranger := &Content{Kind: KindTombstone, Target: lineId}
-	group.deliverLocked(newMessage(stranger, 11, theirs, false, 0, aTarget(0xA2)), stranger)
+	deliverOneThroughAWalk(group, newMessage(stranger, 11, theirs, false, 0, aTarget(0xA2)), stranger)
 	if line.Deleted {
 		t.Errorf("a tombstone sealed by %x deleted a message sealed by %x", theirs, mine)
 	}
 
 	owner := &Content{Kind: KindTombstone, Target: lineId}
-	group.deliverLocked(newMessage(owner, 12, mine, false, 0, aTarget(0xA3)), owner)
+	deliverOneThroughAWalk(group, newMessage(owner, 12, mine, false, 0, aTarget(0xA3)), owner)
 	if !line.Deleted {
 		t.Error("a tombstone sealed by the line's own sender did not delete it")
 	}
@@ -550,11 +572,11 @@ func TestAReactionIsPerReactorAndARemoveTakesBackOnlyItsOwn(t *testing.T) {
 
 	line := &Content{Kind: KindText, Text: "a line"}
 	held := newMessage(line, 10, alice, false, 0, lineId)
-	group.deliverLocked(held, line)
+	deliverOneThroughAWalk(group, held, line)
 
 	react := func(kind ContentKind, who []byte, emoji string, recordId uint64, id byte) {
 		entry := &Content{Kind: kind, Target: lineId, Emoji: emoji}
-		group.deliverLocked(newMessage(entry, recordId, who, false, 0, aTarget(id)), entry)
+		deliverOneThroughAWalk(group, newMessage(entry, recordId, who, false, 0, aTarget(id)), entry)
 	}
 	react(KindReactionAdd, alice, "👍", 11, 0xB2)
 	react(KindReactionAdd, bob, "👍", 12, 0xB3)
@@ -608,12 +630,12 @@ func TestAKindThisBuildCannotReadIsNotReactableAndIsNotDeletable(t *testing.T) {
 
 	placeholder := &Content{Kind: KindEdit}
 	held := newMessage(placeholder, 10, sender, true, 0, placeholderId)
-	if !group.deliverLocked(held, placeholder) {
+	if !deliverOneThroughAWalk(group, held, placeholder) {
 		t.Fatal("a placeholder is an entry of the conversation and this build dropped it")
 	}
 	line := &Content{Kind: KindText, Text: "a line"}
 	heldLine := newMessage(line, 11, sender, true, 0, lineId)
-	group.deliverLocked(heldLine, line)
+	deliverOneThroughAWalk(group, heldLine, line)
 
 	// the send side
 	if _, err := group.reactableLocked(placeholderId); !errors.Is(err, ErrNoSuchMessage) {
@@ -625,14 +647,14 @@ func TestAKindThisBuildCannotReadIsNotReactableAndIsNotDeletable(t *testing.T) {
 
 	// and the receipt side: a tombstone from the placeholder's OWN sender, which passes T-b
 	tombstone := &Content{Kind: KindTombstone, Target: placeholderId}
-	group.deliverLocked(newMessage(tombstone, 12, sender, true, 0, aTarget(0xC3)), tombstone)
+	deliverOneThroughAWalk(group, newMessage(tombstone, 12, sender, true, 0, aTarget(0xC3)), tombstone)
 	if held.Deleted {
 		t.Error("a tombstone deleted a record whose kind this build cannot read")
 	}
 	// the control, which is what says the clause above is about the KIND and not about the
 	// tombstone being ignored altogether
 	onTheLine := &Content{Kind: KindTombstone, Target: lineId}
-	group.deliverLocked(newMessage(onTheLine, 13, sender, true, 0, aTarget(0xC4)), onTheLine)
+	deliverOneThroughAWalk(group, newMessage(onTheLine, 13, sender, true, 0, aTarget(0xC4)), onTheLine)
 	if !heldLine.Deleted {
 		t.Error("the control: a tombstone on this sender's own TEXT did not delete it")
 	}
@@ -651,12 +673,12 @@ func TestAnEffectWithNoRecordIdYetSortsAfterEveryNumberedOne(t *testing.T) {
 	lineId := aTarget(0xD1)
 	line := &Content{Kind: KindText, Text: "a line"}
 	held := newMessage(line, 10, sender, true, 0, lineId)
-	group.deliverLocked(held, line)
+	deliverOneThroughAWalk(group, held, line)
 
 	remove := &Content{Kind: KindReactionRemove, Target: lineId, Emoji: "👍"}
-	group.deliverLocked(newMessage(remove, 15, sender, true, 0, aTarget(0xD2)), remove)
+	deliverOneThroughAWalk(group, newMessage(remove, 15, sender, true, 0, aTarget(0xD2)), remove)
 	add := &Content{Kind: KindReactionAdd, Target: lineId, Emoji: "👍"}
-	group.deliverLocked(newMessage(add, 0, sender, true, 0, aTarget(0xD3)), add)
+	deliverOneThroughAWalk(group, newMessage(add, 0, sender, true, 0, aTarget(0xD3)), add)
 
 	if len(held.Reactions) != 1 {
 		t.Errorf("a reaction this device has just sealed was cancelled by a REMOVE the server numbered before it: %v",
@@ -666,10 +688,10 @@ func TestAnEffectWithNoRecordIdYetSortsAfterEveryNumberedOne(t *testing.T) {
 	second := &Group{}
 	second.initTables()
 	secondHeld := newMessage(line, 10, sender, true, 0, lineId)
-	second.deliverLocked(secondHeld, line)
+	deliverOneThroughAWalk(second, secondHeld, line)
 	numbered := &Content{Kind: KindReactionAdd, Target: lineId, Emoji: "👍"}
-	second.deliverLocked(newMessage(numbered, 14, sender, true, 0, aTarget(0xD3)), numbered)
-	second.deliverLocked(newMessage(remove, 15, sender, true, 0, aTarget(0xD2)), remove)
+	deliverOneThroughAWalk(second, newMessage(numbered, 14, sender, true, 0, aTarget(0xD3)), numbered)
+	deliverOneThroughAWalk(second, newMessage(remove, 15, sender, true, 0, aTarget(0xD2)), remove)
 	if len(secondHeld.Reactions) != 0 {
 		t.Errorf("the control: an ADD at record 14 and a REMOVE at 15 left %v standing", secondHeld.Reactions)
 	}

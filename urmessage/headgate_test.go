@@ -3,9 +3,11 @@ package urmessage
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"path/filepath"
 	"testing"
 	"time"
@@ -71,51 +73,166 @@ func TestEveryRecordThisBuildSealsCarriesA25OctetCtHead(t *testing.T) {
 	}
 }
 
-// THE FOUR SEAL SITES ALL PASS encodeHead, AND THERE ARE FOUR OF THEM.
+// THE FOUR SEAL SITES ALL PASS encodeHead, AND THERE ARE FOUR OF THEM, IN THE WHOLE PACKAGE.
 //
 // The case above seals its own four records, which makes it a statement about encodeHead's width
-// and not yet a statement about the FILE. This is the other half: every SealRecord call in
-// group.go hands encodeHead's answer as its head argument, and there are exactly four. A fifth site
-// -- or one that built a head some other way -- would leave the case above green over a build that
-// seals a head it never measured.
+// and not yet a statement about the SOURCE. This is the other half: every SealRecord call this
+// package makes hands encodeHead's answer as its head argument, and there are exactly four. A fifth
+// site -- or one that built a head some other way -- would leave the case above green over a build
+// that seals a head it never measured.
+//
+// IT MEASURES THE CALL AND NOT THE NAME, and it used to measure the name. The old body asked whether
+// `call.Args[3].(*ast.CallExpr).Fun` was an [ast.Ident] spelled "encodeHead" -- which is a question
+// about nine characters of text. A package-level `var encodeHead = func(int64) []byte { ... }`, or a
+// local of that name in scope at the seal site, or a method reached through a receiver that happened
+// to be spelled the same, all satisfy it while sealing a head nothing in this suite has measured.
+// The identifier is now RESOLVED, through go/types, and held against the one object
+// [encodeHead] names in this package's scope: not a name that matches, THE FUNCTION.
+//
+// THE TYPE-CHECK RUNS WITH AN IMPORTER THAT REFUSES EVERYTHING, and that is a decision rather than a
+// shortcut. What this gate needs to resolve is a package-level function declared in a file it is
+// already reading, and nothing about connect, protobuf or the standard library bears on it -- so
+// the imports are allowed to fail (41 errors, swallowed) and the check still binds every use of
+// encodeHead to record.go's declaration. It costs 13ms. An importer that actually resolved the
+// imports would cost 3.5s per run and would make this gate fail on a machine where a dependency
+// does not build, which is a gate measuring the environment.
+//
+// AND IT READS EVERY PRODUCTION FILE, NOT group.go. It scanned one file, so a seal site added in a
+// new file was not a fifth site this gate could see -- it was no site at all, and the count stayed
+// at four. [stateTestProductionSources] is the package's own enumerator and it is what
+// TestEveryFsyncInThisPackageIsAtASiteThisSuiteNames already holds its own count against.
 func TestTheFourSealSitesAllPassEncodeHead(t *testing.T) {
-	path := filepath.Join("group.go")
-	fileSet := token.NewFileSet()
-	syntax, err := parser.ParseFile(fileSet, path, nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("parsing %s: %v", path, err)
+	fileSet, files := headGateParsePackage(t)
+	pkg, uses := headGateTypeCheck(t, fileSet, files)
+
+	// THE OBJECT EVERY SITE IS HELD AGAINST. It is looked up rather than assumed so that the
+	// failure "there is no such function any more" reads as itself rather than as four site
+	// failures.
+	declared := pkg.Scope().Lookup("encodeHead")
+	if declared == nil {
+		t.Fatal("this package's scope holds no encodeHead, so there is nothing for a seal site to pass")
 	}
+	asFunc, isFunc := declared.(*types.Func)
+	if !isFunc {
+		t.Fatalf("encodeHead resolves to %T and not to a function; a head built by a value a caller can rebind is a head this suite does not measure", declared)
+	}
+	if asFunc.Signature().Recv() != nil {
+		t.Fatal("encodeHead has a receiver, so which head it builds depends on what it is called on")
+	}
+	t.Logf("encodeHead resolves to %v, declared at %s", asFunc, fileSet.Position(asFunc.Pos()))
+
 	sites := []string{}
-	ast.Inspect(syntax, func(node ast.Node) bool {
-		call, isCall := node.(*ast.CallExpr)
-		if !isCall {
+	for _, file := range files {
+		ast.Inspect(file, func(node ast.Node) bool {
+			call, isCall := node.(*ast.CallExpr)
+			if !isCall {
+				return true
+			}
+			selector, isSelector := call.Fun.(*ast.SelectorExpr)
+			if !isSelector || selector.Sel.Name != "SealRecord" {
+				return true
+			}
+			where := fileSet.Position(call.Pos()).String()
+			sites = append(sites, where)
+			if len(call.Args) != 7 {
+				t.Errorf("%s: SealRecord takes 7 arguments and this call passes %d", where, len(call.Args))
+				return true
+			}
+			head, isCall := call.Args[3].(*ast.CallExpr)
+			if !isCall {
+				t.Errorf("%s: the head argument is not a call, so it is not encodeHead's answer", where)
+				return true
+			}
+			callee := headGateCallee(head.Fun)
+			if callee == nil {
+				t.Errorf("%s: the head argument is a call through %T, which names no identifier this gate can resolve -- so what builds this record's head is not something this suite measured",
+					where, head.Fun)
+				return true
+			}
+			if resolved := uses[callee]; resolved != declared {
+				t.Errorf("%s: the head argument calls %q, which resolves to %v declared at %s -- and the function this suite measures is %v declared at %s. This record's head is built somewhere this suite does not measure",
+					where, callee.Name, resolved, headGatePositionOf(fileSet, resolved),
+					asFunc, fileSet.Position(asFunc.Pos()))
+			}
 			return true
-		}
-		selector, isSelector := call.Fun.(*ast.SelectorExpr)
-		if !isSelector || selector.Sel.Name != "SealRecord" {
-			return true
-		}
-		where := fileSet.Position(call.Pos()).String()
-		sites = append(sites, where)
-		if len(call.Args) != 7 {
-			t.Errorf("%s: SealRecord takes 7 arguments and this call passes %d", where, len(call.Args))
-			return true
-		}
-		head, isCall := call.Args[3].(*ast.CallExpr)
-		if !isCall {
-			t.Errorf("%s: the head argument is not a call, so it is not encodeHead's answer", where)
-			return true
-		}
-		name, isName := head.Fun.(*ast.Ident)
-		if !isName || name.Name != "encodeHead" {
-			t.Errorf("%s: the head argument is not encodeHead(...), so this record's head is built somewhere this suite does not measure", where)
-		}
-		return true
-	})
+		})
+	}
 	if len(sites) != 4 {
-		t.Errorf("group.go holds %d SealRecord call(s) and the build has four record kinds: %v", len(sites), sites)
+		t.Errorf("this package holds %d SealRecord call(s) and the build has four record kinds: %v", len(sites), sites)
 	}
 	t.Logf("the four seal sites: %v", sites)
+}
+
+// headGateParsePackage parses every production source in this package, WHATEVER GOOS IT IS
+// CONSTRAINED TO -- see [stateTestProductionSources] for why that is the right set to read and not
+// the set this build compiles.
+//
+// THE THREE PLATFORM FILES REDECLARE ONE ANOTHER and the type-check below says so, loudly, in the
+// errors it swallows. That is harmless here and is worth stating rather than discovering: the
+// duplicates are syncStateDir and its neighbours, this gate resolves encodeHead, and the two do not
+// meet. A gate that dropped the platform files to quiet the checker would be a gate that stopped
+// reading three of this package's files to make itself easier to write.
+func headGateParsePackage(t *testing.T) (*token.FileSet, []*ast.File) {
+	t.Helper()
+	fileSet := token.NewFileSet()
+	files := []*ast.File{}
+	for _, name := range stateTestProductionSources(t) {
+		parsed, err := parser.ParseFile(fileSet, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		files = append(files, parsed)
+	}
+	return fileSet, files
+}
+
+// headGateTypeCheck binds every identifier in those files to the object it names, as far as a
+// checker with no imports can. See TestTheFourSealSitesAllPassEncodeHead for why no imports.
+func headGateTypeCheck(t *testing.T, fileSet *token.FileSet, files []*ast.File) (*types.Package, map[*ast.Ident]types.Object) {
+	t.Helper()
+	swallowed := 0
+	config := &types.Config{
+		Importer:                 headGateNoImports{},
+		Error:                    func(error) { swallowed += 1 },
+		DisableUnusedImportCheck: true,
+	}
+	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
+	pkg, _ := config.Check("github.com/urnetwork/sdk/urmessage", fileSet, files, info)
+	if pkg == nil {
+		t.Fatal("the type-check produced no package, so nothing below resolves")
+	}
+	t.Logf("type-checked %d file(s), %d error(s) swallowed (the refused imports and the platform redeclarations)",
+		len(files), swallowed)
+	return pkg, info.Uses
+}
+
+// headGateNoImports refuses every import. The package under the checker is this one, and the only
+// object this gate resolves is declared inside it.
+type headGateNoImports struct{}
+
+func (headGateNoImports) Import(path string) (*types.Package, error) {
+	return nil, fmt.Errorf("this gate resolves no imports, and %s is one", path)
+}
+
+// headGateCallee is the identifier a call expression names, for the two shapes a call to a function
+// can take: `f(...)` and `x.f(...)`. Anything else -- a call through a returned value, an index, a
+// conversion -- answers nil, which the caller reports as a head built through an expression this
+// suite cannot follow. That is the honest answer and not a pass.
+func headGateCallee(fun ast.Expr) *ast.Ident {
+	switch named := fun.(type) {
+	case *ast.Ident:
+		return named
+	case *ast.SelectorExpr:
+		return named.Sel
+	}
+	return nil
+}
+
+func headGatePositionOf(fileSet *token.FileSet, object types.Object) string {
+	if object == nil {
+		return "nowhere this gate could resolve"
+	}
+	return fileSet.Position(object.Pos()).String()
 }
 
 // ── one of every record kind, sealed the way the build seals it ──────────────────────────────
