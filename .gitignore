@@ -4,6 +4,9 @@
 # `**/bin` does not match them, and the tracked 35 MB binary this replaced is why they are here.
 liveprobe/liveprobe
 liveprobe/liveprobe-arm64
+# and the Windows spelling, which neither name above matches: `go build` in this directory on
+# Windows writes liveprobe.exe, 36 MB. It was staged once, on 2026-09-17, before this line existed.
+liveprobe/*.exe
 build/apple*
 build/ios*
 build/android*

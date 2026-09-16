@@ -10,6 +10,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -407,6 +408,81 @@ func main() {
 	fmt.Printf("  %d lines each way, concurrently: A opened %d of B's, B opened %d of A's, none twice\n",
 		concurrent, len(atA), len(atB))
 
+	// ── 9 ────────────────────────────────────────────────────────────────────────────────
+	step("a reply, two reactions, one taken back, and a delete -- the content envelope over the mesh")
+	fmt.Printf("  WHAT THIS IS FOR: every line above this step was a TEXT. A reply, a reaction and a\n" +
+		"  tombstone ride the SAME sealed body under a one-octet kind, so a build that got the\n" +
+		"  envelope wrong does not refuse -- it renders them as garbage text attributed to a real\n" +
+		"  sender. Every kind here is asserted on the FAR side, because the near side proves only\n" +
+		"  that this build agrees with itself.\n")
+
+	anchor, err := aGroup.Send(ctx, "the line every kind below points at")
+	if err != nil {
+		fail("A Send the anchor line: %v", err)
+	}
+	anchorAtB := findById(receive(bGroup, ctx, "B"), anchor.MessageId)
+	check(anchorAtB != nil, "B never received the anchor line A sent")
+	check(anchorAtB.Kind == urmessage.KindText,
+		"the anchor came back as kind %s and A sealed it as a text", anchorAtB.Kind)
+
+	// A REPLY carries a raw 32 octet reference in front of its text. The reference is the half a
+	// text-only build cannot have got right by accident.
+	const replyText = "a reply that names the line above"
+	replySent, err := bGroup.SendReply(ctx, anchor.MessageId, replyText)
+	if err != nil {
+		fail("B SendReply: %v", err)
+	}
+	replyAtA := findById(receive(aGroup, ctx, "A"), replySent.MessageId)
+	check(replyAtA != nil, "A never received B's reply")
+	check(replyAtA.Kind == urmessage.KindReply, "B's reply came back as kind %s", replyAtA.Kind)
+	check(bytes.Equal(replyAtA.ReplyToId, anchor.MessageId),
+		"the reply names message %x and the anchor is %x", replyAtA.ReplyToId, anchor.MessageId)
+	check(replyAtA.Text == replyText, "the reply's text came back as %q", replyAtA.Text)
+	fmt.Printf("  a REPLY crossed: it names the anchor's message_id and its text survived\n")
+
+	// TWO REACTIONS, THEN ONE TAKEN BACK. A reaction adds no line of its own -- it changes a line
+	// that is already there -- so the assertion is on the ANCHOR, not on what Receive answered.
+	for _, emoji := range []string{"👍", "🎉"} {
+		if _, err := bGroup.React(ctx, anchor.MessageId, emoji); err != nil {
+			fail("B React %q: %v", emoji, err)
+		}
+	}
+	receive(aGroup, ctx, "A")
+	anchorAtA := findById(aGroup.Messages(), anchor.MessageId)
+	check(anchorAtA != nil, "A lost its own anchor line out of its log")
+	check(len(anchorAtA.Reactions) == 2,
+		"A sees %d reaction(s) on its line and B sent two", len(anchorAtA.Reactions))
+
+	if _, err := bGroup.Unreact(ctx, anchor.MessageId, "👍"); err != nil {
+		fail("B Unreact: %v", err)
+	}
+	receive(aGroup, ctx, "A")
+	anchorAtA = findById(aGroup.Messages(), anchor.MessageId)
+	check(len(anchorAtA.Reactions) == 1,
+		"after B took one back A sees %d reaction(s), want 1", len(anchorAtA.Reactions))
+	check(anchorAtA.Reactions[0].Emoji == "🎉",
+		"the reaction still standing is %q and the one taken back was the other",
+		anchorAtA.Reactions[0].Emoji)
+	fmt.Printf("  two REACTIONS crossed and one was taken back: A sees exactly the one that stands\n")
+
+	// THE SAME-SENDER RULE, ON THE SEND SIDE. R1 proves who wrote a TOMBSTONE and NOTHING proves
+	// they wrote its target, so an honest build refuses to seal one naming somebody else's line.
+	// This asserts the refusal, which is the arm a receiver-side check alone would leave untested.
+	if _, err := bGroup.Delete(ctx, anchor.MessageId); err == nil {
+		fail("B SEALED A TOMBSTONE FOR A'S MESSAGE. The same-sender rule is not enforced on the send\n" +
+			"  side, so this build emits a record every honest receiver is supposed to ignore.")
+	}
+	fmt.Printf("  and B REFUSED to delete A's line, which is the same-sender rule on the send side\n")
+
+	if _, err := aGroup.Delete(ctx, anchor.MessageId); err != nil {
+		fail("A Delete its own line: %v", err)
+	}
+	receive(bGroup, ctx, "B")
+	anchorAtB = findById(bGroup.Messages(), anchor.MessageId)
+	check(anchorAtB != nil, "B lost the anchor line entirely once it was deleted; it should be MARKED")
+	check(anchorAtB.Deleted, "A deleted its line and B's copy of it is not marked deleted")
+	fmt.Printf("  a TOMBSTONE crossed: B's copy of A's line is marked deleted and still present\n")
+
 	// ── the counters, which are the last thing a reader should see ───────────────────────
 	step("the counters")
 	report("A", aGroup)
@@ -636,6 +712,19 @@ func texts(messages []*urmessage.Message) string {
 
 // firstDifference is where two strings stop agreeing, so a fragment reassembled out of order says
 // WHERE rather than only that it is wrong.
+// findById is the probe's one lookup: a message by the id its own sender was told it has.
+//
+// IT EXISTS BECAUSE NAMING IS THE WHOLE OF WHAT THE ENVELOPE ADDED. A reply that points at
+// nothing, and a reaction that lands on nothing, both look like success from the sending side.
+func findById(messages []*urmessage.Message, id []byte) *urmessage.Message {
+	for _, message := range messages {
+		if bytes.Equal(message.MessageId, id) {
+			return message
+		}
+	}
+	return nil
+}
+
 func firstDifference(want string, got string) int {
 	for at := 0; at < len(want) && at < len(got); at += 1 {
 		if want[at] != got[at] {
