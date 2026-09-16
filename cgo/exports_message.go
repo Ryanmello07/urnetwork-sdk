@@ -83,8 +83,10 @@ import (
 // ── DECISION: A BODY CROSSES AS COUNTED OCTETS, NEVER AS char* AND NEVER INSIDE JSON ─────────
 //
 // urmessage.Group.Send takes a Go string and Message.Text is a Go string, and A GO STRING IS NOT
-// TEXT: group.go seals []byte(text) and fills Text with string(bodyPlain) straight out of the
-// AEAD. Neither is validated as UTF-8 and neither is NUL-free. So:
+// TEXT: a body is octets that arrive from another device. Since the content envelope landed
+// (urmessage/kind.go, the 2026-09-17 ruling) a TEXT and a REPLY tail IS checked for valid UTF-8 on
+// the way in and on the way out -- but valid UTF-8 is NOT NUL-free, U+0000 being one octet of it,
+// and a kind this build does not know carries no text at all. So:
 //
 //   - A body is (const uint8_t*, int32_t) going in and the buffer-out pattern coming back. It is
 //     never a char*: a char* would truncate a body at its first 0x00 octet and hand back a

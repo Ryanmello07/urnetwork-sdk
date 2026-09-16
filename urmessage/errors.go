@@ -46,6 +46,35 @@ var (
 	// The head this package writes, read back as something else.
 	ErrHeadFormat = errors.New("urmessage: this record's head is not one this build wrote")
 
+	// ── the content envelope ──────────────────────────────────────────────────────────────
+
+	// THE SENDER BROKE A RULE THE KIND CODE ALONE DECIDES: a body too short for its layout,
+	// trailing octets after a layout with no tail, an empty required tail, a kind of 0x00, or a
+	// code outside the retention classes its range allows. It is spec A §7.4's "malformed", and
+	// it is a statement about the octets rather than about this build's age -- which is what
+	// makes it a different value from [ErrContentUnsupported].
+	ErrContentMalformed = errors.New("urmessage: this record's application plaintext is not a content envelope this build can read")
+
+	// A CODE THIS BUILD DOES NOT KNOW, on a class its range allows. It is NOT a failure: the
+	// record keeps its position and its message_id, the walk continues, and it renders as one
+	// closed placeholder. A future kind is not malformed, and the day spec A §7.4's closed set
+	// grows the "unsupported" value owner choice 11 owes, this is what carries it.
+	ErrContentUnsupported = errors.New("urmessage: this record carries a content kind this build does not know")
+
+	// An unknown code on EPH(0), which is never persisted: dropped, with nothing to render and
+	// no history for a gap to be a hole in. It is carried as an error so that a caller that
+	// wanted to know can, and no walk in this build can reach it -- see [transientOnly].
+	ErrContentDropped = errors.New("urmessage: this record is a transient nothing on this build would keep")
+
+	// An emoji this package will not seal. See checkEmoji for exactly what is checked and for
+	// the larger half that is NOT, which is open item M1-41.
+	ErrEmojiRefused = errors.New("urmessage: this is not an emoji a reaction may carry")
+
+	// A kind that names another message named one this group does not hold. It is raised on the
+	// SEND side only: on the receive side a reaction or a tombstone whose target has not
+	// arrived is HELD, because the walk's order is not the conversation's order.
+	ErrNoSuchMessage = errors.New("urmessage: this group holds no message under that message_id")
+
 	// ── the durable state store ───────────────────────────────────────────────────────────
 
 	// The directory could not be opened, read, written or flushed. It is the store's "this

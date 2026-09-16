@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/urnetwork/connect/message"
@@ -55,7 +56,14 @@ const alphaEpochCompleteBody = "urmessage/v1 alpha epoch complete"
 // problem instead of like a server problem.
 const maxFetchPages = 1024
 
-// Message is one line of text that crossed the group.
+// Message is one entry of the conversation: what one record SAYS, after the content envelope has
+// been read.
+//
+// IT IS NOT ONE RECORD. Three kinds of record produce no Message at all -- a REACTION, a TOMBSTONE
+// and a COVER -- because a reaction is a change to another message and a cover is a change to
+// nothing. Their effects arrive here as [Message.Reactions] and [Message.Deleted], on the message
+// they name, whenever that message is present. See [Group.noteEffectLocked] for the ordering
+// problem that makes "whenever" the right word.
 type Message struct {
 	// The server's own id for the record: per group, gapless, and the cursor a later fetch
 	// resumes from. Zero on a message this device has sent and the server has not yet numbered.
@@ -94,6 +102,52 @@ type Message struct {
 	// Every [Message] this package produces carries one, because every one of them is built
 	// beside the header it is derived from.
 	MessageId []byte
+
+	// ── what the content envelope said ───────────────────────────────────────────────────
+
+	// The code at octet 0 of the application plaintext: what grammar [Text] and the fields
+	// below were read under. See kind.go.
+	//
+	// A KIND THIS BUILD DOES NOT KNOW IS CARRIED HERE AS ITSELF, and that is the whole of the
+	// unknown-kind rule's rendering obligation: the record kept its position and its
+	// [Message.MessageId], [Message.Text] is empty, and a UI shows one closed placeholder
+	// rather than a line of garbage attributed to a real sender. [ContentKind.String] names the
+	// codes this registry has and prints the value of one it does not.
+	Kind ContentKind
+
+	// REPLY only: the raw 32-octet message_id of the message being replied to. The quoted text
+	// never travels -- the reply renders by looking its parent up -- and the parent may be
+	// unavailable, deleted or not yet fetched.
+	ReplyToId []byte
+
+	// A TOMBSTONE from this message's OWN sender has been applied to it. The body is still in
+	// [Message.Text]: this package refuses to decide what a UI does with a deleted line, and
+	// the record itself is on the server either way.
+	Deleted bool
+
+	// The reactions standing on this message, rebuilt from every reaction record this group
+	// holds for it whenever one arrives. Empty on a message nobody has reacted to.
+	Reactions []Reaction
+}
+
+// Reaction is one emoji standing on one message, from one member.
+//
+// THE REACTOR IS A sender_handle AND NOT A PERSON. The alpha has no identity system, so "the same
+// reactor across one person's devices" is open item D7; until it is ruled a reactor is the leaf.
+//
+// THE EMOJI IS RAW AND IS NOT FOLDED TO A GROUPING KEY. Section 5.3 groups on (NFC, skin-tone
+// modifiers and variation selectors removed), which needs normalisation tables this module does not
+// carry -- see checkEmoji and open item M1-41 -- so two spellings of one emoji are two reactions
+// here.
+type Reaction struct {
+	// The 16-octet sender_handle of the member who reacted.
+	SenderHandle []byte
+
+	// The emoji as that member's device sent it.
+	Emoji string
+
+	// True when this device sealed the reaction.
+	Mine bool
 }
 
 // MaxTextOctets is the longest text [Group.Send] will seal, and it is a MEASURED number rather
@@ -132,7 +186,20 @@ type Message struct {
 // already refused for free. This makes the two answers one answer, taken in one place, before
 // anything irreversible has happened -- so a send refused for length costs nothing however many
 // times it is retried.
-const MaxTextOctets = 65334
+//
+// AND IT IS ONE OCTET SHORT OF THE MEASURED COLUMN SINCE THE CONTENT ENVELOPE LANDED. What connect
+// measures is the APPLICATION PLAINTEXT's capacity, 65,334; under the 2026-09-17 ruling the
+// plaintext is `kind ‖ body`, so the kind octet comes out of the same budget and the longest TEXT
+// this package will seal is 65,333. That is the whole of what the envelope costs a stored record,
+// and it costs nothing at all except on a body whose plaintext sat EXACTLY on a rung boundary.
+const MaxTextOctets = 65333
+
+// MaxReplyTextOctets is the same ceiling for a REPLY, which spends 32 more octets of the plaintext
+// on the raw message_id its text is an answer to (rule R-c).
+//
+// IT IS DERIVED AND NOT MEASURED, deliberately: a second literal here would be a second column to
+// keep level with connect's, and the subtraction is the layout itself.
+const MaxReplyTextOctets = MaxTextOctets - MessageIdBytes
 
 // Stats is what a group has seen, so that "nothing arrived" and "something arrived and this build
 // would not open it" are two readings rather than one silence.
@@ -305,6 +372,24 @@ type Group struct {
 
 	// unopened is the record ids this group has given up on, ascending.
 	unopened []uint64
+
+	// ── the kinds that change another message ────────────────────────────────────────────
+	//
+	// byMessage is every [Message] this group holds, under its own message_id. It is what a
+	// reaction, a tombstone or a reply resolves its target through, and it is a map because the
+	// alternative is a scan of the log per effect record.
+	byMessage map[[MessageIdBytes]byte]*Message
+
+	// effects is every reaction and tombstone this group has read, under the EFFECT RECORD's
+	// OWN message_id. The key is what makes a re-delivery idempotent: one record is one effect
+	// however many times a rewind walks back over it, and a record's id is a function of the
+	// record alone (MASTER §8.4.5).
+	effects map[[MessageIdBytes]byte]*contentEffect
+
+	// effectsOn is the same effects indexed by the message they NAME, which is the order they
+	// have to be replayed in. See [Group.reapplyLocked] for why a replay rather than an
+	// application.
+	effectsOn map[[MessageIdBytes]byte][]*contentEffect
 
 	// ── one identity, two devices ────────────────────────────────────────────────────────
 	//
@@ -747,66 +832,236 @@ func (self *Group) wrapTargetsLocked() ([][16]byte, error) {
 
 // Send seals one line of text as a DURABLE record and submits it.
 //
+// WHAT IS SEALED IS `kind(TEXT) ‖ text` AND NOT THE TEXT, which is the 2026-09-17 ruling and is why
+// [MaxTextOctets] is one octet short of connect's measured column. See kind.go.
+//
 // The size bucket is whatever the text needs: [messagegroup.GroupSession.SealRecord] walks the
 // ladder and takes the smallest rung the padded body fits, so a message leaks its rung rather than
 // its length. THE RUNGS ARE NOT WHAT THEY WERE. Since connect 4c030dc the text is carried inside an
-// MLS PrivateMessage that itself sits inside the rung, and the usable text per rung, measured through
-// this method and a real server's rows by cp3b.TestEveryRecordTypeUrmessageSealsLandsOnTheRungItsBodyNeeds,
-// is 59 / 826 / 3,898 / 16,186 / 65,334 octets where it was 252 / 1,020 / 4,092 / 16,380 / 65,532.
-// So a text over 59 octets is stored at 1,040 octets where one up to 252 used to be stored at 272,
-// and a text over [MaxTextOctets] -- including the 198 octets up to the old ceiling -- is refused
-// with [ErrTextTooLong]; blob-backed bodies are out of scope.
+// MLS PrivateMessage that itself sits inside the rung, and the usable PLAINTEXT per rung, measured
+// through this method and a real server's rows by
+// cp3b.TestEveryRecordTypeUrmessageSealsLandsOnTheRungItsBodyNeeds, is 59 / 826 / 3,898 / 16,186 /
+// 65,334 octets where it was 252 / 1,020 / 4,092 / 16,380 / 65,532 -- one of which the kind now
+// spends, so the text column is 58 / 825 / 3,897 / 16,185 / 65,333. A text over [MaxTextOctets] --
+// including the 198 octets up to the old ceiling -- is refused with [ErrTextTooLong]; blob-backed
+// bodies are out of scope.
 //
 // THE LENGTH REFUSAL IS TAKEN HERE AND COSTS NOTHING, which is a change from every build before
 // this one: see [MaxTextOctets] for the 198 octet band that used to spend a durable stream index
 // and an MLS generation on its way to the same error, and for why the sealer's own early refusal
 // cannot cover it.
 //
+// AND AN EMPTY TEXT IS REFUSED, which is a PRODUCT change and not a size one: TEXT's body is a tail
+// of at least one octet (rule R-d), so an empty line is a message the format has no encoding for
+// and [ErrContentMalformed] is the answer. Before the content envelope it sealed a record with an
+// empty body, which every receiver rendered as a blank line.
+//
 // IT NEVER RETURNS NIL ON A MESSAGE THAT DID NOT LAND. The record is accepted by the server, or
 // this returns an error naming the refusal -- including after S2-2's single re-Hello and re-MAC.
 func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
+	if err := self.sendableLocked(); err != nil {
+		return nil, err
+	}
+	// THE ENCODE IS THE LENGTH REFUSAL AND IT IS BEFORE THE SEAL, one clause further out than the
+	// sealer can take it. See [MaxTextOctets]: the sealer's own early refusal is over the CALLER's
+	// length against the rung, and the frame that decides the real rung does not exist until an
+	// index has been reserved and a generation spent.
+	//
+	// IT IS AFTER THE STICKY REFUSALS IN sendableLocked AND THAT ORDER IS DELIBERATE. A group that
+	// has seen a second writer, or a restored group that has not reconciled, must say THAT rather
+	// than report a fact about the length of this particular line.
+	plaintext, err := encodeText(text)
+	if err != nil {
+		return nil, err
+	}
+	return self.sendContentLocked(ctx, plaintext, "a message")
+}
+
+// SendReply seals one line of text that names the message it answers, and submits it.
+//
+// replyTo is the parent's [Message.MessageId], raw, 32 octets. THE QUOTED TEXT NEVER TRAVELS: a
+// reply carries its parent's NAME and renders by looking the parent up, which is what spec A §7.4's
+// ephemeral-containment rule requires of a reply to an ephemeral message and what keeps a reply
+// from being a second copy of a line the group already paid for.
+//
+// A reply is a new message and takes the conversation's own class, so its ceiling is
+// [MaxReplyTextOctets] rather than [MaxTextOctets]: the 32 octets of the name come out of the same
+// plaintext budget as the text.
+func (self *Group) SendReply(ctx context.Context, replyTo []byte, text string) (*Message, error) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if err := self.sendableLocked(); err != nil {
+		return nil, err
+	}
+	// THE PARENT IS NOT REQUIRED TO BE PRESENT, and that is the one place this differs from
+	// [Group.React] and [Group.Delete]. A reply is a message in its own right: it renders whether
+	// or not its parent is holdable, and the parent may legitimately be gone -- pruned, expired,
+	// or not yet fetched by THIS device while the sender holds it. A reaction and a tombstone
+	// have nothing to be but a change to something else, so those two refuse.
+	plaintext, err := encodeReply(replyTo, text)
+	if err != nil {
+		return nil, err
+	}
+	return self.sendContentLocked(ctx, plaintext, "a reply")
+}
+
+// React seals one REACTION_ADD naming a message this group holds, and submits it.
+//
+// The emoji is sealed as the octets the caller passed. WHAT IS AND IS NOT VALIDATED is checkEmoji's
+// comment and it is the honest half: valid UTF-8 of 1..[MaxEmojiOctets] octets, and NOT "exactly one
+// extended grapheme cluster from the pinned Unicode version", which needs a UAX-29 dependency
+// nobody has decided to take (open item M1-41).
+//
+// IT ANSWERS THE REACTION RECORD'S OWN [Message], WHICH IS NOT A LINE OF THE CONVERSATION. A
+// reaction creates no entry: it changes the message it names, which this group applies locally at
+// the same moment. The value is returned so that a caller has the record id and the message_id of
+// what it just sent -- the two things a later Unreact and any log would need.
+func (self *Group) React(ctx context.Context, target []byte, emoji string) (*Message, error) {
+	return self.react(ctx, KindReactionAdd, target, emoji)
+}
+
+// Unreact seals one REACTION_REMOVE. It cancels an ADD with the same (reactor, target, emoji) --
+// see [Reaction] for what "the same" means in a build with no identity system and no grouping key.
+func (self *Group) Unreact(ctx context.Context, target []byte, emoji string) (*Message, error) {
+	return self.react(ctx, KindReactionRemove, target, emoji)
+}
+
+func (self *Group) react(ctx context.Context, kind ContentKind, target []byte, emoji string) (*Message, error) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if err := self.sendableLocked(); err != nil {
+		return nil, err
+	}
+	// K9/K5: a reaction may name a stored content message and nothing else, and a call naming an
+	// id this device does not hold is a CALL ERROR that emits no record. It is not a courtesy
+	// check: a reaction on an id nothing carries is a record every receiver holds for ever
+	// waiting for a target that does not exist.
+	if _, err := self.reactableLocked(target); err != nil {
+		return nil, err
+	}
+	plaintext, err := encodeReaction(kind, target, emoji)
+	if err != nil {
+		return nil, err
+	}
+	return self.sendContentLocked(ctx, plaintext, "a reaction")
+}
+
+// Delete seals one TOMBSTONE naming a message of THIS DEVICE'S OWN, and submits it.
+//
+// THE SAME-SENDER RULE IS ENFORCED ON BOTH SIDES AND THIS IS THE SEND SIDE (T-b). A tombstone
+// applies only if its sender_handle equals the target's, which is what MASTER §12.1's "a deletion
+// cannot be forged" needs beyond R1: R1 proves who wrote the TOMBSTONE and nothing proves they
+// wrote the target. So a tombstone naming somebody else's message is a record every honest receiver
+// would ignore, and the honest thing is not to seal one.
+//
+// WHAT IT DOES NOT DO. It does not erase the record on the server -- spec B's B6 is "no
+// client-initiated server-side erase in v1" -- and it does not decide what a UI shows: the target
+// is marked [Message.Deleted] and keeps its text, because this package refuses to be the layer that
+// throws away a user's data on a peer's say-so.
+//
+// THE 24-HOUR WINDOW IS NOT IMPLEMENTED AND IS NOT FORGOTTEN. MASTER §12.1:2564 bounds a tombstone
+// to 24 hours and no document says WHICH CLOCK measures it; every clock reading in a record is its
+// sender's claim, and the three candidate clocks are enumerated as owner choice 6 (msgrepo
+// docs/reports/2026-09-16-content-kinds.md §5.4 T-d). Building one of them here would be this
+// package taking an owner's decision.
+func (self *Group) Delete(ctx context.Context, target []byte) (*Message, error) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if err := self.sendableLocked(); err != nil {
+		return nil, err
+	}
+	held, err := self.reactableLocked(target)
+	if err != nil {
+		return nil, err
+	}
+	if !held.Mine {
+		return nil, fmt.Errorf("%w: message %x was sealed by %x and this device may only delete its own",
+			ErrContentMalformed, target, held.SenderHandle)
+	}
+	plaintext, err := encodeTombstone(target)
+	if err != nil {
+		return nil, err
+	}
+	return self.sendContentLocked(ctx, plaintext, "a tombstone")
+}
+
+// sendableLocked is every refusal a send owes BEFORE it looks at what is being sent. It is one
+// function because four entry points owe the same five, in the same order, and a fifth entry point
+// that forgot one would seal under a reused identity.
+func (self *Group) sendableLocked() error {
 	if self.closed {
-		return nil, fmt.Errorf("urmessage: this group is closed")
+		return fmt.Errorf("urmessage: this group is closed")
 	}
 	if self.session == nil {
-		return nil, ErrNoMemberAdded
+		return ErrNoMemberAdded
 	}
 	if !self.opened {
-		return nil, ErrGroupNotOpen
+		return ErrGroupNotOpen
 	}
 	// BEFORE THE REBIND AND BEFORE THE SEAL, because the seal is the irreversible half: a
 	// record sealed under a reused (key, nonce) exists whatever this method then returns.
 	if self.identityInUse != nil {
-		return nil, self.identityInUse
+		return self.identityInUse
 	}
 	if !self.reconciled {
-		return nil, fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
+		return fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
 	}
-	// AND BEFORE THE SEAL FOR THE SAME REASON, one clause further out than the sealer can take
-	// it. See [MaxTextOctets]: the sealer's own early refusal is over the CALLER's length against
-	// the rung, and the frame that decides the real rung does not exist until an index has been
-	// reserved and a generation spent.
-	//
-	// IT IS AFTER THE TWO STICKY REFUSALS ABOVE AND THAT ORDER IS DELIBERATE. A group that has
-	// seen a second writer, or a restored group that has not reconciled, must say THAT rather
-	// than report a fact about the length of this particular line.
-	if MaxTextOctets < len(text) {
-		return nil, fmt.Errorf("%w: %d octets, and the largest inline rung carries %d",
-			ErrTextTooLong, len(text), MaxTextOctets)
+	return nil
+}
+
+// reactableLocked answers the message a reaction or a tombstone may name, and refuses one it may
+// not. T-a and K9 are the same rule read from two sides: the target must be a STORED CONTENT
+// message -- TEXT or REPLY here, ATTACHMENT when the blob plane exists -- and a reaction, a
+// tombstone and a COVER are not entries and cannot be named.
+//
+// THEY CANNOT BE NAMED BY CONSTRUCTION RATHER THAN BY A CLAUSE, which is worth knowing before
+// somebody deletes the kind check below: this group's [Group.byMessage] holds only records that
+// BECAME a [Message], and a reaction, a tombstone and a COVER become none. The clause is what makes
+// the rule survive a later kind that does become a message and still may not be reacted to.
+func (self *Group) reactableLocked(target []byte) (*Message, error) {
+	if len(target) != MessageIdBytes {
+		return nil, fmt.Errorf("%w: a message_id is %d octets and this one is %d",
+			ErrContentMalformed, MessageIdBytes, len(target))
+	}
+	held, found := self.byMessage[messageKeyOf(target)]
+	if !found {
+		return nil, fmt.Errorf("%w: %x", ErrNoSuchMessage, target)
+	}
+	switch held.Kind {
+	case KindText, KindReply:
+		return held, nil
+	}
+	return nil, fmt.Errorf("%w: message %x is a %s, which carries no reactions and no tombstone",
+		ErrNoSuchMessage, target, held.Kind)
+}
+
+// sendContentLocked seals one already-encoded application plaintext as a DURABLE record, submits
+// it, and folds what it says back into this group.
+//
+// IT PARSES WHAT IT IS ABOUT TO SEAL, BEFORE THE SEAL, and that is a gate rather than a
+// belt-and-braces: the encoder and the parser are two sides of one grammar, and the day they
+// disagree the sender ships a record every receiver refuses as malformed while its own screen shows
+// it correctly. Taking the refusal here costs nothing -- no stream index, no MLS generation -- and
+// what a sender then displays is built by the SAME code path the receiver's display is.
+func (self *Group) sendContentLocked(ctx context.Context, plaintext []byte, what string) (*Message, error) {
+	entry, verdict, why := ParseContent(plaintext, message.RetentionDurable, 0)
+	if verdict != ContentParsed {
+		return nil, fmt.Errorf("urmessage: this build would not read back the %s it was about to seal (%s): %w",
+			what, verdict, why)
 	}
 	if err := self.rebindLocked(); err != nil {
 		return nil, err
 	}
 	sentAtMs := self.device.nowMs()
 	record, err := self.session.SealRecord(message.RetentionDurable, 0, false,
-		encodeHead(sentAtMs), []byte(text), 0, nil)
+		encodeHead(sentAtMs), plaintext, 0, nil)
 	if err != nil {
 		if errors.Is(err, messagegroup.ErrBodyTooLong) {
-			return nil, fmt.Errorf("%w: %d octets: %w", ErrTextTooLong, len(text), err)
+			return nil, fmt.Errorf("%w: %d octets: %w", ErrTextTooLong, len(plaintext), err)
 		}
-		return nil, fmt.Errorf("urmessage: sealing this message: %w", err)
+		return nil, fmt.Errorf("urmessage: sealing %s: %w", what, err)
 	}
 	// THE ID IS TAKEN OFF THE RECORD AND BEFORE THE SUBMIT, which is what makes it a name the
 	// sender can quote OPTIMISTICALLY: the three inputs are group_handle_key and three fields of
@@ -822,7 +1077,7 @@ func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 	// below: one stream index and one MLS generation spent, both legal gaps, and the send fails.
 	messageId, err := self.session.MessageIdOf(&record.Header)
 	if err != nil {
-		return nil, fmt.Errorf("urmessage: this message was sealed and NOT sent, because its message_id could not be derived: %w", err)
+		return nil, fmt.Errorf("urmessage: %s was sealed and NOT sent, because its message_id could not be derived: %w", what, err)
 	}
 	// THE INDEX IS NOTED AT THE SEAL AND NOT AT THE SUBMIT, and the ordering is the whole of
 	// why this is here rather than three lines down. A submit whose response never arrived is
@@ -835,6 +1090,11 @@ func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 	// record whose answer was lost comes back on the next fetch as ciphertext this device will
 	// never read again -- unless it kept what it sealed.
 	//
+	// WHAT IS KEPT IS THE PLAINTEXT AND NOT THE TEXT, which is [SentRecord.Body]'s own definition
+	// -- "what was sealed, octets, never interpreted" -- and is what lets the own-copy path read a
+	// restored device's own reply, reaction and tombstone back through the same codec every other
+	// member reads them through.
+	//
 	// IT IS DURABLE BEFORE THE SUBMIT, OR THE SUBMIT DOES NOT HAPPEN. A record that reached the
 	// server with no copy on the disk is a line the user typed that a restart of this device can
 	// never show them again, and nothing afterwards could repair it. Refusing here costs one
@@ -843,28 +1103,20 @@ func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 	sealed := &ownSealed{
 		bodyHash: record.Header.BodyHash,
 		hasCopy:  true,
-		body:     []byte(text),
+		body:     append([]byte(nil), plaintext...),
 		sentAtMs: sentAtMs,
 	}
 	self.ownIndices[record.Header.StreamIndex] = sealed
 	if err := self.device.persistSent(self.id, record.Header.StreamIndex, sealed); err != nil {
-		return nil, fmt.Errorf("urmessage: this message was sealed and NOT sent, because the copy a restart would show it from could not be persisted: %w", err)
+		return nil, fmt.Errorf("urmessage: %s was sealed and NOT sent, because the copy a restart would show it from could not be persisted: %w", what, err)
 	}
-	recordId, err := self.submitLocked(ctx, self.session, record, "a message")
+	recordId, err := self.submitLocked(ctx, self.session, record, what)
 	if err != nil {
 		return nil, err
 	}
 	sealed.recordId = recordId
-	handle := append([]byte(nil), record.Header.SenderHandle[:]...)
-	sent := &Message{
-		RecordId:     recordId,
-		SenderHandle: handle,
-		Mine:         true,
-		Text:         text,
-		SentAtMs:     sentAtMs,
-		MessageId:    messageId[:],
-	}
-	self.log = append(self.log, sent)
+	sent := newMessage(entry, recordId, record.Header.SenderHandle[:], true, sentAtMs, messageId[:])
+	self.deliverLocked(sent, entry)
 	self.delivered[recordId] = true
 	return sent, nil
 }
@@ -1622,6 +1874,38 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			fail(recordId, fmt.Errorf("%w: record %d: %w", ErrRecordOpen, recordId, err))
 			continue
 		}
+		// THE CONTENT ENVELOPE, read by the ONE codec both sides of this package use. What this
+		// used to do was `Text: string(bodyPlain)` with no branch, which is what headVersion 0x02
+		// exists to keep a pre-kinds record away from.
+		//
+		// THE THREE NON-PARSED ANSWERS ARE THREE DIFFERENT ACCOUNTINGS and that is the whole
+		// reason the codec answers a verdict rather than an error:
+		//
+		//   - MALFORMED is a fail(), which is this walk's existing refusal channel: the record is
+		//     re-fetched, and after [maxRecordAttempts] it is named by [ErrRecordAbandoned] and
+		//     counted in [Stats.Unopened]. It is NOT the right long-term answer -- spec A §7.4's
+		//     closed GapReason set has a "malformed" value and sdk has no gap entry to render it
+		//     into, so a malformed body is currently reported as a hole rather than as a bad
+		//     record, and the retries before the hole are spent on something a retry cannot
+		//     repair. What it is NOT is silent, and that is why it is this way rather than
+		//     resolved past while somebody designs the gap entry.
+		//   - DROPPED is a transient on EPH(0): nothing was persisted, so there is nothing to
+		//     render and nothing to be a hole. UNREACHABLE FROM THIS WALK TODAY -- the class skip
+		//     above resolves every non-DURABLE record before this point -- and it is here because
+		//     the codec can answer it and a reader of this switch should not have to prove that.
+		//   - UNSUPPORTED is the unknown-kind rule and is handled BELOW, with the parsed case,
+		//     because it is not a failure: the record keeps its position and its message_id, it
+		//     does not count toward [ErrRecordAbandoned], and it becomes one closed placeholder.
+		entry, verdict, why := ParseContent(bodyPlain, header.RetentionClass, header.EphBucket)
+		switch verdict {
+		case ContentMalformed:
+			fail(recordId, fmt.Errorf("%w: record %d: %w", ErrRecordOpen, recordId, why))
+			continue
+		case ContentDropped:
+			self.stats.SkippedClass += 1
+			resolve(recordId)
+			continue
+		}
 		messageId, err := self.session.MessageIdOf(header)
 		if err != nil {
 			// UNREACHABLE HERE AND CARRIED ANYWAY. MessageIdOf refuses a nil header, a closed
@@ -1643,16 +1927,14 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			self.stats.OpenedOwn += 1
 			self.noteOwnIndexLocked(walk, recordId, header.StreamIndex, header.BodyHash)
 		}
-		received := &Message{
-			RecordId:     recordId,
-			SenderHandle: append([]byte(nil), header.SenderHandle[:]...),
-			Mine:         mine,
-			Text:         string(bodyPlain),
-			SentAtMs:     sentAtMs,
-			MessageId:    messageId[:],
+		received := newMessage(entry, recordId, header.SenderHandle[:], mine, sentAtMs, messageId[:])
+		// WHAT A RECORD BECOMES IS ONE DECISION AND IT IS TAKEN IN ONE PLACE. A reaction, a
+		// tombstone and a COVER are records that add no line, and [Group.deliverLocked] is what
+		// says so -- for this walk, for the own-copy path and for [Group.Send] alike, because
+		// three sites that each decided it would be three sites to keep level.
+		if self.deliverLocked(received, entry) {
+			walk.opened = append(walk.opened, received)
 		}
-		walk.opened = append(walk.opened, received)
-		self.log = append(self.log, received)
 		self.delivered[recordId] = true
 		resolve(recordId)
 	}
@@ -1764,6 +2046,27 @@ func (self *Group) openOwnFromCopyLocked(walk *pageWalk, recordId uint64, parsed
 	// is not this session's, and the clauses above have already compared this record's group and
 	// epoch against this group's. It is kept because the alternative to a branch is a [Message]
 	// delivered with a nil MessageId and nothing saying so.
+	// THE COPY IS AN APPLICATION PLAINTEXT AND IS READ BY THE SAME CODEC EVERY OTHER MEMBER READS
+	// THIS RECORD WITH. [SentRecord.Body] is "what was sealed, octets, never interpreted", and what
+	// [Group.Send] seals is `kind ‖ body` -- so this device's own reply, its own reaction and its
+	// own tombstone come back through this path with the same meaning the group gives them, rather
+	// than as a line of text that happens to start with an 0x02.
+	//
+	// A COPY THIS BUILD CANNOT READ IS NOT SHOWN AND IS NOT A SECOND KIND OF SILENCE. The one
+	// population that reaches it is a state directory written by a PRE-KINDS build, whose copies
+	// are raw text with no code: under the codec a line beginning "h" is kind 0x68, which is
+	// unassigned, so it renders as one closed placeholder under the unknown-kind rule -- the same
+	// answer every other member's build gives an unknown code, and NOT the line rendered wrong. A
+	// copy that is malformed under the codec falls through to the ordinary path instead, where it
+	// is authenticated as this device's own and counted in [Stats.OwnWithoutCopy]: a hole this
+	// device names, which is what "this build cannot read what it wrote" honestly is. The local
+	// copy has no version byte of its own to refuse on, and buying one would cost the state store's
+	// single version lever -- which every OTHER record in the directory, the device identity
+	// included, is read under.
+	entry, verdict, _ := ParseContent(sealed.body, header.RetentionClass, header.EphBucket)
+	if verdict == ContentMalformed || verdict == ContentDropped {
+		return false, nil
+	}
 	messageId, err := self.session.MessageIdOf(header)
 	if err != nil {
 		return false, fmt.Errorf("%w: record %d is this device's own at stream index %d and its message_id could not be derived: %w",
@@ -1772,18 +2075,256 @@ func (self *Group) openOwnFromCopyLocked(walk *pageWalk, recordId uint64, parsed
 	sealed.recordId = recordId
 	self.stats.OpenedOwn += 1
 	self.noteOwnIndexLocked(walk, recordId, header.StreamIndex, header.BodyHash)
-	received := &Message{
-		RecordId:     recordId,
-		SenderHandle: append([]byte(nil), header.SenderHandle[:]...),
-		Mine:         true,
-		Text:         string(sealed.body),
-		SentAtMs:     sealed.sentAtMs,
-		MessageId:    messageId[:],
+	received := newMessage(entry, recordId, header.SenderHandle[:], true, sealed.sentAtMs, messageId[:])
+	if self.deliverLocked(received, entry) {
+		walk.opened = append(walk.opened, received)
 	}
-	walk.opened = append(walk.opened, received)
-	self.log = append(self.log, received)
 	self.delivered[recordId] = true
 	return true, nil
+}
+
+// ── what a record becomes ────────────────────────────────────────────────────────────────────
+
+// messageKeyOf is a message_id as a map key. It TRUNCATES NOTHING and pads nothing: an id of any
+// other width is not a message_id, and every caller here has one off a [32]byte the derivation
+// answered.
+func messageKeyOf(messageId []byte) [MessageIdBytes]byte {
+	key := [MessageIdBytes]byte{}
+	copy(key[:], messageId)
+	return key
+}
+
+// newMessage builds one [Message] from one parsed envelope. It is the only constructor, so the walk,
+// the own-copy path and [Group.Send] cannot fill a [Message] three different ways.
+//
+// AN UNSUPPORTED ENTRY BECOMES A PLACEHOLDER HERE AND NOT SOMEWHERE ELSE: its Kind is the code that
+// arrived, its Text is empty, and nothing else is set -- because a build that does not know a code
+// must not guess at its layout, and a Text filled from a body it could not parse is exactly the
+// failure headVersion 0x02 was bumped to prevent.
+func newMessage(entry *Content, recordId uint64, senderHandle []byte, mine bool, sentAtMs int64,
+	messageId []byte) *Message {
+
+	received := &Message{
+		RecordId:     recordId,
+		SenderHandle: append([]byte(nil), senderHandle...),
+		Mine:         mine,
+		Text:         entry.Text,
+		SentAtMs:     sentAtMs,
+		MessageId:    append([]byte(nil), messageId...),
+		Kind:         entry.Kind,
+	}
+	if entry.Kind == KindReply {
+		received.ReplyToId = append([]byte(nil), entry.Target...)
+	}
+	return received
+}
+
+// deliverLocked folds one opened record into this group and answers whether it became a LINE of the
+// conversation.
+//
+// THREE KINDS OF RECORD ADD NO LINE and each answers false for a different reason:
+//
+//   - A REACTION and a TOMBSTONE are changes to another message. They are noted as effects and
+//     applied to their target, now or whenever it arrives.
+//   - A COVER is a change to nothing: "discarded, never receipted". It exists to be
+//     indistinguishable from a real message on the wire, and a COVER that produced an entry would
+//     be cover traffic the user can see.
+//
+// IT IS ONE FUNCTION BECAUSE THREE CALLERS ASK IT. [Group.openPageLocked], [Group.openOwnFromCopyLocked]
+// and [Group.sendContentLocked] each hold a [Message] and an entry, and a rule about what a record
+// becomes that lived in three places would be three rules the day one of them grew a case.
+func (self *Group) deliverLocked(received *Message, entry *Content) bool {
+	if effect, isEffect := effectOf(received, entry); isEffect {
+		self.noteEffectLocked(effect)
+		return false
+	}
+	if received.Kind == KindCover {
+		return false
+	}
+	self.log = append(self.log, received)
+	key := messageKeyOf(received.MessageId)
+	self.byMessage[key] = received
+	// AND THE EFFECTS THAT WERE WAITING FOR IT. A reaction or a tombstone that arrived before its
+	// target has been held since, and this is the moment it applies.
+	self.reapplyLocked(key)
+	return true
+}
+
+// contentEffect is one record that changes ANOTHER message rather than adding one.
+type contentEffect struct {
+	kind ContentKind
+
+	// The EFFECT RECORD's own message_id, which is the key it is held under. One record is one
+	// effect however many times a rewind walks back over it.
+	messageId [MessageIdBytes]byte
+
+	// The server's number for it, and zero for a record this device has sealed and the server
+	// has not answered yet. See [effectOrder] for what a zero sorts as and why.
+	recordId uint64
+
+	// Who sealed it, which is T-b's operand and a reaction's reactor.
+	senderHandle []byte
+	mine         bool
+
+	// The message it names.
+	target [MessageIdBytes]byte
+
+	// A reaction's emoji, raw. Empty on a tombstone.
+	emoji string
+}
+
+// effectOf reads one parsed envelope as an effect, and answers false for a kind that is a line of
+// the conversation rather than a change to one.
+func effectOf(received *Message, entry *Content) (*contentEffect, bool) {
+	switch entry.Kind {
+	case KindTombstone, KindReactionAdd, KindReactionRemove:
+	default:
+		return nil, false
+	}
+	return &contentEffect{
+		kind:         entry.Kind,
+		messageId:    messageKeyOf(received.MessageId),
+		recordId:     received.RecordId,
+		senderHandle: append([]byte(nil), received.SenderHandle...),
+		mine:         received.Mine,
+		target:       messageKeyOf(entry.Target),
+		emoji:        entry.Emoji,
+	}, true
+}
+
+// noteEffectLocked holds one reaction or tombstone and applies everything standing on its target.
+//
+// WHY IT IS HELD AND NOT APPLIED. A reaction, a tombstone and their target are three records and
+// THE WALK'S ORDER IS NOT THE CONVERSATION'S ORDER: a record that fails to open holds the cursor
+// back and is re-delivered on a LATER fetch, after record ids above it have already been shown, and
+// after [maxRecordAttempts] it is abandoned and never delivered at all. So "the target is already
+// here" is a thing this package may not assume, in either direction -- the target may arrive after
+// the effect, and an effect may arrive after another effect that was written later.
+//
+// SO EVERY EFFECT IS KEPT AND THE TARGET'S STATE IS REBUILT, rather than each effect being applied
+// once as it lands. The difference is not theoretical: an ADD at record 5 and a REMOVE at record 6
+// that arrive in the order 6, 5 -- which is exactly what one failed open produces -- leave the
+// reaction STANDING under apply-as-it-lands and REMOVED under a replay, and the second is what
+// server order says. See [Group.reapplyLocked].
+func (self *Group) noteEffectLocked(effect *contentEffect) {
+	if held, seen := self.effects[effect.messageId]; seen {
+		// ONE RECORD IS ONE EFFECT. The same record re-delivered behind an earlier failure is
+		// the same effect with a record id the server may only now have given it, so the held
+		// copy is updated in place rather than appended beside itself.
+		*held = *effect
+	} else {
+		self.effects[effect.messageId] = effect
+		self.effectsOn[effect.target] = append(self.effectsOn[effect.target], effect)
+	}
+	self.reapplyLocked(effect.target)
+}
+
+// reapplyLocked rebuilds one message's effects from every effect record this group holds for it, in
+// SERVER ORDER.
+//
+// IT REBUILDS RATHER THAN ACCUMULATES, which is the whole of why [Message.Deleted] and
+// [Message.Reactions] are cleared first: an effect that arrives out of order has to be able to
+// change the answer that an effect already applied gave, and an accumulator cannot be walked
+// backwards. The cost is one pass over one message's effects per effect record, and the effects on
+// one message are a number a human produced.
+//
+// THE CLEARING ITSELF DEFENDS NOTHING A TEST CAN SEE, measured by deleting the two lines and
+// running ./urmessage and ./cp3b with nothing going red, and it is kept for a reason rather than
+// from habit. Every [contentEffect.applyTo] is idempotent TODAY -- an ADD dedupes on
+// (reactor, emoji), a REMOVE filters, and a tombstone sets a bool nothing else clears -- so
+// replaying onto the previous answer happens to reach the same state as replaying onto an empty
+// one. The clearing is what makes that a PROPERTY of this function rather than a coincidence of
+// those three, and the day one of them is not idempotent it is the line that keeps this a rebuild.
+// The SORT beside it is not in the same position: deleting that turns
+// TestEffectsAreAppliedInServerOrderAndNotArrivalOrder red.
+//
+// A TARGET THAT IS NOT HERE IS NOT AN ERROR AND NOT A DROP. The effects stay held; this is what
+// runs again when [Group.deliverLocked] indexes the target.
+func (self *Group) reapplyLocked(target [MessageIdBytes]byte) {
+	held, found := self.byMessage[target]
+	if !found {
+		return
+	}
+	effects := append([]*contentEffect(nil), self.effectsOn[target]...)
+	slices.SortStableFunc(effects, effectOrder)
+	held.Deleted = false
+	held.Reactions = nil
+	for _, effect := range effects {
+		effect.applyTo(held)
+	}
+}
+
+// effectOrder is server order: `record_id` ascending, which is what §5.3 says decides which of two
+// reactions came last.
+//
+// A RECORD THE SERVER HAS NOT NUMBERED SORTS LAST, and that is a decision rather than a fallback.
+// The only records with a zero id are ones THIS DEVICE has just sealed and not yet had answered, so
+// "the newest thing that happened" is the true reading of one; sorting it first would let a
+// half-submitted reaction be cancelled by a REMOVE the server numbered before it existed.
+//
+// THE TIE-BREAK IS THE EFFECT'S OWN message_id, so that two effects the server has not numbered
+// have an order at all, and the SAME order on every device that holds them.
+func effectOrder(first *contentEffect, second *contentEffect) int {
+	if first.recordId != second.recordId {
+		switch {
+		case first.recordId == 0:
+			return 1
+		case second.recordId == 0:
+			return -1
+		case first.recordId < second.recordId:
+			return -1
+		}
+		return 1
+	}
+	return bytes.Compare(first.messageId[:], second.messageId[:])
+}
+
+// applyTo is one effect, against the message it names.
+func (self *contentEffect) applyTo(target *Message) {
+	switch self.kind {
+	case KindTombstone:
+		// T-b, THE SAME-SENDER RULE, and it is what MASTER §12.1's "a deletion cannot be
+		// forged" needs beyond R1: R1 proves who sealed the TOMBSTONE and nothing in it proves
+		// they sealed the target. A tombstone from anybody else is ignored -- not refused,
+		// because the record is a legal record and a receiver that failed the walk over one
+		// would be handing any member a way to wedge the conversation.
+		if !bytes.Equal(self.senderHandle, target.SenderHandle) {
+			return
+		}
+		// T-a: only a stored CONTENT message can be deleted. A reaction, a tombstone and a
+		// COVER are not entries and never reach here; a kind this build does not know is an
+		// entry, and it is not one this build can say is deletable.
+		switch target.Kind {
+		case KindText, KindReply:
+		default:
+			return
+		}
+		target.Deleted = true
+	case KindReactionAdd:
+		for _, standing := range target.Reactions {
+			if standing.Emoji == self.emoji && bytes.Equal(standing.SenderHandle, self.senderHandle) {
+				return
+			}
+		}
+		target.Reactions = append(target.Reactions, Reaction{
+			SenderHandle: append([]byte(nil), self.senderHandle...),
+			Emoji:        self.emoji,
+			Mine:         self.mine,
+		})
+	case KindReactionRemove:
+		// A REMOVE CANCELS AN ADD WITH THE SAME (reactor, target, emoji) AND NOBODY ELSE'S.
+		// The reactor is the sender_handle: D7 is what would make it a person rather than a
+		// leaf, and until it is ruled a second device of one person cannot take back the
+		// first's reaction.
+		kept := make([]Reaction, 0, len(target.Reactions))
+		for _, standing := range target.Reactions {
+			if standing.Emoji == self.emoji && bytes.Equal(standing.SenderHandle, self.senderHandle) {
+				continue
+			}
+			kept = append(kept, standing)
+		}
+		target.Reactions = kept
+	}
 }
 
 // ownFrameAlreadySpent reports whether OpenRecord refused a record for exactly one reason: its inner
@@ -1892,6 +2433,9 @@ func (self *Group) initTables() {
 	self.ownIndices = map[uint64]*ownSealed{}
 	self.withoutCopy = map[uint64]bool{}
 	self.ownHeads = map[trackedKey]uint64{}
+	self.byMessage = map[[MessageIdBytes]byte]*Message{}
+	self.effects = map[[MessageIdBytes]byte]*contentEffect{}
+	self.effectsOn = map[[MessageIdBytes]byte][]*contentEffect{}
 }
 
 // advanceOwnLadderLocked moves the receiver ladder over this device's OWN leaf up to the position

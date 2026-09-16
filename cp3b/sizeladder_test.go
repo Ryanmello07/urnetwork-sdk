@@ -96,20 +96,26 @@ func TestEveryRecordTypeUrmessageSealsLandsOnTheRungItsBodyNeeds(t *testing.T) {
 		octets int
 		rung   message.SizeBucket
 	}
+	// EVERY EDGE MOVED DOWN BY ONE OCTET WHEN THE CONTENT ENVELOPE LANDED, and that is the whole
+	// of what the 2026-09-17 ruling costs a stored record. What connect measures is the
+	// APPLICATION PLAINTEXT's capacity -- 59 / 826 / 3,898 / 16,186 / 65,334 -- and the plaintext
+	// is now `kind ‖ body`, so a text of 58 octets is 59 of plaintext and still fits the 256 rung
+	// while one of 59 is 60 and does not. The column below is therefore the measured one less the
+	// kind octet, and it stays literals for the reason it always did: two tables agreeing with
+	// each other measure nothing.
 	edges := []edge{
-		{0, message.SizeBucket256},
 		{1, message.SizeBucket256},
-		{59, message.SizeBucket256},
-		{60, message.SizeBucket1K},
-		{252, message.SizeBucket1K}, // fitted the 256 rung before 4c030dc
-		{826, message.SizeBucket1K},
-		{827, message.SizeBucket4K},
-		{1020, message.SizeBucket4K}, // fitted the 1K rung before
-		{3898, message.SizeBucket4K},
-		{3899, message.SizeBucket16K},
-		{16186, message.SizeBucket16K},
-		{16187, message.SizeBucket64K},
-		{65334, message.SizeBucket64K},
+		{58, message.SizeBucket256},
+		{59, message.SizeBucket1K}, // fitted the 256 rung before the kind octet
+		{252, message.SizeBucket1K},
+		{825, message.SizeBucket1K},
+		{826, message.SizeBucket4K}, // fitted the 1K rung before the kind octet
+		{1020, message.SizeBucket4K},
+		{3897, message.SizeBucket4K},
+		{3898, message.SizeBucket16K},
+		{16185, message.SizeBucket16K},
+		{16186, message.SizeBucket64K},
+		{65333, message.SizeBucket64K},
 	}
 	for _, one := range edges {
 		text := strings.Repeat("u", one.octets)
@@ -139,22 +145,30 @@ func TestEveryRecordTypeUrmessageSealsLandsOnTheRungItsBodyNeeds(t *testing.T) {
 		t.Logf("a %5d octet text: rung %d, ct_body %5d octets, read back whole", one.octets, row.SizeBucket, len(row.CtBody))
 	}
 
-	// ── and the ceiling: 65,335 is one past the largest inline rung and is refused by name ───
+	// ── and the ceiling: 65,334 is one past the largest inline rung and is refused by name ───
 	//
-	// It used to fit: 65,532 octets were usable before 4c030dc. The 198 octet band between is the
-	// one connect's ledger open item 203 names, and a blob rung is its only destination.
+	// It used to fit twice over: 65,532 octets were usable before 4c030dc and 65,334 before the
+	// kind octet. The 198 octet band between the first two is the one connect's ledger open item
+	// 203 names, and a blob rung is its only destination.
 	//
 	// WHERE THE REFUSAL NOW HAPPENS IS NOT WHERE IT DID, and this case deliberately does not say
-	// so: urmessage.MaxTextOctets refuses both of these BEFORE SealRecord, and what that costs --
+	// so: urmessage.MaxTextOctets refuses all of these BEFORE SealRecord, and what that costs --
 	// or rather what it stops costing -- is
 	// TestTheTextCeilingRefusesBeforeItSpendsAnythingIrreversible's. The literals below stay
 	// literals on purpose: they are this file's own measured column, so a MaxTextOctets that
 	// drifted away from the ladder would show up here as a text that is refused and should not be,
 	// or accepted and should not be, rather than as two tables agreeing with each other.
-	for _, octets := range []int{65335, 65532} {
+	for _, octets := range []int{65334, 65335, 65532} {
 		if _, err := aliceGroup.Send(ctx, strings.Repeat("u", octets)); !errors.Is(err, urmessage.ErrTextTooLong) {
 			t.Errorf("a %d octet text answered %v, want ErrTextTooLong", octets, err)
 		}
+	}
+	// AND THE FLOOR, WHICH MOVED THE OTHER WAY AND IS A PRODUCT CHANGE RATHER THAN A RUNG ONE.
+	// TEXT's body is a tail of at least one octet (rule R-d), so an empty line is a text the
+	// format has no encoding for and Send refuses it. Before the envelope it sealed a record with
+	// an empty body. It is asserted here so the change is gated rather than discovered.
+	if _, err := aliceGroup.Send(ctx, ""); !errors.Is(err, urmessage.ErrContentMalformed) {
+		t.Errorf("an empty text answered %v, want ErrContentMalformed", err)
 	}
 	assertNothingFailedToOpen(t, "bob", bobGroup)
 }

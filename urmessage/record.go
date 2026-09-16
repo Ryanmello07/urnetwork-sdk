@@ -123,13 +123,35 @@ func armOf(body proto.Message) (protoreflect.FieldDescriptor, error) {
 // The version byte every head this package seals starts with. It is INSIDE `ct_head`, so the
 // server never sees it and it costs nothing on the wire that is readable by anyone but a member.
 //
-// It exists so that the day this package puts a second field in the head -- a reply-to, a content
-// type -- a record written by the older build is refused with a sentence rather than parsed as
-// something it is not.
-const headVersion byte = 0x01
+// The version byte is the RECORD's format epoch, not the head's own layout version. It is bumped
+// whenever a build's reading of a record changes in a way an older build would get wrong --
+// including a change to the APPLICATION PLAINTEXT's grammar, which is what 0x02 announces. The head
+// layout itself is frozen at version ‖ sent_at, 9 octets, and invariant H1 gates that.
+//
+// CONCRETELY, 0x02 ANNOUNCES "the application plaintext is kind ‖ body(kind)" -- see kind.go. It
+// does not announce a head change, because there is none. What it buys is exactly one population:
+// records sealed by a post-MASTER-§8.4, pre-kinds build, which is what the live table holds today.
+// An sdk at eebd50c does `Text: string(bodyPlain)` with no branch, so handed a kinded record it
+// would render `0x05 ‖ <32 octets> ‖ 👍` as a text line attributed to a real sender; decodeHead's
+// strict equality below is what turns that into [ErrHeadFormat] instead. A kinded build keeps NO
+// raw-text parser for head 0x01, so no body is ever interpretable under two grammars.
+//
+// RECORDS SEALED BEFORE MASTER §8.4 ARE NOT WHAT THIS PROTECTS AGAINST, stated so nobody claims it:
+// those carry no inner frame and OpenRecord already refuses them at the peek
+// (connect/messagegroup/mlsframe.go:383).
+const headVersion byte = 0x02
 
 // headBytes is the octets a head of this version is: the version, then `sent_at` as unix
 // milliseconds, big endian.
+//
+// IT IS FROZEN AND THE FREEZE IS A CASE, not this sentence: 9 octets here plus
+// chacha20poly1305.Overhead (16, connect/messagegroup/recordaead.go:67) is 25 octets of `ct_head`
+// on every record of every class, which is invariant H1 and is what
+// TestEveryRecordThisBuildSealsCarriesA25OctetCtHead asserts on the SEAL side across all four
+// record kinds. Widening this is not an edit: `ct_head` travels as a bare WriteOpaqueLP
+// (connect/message/codec.go:155) bounded by a cap rather than padded into a rung, so a head whose
+// width depends on what a record SAYS leaks that to the server, permanently, for every PERMANENT
+// and DURABLE row already stored.
 const headBytes = 1 + 8
 
 // encodeHead builds one record's head from the clock reading its sender took.

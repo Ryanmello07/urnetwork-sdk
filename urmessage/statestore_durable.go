@@ -194,7 +194,17 @@ type SentRecord struct {
 	// The sender's clock reading the record's head carries, unix milliseconds.
 	SentAtMs int64
 
-	// What was sealed. Octets, never interpreted.
+	// What was sealed. Octets, never interpreted HERE -- and since the content envelope landed
+	// they are the APPLICATION PLAINTEXT, `kind ‖ body`, not the text. That is the same
+	// definition it always had; what changed is what [Group.Send] hands it.
+	//
+	// A COPY WRITTEN BY A PRE-KINDS BUILD IS RAW TEXT AND HAS NO CODE, and this record carries no
+	// version byte of its own to refuse it by: the store's one version lever is read for every
+	// record in the directory, the device identity included, so spending it here would brick a
+	// restore rather than refuse a line. What happens instead is [Group.openOwnFromCopyLocked]'s
+	// answer -- the first octet of an old line is an unassigned code, so it renders as one closed
+	// placeholder under the unknown-kind rule, which is what every other member's build does with
+	// a code it does not know, and is not the line rendered wrong.
 	Body []byte
 }
 
