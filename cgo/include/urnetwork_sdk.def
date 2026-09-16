@@ -482,6 +482,10 @@ EXPORTS
 	urnet_login_view_controller_close
 	urnet_login_view_controller_start
 	urnet_login_view_controller_stop
+	urnet_message_client_close
+	urnet_message_client_id
+	urnet_message_client_new
+	urnet_message_client_platform_url
 	urnet_message_context_cancel
 	urnet_message_context_new
 	urnet_message_device_close

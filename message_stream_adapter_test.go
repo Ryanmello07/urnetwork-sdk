@@ -1111,6 +1111,9 @@ var streamAdapterPackageValueCensus = map[string]streamAdapterPackageVar{
 	"errMessageTransportNoServer":              streamAdapterPackageVarOf(&errMessageTransportNoServer),
 	"errMessageTransportRefused":               streamAdapterPackageVarOf(&errMessageTransportRefused),
 	"errMessageTransportTimeout":               streamAdapterPackageVarOf(&errMessageTransportTimeout),
+	"ErrMessageClientNoJwt":                    streamAdapterPackageVarOf(&ErrMessageClientNoJwt),
+	"ErrMessageClientNoClientId":               streamAdapterPackageVarOf(&ErrMessageClientNoClientId),
+	"ErrMessageClientNoHost":                   streamAdapterPackageVarOf(&ErrMessageClientNoHost),
 	"multiPartPublicSuffixes":                  streamAdapterPackageVarOf(&multiPartPublicSuffixes),
 	"probeDnsTargets":                          streamAdapterPackageVarOf(&probeDnsTargets),
 	"probeHttpTargets":                         streamAdapterPackageVarOf(&probeHttpTargets),
@@ -1174,6 +1177,9 @@ var streamAdapterNonSentinelRulings = map[string]string{
 	"errMessageTransportWrongArm":      "the binding's refusal to read a REASON_OK answer carried on a body arm that is not the one the request travelled in. Raised in messageTransport.Hello over a decoded response; a StreamStore answers no arms",
 	"errMessageFragmentAborted":        "the binding's typed §4.6 abort, raised inside the receive callback when a fragment is not the one the reassembly was waiting for. It is raised over a protocol.MessageServerFragment that connect delivered and reaches no store call at all; a reserver talks to a StreamStore and a StreamStore has no fragments",
 	"errMessageTransportTimeout":       "the binding's typed timeout, raised when no response carrying a request_id arrived before the deadline. It is a TRANSPORT deadline and not a store refusal; SenderRatchet.Next never meets it, because the reserver's error chain comes from a StreamStore and a StreamStore has no deadline",
+	"ErrMessageClientNoJwt":            "NewMessageClient's refusal that no by_client_jwt was handed in. It is raised by a free function that CONSTRUCTS a platform-attached connect client, before any store exists; the reserver's call graph reaches a StreamStore and a StreamStore mints no credentials",
+	"ErrMessageClientNoClientId":       "NewMessageClient's refusal that the credential names no client_id, so the client it would build is at the zero id. Same seat as the one above: a construction refusal taken before a client exists, and no method the adapter holds can produce it",
+	"ErrMessageClientNoHost":           "NewMessageClient's refusal that the config named neither a host nor both absolute service urls, so there is nowhere to dial. It is decided over the config alone, in a free function no store call reaches",
 }
 
 // streamAdapterPredeclaredTypeNames is the set of type names a CONSTANT's declared type can be

@@ -95,6 +95,44 @@ uint64_t urnet_message_stream_index_reserver_new(uint64_t stream_store);
 uint64_t urnet_message_durable_state_store_open(const char* dir, char** out_error);
 bool urnet_message_durable_state_store_close(uint64_t self, char** out_error);
 
+/* ----- the platform-attached client ----- */
+
+/* build a connect client ATTACHED TO THE PLATFORM and dial it: this is the `client` handle
+ * urnet_message_transport_new takes, and it is what lets this abi reach a message server that is
+ * not in your own process.
+ *
+ * by_client_jwt is an operator-minted ByJwt for a network_client. NOTHING HERE MINTS ONE: that is
+ * an admin action against a running URnetwork operator, it is the half of S2-7 that is still open,
+ * and this call takes the credential you already hold. IT IS A SECRET -- do not log it.
+ *
+ * host is the operator host name, e.g. "ur.io". the platform and api urls are DERIVED from it:
+ * env "" or "main" gives wss://connect.<host>, any other env gives wss://<env>-connect.<host>.
+ * env, instance_id and app_version may each be NULL. instance_id is a uuid identifying THIS
+ * installation -- pass NULL or "" to draw a fresh one, or the uuid you kept to reconnect as the
+ * same one; a malformed uuid is refused rather than silently replaced. every refusal answers 0
+ * AND sets out_error.
+ *
+ * IT DOES NOT BLOCK AND IT DOES NOT TELL YOU WHETHER THE CREDENTIAL WAS ACCEPTED. the dial runs on
+ * its own thread and reconnects by itself; urnet_message_device_connect is what finds out.
+ *
+ * THIS PATH HAS NOT BEEN RUN AGAINST A REAL OPERATOR FROM THIS ABI. what is under test is the
+ * shape -- refusals, the derived url, the client_id, the provide modes -- and not that a frame
+ * crossed.
+ *
+ * CLOSE IT WITH urnet_message_client_close BEFORE urnet_release. release alone leaves the
+ * websocket and its reconnect loop running. close the device and the transport first: they are
+ * built over this and neither closes it. */
+uint64_t urnet_message_client_new(const char* by_client_jwt, const char* host, const char* env, const char* instance_id, const char* app_version, char** out_error);
+/* the client_id the credential names, as a uuid string, which is the identity the platform routes
+ * to. free with urnet_free_string. */
+char* urnet_message_client_id(uint64_t self);
+/* the url this client actually dialled. the derivation from host and env happens inside the
+ * library, and dialling the production authority from a staging env looks exactly like working.
+ * free with urnet_free_string. */
+char* urnet_message_client_platform_url(uint64_t self);
+/* stop the platform transport, the client and everything under them. idempotent. */
+void urnet_message_client_close(uint64_t self);
+
 /* ----- the transport ----- */
 
 /* bind to one message server over a connect client YOU own: nothing here dials, authenticates or
@@ -102,10 +140,10 @@ bool urnet_message_durable_state_store_close(uint64_t self, char** out_error);
  * or 0 for it; any other value answers 0 and out_error here, rather than a Hello the server refuses
  * later. timeout_ms 0 takes the binding's default.
  *
- * NO EXPORT IN THIS ABI PRODUCES THE client HANDLE TODAY. a connect.Client receives a frame only
- * through an in-process route or through a platform transport dialling an operator with a minted
- * ByJwt for a network_client, and minting that is an operator-admin action no code in this
- * workspace can perform. that is the open item S2-7; this parameter is the hole it goes in. */
+ * WHERE THE client HANDLE COMES FROM: urnet_message_client_new, above -- a connect.Client receives
+ * a frame only through an in-process route or through a platform transport dialling an operator
+ * with a minted ByJwt, and that export is the second. what is still open of S2-7 is the CREDENTIAL
+ * and only the credential. */
 uint64_t urnet_message_transport_new(uint64_t client, const char* server_client_id, uint32_t protocol_version, int64_t timeout_ms, char** out_error);
 /* stop receiving. the connect client under it is yours and is NOT closed. */
 void urnet_message_transport_close(uint64_t self);
@@ -200,8 +238,16 @@ uint64_t urnet_message_group_list_at(uint64_t self, int32_t index);
 
 int32_t urnet_message_list_count(uint64_t self);
 /* one message's metadata as json, WITHOUT the body:
- *   {"record_id":u64,"sender_handle":"<32 hex>","mine":bool,"sent_at_ms":i64,"body_len":i32}
+ *   {"record_id":u64,"sender_handle":"<32 hex>","mine":bool,"sent_at_ms":i64,"body_len":i32,
+ *    "message_id":"<64 hex>"}
  * sender_handle is 16 opaque octets and IS NOT A NAME: the alpha has no identity system.
+ *
+ * message_id is 32 octets and IS the name to quote: a reply, a reaction, a tombstone or a read
+ * cursor has to say which message it is about, and record_id cannot -- record_id is the SERVER's
+ * per-group counter, so it is zero on a message whose submit response was lost. it is a NAME and
+ * not an authentication: the key it is derived under is group-shared, so any member can compute
+ * any member's id at any position. what makes an id trustworthy is that the record it names
+ * opened.
  * free with urnet_free_string. */
 char* urnet_message_list_info(uint64_t self, int32_t index);
 /* one message's body, byte for byte, through the buffer-out pattern. the ONLY way a body leaves

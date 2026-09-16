@@ -143,6 +143,14 @@ func TestEveryRecordTypeUrmessageSealsLandsOnTheRungItsBodyNeeds(t *testing.T) {
 	//
 	// It used to fit: 65,532 octets were usable before 4c030dc. The 198 octet band between is the
 	// one connect's ledger open item 203 names, and a blob rung is its only destination.
+	//
+	// WHERE THE REFUSAL NOW HAPPENS IS NOT WHERE IT DID, and this case deliberately does not say
+	// so: urmessage.MaxTextOctets refuses both of these BEFORE SealRecord, and what that costs --
+	// or rather what it stops costing -- is
+	// TestTheTextCeilingRefusesBeforeItSpendsAnythingIrreversible's. The literals below stay
+	// literals on purpose: they are this file's own measured column, so a MaxTextOctets that
+	// drifted away from the ladder would show up here as a text that is refused and should not be,
+	// or accepted and should not be, rather than as two tables agreeing with each other.
 	for _, octets := range []int{65335, 65532} {
 		if _, err := aliceGroup.Send(ctx, strings.Repeat("u", octets)); !errors.Is(err, urmessage.ErrTextTooLong) {
 			t.Errorf("a %d octet text answered %v, want ErrTextTooLong", octets, err)

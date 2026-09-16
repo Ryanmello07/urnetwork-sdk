@@ -31,16 +31,20 @@ import (
 // ships. The measurement that says so is in ctest/run.sh: it counts urnet_message_loopback_*
 // in both headers and requires 0 in the shipping one.
 //
-// WHY IT HAS TO EXIST AT ALL. urnet_message_transport_new takes a connect client handle and no
-// export in this abi produces one, for the reason stated at that function: a connect.Client
+// WHY IT HAS TO EXIST AT ALL, AND THE REASON IS NOT THE ONE IT USED TO BE. A connect.Client
 // receives a frame only through an in-process connect.Route or through a PlatformTransport
-// dialling an operator with a minted ByJwt, and the second needs a credential no code in this
-// workspace can mint. So a C program cannot reach a message server through the shipping abi
-// alone -- not because the binding is incomplete but because S2-7 is open. These four exports
-// are the in-process half, exactly as sdk/cp3b's world_test.go wires it, so that the C-level
-// test of the binding can be a REAL conversation through the REAL server rather than a mock of
-// one. Nothing here is a double: peer.Peer dispatches §4.2 frames, api.Handler runs §5.1's
-// pipeline, store.MemoryStore holds the rows, and the client half is entirely the shipping abi.
+// dialling an operator with a minted ByJwt. THIS ABI NOW PRODUCES THE SECOND --
+// urnet_message_client_new, which ships -- so the sentence that stood here, "urnet_message_transport_new
+// takes a connect client handle and no export in this abi produces one", is no longer true, and it
+// is recorded as having been rather than quietly replaced.
+//
+// WHAT REMAINS TRUE IS THE HALF THIS FILE RESTS ON: there is no operator here to dial and no
+// credential to dial one with, so a C-level test routed through the shipping client would reach
+// nothing at all. These exports are the in-process half, exactly as sdk/cp3b's world_test.go wires
+// it, so that the C-level test of the binding can be a REAL conversation through the REAL server
+// rather than a mock of one. Nothing here is a double: peer.Peer dispatches §4.2 frames,
+// api.Handler runs §5.1's pipeline, store.MemoryStore holds the rows, and the client half is
+// entirely the shipping abi.
 //
 // WHY IT IS HERE AND NOT IN A MODULE OF ITS OWN. It must be in package main, because the handles
 // it hands back have to land in this package's own registry (handles.go) -- a second module is a

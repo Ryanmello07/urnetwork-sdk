@@ -214,6 +214,114 @@ func urnet_message_durable_state_store_close(self C.uint64_t, outError **C.char)
 	return C.bool(true)
 }
 
+// ── the platform-attached client, which is what makes the rest of this abi reach a real server ──
+
+// urnet_message_client_new builds a connect client ATTACHED TO THE URNETWORK PLATFORM: it dials
+// wss://connect.<host> with the operator-minted by_client_jwt, and it is what
+// urnet_message_transport_new's client parameter takes.
+//
+// IT IS THE EXPORT THAT USED NOT TO EXIST, and until it did, a C caller could reach an in-process
+// loopback server and nothing else -- not because the binding was incomplete but because S2-7's
+// second half was open. It does not close S2-7's FIRST half: the by_client_jwt is minted by an
+// admin of a running URnetwork operator (spec B §9.1) and nothing in this abi mints, fetches or
+// validates one. This takes the credential the caller already holds.
+//
+// THIS PATH HAS NEVER BEEN RUN AGAINST A REAL OPERATOR FROM THIS ABI, and the module says so in
+// sdk/message_client.go's own header rather than only here. What is held by tests is the SHAPE:
+// which arguments are refused, what the urls derive to, that the client carries the client_id the
+// credential names, and that the provide modes are set. Not that a frame ever crossed.
+//
+// ARGUMENTS. by_client_jwt is required. host is the operator host name, e.g. "ur.io"; the two
+// service urls are DERIVED from it the way the rest of sdk derives them, so env "" or "main"
+// gives wss://connect.<host> and any other env gives wss://<env>-connect.<host>. env may be NULL
+// or "" for the deployed one. instance_id may be NULL or "" to draw a fresh one; pass the uuid
+// you kept to reconnect as the same installation. app_version may be NULL for this build's
+// default. Every refusal answers 0 AND sets out_error.
+//
+// THE RETURNED HANDLE OWNS A LIVE CONNECTION. Call urnet_message_client_close before urnet_release
+// -- release alone leaves the websocket, the platform transport's reconnect loop and the client's
+// goroutines running for the life of the process. Close the transport and the device FIRST: they
+// are built over this and they do not close it.
+//
+// IT DOES NOT BLOCK AND IT DOES NOT REPORT WHETHER THE CREDENTIAL WAS ACCEPTED. The dial happens
+// on a goroutine and reconnects on its own; the first call that finds out is
+// urnet_message_device_connect, and a client_id that has just re-dialled is not routed to for
+// about sixty seconds.
+//
+//export urnet_message_client_new
+func urnet_message_client_new(byClientJwt *C.char, host *C.char, env *C.char, instanceId *C.char, appVersion *C.char, outError **C.char) C.uint64_t {
+	defer cgoGuard("urnet_message_client_new")
+	config := &sdk.MessageClientConfig{
+		ByClientJwt: goString(byClientJwt),
+		Host:        goString(host),
+		Env:         goString(env),
+		AppVersion:  goString(appVersion),
+	}
+	// AN EMPTY instance_id IS "DRAW ONE" AND A MALFORMED ONE IS A REFUSAL, which is not the
+	// same thing and is the reason this is not one ParseId call with the error swallowed. A
+	// caller that meant to reconnect as a kept installation and mistyped the uuid would
+	// otherwise silently become a NEW installation, which is exactly the case the id exists to
+	// distinguish.
+	if raw := goString(instanceId); raw != "" {
+		parsed, err := connect.ParseId(raw)
+		if err != nil {
+			setErrorOut(outError, fmt.Errorf("urnet_message_client_new: instance_id %q is not a uuid; pass NULL or \"\" to draw a fresh one: %w", raw, err))
+			return 0
+		}
+		config.InstanceId = parsed
+	}
+	client, err := sdk.NewMessageClient(context.Background(), config)
+	if err != nil {
+		setErrorOut(outError, err)
+		return 0
+	}
+	return C.uint64_t(newHandle(client))
+}
+
+// urnet_message_client_id is the client_id the credential named, as a uuid string. It is the
+// identity the platform routes to, and a caller that wants to know WHICH client this is -- for a
+// log line, or to compare against what an operator console shows -- gets it here rather than by
+// parsing the jwt a second time. Free with urnet_free_string.
+//
+//export urnet_message_client_id
+func urnet_message_client_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_message_client_id")
+	self_, ok := resolveHandle[*sdk.MessageClient](uint64(self), "urnet_message_client_id")
+	if !ok || self_ == nil {
+		return nil
+	}
+	return cString(self_.ClientId().String())
+}
+
+// urnet_message_client_platform_url is the url this client actually dialled. It exists because
+// the derivation from host and env happens inside the module, so it is the one thing about this
+// client a caller cannot otherwise check -- and dialling the production authority from a staging
+// env is a mistake that looks exactly like working. Free with urnet_free_string.
+//
+//export urnet_message_client_platform_url
+func urnet_message_client_platform_url(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_message_client_platform_url")
+	self_, ok := resolveHandle[*sdk.MessageClient](uint64(self), "urnet_message_client_platform_url")
+	if !ok || self_ == nil {
+		return nil
+	}
+	return cString(self_.PlatformUrl())
+}
+
+// urnet_message_client_close stops the platform transport, the client and the context under them.
+// It is idempotent. Everything built OVER this client -- the transport, the device, the groups --
+// should be closed first; none of them closes this.
+//
+//export urnet_message_client_close
+func urnet_message_client_close(self C.uint64_t) {
+	defer cgoGuard("urnet_message_client_close")
+	self_, ok := resolveHandle[*sdk.MessageClient](uint64(self), "urnet_message_client_close")
+	if !ok || self_ == nil {
+		return
+	}
+	self_.Close()
+}
+
 // ── the transport, over a connect client this abi does not produce ──────────────────────────
 
 // urnet_message_transport_new binds §10.1 to one message server over a connect client the CALLER
@@ -227,13 +335,16 @@ func urnet_message_durable_state_store_close(self C.uint64_t, outError **C.char)
 // check after it. So 0 now takes the version this build speaks, like every other 0 here, and any
 // other value is refused HERE, by name, before it can become a Hello the server refuses.
 //
-// THE CLIENT HANDLE HAS NO SOURCE IN THIS ABI TODAY AND THAT IS NOT AN OVERSIGHT. A
-// connect.Client receives a frame in exactly two ways -- an in-process connect.Route, or a
-// connect.PlatformTransport that dials wss://connect.<host> with an operator-minted ByJwt for a
-// network_client (spec B §9.1) -- and neither is something sdk, connect or this binding can
-// perform for itself. It is S2-7, it is open, and a client factory invented here would be an
-// invented answer to it. What this export fixes is the SHAPE: the day a credential exists the
-// client goes in this hole and nothing above it moves.
+// WHERE THE CLIENT HANDLE COMES FROM, WHICH IS A SENTENCE THAT CHANGED. A connect.Client receives
+// a frame in exactly two ways -- an in-process connect.Route, or a connect.PlatformTransport that
+// dials wss://connect.<host> with an operator-minted ByJwt for a network_client (spec B §9.1).
+// This abi now produces the SECOND: urnet_message_client_new, above. The first is the loopback
+// harness, which is behind a build tag and ships in nothing.
+//
+// UNTIL THAT EXPORT EXISTED THERE WAS NO SOURCE AT ALL, and this paragraph said so. What is still
+// open of S2-7 is the CREDENTIAL and only the credential: minting a network_client ByJwt is an
+// operator-admin action against a running URnetwork operator, and nothing in connect, sdk or this
+// binding does it. The client no longer has to be invented; the token still has to be handed in.
 //
 //export urnet_message_transport_new
 func urnet_message_transport_new(client C.uint64_t, serverClientId *C.char, protocolVersion C.uint32_t, timeoutMs C.int64_t, outError **C.char) C.uint64_t {
@@ -813,6 +924,18 @@ type messageInfo struct {
 	SentAtMs     int64  `json:"sent_at_ms"`
 	// The body's length in octets, which is what urnet_message_list_body will ask for.
 	BodyLen int32 `json:"body_len"`
+	// MASTER section 8.4.5's message_id, 32 octets as 64 lower case hex characters.
+	//
+	// IT IS THE NAME A LATER KIND QUOTES. A reply, a reaction, a tombstone or a read cursor has
+	// to say WHICH message it is about, and record_id cannot be that name: record_id is the
+	// SERVER's per-group counter, so a sender does not have it until the submit is answered and
+	// a message whose submit response was lost carries zero. message_id is a function of the
+	// record alone and every member derives the same value from the header it already holds.
+	//
+	// IT IS A NAME AND NOT AN AUTHENTICATION. The key it is derived under is group-shared, so
+	// any member can compute any member's id at any position, including positions nobody has
+	// written yet. What makes an id trustworthy is that the record it names OPENED.
+	MessageId string `json:"message_id"`
 }
 
 // messageGroupStats is urmessage.Stats under the same snake_case rule.
@@ -851,6 +974,7 @@ func messageInfoOf(message *urmessage.Message) *messageInfo {
 		Mine:         message.Mine,
 		SentAtMs:     message.SentAtMs,
 		BodyLen:      int32(len(message.Text)),
+		MessageId:    hex.EncodeToString(message.MessageId),
 	}
 }
 

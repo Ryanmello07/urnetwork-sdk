@@ -8,12 +8,16 @@
  *
  * WHAT IS REAL HERE AND WHAT IS THE HARNESS. The server is real: peer.Peer dispatching frames,
  * api.Handler running the §5.1 pipeline, store.MemoryStore holding rows, wired exactly as
- * sdk/cp3b's world_test.go wires it. The five urnet_message_loopback_* functions are the harness
- * and they are NOT in the shipping library -- they are behind a Go build tag, run.sh proves the
- * shipping header has none of them, and the reason a harness is needed at all is that
- * urnet_message_transport_new takes a connect client handle that no shipping export produces
- * (S2-7, open, stated at that function). EVERYTHING ELSE below -- every store, every device,
- * every group, every octet -- goes through the abi that ships.
+ * sdk/cp3b's world_test.go wires it. The six urnet_message_loopback_* functions are the harness
+ * and they are NOT in the shipping library -- they are behind a Go build tag and run.sh proves the
+ * shipping header has none of them.
+ *
+ * WHY A HARNESS IS NEEDED AT ALL, AND IT IS NO LONGER "NO SHIPPING EXPORT PRODUCES A CLIENT".
+ * urnet_message_client_new does, and the step near the end of this file builds one. What it cannot
+ * do is reach anything: there is no operator here to dial and no credential to dial one with, so
+ * the CONVERSATION below runs over an in-process server and the platform client is exercised for
+ * its shape alone. EVERYTHING ELSE -- every store, every device, every group, every octet --
+ * goes through the abi that ships.
  *
  * SPDX-License-Identifier: MPL-2.0 */
 
@@ -93,6 +97,50 @@ static void show_error(const char* what, char* err) {
   } else {
     fprintf(stderr, "  %s: (no error text)\n", what);
   }
+}
+
+/* ── reading one string field out of the info json ───────────────────────────────────────────
+ *
+ * Deliberately a `"key":"` search and a copy up to the next quote, rather than a json parser:
+ * this program links nothing but the library under test, and the fields it reads are hex written
+ * by encoding/json a few lines away. It answers false when the key is absent or when the value is
+ * not a string, which is the only failure a caller here can have. */
+static bool json_string_field(const char* json, const char* key, char* out, size_t cap) {
+  char needle[64];
+  snprintf(needle, sizeof(needle), "\"%s\":\"", key);
+  const char* at = (json == NULL) ? NULL : strstr(json, needle);
+  if (at == NULL) {
+    return false;
+  }
+  at += strlen(needle);
+  const char* end = strchr(at, '"');
+  if (end == NULL || (size_t)(end - at) >= cap) {
+    return false;
+  }
+  memcpy(out, at, (size_t)(end - at));
+  out[end - at] = '\0';
+  return true;
+}
+
+/* is this 64 lower-case hex characters, not all of them zero? BOTH HALVES MATTER: a field that is
+ * present and empty, and one that is thirty two zero octets, are the two shapes a message_id takes
+ * when nothing derived it -- and a strstr for "message_id" alone would accept either. */
+static bool is_message_id(const char* value) {
+  size_t n = strlen(value);
+  if (n != 64) {
+    return false;
+  }
+  bool any = false;
+  for (size_t at = 0; at < n; at += 1) {
+    char c = value[at];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+      return false;
+    }
+    if (c != '0') {
+      any = true;
+    }
+  }
+  return any;
 }
 
 /* ── a temp directory per store ──────────────────────────────────────────────────────────── */
@@ -452,6 +500,15 @@ int main(void) {
   printf("      %s\n", sent_info);
   CHECK(strstr(sent_info, "\"mine\":true") != NULL, "A's own message did not say mine:true");
   CHECK(strstr(sent_info, "\"body_len\":21") != NULL, "A's send reported a body_len that is not 21");
+  /* MASTER 8.4.5's message_id, WHICH THE SENDER HAS BEFORE ANYBODY ELSE DOES. It is derived from
+   * the record alone, so it is available at the submit rather than at the answer -- which is what
+   * lets a reply name its parent optimistically. Kept here and compared against B's below: an id
+   * only one side can compute is a number, not a name. */
+  char sent_message_id[128] = { 0 };
+  CHECK(json_string_field(sent_info, "message_id", sent_message_id, sizeof(sent_message_id)),
+        "A's send reported no message_id at all");
+  CHECK(is_message_id(sent_message_id),
+        "A's message_id is %s, which is not 32 non-zero octets of hex", sent_message_id);
   urnet_free_string(sent_info);
 
   step("B reads it back, and the octets are compared one at a time");
@@ -469,6 +526,16 @@ int main(void) {
   printf("      %s\n", info);
   CHECK(strstr(info, "\"mine\":false") != NULL, "B read A's message as its own");
   CHECK(strstr(info, "\"body_len\":21") != NULL, "B's copy is not 21 octets");
+  /* THE AGREEMENT, WHICH IS THE WHOLE PROPERTY. Two devices, two MLS states, two derivations of
+   * the same 32 octets out of the same record header. An id the receiver computed from its own
+   * bookkeeping would differ here, and a reply quoting A's id would name nothing on B's side. */
+  char got_message_id[128] = { 0 };
+  CHECK(json_string_field(info, "message_id", got_message_id, sizeof(got_message_id)),
+        "B's copy of the message reported no message_id at all");
+  CHECK(strcmp(got_message_id, sent_message_id) == 0,
+        "A named this message %s and B named it %s; the two sides do not agree on the name of one "
+        "message, so nothing that quotes an id can cross the group",
+        sent_message_id, got_message_id);
   urnet_free_string(info);
 
   int32_t body_len = 0;
@@ -517,6 +584,18 @@ int main(void) {
     show_error("B send", err);
   }
   REQUIRE(reply_info != NULL, "B's send failed");
+  /* AND THE OTHER HALF OF "IT IS A NAME": a DIFFERENT message has a different one. Without this
+   * clause a binding that emitted one constant for every message would satisfy the agreement
+   * check above -- both sides would read the same constant -- and every reply in the product
+   * would name every message at once. */
+  char reply_message_id[128] = { 0 };
+  CHECK(json_string_field(reply_info, "message_id", reply_message_id, sizeof(reply_message_id)),
+        "B's send reported no message_id at all");
+  CHECK(is_message_id(reply_message_id),
+        "B's message_id is %s, which is not 32 non-zero octets of hex", reply_message_id);
+  CHECK(strcmp(reply_message_id, sent_message_id) != 0,
+        "two different messages carry the same message_id %s, so an id names no particular one",
+        reply_message_id);
   urnet_free_string(reply_info);
   err = NULL;
   uint64_t back = urnet_message_group_receive(group_a, ctx, &err);
@@ -770,6 +849,109 @@ int main(void) {
   urnet_message_context_cancel(doomed);
   CHECK(urnet_release(doomed), "releasing the cancelled context answered false");
   party_close(&c);
+
+  step("a PLATFORM-ATTACHED client, built from a credential, with no operator to accept it");
+  /* WHAT THIS IS FOR. Until urnet_message_client_new existed, no shipping export produced the
+   * `client` handle urnet_message_transport_new takes, so a C caller could reach the in-process
+   * loopback world above and NOTHING ELSE. This step is a C caller building the real thing.
+   *
+   * WHAT IT DOES NOT ASSERT, and it is the honest half: the credential below is an UNSIGNED jwt
+   * and the host is example.invalid, which RFC 6761 reserves to never resolve. So the client
+   * really is constructed and really does start dialling, and the dial cannot reach anything and
+   * would be refused if it did. Nothing here says a frame crossed a platform. What it holds is
+   * the SHAPE: every argument that would produce a client nobody can route to is refused by name,
+   * a good one answers a handle whose client_id is the credential's and whose url is the one the
+   * host and env derive to, and a transport and a device stand up over it. */
+  static const char* kJwtWithClientId =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+      "eyJjbGllbnRfaWQiOiIwZjlhZDhhMS00ZjNiLTRjMmUtOWI3MS0yYTZkNWM4ZTFmMzAiLCJuZXR3b3JrX25hbWUiOiJjdGVzdCJ9."
+      "bm90LWEtc2lnbmF0dXJl";
+  static const char* kJwtWithoutClientId =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+      "eyJuZXR3b3JrX25hbWUiOiJjdGVzdCJ9."
+      "bm90LWEtc2lnbmF0dXJl";
+  static const char* kClientIdInTheJwt = "0f9ad8a1-4f3b-4c2e-9b71-2a6d5c8e1f30";
+
+  int64_t before_client = urnet_live_handle_count();
+  err = NULL;
+  CHECK(urnet_message_client_new(NULL, "example.invalid", NULL, NULL, NULL, &err) == 0,
+        "a client with no credential was built anyway");
+  CHECK(err != NULL, "a client with no credential was refused with no out_error");
+  if (err != NULL) { urnet_free_string(err); err = NULL; }
+
+  /* THE ONE THAT IS NOT OBVIOUS. The jwt parser fills its fields one at a time and SKIPS a claim
+   * that is absent, so a token with no client_id answers the ZERO id and no error -- a client
+   * that dials, authenticates and is routed nothing, green at every signal. */
+  CHECK(urnet_message_client_new(kJwtWithoutClientId, "example.invalid", NULL, NULL, NULL, &err) == 0,
+        "a credential naming no client_id built a client at the zero id");
+  CHECK(err != NULL, "a credential naming no client_id was refused with no out_error");
+  if (err != NULL) { urnet_free_string(err); err = NULL; }
+
+  CHECK(urnet_message_client_new(kJwtWithClientId, "", NULL, NULL, NULL, &err) == 0,
+        "a client with nowhere to dial was built anyway");
+  CHECK(err != NULL, "a client with no host was refused with no out_error");
+  if (err != NULL) { urnet_free_string(err); err = NULL; }
+
+  /* a malformed instance_id is a REFUSAL and not a silently fresh one: a caller that meant to
+   * reconnect as a kept installation and mistyped the uuid would otherwise become a new one. */
+  CHECK(urnet_message_client_new(kJwtWithClientId, "example.invalid", NULL, "not-a-uuid", NULL, &err) == 0,
+        "a malformed instance_id was accepted");
+  CHECK(err != NULL, "a malformed instance_id was refused with no out_error");
+  if (err != NULL) { urnet_free_string(err); err = NULL; }
+
+  CHECK(urnet_live_handle_count() == before_client,
+        "%lld handles were left behind by four refused clients",
+        (long long)(urnet_live_handle_count() - before_client));
+
+  uint64_t platform_client =
+      urnet_message_client_new(kJwtWithClientId, "example.invalid", "staging", NULL, "ctest", &err);
+  if (platform_client == 0) {
+    show_error("platform client", err);
+    err = NULL;
+  }
+  REQUIRE(platform_client != 0, "a platform-attached client could not be built");
+  char* platform_client_id = urnet_message_client_id(platform_client);
+  REQUIRE(platform_client_id != NULL, "the platform client reported no client_id");
+  CHECK(strcmp(platform_client_id, kClientIdInTheJwt) == 0,
+        "the client dials as %s and the credential names %s", platform_client_id, kClientIdInTheJwt);
+  urnet_free_string(platform_client_id);
+  char* platform_url = urnet_message_client_platform_url(platform_client);
+  REQUIRE(platform_url != NULL, "the platform client reported no url");
+  printf("      dialling %s\n", platform_url);
+  /* env "staging" prefixes the SERVICE host and not the operator host. A hand-built
+   * "wss://connect." + host -- which is what sdk/liveprobe did -- silently dials production. */
+  CHECK(strcmp(platform_url, "wss://staging-connect.example.invalid") == 0,
+        "the client dialled %s", platform_url);
+  urnet_free_string(platform_url);
+
+  /* and the whole stack stands up over it, which is the property the handle registry resolves by:
+   * urnet_message_transport_new takes a MessageTransportClient, and this is one. */
+  err = NULL;
+  char* loop_server = urnet_message_loopback_world_server_id(world);
+  REQUIRE(loop_server != NULL, "no server id for the platform-client transport");
+  uint64_t platform_transport =
+      urnet_message_transport_new(platform_client, loop_server, URNET_MESSAGE_PROTOCOL_VERSION, 1000, &err);
+  urnet_free_string(loop_server);
+  if (platform_transport == 0) {
+    show_error("transport over the platform client", err);
+    err = NULL;
+  }
+  CHECK(platform_transport != 0,
+        "a transport would not bind over a platform-attached client, so the client export does not "
+        "fit the hole it was built for");
+  if (platform_transport != 0) {
+    urnet_message_transport_close(platform_transport);
+    CHECK(urnet_release(platform_transport), "releasing the platform transport answered false");
+  }
+  urnet_message_client_close(platform_client);
+  /* idempotent, because stop-then-release is not always in that order */
+  urnet_message_client_close(platform_client);
+  CHECK(urnet_release(platform_client), "releasing the platform client answered false");
+  CHECK(urnet_live_handle_count() == before_client,
+        "the platform client left %lld handles behind",
+        (long long)(urnet_live_handle_count() - before_client));
+  CHECK(urnet_message_client_id(0) == NULL, "the zero handle answered a client_id");
+  CHECK(urnet_message_client_platform_url(0) == NULL, "the zero handle answered a url");
 
   step("everything closes, and the handle registry comes back to where it started");
   err = NULL;

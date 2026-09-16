@@ -73,7 +73,66 @@ type Message struct {
 
 	// The sender's own clock reading, unix milliseconds, out of the head the AEAD authenticated.
 	SentAtMs int64
+
+	// MASTER section 8.4.5's message_id for this record: 32 octets, derived by
+	// [messagegroup.GroupSession.MessageIdOf] from this group's epoch-zero group_handle_key and
+	// three fields of the record's own plaintext header.
+	//
+	// IT IS THE NAME EVERY LATER KIND QUOTES. A reply, a reaction, a tombstone and a read cursor
+	// all have to say WHICH message they are about, and [Message.RecordId] cannot be that name:
+	// it is the SERVER's per-group counter, so a sender does not know it until the submit is
+	// answered, and a device whose submit response was lost holds a message whose RecordId is
+	// zero. message_id is a function of the record alone and both sides compute it from the
+	// header they already hold.
+	//
+	// IT IS A NAME AND NOT AN AUTHENTICATION, carried through verbatim from the derivation's own
+	// document rather than softened here: group_handle_key is group-shared, so any member can
+	// compute any member's id at any index, including indices nobody has written yet. What makes
+	// a message's id trustworthy is that the record it names OPENED, and opening is what MASTER
+	// section 8.4.3's R1 and R2 decide.
+	//
+	// Every [Message] this package produces carries one, because every one of them is built
+	// beside the header it is derived from.
+	MessageId []byte
 }
+
+// MaxTextOctets is the longest text [Group.Send] will seal, and it is a MEASURED number rather
+// than a rung of the size ladder.
+//
+// WHERE IT COMES FROM. Since connect 4c030dc an application record's ct_body plaintext is an MLS
+// PrivateMessage and the frame sits INSIDE the size rung, so the usable text per rung is the
+// rung's own capacity less the frame's overhead. connect measures the whole column in
+// messagegroup.TestTheSizeLadderCostOfTheInnerFrameIsMeasuredHere -- run on connect d368fea, it
+// logs 59 / 826 / 3,898 / 16,186 / 65,334 usable, at 193 / 194 / 194 / 194 / 198 octets lost --
+// and cp3b.TestEveryRecordTypeUrmessageSealsLandsOnTheRungItsBodyNeeds re-measures the same column
+// through THIS package and a real server's own rows. This constant is the top of that column, and
+// cp3b.TestTheTextCeilingRefusesBeforeItSpendsAnythingIrreversible is what holds it against a
+// measurement rather than against this comment.
+//
+// THE OVERHEAD AS A FUNCTION OF LENGTH IS NOT RESTATED HERE, deliberately: connect's own
+// mlsframe.go prose gives it as three steps -- 193 below 64, 194 below 16,384, 198 at or above --
+// and that sentence is FALSE at P = 16,383, which connect's own applicationFrameOverhead table
+// pins at 196 in the same file, in a case that passes. msgrepo ledger item 218 and MASTER §8.4.4's
+// 2026-09-17 correction carry the four-band form. What this constant needs is the TOP of the
+// capacity column and nothing else, so it takes the measured column and leaves the step function
+// where it is measured.
+//
+// WHY THE REFUSAL IS HERE AND NOT LEFT TO THE SEALER, which is the whole reason the constant
+// exists. messagegroup takes a CHEAP half of the ladder refusal before it reserves anything --
+// bucketForBody over the CALLER's own length -- and that half passes for every body up to 65,532,
+// because 65,532 is what the 64 KiB rung holds. The real bucket is chosen AFTER the frame exists,
+// which is after the stream index has been reserved and after Protect has consumed an MLS
+// generation. So a text of 65,335..65,532 octets -- connect's ledger open item 203, whose own
+// TestABodyNoRungCouldHoldCostsNeitherAnIndexNorAGeneration measures the band by name -- used to
+// pass through here, spend one DURABLE stream index and one MLS generation, and only then be
+// answered [ErrTextTooLong]. Both are legal gaps and neither is recoverable, and a caller that
+// retried a failed send spent another of each on every attempt.
+//
+// THE BAND IS 198 OCTETS WIDE AND IT IS NOT THE ONLY THING THIS REFUSES. Above 65,532 the sealer
+// already refused for free. This makes the two answers one answer, taken in one place, before
+// anything irreversible has happened -- so a send refused for length costs nothing however many
+// times it is retried.
+const MaxTextOctets = 65334
 
 // Stats is what a group has seen, so that "nothing arrived" and "something arrived and this build
 // would not open it" are two readings rather than one silence.
@@ -695,8 +754,13 @@ func (self *Group) wrapTargetsLocked() ([][16]byte, error) {
 // this method and a real server's rows by cp3b.TestEveryRecordTypeUrmessageSealsLandsOnTheRungItsBodyNeeds,
 // is 59 / 826 / 3,898 / 16,186 / 65,334 octets where it was 252 / 1,020 / 4,092 / 16,380 / 65,532.
 // So a text over 59 octets is stored at 1,040 octets where one up to 252 used to be stored at 272,
-// and a text over 65,334 octets -- including the 198 octets up to the old ceiling -- is refused with
-// [ErrTextTooLong]; blob-backed bodies are out of scope.
+// and a text over [MaxTextOctets] -- including the 198 octets up to the old ceiling -- is refused
+// with [ErrTextTooLong]; blob-backed bodies are out of scope.
+//
+// THE LENGTH REFUSAL IS TAKEN HERE AND COSTS NOTHING, which is a change from every build before
+// this one: see [MaxTextOctets] for the 198 octet band that used to spend a durable stream index
+// and an MLS generation on its way to the same error, and for why the sealer's own early refusal
+// cannot cover it.
 //
 // IT NEVER RETURNS NIL ON A MESSAGE THAT DID NOT LAND. The record is accepted by the server, or
 // this returns an error naming the refusal -- including after S2-2's single re-Hello and re-MAC.
@@ -720,6 +784,18 @@ func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 	if !self.reconciled {
 		return nil, fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
 	}
+	// AND BEFORE THE SEAL FOR THE SAME REASON, one clause further out than the sealer can take
+	// it. See [MaxTextOctets]: the sealer's own early refusal is over the CALLER's length against
+	// the rung, and the frame that decides the real rung does not exist until an index has been
+	// reserved and a generation spent.
+	//
+	// IT IS AFTER THE TWO STICKY REFUSALS ABOVE AND THAT ORDER IS DELIBERATE. A group that has
+	// seen a second writer, or a restored group that has not reconciled, must say THAT rather
+	// than report a fact about the length of this particular line.
+	if MaxTextOctets < len(text) {
+		return nil, fmt.Errorf("%w: %d octets, and the largest inline rung carries %d",
+			ErrTextTooLong, len(text), MaxTextOctets)
+	}
 	if err := self.rebindLocked(); err != nil {
 		return nil, err
 	}
@@ -731,6 +807,22 @@ func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 			return nil, fmt.Errorf("%w: %d octets: %w", ErrTextTooLong, len(text), err)
 		}
 		return nil, fmt.Errorf("urmessage: sealing this message: %w", err)
+	}
+	// THE ID IS TAKEN OFF THE RECORD AND BEFORE THE SUBMIT, which is what makes it a name the
+	// sender can quote OPTIMISTICALLY: the three inputs are group_handle_key and three fields of
+	// the header SealRecord just answered, so nothing about it waits on the server. A reply typed
+	// before the submit is acknowledged can already name its parent.
+	//
+	// IT IS RAISED RATHER THAN LEFT NIL, and it is raised HERE rather than after the submit,
+	// because the alternative to both is worse. A Message whose MessageId is nil is a message no
+	// later kind can reference and nothing downstream would say so; and an error returned after
+	// the submit succeeded would be this method reporting a failure for a record that LANDED,
+	// which is the one thing its last paragraph promises it never does. At this point the seal
+	// has happened and the submit has not, so this is the same class as the persistSent refusal
+	// below: one stream index and one MLS generation spent, both legal gaps, and the send fails.
+	messageId, err := self.session.MessageIdOf(&record.Header)
+	if err != nil {
+		return nil, fmt.Errorf("urmessage: this message was sealed and NOT sent, because its message_id could not be derived: %w", err)
 	}
 	// THE INDEX IS NOTED AT THE SEAL AND NOT AT THE SUBMIT, and the ordering is the whole of
 	// why this is here rather than three lines down. A submit whose response never arrived is
@@ -770,6 +862,7 @@ func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 		Mine:         true,
 		Text:         text,
 		SentAtMs:     sentAtMs,
+		MessageId:    messageId[:],
 	}
 	self.log = append(self.log, sent)
 	self.delivered[recordId] = true
@@ -1529,6 +1622,17 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			fail(recordId, fmt.Errorf("%w: record %d: %w", ErrRecordOpen, recordId, err))
 			continue
 		}
+		messageId, err := self.session.MessageIdOf(header)
+		if err != nil {
+			// UNREACHABLE HERE AND CARRIED ANYWAY. MessageIdOf refuses a nil header, a closed
+			// session and a record whose group_id is not this session's, and this record has
+			// just been OPENED by this session -- both AEADs bound group_id. Measured: deleting
+			// this branch leaves ./urmessage and ./cp3b green, so it defends nothing a test can
+			// see. It is here because the alternative to a branch is a [Message] with a nil
+			// MessageId delivered as though it had one.
+			fail(recordId, fmt.Errorf("%w: record %d: its message_id could not be derived: %w", ErrRecordOpen, recordId, err))
+			continue
+		}
 		self.stats.Opened += 1
 		if mine {
 			// A RECORD OF THIS DEVICE'S OWN THAT OPENED. This device cannot open what IT sealed
@@ -1545,6 +1649,7 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			Mine:         mine,
 			Text:         string(bodyPlain),
 			SentAtMs:     sentAtMs,
+			MessageId:    messageId[:],
 		}
 		walk.opened = append(walk.opened, received)
 		self.log = append(self.log, received)
@@ -1645,6 +1750,25 @@ func (self *Group) openOwnFromCopyLocked(walk *pageWalk, recordId uint64, parsed
 		return false, fmt.Errorf("%w: record %d carries this device's own record at stream index %d, which this group already holds as record %d",
 			ErrRecordOpen, recordId, header.StreamIndex, sealed.recordId)
 	}
+	// THE ID IS DERIVED FROM THE SERVER'S RECORD AND NOT FROM THE COPY, which is the only reason
+	// this line is above the two counters rather than inside the literal below. The copy carries
+	// the TEXT and the clock reading; the three inputs to message_id are header fields, and the
+	// header in hand is the one whose body_hash has just been checked against the ciphertext. So
+	// the id this device shows for its own message is computed from the same octets every other
+	// member computes it from, and a restarted device that shows a line from its copy names it
+	// the same way the group does.
+	//
+	// THE ERROR BRANCH DEFENDS NOTHING A TEST HERE CAN SEE, and it is the same unreachable clause
+	// the ordinary open path carries, measured the same way: deleting it leaves ./urmessage and
+	// ./cp3b green. MessageIdOf refuses a nil header, a closed session and a record whose group_id
+	// is not this session's, and the clauses above have already compared this record's group and
+	// epoch against this group's. It is kept because the alternative to a branch is a [Message]
+	// delivered with a nil MessageId and nothing saying so.
+	messageId, err := self.session.MessageIdOf(header)
+	if err != nil {
+		return false, fmt.Errorf("%w: record %d is this device's own at stream index %d and its message_id could not be derived: %w",
+			ErrRecordOpen, recordId, header.StreamIndex, err)
+	}
 	sealed.recordId = recordId
 	self.stats.OpenedOwn += 1
 	self.noteOwnIndexLocked(walk, recordId, header.StreamIndex, header.BodyHash)
@@ -1654,6 +1778,7 @@ func (self *Group) openOwnFromCopyLocked(walk *pageWalk, recordId uint64, parsed
 		Mine:         true,
 		Text:         string(sealed.body),
 		SentAtMs:     sealed.sentAtMs,
+		MessageId:    messageId[:],
 	}
 	walk.opened = append(walk.opened, received)
 	self.log = append(self.log, received)

@@ -30,7 +30,7 @@ type party struct {
 	name string
 	dir  string
 
-	client      *connect.Client
+	client      *sdk.MessageClient
 	transport   *sdk.MessageTransport
 	streamStore *sdk.StreamStore
 	stateStore  *urmessage.DurableStateStore
@@ -424,26 +424,31 @@ func main() {
 //
 // BOTH STORES LIVE UNDER ONE DIRECTORY PER PARTY and that directory is the whole of what survives
 // this process. Nothing else about a party is persisted and nothing else needs to be.
+//
+// THE CLIENT IS sdk.NewMessageClient'S AND IT USED TO BE THIS FUNCTION'S. The eight lines that
+// stood one up -- a client strategy, an out-of-band control over https://api.<host>, a client at
+// the credential's client_id, a platform transport dialling wss://connect.<host>, and the provide
+// modes -- were the ONLY construction of a platform-attached client anywhere in this workspace,
+// which is why the C abi could reach nothing but an in-process loopback server. They are now
+// sdk/message_client.go's, and this probe calls it.
+//
+// THAT IS THE POINT RATHER THAN A TIDY-UP. This binary is the one thing that is ever run against a
+// real operator, so putting the shared declaration on ITS path is what makes a live run evidence
+// about the code the Windows app links rather than about a copy of it.
 func (self *dialer) dial(name string, jwtPath string) *party {
 	raw, err := os.ReadFile(jwtPath)
 	if err != nil {
 		fail("%s read jwt: %v", name, err)
 	}
 	byJwt := strings.TrimSpace(string(raw))
-	parsed, err := connect.ParseByJwtUnverified(byJwt)
+	client, err := sdk.NewMessageClient(self.ctx, &sdk.MessageClientConfig{
+		ByClientJwt: byJwt,
+		Host:        self.host,
+		AppVersion:  "alphaprobe",
+	})
 	if err != nil {
-		fail("%s parse jwt: %v", name, err)
+		fail("%s client: %v", name, err)
 	}
-	strategy := connect.NewClientStrategyWithDefaults(self.ctx)
-	oob := connect.NewApiOutOfBandControl(self.ctx, strategy, byJwt, "https://api."+self.host)
-	client := connect.NewClient(self.ctx, parsed.ClientId, oob, connect.DefaultClientSettings())
-	connect.NewPlatformTransport(
-		client.Ctx(), strategy, client.RouteManager(), "wss://connect."+self.host,
-		&connect.ClientAuth{ByJwt: byJwt, InstanceId: connect.NewId(), AppVersion: "alphaprobe"},
-		connect.DefaultPlatformTransportSettings(),
-	)
-	// The server's replies are IT sending to a client it has no contract with: return traffic.
-	client.ContractManager().SetProvideModesWithReturnTraffic(map[protocol.ProvideMode]bool{})
 
 	transport, err := sdk.NewMessageTransport(&sdk.MessageTransportConfig{
 		Client: client, Server: self.server, ProtocolVersion: 1, Timeout: self.timeout,
@@ -476,7 +481,8 @@ func (self *dialer) dial(name string, jwtPath string) *party {
 	if err != nil {
 		fail("%s NewDevice: %v", name, err)
 	}
-	fmt.Printf("%s  client_id %s, durable state in %s\n", name, parsed.ClientId, dir)
+	fmt.Printf("%s  client_id %s, dialling %s, durable state in %s\n",
+		name, client.ClientId(), client.PlatformUrl(), dir)
 	return &party{
 		name: name, dir: dir, client: client, transport: transport,
 		streamStore: streamStore, stateStore: stateStore, device: device,
@@ -527,7 +533,7 @@ func (self *party) close() {
 		self.transport.Close()
 	}
 	if self.client != nil {
-		self.client.Cancel()
+		self.client.Close()
 	}
 }
 

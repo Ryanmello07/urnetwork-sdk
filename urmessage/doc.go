@@ -62,6 +62,23 @@
 //
 // S2-7 is not resolved by any of this and this package makes no claim on it.
 //
+// WHAT HAS MOVED SINCE, AND IT IS HALF OF S2-7 AND NOT THE WHOLE OF IT. The platform-transport
+// path above is now WRITTEN DOWN as [sdk.NewMessageClient]: a client strategy, an out-of-band
+// control over the operator's api url, a `connect.Client` at the credential's own client_id, a
+// `connect.PlatformTransport` dialling the operator's platform url, and the
+// `SetProvideModesWithReturnTraffic` without which the platform delivers a message server's
+// replies NOWHERE while every health signal still reads green. Until that existed it was eight
+// lines inside `sdk/liveprobe`'s own main, so the C abi could reach nothing but an in-process
+// loopback server; now the probe, the abi and anything else reach one declaration.
+//
+// NOTHING ABOUT THIS PACKAGE CHANGES FOR IT. [DeviceConfig.Transport] is still injected, this
+// package still dials nothing and closes nothing, and the loopback wiring the alpha's cases run
+// on is untouched. What is still open of S2-7 is the CREDENTIAL: a `network_client` ByJwt is
+// minted by an admin of a running URnetwork operator (spec B sections 9.1 and 9.2), and nothing
+// in connect, sdk or the server module mints one. AND THE PLATFORM PATH IS UNEXERCISED BY EVERY
+// TEST IN THIS MODULE, for the same reason -- what the tests beside [sdk.NewMessageClient] hold
+// is its shape, never that a frame crossed.
+//
 // ---------------------------------------------------------------------------------------------
 // DECISION S2-2: WHAT HAPPENS ON A RECONNECT. RE-HELLO AND REBIND, AND NEVER SILENTLY.
 // ---------------------------------------------------------------------------------------------
