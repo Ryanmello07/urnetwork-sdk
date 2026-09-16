@@ -38,6 +38,18 @@ extern int64_t urnet_live_handle_count(void);
 
 /* the harness. NOT IN THE SHIPPING LIBRARY -- see the file header. */
 extern uint64_t urnet_message_loopback_world_new(char** out_error);
+/* the SEND verbs the shipping abi does not have. urmessage.Group has SendReply, React, Unreact and
+ * Delete and no shipping export calls them -- ledger item 236 is the READ projection and only that
+ * -- so the steps below drive the read side through the harness. what these produce is real: a real
+ * seal, a real submit to the real server, and a real receive walk on the other side. */
+extern char* urnet_message_loopback_group_send_reply(uint64_t self, uint64_t ctx, const char* reply_to_hex, const uint8_t* body, int32_t body_len, char** out_error);
+extern char* urnet_message_loopback_group_react(uint64_t self, uint64_t ctx, const char* target_hex, const char* emoji, char** out_error);
+extern char* urnet_message_loopback_group_delete(uint64_t self, uint64_t ctx, const char* target_hex, char** out_error);
+/* and the one thing that is NOT real: three entries built in Go. nothing in this tree can seal a
+ * malformed body or an unknown kind from outside urmessage (msgrepo ledger item 235), so the WALK
+ * that makes a gap is held by urmessage's own suite and what is held HERE is that a gap crosses the
+ * boundary as something a C caller can tell from a message. */
+extern uint64_t urnet_message_loopback_gap_list(void);
 extern char* urnet_message_loopback_world_server_id(uint64_t self);
 extern uint64_t urnet_message_loopback_world_client(uint64_t self);
 extern uint64_t urnet_message_loopback_world_unrouted_client(uint64_t self);
@@ -162,20 +174,45 @@ static bool temp_dir(char* path, size_t cap) {
   return true;
 }
 
-/* ── the body. IT IS NOT TEXT, ON PURPOSE. ───────────────────────────────────────────────────
+/* ── the body. IT IS NOT A C STRING, ON PURPOSE. ─────────────────────────────────────────────
  *
- * 0x00 at offsets 12 and 19 would truncate a char*-carried body to 12 octets with no error
- * raised. 0xFF 0xFE and the ill-formed 0xC3 0x28 would each become U+FFFD in a json-carried one,
- * changing both the bytes and the length. A byte-identical round trip is the measurement that
- * says neither happened. */
+ * 0x00 at offsets 12 and 19 would truncate a char*-carried body to 12 octets with no error raised
+ * anywhere, and the two multi-byte sequences are there so that what crosses is not seven-bit. A
+ * byte-identical round trip is the measurement that says neither happened.
+ *
+ * IT USED TO CARRY 0xFF 0xFE AND THE ILL-FORMED 0xC3 0x28, AND IT NO LONGER CAN, WHICH IS RECORDED
+ * HERE RATHER THAN QUIETLY REPAIRED. Since the content envelope landed (urmessage/kind.go, the
+ * 2026-09-17 ruling) a TEXT tail is checked for valid UTF-8 BEFORE it is sealed, so
+ * urnet_message_group_send refuses those octets -- "the 21 octet text tail is not valid utf8" --
+ * and THIS FILE WAS ALREADY RED FOR THAT REASON AT sdk bd4672d, at the first send, before any of
+ * the content-envelope steps below existed. Nothing runs it but `make ctest`, so nothing said so.
+ *
+ * The half those octets defended -- that a json-carried body would come back as U+FFFD -- is
+ * measured in exports_message_test.go's TestTheRejectedBodyEncodingsWouldHaveChangedTheseOctets,
+ * which has nothing to seal and can therefore still hold them. The half that is still measurable
+ * HERE, across a real seal and a real receive, is the NUL, and it is the one that decides char*
+ * against counted octets. */
 static const unsigned char kBody[] = {
   'h', 'e', 'l', 'l', 'o', ' ', 'f', 'r', 'o', 'm', ' ', 'C',
-  0x00, 0xFF, 0xFE, 'x', 0xC3, 0x28, '\n', 0x00, 'z'
+  0x00, 0xC3, 0xA9, 0xE2, 0x9C, 0x93, '\n', 0x00, 'z'
 };
 static const int32_t kBodyLen = (int32_t)sizeof(kBody);
 
-static const unsigned char kReply[] = { 'r', 'e', 'p', 'l', 'y', 0x00, 0x80, '!' };
+/* B's second plain message. 0xC2 0xA1 for the same reason as above: it was 0x80, which is a
+ * continuation octet on its own, is not valid UTF-8, and is refused at the seal. */
+static const unsigned char kReply[] = { 'r', 'e', 'p', 'l', 'y', 0x00, 0xC2, 0xA1, '!' };
 static const int32_t kReplyLen = (int32_t)sizeof(kReply);
+
+/* a REPLY's text is a text tail and IS checked for valid utf-8 on the way in and on the way out,
+ * unlike a plain body, so this one is text. (kReply above is NOT a reply -- it is B's second plain
+ * message and it is named for the conversation and not for the kind.) */
+static const unsigned char kReplyText[] = "answering the first line";
+static const int32_t kReplyTextLen = (int32_t)sizeof(kReplyText) - 1;
+
+/* written as octets rather than pasted, so that this file stays ascii and so that what is compared
+ * is the four octets and not what an editor decided they were. */
+static const char kThumbsUp[] = "\xF0\x9F\x91\x8D";  /* U+1F44D */
+static const char kDirectHit[] = "\xF0\x9F\x8E\xAF"; /* U+1F3AF */
 
 /* ── the connect-attempt callback, which is the listener convention ──────────────────────── */
 
@@ -490,7 +527,7 @@ int main(void) {
   invite = 0;
   carried = 0;
 
-  step("A sends 21 octets that are NOT text: two NULs, and two ill-formed utf-8 sequences");
+  step("A sends 21 octets that are not a C string: two NULs and two multi-byte sequences");
   err = NULL;
   char* sent_info = urnet_message_group_send(group_a, ctx, kBody, kBodyLen, &err);
   if (sent_info == NULL) {
@@ -633,6 +670,12 @@ int main(void) {
   printf("      B: %s\n", stats);
   CHECK(strstr(stats, "\"opened\":") != NULL, "the stats carry no opened counter");
   CHECK(strstr(stats, "\"own_without_copy\":") != NULL, "the stats carry no own_without_copy counter");
+  /* AND THE TWO GAP COUNTERS, which are the only loud signal left for a record that could not be
+   * read: a permanent post-open refusal no longer fails, so failed_open does not move, unopened
+   * does not move, and receive answers no out_error. code that watched only out_error would never
+   * learn a line was missing. */
+  CHECK(strstr(stats, "\"gap_malformed\":") != NULL, "the stats carry no gap_malformed counter");
+  CHECK(strstr(stats, "\"gap_unsupported\":") != NULL, "the stats carry no gap_unsupported counter");
   urnet_free_string(stats);
 
   step("the device's own group list, which is a second handle onto the same group");
@@ -700,6 +743,294 @@ int main(void) {
     if (rest != 0) {
       urnet_release(rest);
     }
+  }
+
+  /* ── EVERYTHING THE CONTENT ENVELOPE ADDED, ACROSS THE BOUNDARY ───────────────────────────
+   *
+   * Up to here this file has measured a conversation of plain text, which is all the projection
+   * used to carry: a C caller got record_id, sender_handle, mine, sent_at_ms, body_len and
+   * message_id, and the kind, the gap reason, the reply parent, the tombstone flag and the
+   * reactions reached it as NOTHING AT ALL (msgrepo ledger item 236). The four steps below are
+   * the other five fields, over the same real server.
+   *
+   * WHICH MESSAGE THEY ARE ALL ABOUT: A's first, the 21 octets that are not text, at index 0 of
+   * both logs because it is the first thing either device learned. sent_message_id is its name and
+   * it was captured above, at the send, which is where a real caller gets one. */
+  step("a REPLY names another message, and the name crosses as reply_to_id");
+  {
+    uint64_t log_first = urnet_message_group_messages(group_a);
+    REQUIRE(log_first != 0, "A's log is empty");
+    char* first = urnet_message_list_info(log_first, 0);
+    REQUIRE(first != NULL, "A's log has no row 0");
+    CHECK(strstr(first, "\"body_len\":21") != NULL,
+          "row 0 of A's log is not the 21 octet message these steps are about: %s", first);
+    /* AND THE TWO FIELDS AN ORDINARY MESSAGE MUST NOT CLAIM. A projection that hard-coded either
+     * would pass every assertion below and would mark the whole conversation. */
+    CHECK(strstr(first, "\"gap\":\"\"") != NULL, "an ordinary message reports a gap: %s", first);
+    CHECK(strstr(first, "\"reply_to_id\":\"\"") != NULL,
+          "a message that answers nothing names a parent: %s", first);
+    CHECK(strstr(first, "\"deleted\":false") != NULL, "a message nobody deleted says deleted: %s", first);
+    CHECK(strstr(first, "\"reaction_count\":0") != NULL,
+          "a message nobody reacted to carries reactions: %s", first);
+    urnet_free_string(first);
+    CHECK(urnet_release(log_first), "releasing A's log answered false");
+
+    err = NULL;
+    char* replied = urnet_message_loopback_group_send_reply(group_a, ctx, sent_message_id,
+                                                           kReplyText, kReplyTextLen, &err);
+    if (replied == NULL) {
+      show_error("send_reply", err);
+      err = NULL;
+    }
+    REQUIRE(replied != NULL, "A could not answer its own message");
+    printf("      %s\n", replied);
+    char sent_reply_parent[128] = { 0 };
+    CHECK(json_string_field(replied, "reply_to_id", sent_reply_parent, sizeof(sent_reply_parent)),
+          "the reply the SENDER sees names no parent: %s", replied);
+    CHECK(strcmp(sent_reply_parent, sent_message_id) == 0,
+          "A's reply names %s and it was answering %s", sent_reply_parent, sent_message_id);
+    urnet_free_string(replied);
+
+    err = NULL;
+    uint64_t arrived = urnet_message_group_receive(group_b, ctx, &err);
+    if (err != NULL) {
+      show_error("B receive of the reply", err);
+      err = NULL;
+    }
+    REQUIRE(arrived != 0, "B received no reply");
+    CHECK(urnet_message_list_count(arrived) == 1, "B received %d messages, want the one reply",
+          (int)urnet_message_list_count(arrived));
+    char* info_reply = urnet_message_list_info(arrived, 0);
+    REQUIRE(info_reply != NULL, "the reply arrived with no metadata");
+    printf("      %s\n", info_reply);
+    /* THE KIND IS WHAT SAYS IT IS A REPLY, and it is a number rather than a name because a code
+     * this build does not know still has to cross. */
+    CHECK(strstr(info_reply, "\"kind\":2") != NULL,
+          "the reply arrived under kind %s, want %d (URNET_MESSAGE_KIND_REPLY)",
+          info_reply, URNET_MESSAGE_KIND_REPLY);
+    char got_reply_parent[128] = { 0 };
+    CHECK(json_string_field(info_reply, "reply_to_id", got_reply_parent, sizeof(got_reply_parent)),
+          "the reply RECEIVED names no parent at all, so a ui has nothing to quote: %s", info_reply);
+    CHECK(strcmp(got_reply_parent, sent_message_id) == 0,
+          "B reads the reply as answering %s and A sent it answering %s; the quoted text never "
+          "travels, so a parent that does not match is a reply that renders as nothing",
+          got_reply_parent, sent_message_id);
+    urnet_free_string(info_reply);
+    CHECK(urnet_release(arrived), "releasing the reply list answered false");
+  }
+
+  step("REACTIONS are a per-message collection, with a count and an accessor");
+  {
+    /* B reacts to A's first message. THE RECORD ADDS NO LINE: a reaction changes another message,
+     * so A's receive below answers 0 -- which is the same answer as "nothing new" and is exactly
+     * why a caller has to re-read the log rather than watch the receive. */
+    err = NULL;
+    char* reacted = urnet_message_loopback_group_react(group_b, ctx, sent_message_id, kThumbsUp, &err);
+    if (reacted == NULL) {
+      show_error("react", err);
+      err = NULL;
+    }
+    REQUIRE(reacted != NULL, "B could not react");
+    CHECK(strstr(reacted, "\"kind\":5") != NULL,
+          "the reaction RECORD is kind %s, want %d (URNET_MESSAGE_KIND_REACTION_ADD)",
+          reacted, URNET_MESSAGE_KIND_REACTION_ADD);
+    urnet_free_string(reacted);
+
+    err = NULL;
+    uint64_t nothing_new = urnet_message_group_receive(group_a, ctx, &err);
+    CHECK(nothing_new == 0,
+          "a page carrying only a reaction delivered %d lines; a reaction is a change to another "
+          "message and is not one of its own",
+          (int)urnet_message_list_count(nothing_new));
+    if (nothing_new != 0) {
+      urnet_release(nothing_new);
+    }
+    if (err != NULL) {
+      show_error("A receive of the reaction", err);
+      err = NULL;
+    }
+
+    /* and A reacts to its own, so that the list has TWO entries and one of them is this device's */
+    err = NULL;
+    char* mine = urnet_message_loopback_group_react(group_a, ctx, sent_message_id, kDirectHit, &err);
+    if (mine == NULL) {
+      show_error("A react", err);
+      err = NULL;
+    }
+    REQUIRE(mine != NULL, "A could not react to its own message");
+    urnet_free_string(mine);
+
+    uint64_t log_r = urnet_message_group_messages(group_a);
+    REQUIRE(log_r != 0, "A's log is empty");
+    char* row = urnet_message_list_info(log_r, 0);
+    REQUIRE(row != NULL, "A's log has no row 0");
+    printf("      %s\n", row);
+    CHECK(strstr(row, "\"reaction_count\":2") != NULL,
+          "the row carries the wrong reaction_count: %s", row);
+    urnet_free_string(row);
+
+    CHECK(urnet_message_list_reaction_count(log_r, 0) == 2,
+          "the message carries %d reactions, want the 2 that were sealed; a list that dropped its "
+          "last entry would answer 1 here",
+          (int)urnet_message_list_reaction_count(log_r, 0));
+    /* IN THE SERVER'S OWN ORDER, which is what makes two devices draw the same row. B's ADD was
+     * submitted first, so it is first. */
+    char* one = urnet_message_list_reaction_info(log_r, 0, 0);
+    char* two = urnet_message_list_reaction_info(log_r, 0, 1);
+    REQUIRE(one != NULL && two != NULL, "a reaction in range answered no metadata");
+    printf("      %s\n      %s\n", one, two);
+    char emoji[64] = { 0 };
+    CHECK(json_string_field(one, "emoji", emoji, sizeof(emoji)), "reaction 0 carries no emoji: %s", one);
+    CHECK(strcmp(emoji, kThumbsUp) == 0, "reaction 0 is %s and B sealed %s", emoji, kThumbsUp);
+    CHECK(strstr(one, "\"mine\":false") != NULL, "A reads B's reaction as its own: %s", one);
+    memset(emoji, 0, sizeof(emoji));
+    CHECK(json_string_field(two, "emoji", emoji, sizeof(emoji)), "reaction 1 carries no emoji: %s", two);
+    CHECK(strcmp(emoji, kDirectHit) == 0, "reaction 1 is %s and A sealed %s", emoji, kDirectHit);
+    CHECK(strstr(two, "\"mine\":true") != NULL, "A does not recognise its own reaction: %s", two);
+    /* the reactor is a sender_handle and not a name, and the two reactions are from two members */
+    char reactor_one[128] = { 0 };
+    char reactor_two[128] = { 0 };
+    CHECK(json_string_field(one, "sender_handle", reactor_one, sizeof(reactor_one)) &&
+              json_string_field(two, "sender_handle", reactor_two, sizeof(reactor_two)),
+          "a reaction names no reactor");
+    CHECK(strcmp(reactor_one, reactor_two) != 0,
+          "two members' reactions name one reactor %s, so a ui cannot say who reacted", reactor_one);
+    urnet_free_string(one);
+    urnet_free_string(two);
+
+    /* out of range on EITHER index is a refusal and not a read past the end */
+    CHECK(urnet_message_list_reaction_info(log_r, 0, 2) == NULL, "reaction 2 of 2 answered metadata");
+    CHECK(urnet_message_list_reaction_info(log_r, 0, -1) == NULL, "reaction -1 answered metadata");
+    CHECK(urnet_message_list_reaction_info(log_r, 99, 0) == NULL, "message 99 answered a reaction");
+    CHECK(urnet_message_list_reaction_count(log_r, 99) == 0, "message 99 answered a reaction count");
+    CHECK(urnet_message_list_reaction_count(0, 0) == 0, "the empty list handle answered a count");
+    CHECK(urnet_message_list_reaction_info(0, 0, 0) == NULL, "the empty list handle answered a reaction");
+    CHECK(urnet_release(log_r), "releasing A's log answered false");
+
+    /* and B, which sealed one of them, sees the same two on ITS copy of the same message -- AFTER
+     * it fetches A's reaction, which arrives as 0 lines for the same reason A's did */
+    err = NULL;
+    uint64_t b_nothing_new = urnet_message_group_receive(group_b, ctx, &err);
+    CHECK(b_nothing_new == 0, "a page carrying only A's reaction delivered %d lines to B",
+          (int)urnet_message_list_count(b_nothing_new));
+    if (b_nothing_new != 0) {
+      urnet_release(b_nothing_new);
+    }
+    if (err != NULL) {
+      show_error("B receive of A's reaction", err);
+      err = NULL;
+    }
+    uint64_t log_rb = urnet_message_group_messages(group_b);
+    REQUIRE(log_rb != 0, "B's log is empty");
+    CHECK(urnet_message_list_reaction_count(log_rb, 0) == 2,
+          "B's copy of the message carries %d reactions and A's carries 2; the two devices would "
+          "draw different rows",
+          (int)urnet_message_list_reaction_count(log_rb, 0));
+    char* b_first = urnet_message_list_reaction_info(log_rb, 0, 0);
+    REQUIRE(b_first != NULL, "B's copy has no first reaction");
+    CHECK(strstr(b_first, "\"mine\":true") != NULL,
+          "B does not recognise the reaction B sealed: %s", b_first);
+    urnet_free_string(b_first);
+    CHECK(urnet_release(log_rb), "releasing B's log answered false");
+  }
+
+  step("a TOMBSTONE marks the message on both sides, and the body is still there");
+  {
+    err = NULL;
+    char* buried = urnet_message_loopback_group_delete(group_a, ctx, sent_message_id, &err);
+    if (buried == NULL) {
+      show_error("delete", err);
+      err = NULL;
+    }
+    REQUIRE(buried != NULL, "A could not delete its own message");
+    CHECK(strstr(buried, "\"kind\":4") != NULL,
+          "the tombstone RECORD is kind %s, want %d (URNET_MESSAGE_KIND_TOMBSTONE)",
+          buried, URNET_MESSAGE_KIND_TOMBSTONE);
+    urnet_free_string(buried);
+
+    uint64_t log_d = urnet_message_group_messages(group_a);
+    REQUIRE(log_d != 0, "A's log is empty");
+    char* row = urnet_message_list_info(log_d, 0);
+    REQUIRE(row != NULL, "A's log has no row 0");
+    printf("      %s\n", row);
+    CHECK(strstr(row, "\"deleted\":true") != NULL, "A's own tombstone did not mark its message: %s", row);
+    /* THE BODY IS STILL HERE AND STILL COMES BACK. the library marks the line and keeps the text
+     * -- it refuses to be the layer that throws away a user's data on a peer's say-so, and the
+     * record is on the server either way -- so "deleted" is how a ui learns it has a decision to
+     * make, and NOT the library having made it. */
+    CHECK(strstr(row, "\"body_len\":21") != NULL, "a deleted message lost its body_len: %s", row);
+    urnet_free_string(row);
+    int32_t still = 0;
+    urnet_message_list_body(log_d, 0, NULL, &still);
+    CHECK(still == kBodyLen, "a deleted message's body sized to %d, want %d", (int)still, (int)kBodyLen);
+    CHECK(urnet_release(log_d), "releasing A's log answered false");
+
+    /* and on B, which has to APPLY the tombstone rather than having sealed it */
+    err = NULL;
+    uint64_t no_lines = urnet_message_group_receive(group_b, ctx, &err);
+    CHECK(no_lines == 0, "a page carrying only a tombstone delivered %d lines",
+          (int)urnet_message_list_count(no_lines));
+    if (no_lines != 0) {
+      urnet_release(no_lines);
+    }
+    if (err != NULL) {
+      show_error("B receive of the tombstone", err);
+      err = NULL;
+    }
+    uint64_t log_db = urnet_message_group_messages(group_b);
+    REQUIRE(log_db != 0, "B's log is empty");
+    char* b_row = urnet_message_list_info(log_db, 0);
+    REQUIRE(b_row != NULL, "B's log has no row 0");
+    CHECK(strstr(b_row, "\"deleted\":true") != NULL,
+          "B did not apply the sender's own tombstone: %s", b_row);
+    urnet_free_string(b_row);
+    CHECK(urnet_release(log_db), "releasing B's log answered false");
+  }
+
+  step("A GAP IS NOT A MESSAGE WITH NO TEXT, which is the whole of ledger item 236");
+  {
+    /* the three entries are built in Go -- see urnet_message_loopback_gap_list, and the reason
+     * nothing here can seal a malformed record -- so what this step measures is the BOUNDARY and
+     * not the walk: that a gap reaches a C caller as something it can tell apart. */
+    uint64_t gaps = urnet_message_loopback_gap_list();
+    REQUIRE(gaps != 0, "the gap list answered 0");
+    CHECK(urnet_message_list_count(gaps) == 3, "the gap list holds %d entries, want 3",
+          (int)urnet_message_list_count(gaps));
+    char* message = urnet_message_list_info(gaps, 0);
+    char* unsupported = urnet_message_list_info(gaps, 1);
+    char* malformed = urnet_message_list_info(gaps, 2);
+    REQUIRE(message != NULL && unsupported != NULL && malformed != NULL, "an entry had no metadata");
+    printf("      %s\n      %s\n      %s\n", message, unsupported, malformed);
+
+    CHECK(strstr(message, "\"gap\":\"\"") != NULL, "a message reports a gap: %s", message);
+    /* BOTH GAPS ARE body_len 0 AND SO IS A MESSAGE NOBODY PUT TEXT IN. that is the whole defect:
+     * without this field the three below are one value to a C caller, and the two gaps are two
+     * different sentences to a user -- one offers an upgrade and the other must not. */
+    CHECK(strstr(unsupported, "\"body_len\":0") != NULL && strstr(malformed, "\"body_len\":0") != NULL,
+          "a gap carries a body, so this case is measuring something else");
+    char reason[64] = { 0 };
+    CHECK(json_string_field(unsupported, "gap", reason, sizeof(reason)), "no gap field: %s", unsupported);
+    CHECK(strcmp(reason, URNET_MESSAGE_GAP_UNSUPPORTED) == 0,
+          "an unknown kind reports gap %s, want %s", reason, URNET_MESSAGE_GAP_UNSUPPORTED);
+    memset(reason, 0, sizeof(reason));
+    CHECK(json_string_field(malformed, "gap", reason, sizeof(reason)), "no gap field: %s", malformed);
+    CHECK(strcmp(reason, URNET_MESSAGE_GAP_MALFORMED) == 0,
+          "a malformed record reports gap %s, want %s", reason, URNET_MESSAGE_GAP_MALFORMED);
+    /* AND THE KIND ON A GAP IS THE CODE IT ARRIVED UNDER AND NOT WHAT IT IS: entry 2 is a
+     * malformed REPLY, so a caller that branched on kind would draw an empty reply for it. */
+    CHECK(strstr(malformed, "\"kind\":2") != NULL,
+          "the malformed entry lost the code it arrived under: %s", malformed);
+    CHECK(strstr(unsupported, "\"kind\":3") != NULL,
+          "the unsupported entry lost the code it arrived under: %s", unsupported);
+    /* a gap still has its position and its name, which is what makes it an entry rather than a
+     * hole: a ui draws it in order and a later reply can still quote it */
+    char gap_id[128] = { 0 };
+    CHECK(json_string_field(unsupported, "message_id", gap_id, sizeof(gap_id)) && is_message_id(gap_id),
+          "the gap carries no message_id, so it is a hole and not an entry: %s", unsupported);
+    urnet_free_string(message);
+    urnet_free_string(unsupported);
+    urnet_free_string(malformed);
+    CHECK(urnet_release(gaps), "releasing the gap list answered false");
   }
 
   step("a device with state_store 0, which takes the in-memory store and persists nothing");

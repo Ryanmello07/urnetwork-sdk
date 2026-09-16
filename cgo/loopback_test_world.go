@@ -13,6 +13,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"sync"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 	"github.com/urnetwork/message-server/api"
 	"github.com/urnetwork/message-server/peer"
 	"github.com/urnetwork/message-server/store"
+	"github.com/urnetwork/sdk/urmessage"
 )
 
 // A RUNNING MESSAGE SERVER AND ITS CLIENTS, FOR THE C CONSUMER TEST AND FOR NOTHING ELSE.
@@ -235,6 +238,138 @@ func urnet_message_loopback_world_unrouted_client(self C.uint64_t) C.uint64_t {
 		connect.DefaultClientSettings())
 	self_.clients = append(self_.clients, client)
 	return C.uint64_t(newHandle(client))
+}
+
+// ── the send verbs the SHIPPING abi does not have, so that the read side can be driven ──────
+//
+// urmessage.Group has SendReply, React, Unreact and Delete. No shipping export calls them -- that
+// asymmetry is stated at the top of exports_message.go and it is ledger item 236's scope, which is
+// the PROJECTION -- and yet the projection cannot be tested from C without something that produces
+// a reply, a reaction and a tombstone. These three are that something, and they are HERE, behind
+// the build tag, for exactly the reason the world above is: what they drive is the real server, the
+// real seal and the real receive walk, and NOTHING of them ships. ctest/run.sh proves the shipping
+// header declares no urnet_message_loopback_* symbol at all.
+//
+// THE DAY THE SHIPPING ABI GAINS ITS OWN SEND VERBS THESE SHOULD GO, and the C consumer's steps
+// should move onto them unchanged: every one of these calls the same urmessage method a shipping
+// export would, and answers the same messageInfoOf json urnet_message_group_send answers.
+//
+// A TARGET CROSSES AS 64 HEX CHARACTERS rather than as 32 octets, because a message_id reaches a C
+// caller as hex out of urnet_message_list_info and hex is what such a caller has in its hand.
+// encoding/hex is what reads it back -- see messageInfoOf for why a hand-rolled nibble split is not
+// an option in this repository.
+func loopbackTarget(raw *C.char, outError **C.char) ([]byte, bool) {
+	target, err := hex.DecodeString(goString(raw))
+	if err != nil {
+		setErrorOut(outError, fmt.Errorf("the target is not hex: %w", err))
+		return nil, false
+	}
+	return target, true
+}
+
+// loopbackSend resolves the group and the context all three verbs take, and projects what urmessage
+// answered through the SAME projection urnet_message_group_send uses.
+func loopbackSend(self C.uint64_t, ctx C.uint64_t, name string,
+	send func(*urmessage.Group, context.Context) (*urmessage.Message, error), outError **C.char) *C.char {
+
+	self_, ok := resolveHandle[*urmessage.Group](uint64(self), name)
+	if !ok || self_ == nil {
+		return nil
+	}
+	ctx_, ok := messageCtx(ctx, name)
+	if !ok {
+		return nil
+	}
+	sent, err := send(self_, ctx_)
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	return cJson(messageInfoOf(messageEntryOf(sent)), name)
+}
+
+//export urnet_message_loopback_group_send_reply
+func urnet_message_loopback_group_send_reply(self C.uint64_t, ctx C.uint64_t, replyToHex *C.char, body *C.uint8_t, bodyLen C.int32_t, outError **C.char) *C.char {
+	defer cgoGuard("urnet_message_loopback_group_send_reply")
+	replyTo, ok := loopbackTarget(replyToHex, outError)
+	if !ok {
+		return nil
+	}
+	text := string(goBytes(body, bodyLen))
+	return loopbackSend(self, ctx, "urnet_message_loopback_group_send_reply",
+		func(group *urmessage.Group, ctx context.Context) (*urmessage.Message, error) {
+			return group.SendReply(ctx, replyTo, text)
+		}, outError)
+}
+
+//export urnet_message_loopback_group_react
+func urnet_message_loopback_group_react(self C.uint64_t, ctx C.uint64_t, targetHex *C.char, emoji *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_message_loopback_group_react")
+	target, ok := loopbackTarget(targetHex, outError)
+	if !ok {
+		return nil
+	}
+	standing := goString(emoji)
+	return loopbackSend(self, ctx, "urnet_message_loopback_group_react",
+		func(group *urmessage.Group, ctx context.Context) (*urmessage.Message, error) {
+			return group.React(ctx, target, standing)
+		}, outError)
+}
+
+//export urnet_message_loopback_group_delete
+func urnet_message_loopback_group_delete(self C.uint64_t, ctx C.uint64_t, targetHex *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_message_loopback_group_delete")
+	target, ok := loopbackTarget(targetHex, outError)
+	if !ok {
+		return nil
+	}
+	return loopbackSend(self, ctx, "urnet_message_loopback_group_delete",
+		func(group *urmessage.Group, ctx context.Context) (*urmessage.Message, error) {
+			return group.Delete(ctx, target)
+		}, outError)
+}
+
+// urnet_message_loopback_gap_list is a message list handle holding one ordinary message and the two
+// GAPS this build can produce, so that a C caller can measure that it can tell them apart.
+//
+// THESE THREE ARE BUILT IN GO AND ARE NOT OPENED OFF THE WIRE, WHICH IS STATED RATHER THAN HIDDEN.
+// Nothing in this tree can seal a malformed body or an unknown kind from OUTSIDE urmessage: Send
+// refuses a plaintext it would not parse back, and the shaped store above corrupts ct_body, which
+// fails at the body hash BEFORE the open and is therefore a fail() rather than a gap. That is
+// msgrepo ledger item 235, filed and open, and it wants a raw-plaintext seal in the cp3b harness
+// first. So the WALK that produces a gap is held where it can be held -- urmessage's own
+// TestAnUnknownKindKeepsItsPositionAndIsNotAFailure and the cases beside it, over real records --
+// and what crosses HERE is the other half, which is the half ledger item 236 is about: that the
+// projection and the list accessors carry a gap to a C caller as something it can tell apart from
+// a message.
+//
+//export urnet_message_loopback_gap_list
+func urnet_message_loopback_gap_list() C.uint64_t {
+	defer cgoGuard("urnet_message_loopback_gap_list")
+	handle := bytes.Repeat([]byte{0x3C}, 16)
+	return C.uint64_t(newMessageList([]*urmessage.Message{
+		{
+			RecordId: 41, SenderHandle: handle, SentAtMs: 1,
+			MessageId: bytes.Repeat([]byte{0x01}, 32),
+			Kind:      urmessage.KindText, Text: "a message that is a message",
+		},
+		{
+			// A CODE THIS BUILD DOES NOT KNOW, on a class its range allows: the record opened
+			// and its signature verified, so the sender did nothing wrong. 0x03 is ATTACHMENT,
+			// which is assigned and has no body in this build.
+			RecordId: 42, SenderHandle: handle, SentAtMs: 2,
+			MessageId: bytes.Repeat([]byte{0x02}, 32),
+			Kind:      urmessage.KindAttachment, Gap: urmessage.GapUnsupported,
+		},
+		{
+			// A SENDER THAT BROKE A RULE ALREADY WRITTEN, and the kind is the code the record
+			// ARRIVED under rather than what the record is: a malformed REPLY is still a REPLY
+			// here, and a caller that branched on kind would draw an empty reply.
+			RecordId: 43, SenderHandle: handle, SentAtMs: 3,
+			MessageId: bytes.Repeat([]byte{0x03}, 32),
+			Kind:      urmessage.KindReply, Gap: urmessage.GapMalformed,
+		},
+	}))
 }
 
 //export urnet_message_loopback_world_close

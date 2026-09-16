@@ -44,10 +44,24 @@ import (
 //
 // ── WHAT IS EXPOSED IS WHAT IS PROVEN, AND THE SILENCES ARE DELIBERATE ───────────────────────
 //
-// The content envelope is the owner's ruling and is not made here. A body is opaque octets, in
-// and out, and nothing in this file knows what is inside one. There is no receipt, no reaction,
-// no reply, no edit, no delete and no media -- not as a stub, not as an export that answers a
-// plausible empty result. urmessage does not carry them and neither does this.
+// THIS PARAGRAPH USED TO READ "there is no receipt, no reaction, no reply, no edit, no delete and
+// no media", AND HALF OF IT IS NO LONGER TRUE. The content envelope landed (urmessage/kind.go, the
+// 2026-09-17 ruling) and urmessage now carries a kind, a gap reason, a reply parent, a tombstone
+// flag and a reaction list on every Message. The READ side of those five crosses here -- see
+// messageInfo and the two reaction accessors at the bottom of this file -- because a caller that
+// cannot tell a GAP from a message with no text is rendering a conversation it has been told
+// nothing about (msgrepo ledger item 236).
+//
+// THE SEND SIDE OF THEM DOES NOT, AND THAT IS NAMED RATHER THAN LEFT TO BE DISCOVERED.
+// urmessage.Group has SendReply, React, Unreact and Delete and NO export here calls them: a C
+// caller can render a reply, a reaction and a tombstone and cannot make one. That asymmetry is
+// deliberate for this pass -- ledger item 236 is the projection and only the projection -- and it
+// is the next thing this file owes.
+//
+// A body is still opaque octets, in and out: nothing here reads one, and the kind says under which
+// grammar it was read rather than what it contains. There is still no receipt, no edit and no
+// media, not as a stub and not as an export that answers a plausible empty result, because
+// urmessage does not carry them.
 //
 // ── DECISION: BLOCKING, ON THE CALLER'S OWN THREAD, WITH A CANCEL HANDLE ─────────────────────
 //
@@ -729,7 +743,7 @@ func urnet_message_group_send(self C.uint64_t, ctx C.uint64_t, body *C.uint8_t, 
 		setErrorOut(outError, err)
 		return nil
 	}
-	return cJson(messageInfoOf(sent), "urnet_message_group_send")
+	return cJson(messageInfoOf(messageEntryOf(sent)), "urnet_message_group_send")
 }
 
 // urnet_message_group_receive fetches §4.3.4's pages and BLOCKS while it does.
@@ -834,6 +848,8 @@ func urnet_message_group_stats(self C.uint64_t) *C.char {
 		Unopened:        stats.Unopened,
 		Omitted:         stats.Omitted,
 		SkippedClass:    stats.SkippedClass,
+		GapMalformed:    stats.GapMalformed,
+		GapUnsupported:  stats.GapUnsupported,
 		FailedOpen:      stats.FailedOpen,
 		Submitted:       stats.Submitted,
 		Rebound:         stats.Rebound,
@@ -902,21 +918,81 @@ func urnet_message_group_list_at(self C.uint64_t, index C.int32_t) C.uint64_t {
 	return C.uint64_t(newHandle(self_.groups[index]))
 }
 
+// messageEntry is one message in a list handle, WITH THE TWO FIELDS urmessage REWRITES IN PLACE
+// COPIED AT THE INSTANT THE LIST WAS BUILT.
+//
+// WHY A SNAPSHOT AND NOT THE LIVE MESSAGE. urmessage.Group.Messages says "the messages themselves
+// are shared and are not written after they are appended", and since the content envelope that
+// sentence is false for exactly two fields: Group.reapplyLocked rewrites Deleted and Reactions on a
+// message that is ALREADY in the log, every time a reaction or a tombstone for it arrives. This abi
+// is polled from one thread while it is rendered from another -- that is the whole threading
+// decision at the top of this file -- so a list handle that read those two fields live would answer
+// urnet_message_list_reaction_count and urnet_message_list_reaction_info from two different
+// instants: a C caller that looped `for k in 0..count` would read past the end of a list that had
+// just shrunk, or miss the entry that had just been added, on a conversation nobody was doing
+// anything unusual to.
+//
+// SO A LIST HANDLE IS ONE INSTANT OF THE CONVERSATION and every accessor on it agrees. Re-reading
+// is one more urnet_message_group_messages call, which is what a render loop does anyway.
+//
+// WHAT IT DOES NOT FIX, STATED RATHER THAN IMPLIED AND MEASURED RATHER THAN SUSPECTED. The copy
+// below reads those two fields WITHOUT urmessage's group lock, because urmessage offers no way to
+// take one: Group.Messages copies the SLICE under the lock and hands back live messages. A probe
+// that rendered Group.Messages on one goroutine while another called Group.Receive reported two
+// data races over one short conversation under -race -- both of them the writes in reapplyLocked,
+// at urmessage/group.go:2511 (`held.Deleted = false`) and :2512 (`held.Reactions = nil`), reached
+// through Receive -> commitWalkLocked -> rebuildDirtyLocked.
+//
+// THAT RACE IS urmessage's AND IT IS OLDER THAN THIS FILE: any Go caller that renders while it
+// polls has it, and closing it means changing what Group.Messages hands out, which belongs to the
+// package that owns the lock rather than to a hand projection outside it. What this snapshot
+// removes is the half that IS this file's: two accessors on one list handle answering a C caller
+// from two different instants.
+type messageEntry struct {
+	message   *urmessage.Message
+	deleted   bool
+	reactions []urmessage.Reaction
+}
+
+// messageEntryOf takes that instant. A nil message is a nil entry and every reader below answers
+// nothing for it.
+func messageEntryOf(message *urmessage.Message) messageEntry {
+	if message == nil {
+		return messageEntry{}
+	}
+	return messageEntry{
+		message: message,
+		deleted: message.Deleted,
+		// append onto nil rather than assigning the slice: assigning would share the array
+		// with a message a later reapplyLocked appends into.
+		reactions: append([]urmessage.Reaction(nil), message.Reactions...),
+	}
+}
+
 type messageList struct {
-	messages []*urmessage.Message
+	entries []messageEntry
 }
 
 func newMessageList(messages []*urmessage.Message) uint64 {
 	if len(messages) == 0 {
 		return 0
 	}
-	return newHandle(&messageList{messages: messages})
+	entries := make([]messageEntry, 0, len(messages))
+	for _, message := range messages {
+		entries = append(entries, messageEntryOf(message))
+	}
+	return newHandle(&messageList{entries: entries})
 }
 
-// messageInfo is one message WITHOUT its body. The field names are snake_case to match the json
-// every other data type in this abi crosses as; urmessage's own structs carry no json tags, so
-// this is a projection rather than a marshal of the type -- and the projection is also what
-// keeps the body out of json, which is the point.
+// messageInfo is one message WITHOUT its body and WITHOUT its reactions. The field names are
+// snake_case to match the json every other data type in this abi crosses as; urmessage's own
+// structs carry no json tags, so this is a projection rather than a marshal of the type -- and the
+// projection is also what keeps the body out of json, which is the point.
+//
+// IT IS A HAND PROJECTION AND THAT IS WHY NO FIELD ARRIVES BY DEFAULT, which is the cause ledger
+// item 236 names: Kind, ReplyToId, Deleted, Reactions and Gap all landed in urmessage.Message and
+// reached a C caller as nothing at all, for months, with every test green.
+// TestTheMessageInfoCarriesEveryFieldUrmessageKeeps is what makes the next one loud instead.
 type messageInfo struct {
 	RecordId uint64 `json:"record_id"`
 	// 3.1's sender_handle, 16 octets, lower case hex. It is the routing identity of the member
@@ -938,6 +1014,92 @@ type messageInfo struct {
 	// any member can compute any member's id at any position, including positions nobody has
 	// written yet. What makes an id trustworthy is that the record it names OPENED.
 	MessageId string `json:"message_id"`
+
+	// ── what the content envelope said, which is what a conversation renders FROM ────────
+
+	// The content kind at octet 0 of the application plaintext: what grammar the body and the
+	// three fields below were read under. 1 is TEXT and 2 is REPLY; the header names the codes
+	// this build knows, as URNET_MESSAGE_KIND_*.
+	//
+	// IT IS A NUMBER AND NOT A NAME, because a code this build does NOT know still has to cross:
+	// urmessage renders an unassigned code as "0x0b" and a switch in C cannot be written against
+	// that. A caller shows a placeholder for any code it does not handle, which is the whole of
+	// the unknown-kind rule's rendering obligation.
+	//
+	// ON A GAP IT IS THE CODE THE RECORD ARRIVED UNDER AND NOT WHAT THE RECORD IS. A malformed
+	// REPLY carries 2 here and is still a gap. Branch on gap, below, and not on this.
+	Kind uint8 `json:"kind"`
+
+	// WHY THIS POSITION IN THE CONVERSATION HOLDS A GAP RATHER THAN A MESSAGE, and "" on every
+	// message that is a message. Spec A §7.4's closed set; this build produces "malformed" and
+	// "unsupported".
+	//
+	// IT IS THE FIELD ledger item 236 IS NAMED AFTER. Something IS at this position, this build
+	// cannot show it, and without this field that is indistinguishable from a message somebody
+	// sent with no text: both are body_len 0. The two are different sentences to a user --
+	// "upgrade" and "this could not be read" -- and spec C §5.1 is careful that neither is ever
+	// shown for the other.
+	Gap string `json:"gap"`
+
+	// REPLY only: the parent's message_id, 32 octets as 64 lower case hex characters, and "" on
+	// everything else. THE QUOTED TEXT NEVER TRAVELS -- a reply renders by looking its parent up
+	// -- and the parent may be deleted, pruned, or not yet fetched by this device.
+	ReplyToId string `json:"reply_to_id"`
+
+	// A TOMBSTONE FROM THIS MESSAGE'S OWN SENDER HAS BEEN APPLIED TO IT. The body is still in
+	// body_len and still comes back from urnet_message_list_body: urmessage refuses to decide
+	// what a UI does with a deleted line, and the record is on the server either way.
+	Deleted bool `json:"deleted"`
+
+	// How many reactions stand on this message, which is the bound on
+	// urnet_message_list_reaction_info's second index.
+	//
+	// IT IS HERE FOR THE SAME REASON body_len IS: a renderer reads one info string per row, and
+	// the overwhelmingly common answer is 0, which it can act on without a second call. The two
+	// cannot disagree -- both are read off one messageEntry, which is one instant.
+	ReactionCount int32 `json:"reaction_count"`
+}
+
+// messageReactionInfo is one reaction standing on one message.
+//
+// ── DECISION: REACTIONS GET THEIR OWN ACCESSORS AND ARE NOT AN ARRAY INSIDE messageInfo ──────
+//
+// They are a per-message COLLECTION, and this abi already has one shape for a collection: a handle,
+// a _count, and an accessor at an index (urnet_message_group_list_count/_at,
+// urnet_message_list_count/_info/_body). Two reasons for taking that shape here rather than
+// inlining a json array, and the first is the one that decides it:
+//
+//  1. NOTHING CAPS THE REACTIONS ON ONE MESSAGE. msgrepo ledger item 223 is that item and it is
+//     FILED and UNRULED: neither len(effectsOn[target]) nor len(Message.Reactions) has a bound and
+//     any member can grow either. An array inlined into messageInfo would make THE METADATA OF ONE
+//     ROW unbounded -- a renderer that today frees one small string per row would be handed a
+//     string whose size a hostile member chose, on every repaint, for every row. With a count and
+//     an index the caller renders the first few and pays for what it asked for. That is the
+//     "without allocating unbounded memory up front" half, and it is why this is two exports.
+//  2. THE CONSUMER THAT TESTS THIS ABI HAS NO JSON PARSER. ctest/message_abi_test.c reads a field
+//     with strstr and a copy up to the next quote, which cannot address the k-th element of an
+//     array at all. An array would be a surface this abi's own test could not check.
+//
+// WHY THE EMOJI IS SAFE IN JSON WHEN A BODY IS NOT, since this looks like an exception to the body
+// rule at the top of this file. A body is arbitrary octets from another device and json would
+// replace every ill-formed byte with U+FFFD. An emoji is NOT arbitrary: urmessage's checkEmoji
+// requires valid UTF-8 of 1..MaxEmojiOctets octets on BOTH paths into a Reaction --
+// parseReactionBody on the way in, encodeReaction on the way out -- so encoding/json round-trips it
+// byte for byte, and it is bounded, so one reaction's json is bounded with it. The premise is
+// MEASURED rather than asserted: TestTheEmojiSurvivesJsonAndAnIllFormedOneWouldNot. If checkEmoji
+// ever stops requiring valid UTF-8, this field has to become counted octets like a body.
+type messageReactionInfo struct {
+	// The reactor's 16 octet sender_handle, lower case hex. IT IS NOT A PERSON: the alpha has no
+	// identity system, so two devices of one person are two reactors (open item D7).
+	SenderHandle string `json:"sender_handle"`
+
+	// The emoji as that member's device sent it, RAW. It is not folded to §5.3's grouping key --
+	// that needs normalisation tables urmessage does not carry (open item M1-41) -- so two
+	// spellings of one emoji are two reactions here, and a caller that groups them says so.
+	Emoji string `json:"emoji"`
+
+	// True when THIS device sealed the reaction, which is what a UI highlights.
+	Mine bool `json:"mine"`
 }
 
 // messageGroupStats is urmessage.Stats under the same snake_case rule.
@@ -952,17 +1114,28 @@ type messageGroupStats struct {
 	Unopened        uint64 `json:"unopened"`
 	Omitted         uint64 `json:"omitted"`
 	SkippedClass    uint64 `json:"skipped_class"`
-	FailedOpen      uint64 `json:"failed_open"`
-	Submitted       uint64 `json:"submitted"`
-	Rebound         uint64 `json:"rebound"`
-	Pages           uint64 `json:"pages"`
-	Unattested      uint64 `json:"unattested"`
+	// Records that OPENED and became a GAP rather than a message, counted apart because they are
+	// two different sentences about the group and only one of them is anybody's fault.
+	//
+	// THEY ARE ALSO THE ONLY LOUD SIGNAL LEFT FOR A MALFORMED RECORD. Ledger item 224 took a
+	// permanent post-open refusal off the fail() path: the record now resolves once, so
+	// failed_open does not move, unopened does not move, and urnet_message_group_receive answers
+	// no error. A caller that watches only out_error no longer learns that a record could not be
+	// read -- gap_malformed and the per-message gap field are what is left to learn it from.
+	GapMalformed   uint64 `json:"gap_malformed"`
+	GapUnsupported uint64 `json:"gap_unsupported"`
+	FailedOpen     uint64 `json:"failed_open"`
+	Submitted      uint64 `json:"submitted"`
+	Rebound        uint64 `json:"rebound"`
+	Pages          uint64 `json:"pages"`
+	Unattested     uint64 `json:"unattested"`
 }
 
-func messageInfoOf(message *urmessage.Message) *messageInfo {
-	if message == nil {
+func messageInfoOf(entry messageEntry) *messageInfo {
+	if entry.message == nil {
 		return nil
 	}
+	message := entry.message
 	// encoding/hex rather than hand-rolled nibbles. The hand-rolled form was correct, and it
 	// tripped connect/message TestClassBucketJoinIsConfinedToRecordGo -- a gate that scans this
 	// repository too and forbids splitting a byte as >>4 / &0x0F outside record.go, because that
@@ -977,6 +1150,14 @@ func messageInfoOf(message *urmessage.Message) *messageInfo {
 		SentAtMs:     message.SentAtMs,
 		BodyLen:      int32(len(message.Text)),
 		MessageId:    hex.EncodeToString(message.MessageId),
+		Kind:         uint8(message.Kind),
+		Gap:          string(message.Gap),
+		// EncodeToString of a nil slice is "", which is the "not a reply" answer and is why
+		// there is no branch here. A REPLY always carries 32 octets: encodeReply refuses a
+		// target of any other width, so a non-empty value is always 64 characters.
+		ReplyToId:     hex.EncodeToString(message.ReplyToId),
+		Deleted:       entry.deleted,
+		ReactionCount: int32(len(entry.reactions)),
 	}
 }
 
@@ -987,11 +1168,11 @@ func urnet_message_list_count(self C.uint64_t) C.int32_t {
 	if !ok || self_ == nil {
 		return 0
 	}
-	return C.int32_t(len(self_.messages))
+	return C.int32_t(len(self_.entries))
 }
 
-// urnet_message_list_info is one message's metadata as json, WITHOUT the body. Free with
-// urnet_free_string.
+// urnet_message_list_info is one message's metadata as json, WITHOUT the body and WITHOUT its
+// reactions. Free with urnet_free_string.
 //
 //export urnet_message_list_info
 func urnet_message_list_info(self C.uint64_t, index C.int32_t) *C.char {
@@ -1000,15 +1181,20 @@ func urnet_message_list_info(self C.uint64_t, index C.int32_t) *C.char {
 	if !ok || self_ == nil {
 		return nil
 	}
-	if index < 0 || int(index) >= len(self_.messages) {
+	if index < 0 || int(index) >= len(self_.entries) {
 		return nil
 	}
-	return cJson(messageInfoOf(self_.messages[index]), "urnet_message_list_info")
+	return cJson(messageInfoOf(self_.entries[index]), "urnet_message_list_info")
 }
 
 // urnet_message_list_body is one message's body, byte for byte, through the buffer-out pattern:
 // call once with out == NULL to size it, again to fill it. It is the ONLY way a body leaves this
 // abi, for the reason the body decision at the top of this file gives.
+//
+// A DELETED MESSAGE STILL HAS ITS BODY HERE. urmessage marks the tombstone and keeps the text,
+// because it refuses to be the layer that throws away a user's data on a peer's say-so, and the
+// record is on the server either way. What a UI does with it is the UI's decision; "deleted" in
+// the info json is how it learns there is one to make.
 //
 //export urnet_message_list_body
 func urnet_message_list_body(self C.uint64_t, index C.int32_t, out *C.uint8_t, inoutLen *C.int32_t) C.bool {
@@ -1017,8 +1203,62 @@ func urnet_message_list_body(self C.uint64_t, index C.int32_t, out *C.uint8_t, i
 	if !ok || self_ == nil {
 		return C.bool(false)
 	}
-	if index < 0 || int(index) >= len(self_.messages) {
+	if index < 0 || int(index) >= len(self_.entries) {
 		return C.bool(false)
 	}
-	return copyOut(out, inoutLen, []byte(self_.messages[index].Text))
+	return copyOut(out, inoutLen, []byte(self_.entries[index].message.Text))
+}
+
+// ── the reactions standing on one message ───────────────────────────────────────────────────
+//
+// The collection shape this abi already has, one level down: a count and an accessor at an index.
+// See messageReactionInfo for why it is this rather than an array inside urnet_message_list_info,
+// and why the emoji may cross inside json when a body may not.
+//
+// BOTH ANSWER OFF THE SNAPSHOT THE LIST HANDLE TOOK, so a `for k in 0..count` loop cannot be
+// overtaken by a reaction landing on another thread. See messageEntry.
+
+// urnet_message_list_reaction_count is how many reactions stand on the message at index. 0 for an
+// index out of range and 0 for handle 0, like every other accessor here.
+//
+//export urnet_message_list_reaction_count
+func urnet_message_list_reaction_count(self C.uint64_t, index C.int32_t) C.int32_t {
+	defer cgoGuard("urnet_message_list_reaction_count")
+	self_, ok := resolveHandle[*messageList](uint64(self), "urnet_message_list_reaction_count")
+	if !ok || self_ == nil {
+		return 0
+	}
+	if index < 0 || int(index) >= len(self_.entries) {
+		return 0
+	}
+	return C.int32_t(len(self_.entries[index].reactions))
+}
+
+// urnet_message_list_reaction_info is one reaction as json:
+// {"sender_handle":"<32 hex>","emoji":"...","mine":bool}. NULL for either index out of range.
+// Free with urnet_free_string.
+//
+//export urnet_message_list_reaction_info
+func urnet_message_list_reaction_info(self C.uint64_t, index C.int32_t, reactionIndex C.int32_t) *C.char {
+	defer cgoGuard("urnet_message_list_reaction_info")
+	self_, ok := resolveHandle[*messageList](uint64(self), "urnet_message_list_reaction_info")
+	if !ok || self_ == nil {
+		return nil
+	}
+	if index < 0 || int(index) >= len(self_.entries) {
+		return nil
+	}
+	reactions := self_.entries[index].reactions
+	if reactionIndex < 0 || int(reactionIndex) >= len(reactions) {
+		return nil
+	}
+	return cJson(reactionInfoOf(reactions[reactionIndex]), "urnet_message_list_reaction_info")
+}
+
+func reactionInfoOf(reaction urmessage.Reaction) *messageReactionInfo {
+	return &messageReactionInfo{
+		SenderHandle: hex.EncodeToString(reaction.SenderHandle),
+		Emoji:        reaction.Emoji,
+		Mine:         reaction.Mine,
+	}
 }

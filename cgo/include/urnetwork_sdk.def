@@ -514,6 +514,8 @@ EXPORTS
 	urnet_message_list_body
 	urnet_message_list_count
 	urnet_message_list_info
+	urnet_message_list_reaction_count
+	urnet_message_list_reaction_info
 	urnet_message_parse_invite
 	urnet_message_stream_index_reserver_new
 	urnet_message_stream_store_close

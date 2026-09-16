@@ -39,8 +39,19 @@
  * THERE IS NO RECEIVE PUSH. urnet_message_group_receive is a poll and that is what the transport
  * is. nothing arrives on its own.
  *
- * WHAT IS NOT HERE: receipts, reactions, replies, edit, delete, media, group names, contact
- * discovery, a third member. They are not built underneath this and they are not stubbed here.
+ * A REAL CONVERSATION IS MORE THAN PLAIN TEXT, AND THE READ SIDE OF IT CROSSES HERE. every
+ * message carries the kind it arrived under, a gap reason, the message it replies to, whether a
+ * tombstone from its own sender has been applied, and the reactions standing on it. see
+ * urnet_message_list_info and the two urnet_message_list_reaction_* calls. THE GAP REASON IS THE
+ * ONE TO READ FIRST: a gap is something that IS at that position and cannot be shown, and without
+ * it a gap is indistinguishable from a message with no text -- both are body_len 0, and they are
+ * different sentences to a user.
+ *
+ * WHAT IS NOT HERE: SENDING any of those. urnet_message_group_send seals a plain TEXT and there is
+ * no call that seals a reply, a reaction, an un-reaction or a tombstone -- so you can render one
+ * and not make one. that asymmetry is deliberate and temporary; it is the next thing this header
+ * owes. also not here: receipts, edit, media, group names, contact discovery, a third member.
+ * they are not built underneath this and they are not stubbed here.
  *
  * SPDX-License-Identifier: MPL-2.0 */
 #ifndef URNETWORK_MESSAGE_H
@@ -59,6 +70,37 @@ extern "C" {
  * urnet_message_transport_new's protocol_version takes. 0 takes it too, as every other 0 in this
  * abi takes a default; any other value is refused at transport_new, by name. */
 #define URNET_MESSAGE_PROTOCOL_VERSION 1
+
+/* the content kinds this build knows, which is what urnet_message_list_info's "kind" carries.
+ * THE CODE IS THE VERSION OF ITS OWN GRAMMAR: a later kind is a NEW code and never a flag inside an
+ * old one, so a build that does not know a code keeps the record's position and shows a
+ * placeholder. TREAT ANY OTHER VALUE AS EXACTLY THAT -- do not refuse it, and do not assume the
+ * list below is closed.
+ *
+ * FOUR OF THESE NEVER APPEAR AS A MESSAGE YOU RENDER. a REACTION_ADD, a REACTION_REMOVE and a
+ * TOMBSTONE change ANOTHER message and add no line of their own -- they arrive as the "reactions"
+ * and "deleted" of the message they name -- and a COVER is traffic that exists to look like a
+ * message and is discarded. they are listed because urnet_message_group_send answers the metadata
+ * of the record it just sealed, and because a GAP carries the code it ARRIVED under. */
+#define URNET_MESSAGE_KIND_TEXT            0x01
+#define URNET_MESSAGE_KIND_REPLY           0x02
+#define URNET_MESSAGE_KIND_ATTACHMENT      0x03
+#define URNET_MESSAGE_KIND_TOMBSTONE       0x04
+#define URNET_MESSAGE_KIND_REACTION_ADD    0x05
+#define URNET_MESSAGE_KIND_REACTION_REMOVE 0x06
+#define URNET_MESSAGE_KIND_COVER           0x07
+
+/* the values urnet_message_list_info's "gap" takes, as strings, and "" for a message that is a
+ * message. spec A section 7.4's set is closed at seven and THIS BUILD PRODUCES TWO; the other five
+ * are waiting on machinery that does not exist here, so a caller that shows a default for an
+ * unrecognised reason is right rather than lazy.
+ *
+ * THE DISTINCTION BETWEEN THESE TWO IS LOAD BEARING IN BOTH DIRECTIONS and the copy differs:
+ * MALFORMED is a fault and NO upgrade fixes it, so it must not offer one; UNSUPPORTED is a member
+ * running a newer build and the upgrade is the whole answer. showing either sentence for the other
+ * either accuses a correct sender or sends a user after an upgrade that cannot help. */
+#define URNET_MESSAGE_GAP_MALFORMED   "malformed"
+#define URNET_MESSAGE_GAP_UNSUPPORTED "unsupported"
 
 /* ----- callback types ----- */
 
@@ -217,8 +259,15 @@ bool urnet_message_group_id(uint64_t self, uint8_t* out, int32_t* inout_len);
 uint64_t urnet_message_group_epoch(uint64_t self);
 bool urnet_message_group_is_open(uint64_t self);
 /* what this group has SEEN, as json: fetched, opened, skipped_ceremony, skipped_own, opened_own,
- * own_without_copy, skipped_seen, unopened, omitted, skipped_class, failed_open, submitted,
- * rebound, pages, unattested. opened_own counts this device's own records shown from the copy it
+ * own_without_copy, skipped_seen, unopened, omitted, skipped_class, gap_malformed, gap_unsupported,
+ * failed_open, submitted, rebound, pages, unattested.
+ *
+ * gap_malformed AND gap_unsupported ARE THE TWO YOU WATCH FOR A RECORD THAT COULD NOT BE READ, and
+ * they are counters rather than an error because a permanent post-open refusal no longer fails:
+ * the record resolves once, failed_open does not move, unopened does not move, and
+ * urnet_message_group_receive answers no out_error. code that watches only out_error will not
+ * learn that a line is missing. gap_unsupported growing is this build getting old; gap_malformed
+ * growing is a fault. opened_own counts this device's own records shown from the copy it
  * persisted when it sent them -- a member cannot decrypt its own records -- and own_without_copy
  * counts its own records it has no copy of and cannot show. it exists so that "nothing arrived" and "something arrived and this build would
  * not open it" are two readings rather than one silence. free with urnet_free_string. */
@@ -237,9 +286,10 @@ int32_t urnet_message_group_list_count(uint64_t self);
 uint64_t urnet_message_group_list_at(uint64_t self, int32_t index);
 
 int32_t urnet_message_list_count(uint64_t self);
-/* one message's metadata as json, WITHOUT the body:
+/* one message's metadata as json, WITHOUT the body and WITHOUT its reactions:
  *   {"record_id":u64,"sender_handle":"<32 hex>","mine":bool,"sent_at_ms":i64,"body_len":i32,
- *    "message_id":"<64 hex>"}
+ *    "message_id":"<64 hex>","kind":u8,"gap":"","reply_to_id":"","deleted":bool,
+ *    "reaction_count":i32}
  * sender_handle is 16 opaque octets and IS NOT A NAME: the alpha has no identity system.
  *
  * message_id is 32 octets and IS the name to quote: a reply, a reaction, a tombstone or a read
@@ -248,11 +298,47 @@ int32_t urnet_message_list_count(uint64_t self);
  * not an authentication: the key it is derived under is group-shared, so any member can compute
  * any member's id at any position. what makes an id trustworthy is that the record it names
  * opened.
+ *
+ * gap IS THE FIELD TO BRANCH ON FIRST, and "" is the answer on a message that is a message. a
+ * non-empty gap means something IS at this position in the conversation and this build cannot show
+ * it: the record kept its place and its message_id, body_len is 0, and one closed placeholder is
+ * what to draw -- see URNET_MESSAGE_GAP_*. DO NOT BRANCH ON kind FOR THIS: on a gap, kind is the
+ * code the record ARRIVED under and not what the record is, so a malformed REPLY carries
+ * URNET_MESSAGE_KIND_REPLY and is still a gap.
+ *
+ * reply_to_id is the parent's message_id on a REPLY and "" on everything else. THE QUOTED TEXT
+ * NEVER TRAVELS: look the parent up, and be ready for it to be missing -- deleted, pruned, or not
+ * fetched by this device yet.
+ *
+ * deleted means a tombstone FROM THIS MESSAGE'S OWN SENDER has been applied. the body is still
+ * here and urnet_message_list_body still hands it back: the library refuses to decide what a UI
+ * does with a deleted line, and the record is on the server either way.
+ *
+ * reaction_count is the bound on urnet_message_list_reaction_info's reaction_index, carried here
+ * for the same reason body_len is -- one info string per row, and the common answer is 0.
  * free with urnet_free_string. */
 char* urnet_message_list_info(uint64_t self, int32_t index);
 /* one message's body, byte for byte, through the buffer-out pattern. the ONLY way a body leaves
  * this abi. */
 bool urnet_message_list_body(uint64_t self, int32_t index, uint8_t* out, int32_t* inout_len);
+
+/* the reactions standing on the message at index: a count and an accessor, which is this abi's
+ * shape for a collection one level down. they are NOT an array inside the info json, and the
+ * reason is a bound: NOTHING CAPS HOW MANY REACTIONS ONE MESSAGE CAN CARRY, so an inlined array
+ * would make one row's metadata a string whose size another member chose. with these two you
+ * render the first few and pay for what you asked for.
+ *
+ * BOTH ANSWER FROM THE INSTANT THE LIST HANDLE WAS MADE, so `for (k = 0; k < count; k++)` cannot
+ * be overtaken by a reaction landing under a urnet_message_group_receive on another thread. call
+ * urnet_message_group_messages again to see later ones.
+ *
+ * one reaction is {"sender_handle":"<32 hex>","emoji":"...","mine":bool}. the reactor is a
+ * sender_handle and NOT a person -- two devices of one person are two reactors -- and the emoji is
+ * RAW: it is not folded to a grouping key, so two spellings of one emoji are two reactions and
+ * grouping them is yours to do. mine is true when THIS device sealed it.
+ * reaction_info answers NULL for either index out of range; free it with urnet_free_string. */
+int32_t urnet_message_list_reaction_count(uint64_t self, int32_t index);
+char* urnet_message_list_reaction_info(uint64_t self, int32_t index, int32_t reaction_index);
 
 #ifdef __cplusplus
 }
