@@ -13,8 +13,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
-	"fmt"
 	"sync"
 	"time"
 
@@ -240,94 +238,21 @@ func urnet_message_loopback_world_unrouted_client(self C.uint64_t) C.uint64_t {
 	return C.uint64_t(newHandle(client))
 }
 
-// ── the send verbs the SHIPPING abi does not have, so that the read side can be driven ──────
+// ── THE THREE SEND VERBS THAT USED TO BE HERE ARE GONE, AND THAT IS THIS FILE'S OWN PLAN ────
 //
-// urmessage.Group has SendReply, React, Unreact and Delete. No shipping export calls them -- that
-// asymmetry is stated at the top of exports_message.go and it is ledger item 236's scope, which is
-// the PROJECTION -- and yet the projection cannot be tested from C without something that produces
-// a reply, a reaction and a tombstone. These three are that something, and they are HERE, behind
-// the build tag, for exactly the reason the world above is: what they drive is the real server, the
-// real seal and the real receive walk, and NOTHING of them ships. ctest/run.sh proves the shipping
-// header declares no urnet_message_loopback_* symbol at all.
+// urnet_message_loopback_group_send_reply, _react and _delete stood here so that the READ side of a
+// reply, a reaction and a tombstone could be driven from C while no shipping export could produce
+// one. Their comment said, in as many words: "THE DAY THE SHIPPING ABI GAINS ITS OWN SEND VERBS
+// THESE SHOULD GO, and the C consumer's steps should move onto them unchanged." That day is this
+// one. exports_message.go now ships urnet_message_group_send_reply, _react, _unreact and _delete,
+// ctest/message_abi_test.c drives those, and keeping a second set behind the tag would mean the
+// only C-level exercise of these four verbs ran against code that never ships.
 //
-// THE DAY THE SHIPPING ABI GAINS ITS OWN SEND VERBS THESE SHOULD GO, and the C consumer's steps
-// should move onto them unchanged: every one of these calls the same urmessage method a shipping
-// export would, and answers the same messageInfoOf json urnet_message_group_send answers.
-//
-// A TARGET CROSSES AS 64 HEX CHARACTERS rather than as 32 octets, because a message_id reaches a C
-// caller as hex out of urnet_message_list_info and hex is what such a caller has in its hand.
-// encoding/hex is what reads it back -- see messageInfoOf for why a hand-rolled nibble split is not
-// an option in this repository.
-func loopbackTarget(raw *C.char, outError **C.char) ([]byte, bool) {
-	target, err := hex.DecodeString(goString(raw))
-	if err != nil {
-		setErrorOut(outError, fmt.Errorf("the target is not hex: %w", err))
-		return nil, false
-	}
-	return target, true
-}
-
-// loopbackSend resolves the group and the context all three verbs take, and projects what urmessage
-// answered through the SAME projection urnet_message_group_send uses.
-func loopbackSend(self C.uint64_t, ctx C.uint64_t, name string,
-	send func(*urmessage.Group, context.Context) (*urmessage.Message, error), outError **C.char) *C.char {
-
-	self_, ok := resolveHandle[*urmessage.Group](uint64(self), name)
-	if !ok || self_ == nil {
-		return nil
-	}
-	ctx_, ok := messageCtx(ctx, name)
-	if !ok {
-		return nil
-	}
-	sent, err := send(self_, ctx_)
-	if err != nil {
-		setErrorOut(outError, err)
-		return nil
-	}
-	return cJson(messageInfoOf(messageEntryOf(sent)), name)
-}
-
-//export urnet_message_loopback_group_send_reply
-func urnet_message_loopback_group_send_reply(self C.uint64_t, ctx C.uint64_t, replyToHex *C.char, body *C.uint8_t, bodyLen C.int32_t, outError **C.char) *C.char {
-	defer cgoGuard("urnet_message_loopback_group_send_reply")
-	replyTo, ok := loopbackTarget(replyToHex, outError)
-	if !ok {
-		return nil
-	}
-	text := string(goBytes(body, bodyLen))
-	return loopbackSend(self, ctx, "urnet_message_loopback_group_send_reply",
-		func(group *urmessage.Group, ctx context.Context) (*urmessage.Message, error) {
-			return group.SendReply(ctx, replyTo, text)
-		}, outError)
-}
-
-//export urnet_message_loopback_group_react
-func urnet_message_loopback_group_react(self C.uint64_t, ctx C.uint64_t, targetHex *C.char, emoji *C.char, outError **C.char) *C.char {
-	defer cgoGuard("urnet_message_loopback_group_react")
-	target, ok := loopbackTarget(targetHex, outError)
-	if !ok {
-		return nil
-	}
-	standing := goString(emoji)
-	return loopbackSend(self, ctx, "urnet_message_loopback_group_react",
-		func(group *urmessage.Group, ctx context.Context) (*urmessage.Message, error) {
-			return group.React(ctx, target, standing)
-		}, outError)
-}
-
-//export urnet_message_loopback_group_delete
-func urnet_message_loopback_group_delete(self C.uint64_t, ctx C.uint64_t, targetHex *C.char, outError **C.char) *C.char {
-	defer cgoGuard("urnet_message_loopback_group_delete")
-	target, ok := loopbackTarget(targetHex, outError)
-	if !ok {
-		return nil
-	}
-	return loopbackSend(self, ctx, "urnet_message_loopback_group_delete",
-		func(group *urmessage.Group, ctx context.Context) (*urmessage.Message, error) {
-			return group.Delete(ctx, target)
-		}, outError)
-}
+// THE ONE THING THAT CHANGED IN THE MOVE is how a target crosses: these took 64 hex characters,
+// because hex is what urnet_message_list_info hands a caller. The shipping exports take COUNTED
+// OCTETS, which is exports_message.go's rule for every binary value going in -- group_id and
+// key_package both -- so the C consumer decodes the hex once, in hex_to_id(), and that decode is
+// now part of what the consumer test proves works.
 
 // urnet_message_loopback_gap_list is a message list handle holding one ordinary message and the two
 // GAPS this build can produce, so that a C caller can measure that it can tell them apart.

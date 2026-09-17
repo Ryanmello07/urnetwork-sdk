@@ -47,10 +47,19 @@
  * it a gap is indistinguishable from a message with no text -- both are body_len 0, and they are
  * different sentences to a user.
  *
- * WHAT IS NOT HERE: SENDING any of those. urnet_message_group_send seals a plain TEXT and there is
- * no call that seals a reply, a reaction, an un-reaction or a tombstone -- so you can render one
- * and not make one. that asymmetry is deliberate and temporary; it is the next thing this header
- * owes. also not here: receipts, edit, media, group names, contact discovery, a third member.
+ * AND SO DOES THE SEND SIDE OF FOUR OF THEM, WHICH THIS PARAGRAPH USED TO SAY WAS MISSING. it read
+ * "WHAT IS NOT HERE: SENDING any of those ... so you can render one and not make one", and that is
+ * no longer true: urnet_message_group_send_reply, _react, _unreact and _delete seal a reply, a
+ * reaction, an un-reaction and a tombstone, so a client PARTICIPATES in a conversation rather than
+ * watching one. each names the message it is about by that message's 32-octet message_id.
+ *
+ * A message_id CROSSES AS COUNTED OCTETS GOING IN -- the same as group_id and key_package -- and
+ * comes BACK as 64 lower case hex characters, in urnet_message_list_info's message_id field. so you
+ * decode that hex once into 32 octets and pass those. the two directions differ because metadata
+ * crosses as json and a buffer-out call for 32 octets a renderer reads once per row would be a
+ * second call per message.
+ *
+ * WHAT IS STILL NOT HERE: receipts, edit, media, group names, contact discovery, a third member.
  * they are not built underneath this and they are not stubbed here.
  *
  * SPDX-License-Identifier: MPL-2.0 */
@@ -240,6 +249,42 @@ bool urnet_message_group_open(uint64_t self, uint64_t ctx, char** out_error);
  * is this message's metadata as json WITHOUT the body -- you already have the body -- or NULL on
  * failure. free with urnet_free_string. */
 char* urnet_message_group_send(uint64_t self, uint64_t ctx, const uint8_t* body, int32_t body_len, char** out_error);
+
+/* THE FOUR VERBS THAT NAME ANOTHER MESSAGE. each blocks on its submit and takes a cancel handle,
+ * exactly as urnet_message_group_send does, and each answers that record's own metadata as json --
+ * the same shape urnet_message_group_send answers -- or NULL with out_error set. free with
+ * urnet_free_string.
+ *
+ * message_id IS 32 OCTETS AND YOU PASS THE LENGTH. you get it as the 64 hex characters in
+ * urnet_message_list_info's message_id field: decode once, pass the octets. any other width is
+ * refused by name before anything is sealed.
+ *
+ * WHAT COMES BACK FROM THE LAST THREE IS NOT A LINE OF THE CONVERSATION. a reaction, an
+ * un-reaction and a tombstone CHANGE another message and add no entry of their own, so the value
+ * exists to give you the record_id and message_id of what you just sent -- what a later unreact,
+ * and any log, would need. do not append it to a view. the change itself appears on the TARGET,
+ * on the next urnet_message_group_messages. */
+
+/* a reply carries its parent's NAME and never its text: it renders by looking the parent up. the
+ * parent is NOT required to be present -- it may be deleted, pruned or not yet fetched -- which is
+ * the one way this differs from the three below. the body is counted octets, as _send's is. */
+char* urnet_message_group_send_reply(uint64_t self, uint64_t ctx, const uint8_t* reply_to, int32_t reply_to_len, const uint8_t* body, int32_t body_len, char** out_error);
+/* react to a message this device holds. the emoji is a NUL-terminated utf-8 string and is checked
+ * as valid utf-8 of 1..64 octets before anything is sealed; it is NOT checked to be exactly one
+ * grapheme cluster, so two characters reach every member as two characters. a target this device
+ * does not hold, a target that is a GAP, and a target that is itself a reaction, a tombstone or a
+ * cover are all refused here and seal nothing. */
+char* urnet_message_group_react(uint64_t self, uint64_t ctx, const uint8_t* target, int32_t target_len, const char* emoji, char** out_error);
+/* take back a reaction: it cancels an ADD with the same (reactor, target, emoji) and NOBODY ELSE'S
+ * -- the reactor is a sender_handle, so a second device of one person cannot take back the first's.
+ * it is a RECORD and not an undo; the add stays on the server and every member replays both. */
+char* urnet_message_group_unreact(uint64_t self, uint64_t ctx, const uint8_t* target, int32_t target_len, const char* emoji, char** out_error);
+/* delete a message of THIS DEVICE'S OWN. a tombstone over anybody else's is refused here and would
+ * be ignored by every honest receiver anyway. IT DOES NOT ERASE THE RECORD ON THE SERVER AND IT
+ * DOES NOT CLEAR THE TEXT: the target keeps its body and its body_len and `deleted` goes true
+ * beside them. what a deleted line looks like is your decision; this abi refuses to make it. */
+char* urnet_message_group_delete(uint64_t self, uint64_t ctx, const uint8_t* target, int32_t target_len, char** out_error);
+
 /* fetch. returns a message list handle, or 0 when nothing new arrived.
  *
  * A NON-ZERO RESULT AND A NON-NULL out_error CAN BOTH COME BACK, and code that reads an error as

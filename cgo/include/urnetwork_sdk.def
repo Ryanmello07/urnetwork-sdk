@@ -500,6 +500,7 @@ EXPORTS
 	urnet_message_durable_state_store_open
 	urnet_message_group_add_member
 	urnet_message_group_close
+	urnet_message_group_delete
 	urnet_message_group_epoch
 	urnet_message_group_id
 	urnet_message_group_is_open
@@ -507,9 +508,12 @@ EXPORTS
 	urnet_message_group_list_count
 	urnet_message_group_messages
 	urnet_message_group_open
+	urnet_message_group_react
 	urnet_message_group_receive
 	urnet_message_group_send
+	urnet_message_group_send_reply
 	urnet_message_group_stats
+	urnet_message_group_unreact
 	urnet_message_invite_encode
 	urnet_message_list_body
 	urnet_message_list_count

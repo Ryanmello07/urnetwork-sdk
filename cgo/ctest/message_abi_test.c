@@ -8,9 +8,16 @@
  *
  * WHAT IS REAL HERE AND WHAT IS THE HARNESS. The server is real: peer.Peer dispatching frames,
  * api.Handler running the §5.1 pipeline, store.MemoryStore holding rows, wired exactly as
- * sdk/cp3b's world_test.go wires it. The six urnet_message_loopback_* functions are the harness
- * and they are NOT in the shipping library -- they are behind a Go build tag and run.sh proves the
+ * sdk/cp3b's world_test.go wires it. The urnet_message_loopback_* functions are the harness and
+ * they are NOT in the shipping library -- they are behind a Go build tag and run.sh proves the
  * shipping header has none of them.
+ *
+ * THERE USED TO BE THREE MORE OF THEM AND THEY WERE THE SEND VERBS. A reply, a reaction and a
+ * tombstone had to be produced by the HARNESS, because no shipping export sealed one; this file's
+ * envelope steps could therefore prove the read projection and could not prove that a C caller can
+ * take part. Those three are gone. urnet_message_group_send_reply, _react, _unreact and _delete
+ * SHIP, and the four steps below drive those -- so what they measure now is the whole verb, from a
+ * C caller's call to the far device's row.
  *
  * WHY A HARNESS IS NEEDED AT ALL, AND IT IS NO LONGER "NO SHIPPING EXPORT PRODUCES A CLIENT".
  * urnet_message_client_new does, and the step near the end of this file builds one. What it cannot
@@ -38,13 +45,6 @@ extern int64_t urnet_live_handle_count(void);
 
 /* the harness. NOT IN THE SHIPPING LIBRARY -- see the file header. */
 extern uint64_t urnet_message_loopback_world_new(char** out_error);
-/* the SEND verbs the shipping abi does not have. urmessage.Group has SendReply, React, Unreact and
- * Delete and no shipping export calls them -- ledger item 236 is the READ projection and only that
- * -- so the steps below drive the read side through the harness. what these produce is real: a real
- * seal, a real submit to the real server, and a real receive walk on the other side. */
-extern char* urnet_message_loopback_group_send_reply(uint64_t self, uint64_t ctx, const char* reply_to_hex, const uint8_t* body, int32_t body_len, char** out_error);
-extern char* urnet_message_loopback_group_react(uint64_t self, uint64_t ctx, const char* target_hex, const char* emoji, char** out_error);
-extern char* urnet_message_loopback_group_delete(uint64_t self, uint64_t ctx, const char* target_hex, char** out_error);
 /* and the one thing that is NOT real: three entries built in Go. nothing in this tree can seal a
  * malformed body or an unknown kind from outside urmessage (msgrepo ledger item 235), so the WALK
  * that makes a gap is held by urmessage's own suite and what is held HERE is that a gap crosses the
@@ -153,6 +153,62 @@ static bool is_message_id(const char* value) {
     }
   }
   return any;
+}
+
+/* ── a message_id, from the hex it arrives as to the octets the send verbs take ──────────────
+ *
+ * THIS FUNCTION IS PART OF WHAT THE TEST PROVES AND NOT A CONVENIENCE. The four verbs that name
+ * another message take a message_id as COUNTED OCTETS, because that is exports_message.go's rule
+ * for every binary value going in -- group_id and key_package both -- and a message_id comes BACK
+ * as 64 lower-case hex characters, in urnet_message_list_info's message_id field, because metadata
+ * crosses as json. So a real caller writes exactly this loop once, and if the two ends did not
+ * agree on the encoding every assertion below would fail with ErrNoSuchMessage.
+ *
+ * ID_OCTETS IS 32 AND IS SPELLED ONCE. A caller that passed the wrong length is refused by name
+ * before anything is sealed, which is a step of its own further down. */
+#define ID_OCTETS 32
+
+static int hex_nibble(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return c - 'a' + 10;
+  }
+  if (c >= 'A' && c <= 'F') {
+    return c - 'A' + 10;
+  }
+  return -1;
+}
+
+static bool hex_to_id(const char* hex, uint8_t* out) {
+  if (hex == NULL || strlen(hex) != (size_t)(ID_OCTETS * 2)) {
+    return false;
+  }
+  for (size_t at = 0; at < (size_t)ID_OCTETS; at += 1) {
+    int high = hex_nibble(hex[at * 2]);
+    int low = hex_nibble(hex[at * 2 + 1]);
+    if (high < 0 || low < 0) {
+      return false;
+    }
+    out[at] = (uint8_t)((high << 4) | low);
+  }
+  return true;
+}
+
+/* how many records a group has SUBMITTED, off urnet_message_group_stats. It is the number a
+ * refusal step holds: a verb that refuses AFTER sealing has spent a stream index and an mls
+ * generation, and answers NULL exactly as one that refused before the seal does. -1 means the
+ * counter could not be read at all, which is a failure of the step rather than a value. */
+static int submitted_by(uint64_t group) {
+  char* stats = urnet_message_group_stats(group);
+  if (stats == NULL) {
+    return -1;
+  }
+  const char* at = strstr(stats, "\"submitted\":");
+  int submitted = (at == NULL) ? -1 : (int)strtol(at + strlen("\"submitted\":"), NULL, 10);
+  urnet_free_string(stats);
+  return submitted;
 }
 
 /* ── a temp directory per store ──────────────────────────────────────────────────────────── */
@@ -546,6 +602,12 @@ int main(void) {
         "A's send reported no message_id at all");
   CHECK(is_message_id(sent_message_id),
         "A's message_id is %s, which is not 32 non-zero octets of hex", sent_message_id);
+  /* AND THE SAME NAME AS OCTETS, WHICH IS WHAT THE FOUR VERBS THAT QUOTE IT TAKE. It is decoded
+   * ONCE, here, exactly as a real caller would -- every reply, reaction, un-reaction and tombstone
+   * below passes this buffer. */
+  uint8_t sent_id[ID_OCTETS] = { 0 };
+  REQUIRE(hex_to_id(sent_message_id, sent_id),
+          "A's message_id %s did not decode to %d octets", sent_message_id, ID_OCTETS);
   urnet_free_string(sent_info);
 
   step("B reads it back, and the octets are compared one at a time");
@@ -776,8 +838,8 @@ int main(void) {
     CHECK(urnet_release(log_first), "releasing A's log answered false");
 
     err = NULL;
-    char* replied = urnet_message_loopback_group_send_reply(group_a, ctx, sent_message_id,
-                                                           kReplyText, kReplyTextLen, &err);
+    char* replied = urnet_message_group_send_reply(group_a, ctx, sent_id, ID_OCTETS,
+                                                   kReplyText, kReplyTextLen, &err);
     if (replied == NULL) {
       show_error("send_reply", err);
       err = NULL;
@@ -825,7 +887,7 @@ int main(void) {
      * so A's receive below answers 0 -- which is the same answer as "nothing new" and is exactly
      * why a caller has to re-read the log rather than watch the receive. */
     err = NULL;
-    char* reacted = urnet_message_loopback_group_react(group_b, ctx, sent_message_id, kThumbsUp, &err);
+    char* reacted = urnet_message_group_react(group_b, ctx, sent_id, ID_OCTETS, kThumbsUp, &err);
     if (reacted == NULL) {
       show_error("react", err);
       err = NULL;
@@ -852,7 +914,7 @@ int main(void) {
 
     /* and A reacts to its own, so that the list has TWO entries and one of them is this device's */
     err = NULL;
-    char* mine = urnet_message_loopback_group_react(group_a, ctx, sent_message_id, kDirectHit, &err);
+    char* mine = urnet_message_group_react(group_a, ctx, sent_id, ID_OCTETS, kDirectHit, &err);
     if (mine == NULL) {
       show_error("A react", err);
       err = NULL;
@@ -934,10 +996,134 @@ int main(void) {
     CHECK(urnet_release(log_rb), "releasing B's log answered false");
   }
 
+  step("an UN-REACTION takes back the reactor's OWN reaction and nobody else's");
+  {
+    /* B takes back the 👍 it sealed. THE ADD IS STILL ON THE SERVER: this is a second record
+     * saying the reaction no longer stands, replayed in server order by every member, and not an
+     * undo of the first. It adds no line either, for the same reason the ADD did not. */
+    err = NULL;
+    char* taken_back = urnet_message_group_unreact(group_b, ctx, sent_id, ID_OCTETS, kThumbsUp, &err);
+    if (taken_back == NULL) {
+      show_error("unreact", err);
+      err = NULL;
+    }
+    REQUIRE(taken_back != NULL, "B could not take back its own reaction");
+    printf("      %s\n", taken_back);
+    CHECK(strstr(taken_back, "\"kind\":6") != NULL,
+          "the un-reaction RECORD is kind %s, want %d (URNET_MESSAGE_KIND_REACTION_REMOVE)",
+          taken_back, URNET_MESSAGE_KIND_REACTION_REMOVE);
+    urnet_free_string(taken_back);
+
+    /* ON B'S OWN COPY FIRST, which is the side that sealed it: one reaction left and it is A's */
+    uint64_t log_u = urnet_message_group_messages(group_b);
+    REQUIRE(log_u != 0, "B's log is empty");
+    CHECK(urnet_message_list_reaction_count(log_u, 0) == 1,
+          "B took back one of the two reactions and its own copy shows %d",
+          (int)urnet_message_list_reaction_count(log_u, 0));
+    char* left = urnet_message_list_reaction_info(log_u, 0, 0);
+    REQUIRE(left != NULL, "the surviving reaction answered no metadata");
+    char surviving[64] = { 0 };
+    CHECK(json_string_field(left, "emoji", surviving, sizeof(surviving)),
+          "the surviving reaction carries no emoji: %s", left);
+    /* THE CONTROL, AND IT IS THE WHOLE POINT OF THIS STEP: a remove written as "drop every
+     * reaction with this emoji" -- or as "drop every reaction" -- passes a one-reactor case and
+     * fails here. What survives is A's, sealed by the other member, and it is still A's. */
+    CHECK(strcmp(surviving, kDirectHit) == 0,
+          "B's un-reaction of %s left %s standing, want A's %s", kThumbsUp, surviving, kDirectHit);
+    CHECK(strstr(left, "\"mine\":false") != NULL,
+          "B reads the reaction A sealed as its own after taking back its own: %s", left);
+    urnet_free_string(left);
+    CHECK(urnet_release(log_u), "releasing B's log answered false");
+
+    /* AND ON A, WHICH HAS TO APPLY IT rather than having sealed it. the page carries one record
+     * and no line, as both reaction pages did. */
+    err = NULL;
+    uint64_t no_lines = urnet_message_group_receive(group_a, ctx, &err);
+    CHECK(no_lines == 0, "a page carrying only an un-reaction delivered %d lines to A",
+          (int)urnet_message_list_count(no_lines));
+    if (no_lines != 0) {
+      urnet_release(no_lines);
+    }
+    if (err != NULL) {
+      show_error("A receive of the un-reaction", err);
+      err = NULL;
+    }
+    uint64_t log_ua = urnet_message_group_messages(group_a);
+    REQUIRE(log_ua != 0, "A's log is empty");
+    char* row = urnet_message_list_info(log_ua, 0);
+    REQUIRE(row != NULL, "A's log has no row 0");
+    printf("      %s\n", row);
+    CHECK(strstr(row, "\"reaction_count\":1") != NULL,
+          "A applied B's un-reaction and its row still says: %s", row);
+    urnet_free_string(row);
+    char* a_left = urnet_message_list_reaction_info(log_ua, 0, 0);
+    REQUIRE(a_left != NULL, "A's surviving reaction answered no metadata");
+    memset(surviving, 0, sizeof(surviving));
+    CHECK(json_string_field(a_left, "emoji", surviving, sizeof(surviving)),
+          "A's surviving reaction carries no emoji: %s", a_left);
+    CHECK(strcmp(surviving, kDirectHit) == 0,
+          "A shows %s standing after B took back %s, want its own %s",
+          surviving, kThumbsUp, kDirectHit);
+    CHECK(strstr(a_left, "\"mine\":true") != NULL,
+          "A does not recognise the reaction it sealed itself: %s", a_left);
+    urnet_free_string(a_left);
+    CHECK(urnet_release(log_ua), "releasing A's log answered false");
+  }
+
+  step("the four verbs REFUSE before they seal, and the refusal crosses as out_error");
+  {
+    /* EVERY ONE OF THESE MUST EMIT NO RECORD. A reaction standing on an id nothing carries is a
+     * record every member holds for ever waiting for a target that will not arrive; a tombstone
+     * over another member's message is one every honest receiver ignores. The counter at the end
+     * of this block is what says nothing was sealed -- not the NULLs, which a binding that
+     * submitted and then reported an error would also return. */
+    int a_before = submitted_by(group_a);
+    int b_before = submitted_by(group_b);
+    REQUIRE(a_before >= 0 && b_before >= 0, "a group answered no submitted counter");
+
+    /* a message_id of the wrong WIDTH. this is the counted-octets contract itself: half an id is
+     * not an id, and the length is the caller's to pass. */
+    err = NULL;
+    CHECK(urnet_message_group_react(group_a, ctx, sent_id, ID_OCTETS / 2, kThumbsUp, &err) == NULL,
+          "a reaction naming half a message_id was sealed");
+    CHECK(err != NULL, "a refused reaction reported no out_error");
+    if (err != NULL) { printf("      %s\n", err); urnet_free_string(err); err = NULL; }
+
+    /* an id nothing holds */
+    uint8_t stranger[ID_OCTETS];
+    memset(stranger, 0xA7, sizeof(stranger));
+    err = NULL;
+    CHECK(urnet_message_group_react(group_a, ctx, stranger, ID_OCTETS, kThumbsUp, &err) == NULL,
+          "a reaction naming a message nothing holds was sealed");
+    CHECK(err != NULL, "a reaction on an unknown id reported no out_error");
+    if (err != NULL) { printf("      %s\n", err); urnet_free_string(err); err = NULL; }
+
+    /* an empty emoji, which is not a reaction at all */
+    err = NULL;
+    CHECK(urnet_message_group_react(group_a, ctx, sent_id, ID_OCTETS, "", &err) == NULL,
+          "a reaction with no emoji was sealed");
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+
+    /* and T-b from the send side: B may not delete a message A sealed */
+    err = NULL;
+    CHECK(urnet_message_group_delete(group_b, ctx, sent_id, ID_OCTETS, &err) == NULL,
+          "B deleted a message A sealed");
+    CHECK(err != NULL, "a refused tombstone reported no out_error");
+    if (err != NULL) { printf("      %s\n", err); urnet_free_string(err); err = NULL; }
+
+    /* AND NOTHING WAS SUBMITTED BY ANY OF THE FOUR, on either device. This is the assertion the
+     * NULL returns cannot make: a binding that sealed, submitted and then reported an error would
+     * answer NULL exactly the same way, having spent a stream index and an mls generation. */
+    CHECK(submitted_by(group_a) == a_before,
+          "A's three refusals submitted %d record(s)", submitted_by(group_a) - a_before);
+    CHECK(submitted_by(group_b) == b_before,
+          "B's refused tombstone submitted %d record(s)", submitted_by(group_b) - b_before);
+  }
+
   step("a TOMBSTONE marks the message on both sides, and the body is still there");
   {
     err = NULL;
-    char* buried = urnet_message_loopback_group_delete(group_a, ctx, sent_message_id, &err);
+    char* buried = urnet_message_group_delete(group_a, ctx, sent_id, ID_OCTETS, &err);
     if (buried == NULL) {
       show_error("delete", err);
       err = NULL;

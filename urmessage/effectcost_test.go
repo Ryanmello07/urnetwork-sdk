@@ -126,8 +126,7 @@ func TestAReactionReAddedAfterItsRemoveStandsAgain(t *testing.T) {
 		group := &Group{}
 		group.initTables()
 		line := &Content{Kind: KindText, Text: "a line reacted to, taken back, and reacted to again"}
-		held := newMessage(line, 1, sender, false, 0, lineId)
-		if !deliverOneThroughAWalk(group, held, line) {
+		if !deliverOneThroughAWalk(group, newMessage(line, 1, sender, false, 0, lineId), line) {
 			t.Fatal("a TEXT did not become a line of the conversation")
 		}
 		// record 11 ADD, record 12 REMOVE, record 13 ADD -- one reactor, one emoji.
@@ -141,7 +140,10 @@ func TestAReactionReAddedAfterItsRemoveStandsAgain(t *testing.T) {
 			group.deliverLocked(newMessage(entry, uint64(11+step), sender, false, 0, countedId(0xC8, step)), entry)
 		}
 		group.rebuildDirtyLocked()
-		return held
+		// THE GROUP'S ANSWER AND NOT THE MESSAGE THIS HELPER DELIVERED: the rebuild REPLACES the
+		// message rather than writing through it, so the delivered pointer is a snapshot from
+		// before the three records. See heldIn.
+		return heldIn(t, group, lineId)
 	}
 
 	held := replay(t, []int{0, 1, 2})
@@ -230,9 +232,19 @@ func mallocsToReplayOnOneMessage(t *testing.T, n int) uint64 {
 
 	// THE CONTROL ON THE MEASUREMENT: a window over a replay that dropped the reactions on the
 	// floor would be cheap and linear and would say nothing. All n of them stand.
-	if len(held.Reactions) != n {
+	//
+	// IT IS READ OUT OF THE GROUP AND NOT OFF `held`, WHICH IS NOT A TIDY-UP. `held` is the
+	// [Message] this helper delivered, and since ledger item 227 a rebuild REPLACES the message it
+	// rebuilt rather than writing through it -- so `held` is frozen at the instant it was
+	// delivered and carries no reactions at all. Reading it would make this control a control on
+	// nothing, and it would say so by failing.
+	standing, found := group.heldLocked(lineId)
+	if !found {
+		t.Fatalf("n=%d: the line this case reacted to is not in the group", n)
+	}
+	if len(standing.Reactions) != n {
 		t.Fatalf("n=%d: %d reactions stand on the line, so the replay this case measured did not do the work",
-			n, len(held.Reactions))
+			n, len(standing.Reactions))
 	}
 	return after - before
 }
@@ -264,7 +276,11 @@ func mallocsToReplayOverDistinctMessages(t *testing.T, n int) uint64 {
 	after := mallocsNow()
 
 	for index, target := range targets {
-		if standing := group.byMessage[messageKeyOf(target)].Reactions; len(standing) != 1 {
+		held, found := group.heldLocked(target)
+		if !found {
+			t.Fatalf("n=%d: message %d is not in the group", n, index)
+		}
+		if standing := held.Reactions; len(standing) != 1 {
 			t.Fatalf("n=%d: message %d carries %d reactions and one record named it", n, index, len(standing))
 		}
 	}

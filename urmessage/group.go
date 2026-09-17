@@ -437,7 +437,13 @@ type Group struct {
 	// opened, skipped for a reason this build names, or given up on. It is deliberately NOT the
 	// highest record id the server has handed over -- see [Group.Receive] and openPageLocked,
 	// where a record that did not open holds this back so that the next fetch asks for it again.
-	cursor  uint64
+	cursor uint64
+
+	// log is every message this group holds, in the order it learned them, AND IT IS THE ONLY
+	// PLACE A *Message IS HELD. Nothing else in this struct carries one -- [Group.logIndex] holds
+	// a POSITION in this slice and not a pointer into it -- because the repair for msgrepo ledger
+	// item 227 is that a [Message] is REPLACED rather than written through, and a second table
+	// holding pointers would be a second table to leave stale. See [Group.reapplyLocked].
 	log     []*Message
 	tracked map[trackedKey]bool
 	stats   Stats
@@ -454,10 +460,22 @@ type Group struct {
 
 	// ── the kinds that change another message ────────────────────────────────────────────
 	//
-	// byMessage is every [Message] this group holds, under its own message_id. It is what a
-	// reaction, a tombstone or a reply resolves its target through, and it is a map because the
-	// alternative is a scan of the log per effect record.
-	byMessage map[[MessageIdBytes]byte]*Message
+	// logIndex is where in [Group.log] every message this group holds sits, under its own
+	// message_id. It is what a reaction, a tombstone or a reply resolves its target through, and
+	// it is a map because the alternative is a scan of the log per effect record.
+	//
+	// IT HOLDS A POSITION AND NOT A POINTER, WHICH IS LEDGER ITEM 227's REPAIR IN ONE FIELD.
+	// It used to be `map[...]*Message`, so a [Message] lived in two places at once and
+	// [Group.reapplyLocked] kept them agreeing by writing THROUGH the pointer both of them held --
+	// which is the write that reached callers holding a [Group.Messages] copy. Now the rebuild
+	// REPLACES the message at its position, and a table of positions cannot go stale when it does:
+	// there is exactly one holder of every *Message and it is [Group.log].
+	//
+	// ONE MESSAGE_ID IS ONE POSITION, which is what makes the position safe to hold. Both this map
+	// and the log are written in [Group.deliverLocked] and nowhere else, together, and a record is
+	// delivered at most once ([Group.delivered], keyed on the server's record id, and
+	// [Group.openOwnFromCopyLocked]'s refusal of a second record id for one copy).
+	logIndex map[[MessageIdBytes]byte]int
 
 	// effects is every reaction and tombstone this group has read, under the EFFECT RECORD's
 	// OWN message_id. The key is what makes a re-delivery idempotent: one record is one effect
@@ -1122,7 +1140,7 @@ func (self *Group) sendableLocked() error {
 // tombstone and a COVER are not entries and cannot be named.
 //
 // THEY CANNOT BE NAMED BY CONSTRUCTION RATHER THAN BY A CLAUSE, which is worth knowing before
-// somebody deletes the kind check below: this group's [Group.byMessage] holds only records that
+// somebody deletes the kind check below: this group's [Group.logIndex] holds only records that
 // BECAME a [Message], and a reaction, a tombstone and a COVER become none. The clause is what makes
 // the rule survive a later kind that does become a message and still may not be reacted to.
 //
@@ -1137,7 +1155,7 @@ func (self *Group) reactableLocked(target []byte) (*Message, error) {
 		return nil, fmt.Errorf("%w: a message_id is %d octets and this one is %d",
 			ErrContentMalformed, MessageIdBytes, len(target))
 	}
-	held, found := self.byMessage[messageKeyOf(target)]
+	held, found := self.heldLocked(target)
 	if !found {
 		return nil, fmt.Errorf("%w: %x", ErrNoSuchMessage, target)
 	}
@@ -1236,11 +1254,37 @@ func (self *Group) sendContentLocked(ctx context.Context, plaintext []byte, what
 	// sends is by construction one it can read back. A send path that could produce a gap would be a
 	// device showing itself a placeholder for a message it had just written.
 	sent := newMessage(entry, recordId, record.Header.SenderHandle[:], true, sentAtMs, messageId[:])
-	self.deliverLocked(sent, entry)
+	line := self.deliverLocked(sent, entry)
 	// THIS IS A SEND AND NOT A WALK, SO THE REBUILD CANNOT WAIT FOR ONE. A reaction or a tombstone
 	// this device has just sealed is one the caller is about to read back off [Group.Messages], and
 	// there is no [Group.commitWalkLocked] between here and that read.
 	self.rebuildDirtyLocked()
+	// AND THE ANSWER IS RE-READ FOR THE SAME REASON [Group.commitWalkLocked] re-reads walk.opened:
+	// since ledger item 227 a rebuild REPLACES the message rather than writing through it, so the
+	// value built above would be frozen the moment anything standing on it were applied. A message
+	// this send added no line for -- a reaction, a tombstone, a COVER -- is not in the log at all
+	// and is returned as itself, which is what it has always been: the record's own [Message], not
+	// an entry in the conversation.
+	//
+	// THIS RE-READ DEFENDS NOTHING A TEST CAN SEE TODAY, MEASURED AND NOT ASSUMED: deleting it
+	// leaves ./urmessage and ./cp3b green, because NOTHING CAN BE HELD FOR A MESSAGE THIS DEVICE
+	// HAS ONLY JUST SEALED. An effect names its target by message_id, message_id is a function of
+	// a header this call produced seconds ago, and no member can have named an id that did not
+	// exist -- so [Group.effectsOn] for it is empty and [Group.reapplyLocked] returns without
+	// replacing anything.
+	//
+	// IT IS KEPT BECAUSE IT IS THE OTHER END OF THAT ARGUMENT AND NOT BECAUSE IT IS FREE. What
+	// makes the branch unreachable is reapplyLocked's empty-effect-set early return, which is a
+	// COST decision -- it is what keeps a delivery of a message nobody has reacted to from
+	// allocating a copy of it. Delete that early return, for a reason that will look entirely
+	// local, and every send starts returning a [Message] this same call replaced in the log: the
+	// caller's own line, correct in every field, and a different object from the one the
+	// conversation holds. This clause is what keeps that from being a silent change.
+	if line {
+		if held, found := self.heldLocked(messageId[:]); found {
+			sent = held
+		}
+	}
 	self.delivered[recordId] = true
 	return sent, nil
 }
@@ -1730,6 +1774,19 @@ func (self *Group) commitWalkLocked(walk *pageWalk) error {
 	// runs through this function, including the ones that return an error, so a walk that ended
 	// badly still leaves the targets it touched consistent with the effects it recorded.
 	self.rebuildDirtyLocked()
+	// AND THEN THE WALK'S OWN ANSWER IS RE-READ, BECAUSE THE REBUILD REPLACES RATHER THAN WRITES.
+	// walk.opened carries the [Message] values [Group.Receive] is about to hand its caller, taken
+	// as each record was delivered and therefore BEFORE the line above. Since ledger item 227 a
+	// rebuild leaves the message it rebuilt frozen and puts a new one in the log, so without this
+	// a reaction that arrived in the SAME page as its target would be applied in the group and
+	// missing from the slice Receive returns -- a caller that renders what Receive hands it,
+	// rather than re-reading [Group.Messages], would never see it. Every entry is re-read from
+	// the log, so what comes back is what this group holds at the moment the walk committed.
+	for index, one := range walk.opened {
+		if held, found := self.heldLocked(one.MessageId); found {
+			walk.opened[index] = held
+		}
+	}
 	if self.walkReconcilesLocked(walk) {
 		// THE RECONCILIATION. It runs once per restored group, on the first walk of this
 		// group's history that was COMPLETE AND CLEAN, and it is the half of the clone check
@@ -2298,6 +2355,23 @@ func messageKeyOf(messageId []byte) [MessageIdBytes]byte {
 	return key
 }
 
+// heldLocked is the [Message] this group holds under one message_id, READ OUT OF THE LOG rather
+// than out of a table of its own.
+//
+// IT IS ONE FUNCTION BECAUSE THE POSITION MUST NEVER BE DEREFERENCED TWO WAYS. [Group.logIndex]
+// answers where a message sits and [Group.log] holds it, and the whole of ledger item 227's repair
+// is that the log slot is the only holder -- so a caller that resolved a target by indexing the log
+// itself would be one more place to fix the day the pair grows a case. Every answer is the CURRENT
+// message at that position, which after a rebuild is the replacement and not the message the
+// rebuild froze.
+func (self *Group) heldLocked(messageId []byte) (*Message, bool) {
+	at, found := self.logIndex[messageKeyOf(messageId)]
+	if !found {
+		return nil, false
+	}
+	return self.log[at], true
+}
+
 // newMessage builds one [Message] from one parsed envelope. It is the only constructor, so the walk,
 // the own-copy path and [Group.Send] cannot fill a [Message] three different ways.
 //
@@ -2379,9 +2453,9 @@ func (self *Group) deliverLocked(received *Message, entry *Content) bool {
 			return false
 		}
 	}
-	self.log = append(self.log, received)
 	key := messageKeyOf(received.MessageId)
-	self.byMessage[key] = received
+	self.logIndex[key] = len(self.log)
+	self.log = append(self.log, received)
 	// AND THE EFFECTS THAT WERE WAITING FOR IT. A reaction or a tombstone that arrived before its
 	// target has been held since, and this is the moment it applies.
 	self.reapplyLocked(key)
@@ -2501,15 +2575,61 @@ func (self *Group) rebuildDirtyLocked() {
 //
 // A TARGET THAT IS NOT HERE IS NOT AN ERROR AND NOT A DROP. The effects stay held; this is what
 // runs again when [Group.deliverLocked] indexes the target.
+//
+// ── IT REPLACES THE MESSAGE AND NEVER WRITES THROUGH ONE (msgrepo ledger item 227) ───────────
+//
+// THE REBUILD USED TO WRITE `held.Deleted = false` AND `held.Reactions = nil` INTO THE MESSAGE
+// ALREADY IN THE LOG, and [Group.Messages] hands that same *Message to every caller: it copies the
+// SLICE under this group's mutex and shares the VALUES. So a caller rendering the conversation it
+// had already been given shared those two fields with a rebuild running under a lock it has no way
+// to take, and the promise in Messages's own doc comment -- "are not written after they are
+// appended" -- was false. MEASURED, not inferred: a probe rendering Group.Messages on one goroutine
+// while another called Group.Receive reported TWO data races under -race, both of them these two
+// writes, reached through Receive -> commitWalkLocked -> rebuildDirtyLocked.
+//
+// SO THE REBUILD BUILDS A NEW [Message] AND PUTS IT AT THE OLD ONE'S POSITION. Every pointer this
+// package has ever handed out is frozen at the instant it was handed out, for ever, WITHOUT a lock
+// held across anybody's rendering -- which is the only shape that works for a UI, since a UI paints
+// on its own schedule and cannot hold this group's mutex while it does.
+//
+// WHAT IT COSTS: one [Message] per REBUILT message per walk. Not per effect -- [Group.dirtyTargets]
+// made the rebuild once-per-target-per-walk -- and not per message, since a target with no effect
+// records at all returns below without copying anything, which is every message in a conversation
+// nobody has reacted to.
+//
+// THE SHALLOW COPY IS SOUND AND THAT IS A CLAIM ABOUT [Message], NOT A HOPE. Of its fields only
+// Deleted and Reactions are ever written after construction (this function and
+// [contentEffect.applyTo] are the only writers of either); SenderHandle, MessageId and ReplyToId
+// are []byte built by [newMessage] with append-onto-nil and never written again, so the copy and
+// the frozen original share arrays that nothing mutates. Reactions is set to nil on the copy before
+// a single effect is applied, so the two never share a reaction array either.
+//
+// WHERE THE REPLACEMENT HAS TO BE PICKED UP: [Group.commitWalkLocked], which re-reads the messages
+// a walk is about to hand back, and [Group.sendContentLocked], which re-reads the one it just sent.
+// A caller of either would otherwise be given the frozen copy of a message this same call had
+// rebuilt.
 func (self *Group) reapplyLocked(target [MessageIdBytes]byte) {
-	held, found := self.byMessage[target]
+	at, found := self.logIndex[target]
 	if !found {
 		return
 	}
-	effects := append([]*contentEffect(nil), self.effectsOn[target]...)
+	// A TARGET NOTHING HAS EVER NAMED IS NOT REBUILT AND IS NOT COPIED. effectsOn only ever
+	// GROWS -- a cancelled reaction is a REMOVE record beside its ADD and not a deletion from
+	// this table -- so an empty effect set means no effect has ever touched this message, its
+	// Deleted is false and its Reactions are nil, and the rebuild below would replace it with an
+	// identical copy. That is every message in a conversation nobody has reacted to, and
+	// [Group.deliverLocked] rebuilds each of them once as it arrives.
+	effectsOn := self.effectsOn[target]
+	if len(effectsOn) == 0 {
+		return
+	}
+	held := self.log[at]
+	effects := append([]*contentEffect(nil), effectsOn...)
 	slices.SortStableFunc(effects, effectOrder)
-	held.Deleted = false
-	held.Reactions = nil
+	rebuilt := *held
+	rebuilt.Deleted = false
+	rebuilt.Reactions = nil
+	held = &rebuilt
 	// THE DEDUPE SET IS THE REBUILD'S AND IS BUILT BESIDE THE SLICE IT MIRRORS. The ADD arm used to
 	// answer "has this reactor already reacted with this emoji" by SCANNING [Message.Reactions],
 	// which is a scan of everything the rebuild had appended so far: m reactions cost m^2 comparisons
@@ -2529,6 +2649,11 @@ func (self *Group) reapplyLocked(target [MessageIdBytes]byte) {
 	for _, effect := range effects {
 		effect.applyTo(held, seen)
 	}
+	// AND IT IS PUBLISHED LAST, WHICH IS THE ONE LINE THAT MAKES THE COPY WORTH ANYTHING. Until
+	// here the rebuilt message is reachable from this frame alone; after it, it is the message
+	// [Group.log] holds and [Group.heldLocked] answers, and the one it replaced is frozen in
+	// whatever [Group.Messages] copy already carries it.
+	self.log[at] = held
 }
 
 // reactionKey is the (reactor, emoji) pair [Group.reapplyLocked]'s dedupe set is keyed on, and it is
@@ -2730,7 +2855,7 @@ func (self *Group) initTables() {
 	self.ownIndices = map[uint64]*ownSealed{}
 	self.withoutCopy = map[uint64]bool{}
 	self.ownHeads = map[trackedKey]uint64{}
-	self.byMessage = map[[MessageIdBytes]byte]*Message{}
+	self.logIndex = map[[MessageIdBytes]byte]int{}
 	self.effects = map[[MessageIdBytes]byte]*contentEffect{}
 	self.effectsOn = map[[MessageIdBytes]byte][]*contentEffect{}
 	self.dirtyTargets = map[[MessageIdBytes]byte]struct{}{}
@@ -2837,8 +2962,23 @@ func (self *Group) IsOpen() bool {
 	return self.opened
 }
 
-// Messages is every message this group has sent or received, in the order it learned them. A copy
-// of the slice; the messages themselves are shared and are not written after they are appended.
+// Messages is every message this group has sent or received, in the order it learned them.
+//
+// IT IS A SNAPSHOT AND THE WORD IS LOAD-BEARING (msgrepo ledger item 227). The slice is a copy, and
+// so is every [Message] in it in the only sense that matters to a caller: NOTHING IN THIS PACKAGE
+// EVER WRITES A [Message] AFTER HANDING IT OUT. A reaction or a tombstone arriving on a later
+// [Group.Receive] builds a REPLACEMENT message and puts it in this group's log; what this call
+// answered keeps saying what the conversation said at the instant it was asked.
+//
+// WHY THAT IS THE CONTRACT AND NOT "hold the lock while you render". This slice is what a UI
+// paints, on its own thread and on its own schedule, while another thread polls [Group.Receive] --
+// and a renderer cannot hold this group's mutex across a paint. Before the repair those two shared
+// [Message.Deleted] and [Message.Reactions], which is a data race the detector reports and which
+// every Go caller that rendered while it polled had.
+//
+// SO A CALLER THAT WANTS THE LATEST STATE ASKS AGAIN, which is what a render loop does anyway.
+// Holding one of these messages and expecting a reaction to appear IN it is the one reading this
+// method does not support.
 func (self *Group) Messages() []*Message {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()

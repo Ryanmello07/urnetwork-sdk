@@ -52,11 +52,13 @@ import (
 // cannot tell a GAP from a message with no text is rendering a conversation it has been told
 // nothing about (msgrepo ledger item 236).
 //
-// THE SEND SIDE OF THEM DOES NOT, AND THAT IS NAMED RATHER THAN LEFT TO BE DISCOVERED.
-// urmessage.Group has SendReply, React, Unreact and Delete and NO export here calls them: a C
-// caller can render a reply, a reaction and a tombstone and cannot make one. That asymmetry is
-// deliberate for this pass -- ledger item 236 is the projection and only the projection -- and it
-// is the next thing this file owes.
+// AND THE SEND SIDE OF FOUR OF THEM NOW CROSSES TOO, WHICH IS WHAT THIS PARAGRAPH USED TO SAY WAS
+// OWED. It read "urmessage.Group has SendReply, React, Unreact and Delete and NO export here calls
+// them: a C caller can render a reply, a reaction and a tombstone and cannot make one." That is no
+// longer true: urnet_message_group_send_reply, _react, _unreact and _delete are shipping exports in
+// the group section below, and a C caller PARTICIPATES in a conversation rather than only watching
+// one. What is still read-only is the pair urmessage itself does not carry -- an EDIT and a receipt
+// -- and those are absent here because they are absent there.
 //
 // A body is still opaque octets, in and out: nothing here reads one, and the kind says under which
 // grammar it was read rather than what it contains. There is still no receipt, no edit and no
@@ -744,6 +746,171 @@ func urnet_message_group_send(self C.uint64_t, ctx C.uint64_t, body *C.uint8_t, 
 		return nil
 	}
 	return cJson(messageInfoOf(messageEntryOf(sent)), "urnet_message_group_send")
+}
+
+// ── the four verbs that name another message ────────────────────────────────────────────────
+//
+// A REPLY, A REACTION, AN UN-REACTION AND A TOMBSTONE. Until these landed urmessage had SendReply,
+// React, Unreact and Delete and NO export called them, so a C caller could RENDER a reply, a
+// reaction and a deletion -- kind, reply_to_id, deleted and the reaction list all cross in
+// messageInfo -- and could not MAKE one. That is the asymmetry the header used to name as the next
+// thing this file owed, and these four are it.
+//
+// A TARGET CROSSES AS COUNTED OCTETS, WHICH IS THIS FILE'S RULE FOR EVERY BINARY VALUE GOING IN and
+// is what group_id and key_package already do. A message_id is 32 octets of derivation output
+// rather than text, and the length is the caller's to pass rather than this side's to assume:
+// urmessage answers ErrContentMalformed by name for any other width, which is a sentence a caller
+// can act on.
+//
+// WHERE A CALLER GETS ONE, stated because the two directions are NOT symmetric and a reader will go
+// looking. A message_id comes BACK as 64 lower case hex characters, in the message_id field of
+// urnet_message_list_info's json -- metadata crosses as json, and a buffer-out call for 32 octets a
+// renderer reads once per row would be a second call per message. So a caller decodes that hex once
+// into the 32 octets it passes here. urnetwork_message.h says so beside the declarations.
+//
+// THEY ALL BLOCK AND ALL TAKE A CANCEL HANDLE, exactly as urnet_message_group_send does and for the
+// same reason: each one seals a record and waits on its submit.
+//
+// WHAT EACH ANSWERS IS THE RECORD'S OWN METADATA -- the same messageInfo json
+// urnet_message_group_send answers -- or NULL with out_error set. FOR THE THREE THAT ARE NOT A
+// REPLY, THAT VALUE IS NOT A LINE OF THE CONVERSATION: a reaction and a tombstone CHANGE another
+// message and add no entry of their own, so what comes back is there to give a caller the record_id
+// and the message_id of what it just sent -- the two things a later un-reaction and any log would
+// need -- and NOT to be appended to a view. The change itself shows up on the TARGET, through
+// urnet_message_group_messages.
+
+// urnet_message_group_send_reply seals one line of text that NAMES the message it answers, and
+// BLOCKS on its submit.
+//
+// THE QUOTED TEXT NEVER TRAVELS. A reply carries its parent's message_id and renders by looking the
+// parent up, which is what keeps a reply from being a second copy of a line the group already paid
+// for -- and the parent may legitimately be unavailable: deleted, pruned, or not yet fetched by the
+// device showing the reply. So the parent is NOT required to be present here, which is the one
+// place this differs from react and delete below: a reply is a message in its own right.
+//
+// The body is counted octets and crosses byte for byte, exactly as urnet_message_group_send's does.
+// A reply's ceiling is lower than a plain message's by the 32 octets of the name, which come out of
+// the same plaintext budget as the text.
+//
+//export urnet_message_group_send_reply
+func urnet_message_group_send_reply(self C.uint64_t, ctx C.uint64_t, replyTo *C.uint8_t, replyToLen C.int32_t, body *C.uint8_t, bodyLen C.int32_t, outError **C.char) *C.char {
+	defer cgoGuard("urnet_message_group_send_reply")
+	self_, ok := resolveHandle[*urmessage.Group](uint64(self), "urnet_message_group_send_reply")
+	if !ok || self_ == nil {
+		return nil
+	}
+	ctx_, ok := messageCtx(ctx, "urnet_message_group_send_reply")
+	if !ok {
+		return nil
+	}
+	sent, err := self_.SendReply(ctx_, goBytes(replyTo, replyToLen), string(goBytes(body, bodyLen)))
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	return cJson(messageInfoOf(messageEntryOf(sent)), "urnet_message_group_send_reply")
+}
+
+// urnet_message_group_react seals one REACTION_ADD naming a message this group holds, and BLOCKS on
+// its submit.
+//
+// THE EMOJI IS A char* AND THAT IS NOT THE BODY RULE BEING BROKEN. The body rule exists because a
+// body is octets from another device that may carry 0x00 and may not be UTF-8. An emoji is neither:
+// urmessage validates it as valid UTF-8 of 1..MaxEmojiOctets octets BEFORE anything is sealed, and
+// a NUL inside one makes it invalid UTF-8 -- so a char* cannot truncate one without the refusal
+// firing first, which is the failure the body rule exists to prevent. What is NOT validated is
+// "exactly one extended grapheme cluster from the pinned Unicode version", which needs a UAX-29
+// dependency nobody has decided to take: a caller that passes two characters sends two characters
+// to every member.
+//
+// A TARGET THIS DEVICE DOES NOT HOLD IS A REFUSAL AND NO RECORD IS SEALED. It is not a courtesy
+// check: a reaction standing on an id nothing carries is a record every member holds for ever,
+// waiting for a target that will not arrive. The same refusal covers a target that is a GAP -- a
+// record this build could not show -- and one that is a reaction, a tombstone or a cover rather
+// than a stored content message.
+//
+//export urnet_message_group_react
+func urnet_message_group_react(self C.uint64_t, ctx C.uint64_t, target *C.uint8_t, targetLen C.int32_t, emoji *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_message_group_react")
+	self_, ok := resolveHandle[*urmessage.Group](uint64(self), "urnet_message_group_react")
+	if !ok || self_ == nil {
+		return nil
+	}
+	ctx_, ok := messageCtx(ctx, "urnet_message_group_react")
+	if !ok {
+		return nil
+	}
+	sent, err := self_.React(ctx_, goBytes(target, targetLen), goString(emoji))
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	return cJson(messageInfoOf(messageEntryOf(sent)), "urnet_message_group_react")
+}
+
+// urnet_message_group_unreact seals one REACTION_REMOVE, and BLOCKS on its submit.
+//
+// IT CANCELS AN ADD WITH THE SAME (reactor, target, emoji) AND NOBODY ELSE'S. The reactor is the
+// sender_handle, so until an identity system exists A SECOND DEVICE OF ONE PERSON CANNOT TAKE BACK
+// THE FIRST'S REACTION: it seals under its own handle and the removal finds nothing of its own to
+// cancel. That is a property of the alpha and not of this binding.
+//
+// IT IS A RECORD AND NOT AN UNDO. The ADD stays on the server; what this seals is a SECOND record
+// saying the reaction no longer stands, and every member replays both in server order. So an
+// un-reaction of a reaction that has not been fetched yet still lands correctly on every device.
+//
+//export urnet_message_group_unreact
+func urnet_message_group_unreact(self C.uint64_t, ctx C.uint64_t, target *C.uint8_t, targetLen C.int32_t, emoji *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_message_group_unreact")
+	self_, ok := resolveHandle[*urmessage.Group](uint64(self), "urnet_message_group_unreact")
+	if !ok || self_ == nil {
+		return nil
+	}
+	ctx_, ok := messageCtx(ctx, "urnet_message_group_unreact")
+	if !ok {
+		return nil
+	}
+	sent, err := self_.Unreact(ctx_, goBytes(target, targetLen), goString(emoji))
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	return cJson(messageInfoOf(messageEntryOf(sent)), "urnet_message_group_unreact")
+}
+
+// urnet_message_group_delete seals one TOMBSTONE naming a message of THIS DEVICE'S OWN, and BLOCKS
+// on its submit.
+//
+// ONLY THIS DEVICE'S OWN, AND IT IS ENFORCED ON BOTH SIDES. A tombstone applies only if its
+// sender_handle equals its target's: nothing in a record proves its sender wrote the message it
+// NAMES, so a tombstone over somebody else's message is one every honest receiver ignores, and the
+// honest thing is not to seal one. A call naming another member's message is refused here and emits
+// no record.
+//
+// WHAT IT DOES NOT DO, because a caller will assume otherwise. It does not erase the record on the
+// server -- there is no client-initiated server-side erase in v1. It does not clear the text: the
+// target keeps its body and its body_len and `deleted` goes true beside them, because urmessage
+// refuses to be the layer that throws away a user's data on a peer's say-so and the record is on
+// the server either way. What a UI shows for a deleted line is the UI's decision and this abi does
+// not make it.
+//
+//export urnet_message_group_delete
+func urnet_message_group_delete(self C.uint64_t, ctx C.uint64_t, target *C.uint8_t, targetLen C.int32_t, outError **C.char) *C.char {
+	defer cgoGuard("urnet_message_group_delete")
+	self_, ok := resolveHandle[*urmessage.Group](uint64(self), "urnet_message_group_delete")
+	if !ok || self_ == nil {
+		return nil
+	}
+	ctx_, ok := messageCtx(ctx, "urnet_message_group_delete")
+	if !ok {
+		return nil
+	}
+	sent, err := self_.Delete(ctx_, goBytes(target, targetLen))
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	return cJson(messageInfoOf(messageEntryOf(sent)), "urnet_message_group_delete")
 }
 
 // urnet_message_group_receive fetches §4.3.4's pages and BLOCKS while it does.

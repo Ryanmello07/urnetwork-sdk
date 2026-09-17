@@ -168,10 +168,16 @@ func (self *kindWalk) deliver(page ...*sealed) ([]*Message, error) {
 	return walk.opened, self.bob.commitWalkLocked(walk)
 }
 
-// held answers the [Message] bob's group holds under one message_id.
+// held answers the [Message] bob's group holds under one message_id, RIGHT NOW.
+//
+// IT IS CALLED AFTER EVERY DELIVERY AND NEVER HELD ACROSS ONE, which is a requirement of the cases
+// below rather than a style: since ledger item 227 a rebuild REPLACES the message it rebuilt, so a
+// pointer taken before an effect arrives is a snapshot from before it -- which is the property
+// TestAMessageAlreadyHandedToACallerIsNeverWrittenAgain exists to hold.
 func (self *kindWalk) held(messageId []byte) *Message {
 	self.t.Helper()
-	return self.bob.byMessage[messageKeyOf(messageId)]
+	held, _ := self.bob.heldLocked(messageId)
+	return held
 }
 
 // A KIND THIS BUILD DOES NOT KNOW KEEPS ITS POSITION AND IS NOT A FAILURE.
@@ -705,8 +711,7 @@ func TestAReDeliveredEffectIsStillOneEffect(t *testing.T) {
 	lineId := aTarget(0xE1)
 	effectId := aTarget(0xE2)
 	text := &Content{Kind: KindText, Text: "a line"}
-	target := newMessage(text, 10, sender, false, 0, lineId)
-	deliverOneThroughAWalk(group, target, text)
+	deliverOneThroughAWalk(group, newMessage(text, 10, sender, false, 0, lineId), text)
 
 	reaction := &Content{Kind: KindReactionAdd, Target: lineId, Emoji: "👍"}
 	deliverOneThroughAWalk(group, newMessage(reaction, 11, sender, false, 0, effectId), reaction)
@@ -714,8 +719,8 @@ func TestAReDeliveredEffectIsStillOneEffect(t *testing.T) {
 	if count := len(group.effectsOn[messageKeyOf(lineId)]); count != 1 {
 		t.Errorf("one effect record delivered twice is held %d times", count)
 	}
-	if len(target.Reactions) != 1 {
-		t.Errorf("one effect record delivered twice left %d reactions: %v", len(target.Reactions), target.Reactions)
+	if standing := heldIn(t, group, lineId).Reactions; len(standing) != 1 {
+		t.Errorf("one effect record delivered twice left %d reactions: %v", len(standing), standing)
 	}
 }
 
@@ -743,6 +748,24 @@ func deliverOneThroughAWalk(group *Group, received *Message, entry *Content) boo
 	return line
 }
 
+// heldIn is the [Message] a group holds under one message_id AT THE MOMENT IT IS ASKED, and every
+// case below that asserts on an effect asks through it rather than keeping the pointer it delivered.
+//
+// THAT IS A REQUIREMENT OF THE CODE AND NOT A PREFERENCE (msgrepo ledger item 227). A rebuild
+// REPLACES the message it rebuilt -- so that every [Message] this package has handed a caller stays
+// frozen and [Group.Messages] can be read without this group's lock -- and a case holding the
+// pointer it passed to deliverOneThroughAWalk is holding the message as it was BEFORE the effect.
+// Six cases here did exactly that and went red on the repair, which is the repair working: they were
+// each reading a value a real caller would also have been reading.
+func heldIn(t *testing.T, group *Group, messageId []byte) *Message {
+	t.Helper()
+	held, found := group.heldLocked(messageId)
+	if !found {
+		t.Fatalf("this group holds no message under %x", messageId)
+	}
+	return held
+}
+
 // A TOMBSTONE FROM ANYBODY BUT THE TARGET'S OWN SENDER IS IGNORED (T-b), AND IT IS IGNORED RATHER
 // THAN REFUSED.
 //
@@ -768,14 +791,20 @@ func TestATombstoneFromAnotherSenderIsIgnored(t *testing.T) {
 
 	stranger := &Content{Kind: KindTombstone, Target: lineId}
 	deliverOneThroughAWalk(group, newMessage(stranger, 11, theirs, false, 0, aTarget(0xA2)), stranger)
-	if line.Deleted {
+	if heldIn(t, group, lineId).Deleted {
 		t.Errorf("a tombstone sealed by %x deleted a message sealed by %x", theirs, mine)
 	}
 
 	owner := &Content{Kind: KindTombstone, Target: lineId}
 	deliverOneThroughAWalk(group, newMessage(owner, 12, mine, false, 0, aTarget(0xA3)), owner)
-	if !line.Deleted {
+	if !heldIn(t, group, lineId).Deleted {
 		t.Error("a tombstone sealed by the line's own sender did not delete it")
+	}
+	// AND THE MESSAGE THE WALK WAS GIVEN IS UNTOUCHED, which is the other half of the same rule:
+	// `line` is the [Message] this case delivered, and a tombstone that reached back into it
+	// would be reaching into every [Group.Messages] copy that already carries it.
+	if line.Deleted {
+		t.Error("the tombstone was written INTO the message this case had already been handed")
 	}
 }
 
@@ -793,42 +822,44 @@ func TestAReactionIsPerReactorAndARemoveTakesBackOnlyItsOwn(t *testing.T) {
 	lineId := aTarget(0xB1)
 
 	line := &Content{Kind: KindText, Text: "a line"}
-	held := newMessage(line, 10, alice, false, 0, lineId)
-	deliverOneThroughAWalk(group, held, line)
+	deliverOneThroughAWalk(group, newMessage(line, 10, alice, false, 0, lineId), line)
 
 	react := func(kind ContentKind, who []byte, emoji string, recordId uint64, id byte) {
 		entry := &Content{Kind: kind, Target: lineId, Emoji: emoji}
 		deliverOneThroughAWalk(group, newMessage(entry, recordId, who, false, 0, aTarget(id)), entry)
 	}
+	// STANDING IS ASKED FOR EACH TIME AND NEVER CACHED: see heldIn.
+	standing := func() []Reaction { return heldIn(t, group, lineId).Reactions }
+
 	react(KindReactionAdd, alice, "👍", 11, 0xB2)
 	react(KindReactionAdd, bob, "👍", 12, 0xB3)
 	react(KindReactionAdd, bob, "🎯", 13, 0xB4)
-	if len(held.Reactions) != 3 {
-		t.Fatalf("three reactions from two members left %d: %v", len(held.Reactions), held.Reactions)
+	if len(standing()) != 3 {
+		t.Fatalf("three reactions from two members left %d: %v", len(standing()), standing())
 	}
 	// the same member's same emoji twice is one reaction
 	react(KindReactionAdd, bob, "👍", 14, 0xB5)
-	if len(held.Reactions) != 3 {
-		t.Errorf("one member's same emoji twice left %d reactions: %v", len(held.Reactions), held.Reactions)
+	if len(standing()) != 3 {
+		t.Errorf("one member's same emoji twice left %d reactions: %v", len(standing()), standing())
 	}
 
 	react(KindReactionRemove, bob, "👍", 15, 0xB6)
-	if len(held.Reactions) != 2 {
-		t.Fatalf("a REMOVE left %d reactions: %v", len(held.Reactions), held.Reactions)
+	if len(standing()) != 2 {
+		t.Fatalf("a REMOVE left %d reactions: %v", len(standing()), standing())
 	}
-	for _, standing := range held.Reactions {
-		if standing.Emoji == "👍" && bytes.Equal(standing.SenderHandle, bob) {
+	for _, one := range standing() {
+		if one.Emoji == "👍" && bytes.Equal(one.SenderHandle, bob) {
 			t.Error("bob's 👍 survived bob's own REMOVE")
 		}
 	}
 	kept := 0
-	for _, standing := range held.Reactions {
-		if standing.Emoji == "👍" && bytes.Equal(standing.SenderHandle, alice) {
+	for _, one := range standing() {
+		if one.Emoji == "👍" && bytes.Equal(one.SenderHandle, alice) {
 			kept += 1
 		}
 	}
 	if kept != 1 {
-		t.Errorf("bob's REMOVE took back alice's 👍 as well: %v", held.Reactions)
+		t.Errorf("bob's REMOVE took back alice's 👍 as well: %v", standing())
 	}
 }
 
@@ -851,13 +882,11 @@ func TestAKindThisBuildCannotReadIsNotReactableAndIsNotDeletable(t *testing.T) {
 	lineId := aTarget(0xC2)
 
 	placeholder := &Content{Kind: KindEdit}
-	held := newMessage(placeholder, 10, sender, true, 0, placeholderId)
-	if !deliverOneThroughAWalk(group, held, placeholder) {
+	if !deliverOneThroughAWalk(group, newMessage(placeholder, 10, sender, true, 0, placeholderId), placeholder) {
 		t.Fatal("a placeholder is an entry of the conversation and this build dropped it")
 	}
 	line := &Content{Kind: KindText, Text: "a line"}
-	heldLine := newMessage(line, 11, sender, true, 0, lineId)
-	deliverOneThroughAWalk(group, heldLine, line)
+	deliverOneThroughAWalk(group, newMessage(line, 11, sender, true, 0, lineId), line)
 
 	// the send side
 	if _, err := group.reactableLocked(placeholderId); !errors.Is(err, ErrNoSuchMessage) {
@@ -870,14 +899,14 @@ func TestAKindThisBuildCannotReadIsNotReactableAndIsNotDeletable(t *testing.T) {
 	// and the receipt side: a tombstone from the placeholder's OWN sender, which passes T-b
 	tombstone := &Content{Kind: KindTombstone, Target: placeholderId}
 	deliverOneThroughAWalk(group, newMessage(tombstone, 12, sender, true, 0, aTarget(0xC3)), tombstone)
-	if held.Deleted {
+	if heldIn(t, group, placeholderId).Deleted {
 		t.Error("a tombstone deleted a record whose kind this build cannot read")
 	}
 	// the control, which is what says the clause above is about the KIND and not about the
 	// tombstone being ignored altogether
 	onTheLine := &Content{Kind: KindTombstone, Target: lineId}
 	deliverOneThroughAWalk(group, newMessage(onTheLine, 13, sender, true, 0, aTarget(0xC4)), onTheLine)
-	if !heldLine.Deleted {
+	if !heldIn(t, group, lineId).Deleted {
 		t.Error("the control: a tombstone on this sender's own TEXT did not delete it")
 	}
 }
@@ -894,28 +923,26 @@ func TestAnEffectWithNoRecordIdYetSortsAfterEveryNumberedOne(t *testing.T) {
 	sender := bytes.Repeat([]byte{0x01}, 16)
 	lineId := aTarget(0xD1)
 	line := &Content{Kind: KindText, Text: "a line"}
-	held := newMessage(line, 10, sender, true, 0, lineId)
-	deliverOneThroughAWalk(group, held, line)
+	deliverOneThroughAWalk(group, newMessage(line, 10, sender, true, 0, lineId), line)
 
 	remove := &Content{Kind: KindReactionRemove, Target: lineId, Emoji: "👍"}
 	deliverOneThroughAWalk(group, newMessage(remove, 15, sender, true, 0, aTarget(0xD2)), remove)
 	add := &Content{Kind: KindReactionAdd, Target: lineId, Emoji: "👍"}
 	deliverOneThroughAWalk(group, newMessage(add, 0, sender, true, 0, aTarget(0xD3)), add)
 
-	if len(held.Reactions) != 1 {
+	if standing := heldIn(t, group, lineId).Reactions; len(standing) != 1 {
 		t.Errorf("a reaction this device has just sealed was cancelled by a REMOVE the server numbered before it: %v",
-			held.Reactions)
+			standing)
 	}
 	// and the control: the same two with the ADD numbered BELOW the remove leave nothing standing
 	second := &Group{}
 	second.initTables()
-	secondHeld := newMessage(line, 10, sender, true, 0, lineId)
-	deliverOneThroughAWalk(second, secondHeld, line)
+	deliverOneThroughAWalk(second, newMessage(line, 10, sender, true, 0, lineId), line)
 	numbered := &Content{Kind: KindReactionAdd, Target: lineId, Emoji: "👍"}
 	deliverOneThroughAWalk(second, newMessage(numbered, 14, sender, true, 0, aTarget(0xD3)), numbered)
 	deliverOneThroughAWalk(second, newMessage(remove, 15, sender, true, 0, aTarget(0xD2)), remove)
-	if len(secondHeld.Reactions) != 0 {
-		t.Errorf("the control: an ADD at record 14 and a REMOVE at 15 left %v standing", secondHeld.Reactions)
+	if standing := heldIn(t, second, lineId).Reactions; len(standing) != 0 {
+		t.Errorf("the control: an ADD at record 14 and a REMOVE at 15 left %v standing", standing)
 	}
 }
 
