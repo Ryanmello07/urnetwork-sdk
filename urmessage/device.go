@@ -201,16 +201,20 @@ type Device struct {
 	engine    messagegroup.GroupEngine
 	leafKeys  []byte
 
-	// The store the engine was built over, HELD BESIDE the engine because a restore needs it
-	// directly: [mls.LoadGroup] takes a *mls.GroupConfig and messagegroup.GroupEngine has no
-	// method that opens a persisted group. That is J1-8; see [restoredHandle].
+	// The store the engine was built over, HELD BESIDE the engine for [DeviceStore]: every
+	// durable-only path in this package -- [Device.Restore], [Device.persistGroup],
+	// [Device.persistSent] -- asks this value whether it is a [DeviceStore] and does nothing when
+	// it is not. The query, so the claim is checkable: `grep -n "self.stateStore" urmessage/*.go`
+	// answers those three type assertions and nothing else.
+	//
+	// IT USED TO BE HELD FOR A SECOND REASON AND THAT REASON IS GONE. Until LoadGroup landed,
+	// `restoreOne` called `mls.LoadGroup` DIRECTLY -- because `messagegroup.GroupEngine` had four
+	// methods and none of them opened a persisted group -- so this field was also the *mls.Store
+	// half of a GroupConfig this package assembled itself, and a `signer mls.SignaturePrivateKey`
+	// field stood beside it to be the other argument that call took. J1-8 is CLOSED: the engine
+	// opens the group, the signer it signs with is the engine's own copy, and the field that
+	// existed only to feed that call has been deleted rather than left as state nothing reads.
 	stateStore mls.StateStore
-
-	// This device's MLS signature private key. mls clones it into every group it founds or
-	// joins, and this copy exists for one reason: [mls.LoadGroup] takes the signer as an
-	// argument and NOT out of the persisted blob -- deliberately, because a signature key is
-	// the device across every group and an epoch state is one group at one epoch.
-	signer mls.SignaturePrivateKey
 
 	// The credential identity this device founds and joins under: its signer's public half. See
 	// [NewDevice] for why it is that value and not another.
@@ -298,7 +302,6 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 		engine:      engine,
 		leafKeys:    leafKeys,
 		stateStore:  stateStore,
-		signer:      append(mls.SignaturePrivateKey(nil), signer...),
 		identityPub: append([]byte(nil), signerPub...),
 		nowMs:       nowMs,
 		random:      random,

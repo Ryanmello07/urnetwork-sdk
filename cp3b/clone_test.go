@@ -281,8 +281,11 @@ func TestAnOrdinaryRestartReconcilesAndIsNotMistakenForACopy(t *testing.T) {
 // sides.
 //
 // WHAT WOULD CLOSE IT PROPERLY: a copy that came back under a DIFFERENT LEAF, which is an MLS
-// Update commit. A restored group cannot ingest a commit (J1-8, [urmessage.ErrRestoredHandle]) and
-// the alpha has exactly one epoch ([urmessage.ErrAlphaOneAdd]). **S2-28.**
+// Update commit. J1-8 is CLOSED -- `messagegroup.GroupEngine.LoadGroup` landed and a restored group
+// now ingests a commit through the same handle a live one does -- so the blocker this comment used
+// to name is gone. What is NOT closed is everything above the handle: the alpha still has exactly
+// one epoch ([urmessage.ErrAlphaOneAdd]), nothing drives a second, and the ladders do not survive
+// an epoch change (ledger item 239). **S2-28.**
 func TestTwoCopiesThatAreExactlyLevelCollideOnceAndTheLoserFindsOut(t *testing.T) {
 	world := newWorld(t)
 	ctx := context.Background()

@@ -310,9 +310,15 @@ func crossProcessSeal(t *testing.T, root string) {
 func crossProcessRestore(t *testing.T, root string) {
 	facts := readCrossProcessFacts(t, root)
 
-	// THE FOUR CALLS BELOW ARE Device.restoreOne'S BODY, in its order, and that is deliberate:
+	// THE THREE CALLS BELOW ARE Device.restoreOne'S BODY, in its order, and that is deliberate:
 	// a case that rebuilt the group some other way would be measuring its own arithmetic rather
 	// than the restore path this package ships.
+	//
+	// IT WAS FOUR UNTIL J1-8 CLOSED, and the pair that collapsed is the finding rather than a
+	// tidy-up. restoreOne used to call `mls.LoadGroup` itself and wrap the result in a handle this
+	// package declared, so this case did the same two things. `messagegroup.GroupEngine` grew
+	// LoadGroup, both went away in the same commit, and this case now drives the engine door --
+	// which is what keeps its own header sentence true rather than one commit stale.
 	bob := openCrossProcessDevice(t, filepath.Join(root, "bob"))
 	defer bob.close()
 
@@ -328,15 +334,10 @@ func crossProcessRestore(t *testing.T, root string) {
 		t.Fatalf("PHASE B: the disk holds group %x and the dead process founded %s",
 			record.GroupId, facts.GroupId)
 	}
-	group, err := mls.LoadGroup(&mls.GroupConfig{
-		Crypto:  bob.crypto,
-		Store:   bob.store,
-		GroupId: append([]byte(nil), record.GroupId...),
-	}, record.Epoch, bob.signer)
+	handle, err := bob.engine.LoadGroup(record.GroupId, record.Epoch)
 	if err != nil {
-		t.Fatalf("PHASE B: mls.LoadGroup at epoch %d: %v", record.Epoch, err)
+		t.Fatalf("PHASE B: GroupEngine.LoadGroup at epoch %d: %v", record.Epoch, err)
 	}
-	handle := &restoredHandle{group: group}
 	defer handle.Close()
 
 	// (1) THE EXPORTER, in a process that did not derive it.

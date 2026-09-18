@@ -226,7 +226,12 @@ type GroupRecord struct {
 	GroupHandleKey []byte
 
 	// The MLS epoch this device's session was at when the record was written. It is the epoch
-	// [mls.LoadGroup] is asked for, because nothing on [mls.StateStore] enumerates epochs -- J1-8.
+	// `messagegroup.GroupEngine.LoadGroup` is asked for, and it has to be carried HERE because
+	// nothing on [mls.StateStore] enumerates epochs: no layer below this one can answer "the
+	// latest" without a scan it has no method for, so the device that persisted the group is the
+	// one that says which epoch it was at. That absence was half of open item J1-8; the other half
+	// -- that no engine method opened a persisted group at all -- is closed, and LoadGroup refuses
+	// by name when the state handed back does not stand at the epoch this field names.
 	Epoch uint64
 
 	// Whether [Group.Open] has published this group on the server. A restored group that was

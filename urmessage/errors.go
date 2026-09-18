@@ -107,12 +107,17 @@ var (
 	// answering an empty slice, which reads exactly like "this device was in no groups".
 	ErrNoDeviceStore = errors.New("urmessage: this device's state store is not durable, so there is nothing to restore; OpenDurableStateStore is the one this module ships")
 
-	// A restored group could not be rebuilt. The cause is carried.
+	// A restored group could not be rebuilt. The cause is carried -- including
+	// `messagegroup.ErrEngineLoadedEpoch`, which is the epoch mismatch this package used to refuse
+	// itself and which now belongs to the engine door every caller of that interface goes through.
+	//
+	// THERE WAS A SECOND SENTINEL HERE AND IT IS GONE. It named the two methods a restored group
+	// could not perform -- Process and ApplyCommit -- and it named its own cause: `connect`'s
+	// GroupEngine had no LoadGroup, so this package carried a handle of its own that could not
+	// write `messagegroup.EngineProcessed`'s unexported staged field. LoadGroup landed, the second
+	// handle was deleted, and a sentinel for an impossibility that is no longer one is exactly the
+	// shape this corpus keeps filing. It is REMOVED rather than retired in place.
 	ErrRestore = errors.New("urmessage: this group could not be restored from the durable state store")
-
-	// A method on the restored-group handle that this package cannot perform. See
-	// restoredHandle for why the two that are refused are refused, and for J1-8.
-	ErrRestoredHandle = errors.New("urmessage: a restored mls group cannot do this through sdk's own handle; it needs connect's GroupEngine to grow a LoadGroup (J1-8)")
 
 	// ── §4.3.4's fetch attestation, and §4.3.4's pagination ───────────────────────────────
 

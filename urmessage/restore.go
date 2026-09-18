@@ -5,8 +5,6 @@ import (
 	"fmt"
 
 	"github.com/urnetwork/connect/messagegroup"
-	"github.com/urnetwork/connect/mls"
-	"github.com/urnetwork/connect/mls/syntax"
 )
 
 // ── S2-14's other half: coming back ──────────────────────────────────────────────────────────
@@ -37,10 +35,18 @@ import (
 //   - It cannot ADD a member or OPEN: both need the epoch-zero founding session, which exists on
 //     the founder before the first commit and is not persisted. A restored group answers
 //     [ErrAlphaOneAdd] and [ErrNoMemberAdded] by name, which is the same answer a joiner gets.
-//   - It cannot INGEST a commit, so it cannot follow the group into a later epoch. That is J1-8
-//     and it belongs to `connect`: see [restoredHandle]. The alpha has exactly one epoch
-//     ([ErrAlphaOneAdd]), so nothing in this build can reach it -- and the day a second epoch is
-//     built, this is the thing that has to land first.
+//   - It CAN INGEST A COMMIT, and that sentence is new. It used to read the other way: a restored
+//     group could not ingest one, so it could not follow its group into a later epoch, and that was
+//     open item J1-8. The cause was structural rather than an omission -- this package carried its
+//     own [messagegroup.GroupHandle] over `mls.LoadGroup`, and two of that interface's twenty six
+//     methods cannot be implemented outside `connect/messagegroup` at all, because
+//     `messagegroup.EngineProcessed` carries its staged commit in an unexported field. So `Process`
+//     and `ApplyCommit` were refused by name. `messagegroup.GroupEngine.LoadGroup` closed it: a
+//     restored group is now the SAME handle type a founded or a joined one is, reaching both
+//     methods through the same body. WHAT THIS DOES NOT DO is make a second epoch reachable from
+//     this package's own API -- [Group.AddMember] still answers [ErrAlphaOneAdd], and nothing here
+//     yet drives an ingest on a restored group -- so what changed is that the floor under a second
+//     epoch exists, not that the alpha has one. Ledger item 239 is where the rest of it is owed.
 //
 // A GROUP THAT WILL NOT RESTORE IS NAMED AND THE REST STILL COME BACK. One unreadable epoch state
 // must not cost a device every other conversation it is in, so the refusals are collected and
@@ -183,8 +189,11 @@ import (
 // asks to write, which is the only place the event is visible.
 //
 // WHAT WOULD CLOSE IT PROPERLY: a copy that came back under a DIFFERENT leaf, which is an MLS
-// Update commit -- and a restored group cannot ingest a commit (J1-8, see [restoredHandle]) and
-// the alpha has exactly one epoch ([ErrAlphaOneAdd]). **FILED AS S2-28: a copied app-data folder
+// Update commit. THE HANDLE-LEVEL BLOCKER ON THAT IS GONE AND THE REST OF IT IS NOT: J1-8 is closed
+// -- a restored group ingests a commit, because it is the same handle a live one is -- and what is
+// still missing is everything above the handle. [Group.AddMember] answers [ErrAlphaOneAdd], nothing
+// in this package drives a second epoch, and the ladders do not survive one (ledger item 239).
+// **FILED AS S2-28: a copied app-data folder
 // needs a new leaf, not a detection.** Until it is ruled, the three clauses above are the whole
 // answer and the sentences you are reading are the rest of it. Every case in this paragraph is
 // driven in `sdk/cp3b`: `clone_test.go` for the copy that is behind and the level copy that
@@ -223,20 +232,26 @@ func (self *Device) Restore(ctx context.Context) ([]*Group, error) {
 }
 
 // restoreOne rebuilds one group: the MLS state at the record's epoch, then the session over it.
+//
+// THE HANDLE COMES OUT OF THE ENGINE AND NOT OUT OF mls, WHICH IS J1-8 CLOSED. This package used to
+// call `mls.LoadGroup` directly and wrap the result in a handle of its own, because
+// `messagegroup.GroupEngine` had four methods and none of them opened a persisted group. That copy
+// could not implement two of [messagegroup.GroupHandle]'s twenty six methods -- `EngineProcessed`
+// carries its staged commit in an unexported field, so the only value an implementation outside
+// that package can build is one `ApplyCommit` refuses -- so it refused `Process` and `ApplyCommit`
+// by name and a restored group could not ingest a commit. `GroupEngine.LoadGroup` now answers the
+// SAME handle type a founded or a joined group is seen through, so a restored group reaches every
+// method through the same body a live one does and the refusal is gone rather than relocated.
+//
+// THE EPOCH COMPARISON MOVED WITH IT and is not repeated here. It used to be this function's, three
+// lines below the load; it is now [messagegroup.GroupEngine.LoadGroup]'s own, refusing with
+// `messagegroup.ErrEngineLoadedEpoch`, which is where it reaches every caller of that interface
+// rather than the one caller that remembered to make it. The wrap below carries the group id and
+// the epoch this record named, so an operator reading the refusal still sees which row asked.
 func (self *Device) restoreOne(store DeviceStore, record *GroupRecord, nonce []byte, nonceEpoch uint64) (*Group, error) {
-	group, err := mls.LoadGroup(&mls.GroupConfig{
-		Crypto:  self.crypto,
-		Store:   self.stateStore,
-		GroupId: append([]byte(nil), record.GroupId...),
-	}, record.Epoch, self.signer)
+	handle, err := self.engine.LoadGroup(record.GroupId, record.Epoch)
 	if err != nil {
 		return nil, fmt.Errorf("%w: group %x at epoch %d: %w", ErrRestore, record.GroupId, record.Epoch, err)
-	}
-	handle := &restoredHandle{group: group}
-	if epoch := handle.Epoch(); epoch != record.Epoch {
-		handle.Close()
-		return nil, fmt.Errorf("%w: group %x restored at epoch %d and the record names %d",
-			ErrRestore, record.GroupId, epoch, record.Epoch)
 	}
 	session, err := messagegroup.NewGroupSession(handle, record.PqSecret, record.GroupHandleKey,
 		self.reserver, self.nowMs, nonce)
@@ -325,208 +340,3 @@ func (self *Device) persistGroup(record *GroupRecord) error {
 	}
 	return store.PutGroupRecord(record)
 }
-
-// ── the handle a restored group is seen through ──────────────────────────────────────────────
-
-// restoredHandle is [messagegroup.GroupHandle] over an [mls.Group] that [mls.LoadGroup] rebuilt.
-//
-// IT EXISTS BECAUSE connect's ENGINE HAS NO DOOR FOR THIS, and that is J1-8 stated as code rather
-// than as a comment. `messagegroup.GroupEngine` declares four methods -- Suite, NewKeyPackage,
-// CreateGroup, JoinFromWelcome -- and NONE of them opens a persisted group, while
-// `mls.LoadGroup(cfg, epoch, signer)` is a complete restore including the TreeKEM ladder and the
-// own-leaf sender ratchets. The query, so the claim is checkable rather than quoted: over connect
-// at the commit this lands against,
-//
-//	grep -n "^type GroupEngine interface" -A 8 messagegroup/engine.go
-//
-// answers those four. So a durable store in `sdk` writes rows that nothing in `connect` can read
-// back, and this adapter is the only thing between that and S2-14 being write-only.
-//
-// THE EXACT CHANGE connect OWES, so that this file can be DELETED rather than maintained: a fifth
-// `GroupEngine` method -- `LoadGroup(groupId []byte, epoch uint64) (GroupHandle, error)` -- plus
-// something that answers WHICH epoch, since `mls.LoadGroup` takes it as a parameter and nothing on
-// `mls.StateStore` enumerates. Until it lands this type is a SECOND site of `connectMlsHandle`, by
-// construction of the visibility rules and not by preference: `connectMlsHandle` is unexported, so
-// there is no way to reach it from here. It is filed rather than absorbed -- exactly as
-// [storageExporterLabel] next door is filed -- and it is a Spec A §6 amendment, therefore Gate 5
-// and an owner ruling.
-//
-// TWO METHODS ARE REFUSED BY NAME AND THE REST DELEGATE. Process and ApplyCommit are the pair that
-// carries a STAGED COMMIT, and `messagegroup.EngineProcessed` holds it in an UNEXPORTED field that
-// only a member of that package can write. So an implementation here could produce an
-// `EngineProcessed` whose staged half is nil -- a value that looks like a processed commit and
-// that `ApplyCommit` cannot apply -- which is precisely the plausible-result-read-as-built shape.
-// It refuses instead, with [ErrRestoredHandle]. Nothing in this package calls either: the query is
-// `grep -n "\.Process(\|\.ApplyCommit(" urmessage/*.go`, which answers nothing.
-type restoredHandle struct {
-	group *mls.Group
-}
-
-var _ messagegroup.GroupHandle = (*restoredHandle)(nil)
-
-func (self *restoredHandle) GroupId() []byte { return self.group.GroupId() }
-
-func (self *restoredHandle) Epoch() uint64 { return self.group.Epoch() }
-
-func (self *restoredHandle) OwnLeafIndex() uint32 { return uint32(self.group.OwnLeafIndex()) }
-
-func (self *restoredHandle) MemberCount() int { return len(self.group.Members()) }
-
-// MemberAt is connectMlsHandle's projection, and the two refusals are its two refusals: an ordinal
-// off the end, and a member whose leaf carries no urmessage_leaf_keys. A projection that answered
-// a nil leafKeys would hand the epoch fan-out a member it silently cannot wrap to.
-func (self *restoredHandle) MemberAt(i int) (uint32, []byte, []byte, error) {
-	members := self.group.Members()
-	if i < 0 || len(members) <= i {
-		return 0, nil, nil, fmt.Errorf("%w: ordinal %d of %d members",
-			messagegroup.ErrEngineMemberOrdinal, i, len(members))
-	}
-	member := members[i]
-	if member.LeafKeys == nil {
-		return 0, nil, nil, fmt.Errorf("%w: the member at ordinal %d carries no urmessage_leaf_keys extension",
-			messagegroup.ErrEngineMemberLeafKeys, i)
-	}
-	leafKeys, err := member.LeafKeys.Encode()
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("%w: %w", messagegroup.ErrEngineMemberLeafKeys, err)
-	}
-	return uint32(member.LeafIndex), member.IdentityPub, leafKeys.ExtensionData, nil
-}
-
-func (self *restoredHandle) Export(label string, context []byte, length int) ([]byte, error) {
-	return self.group.Export(label, context, length)
-}
-
-// PairwiseExport is the method connect added to messagegroup.GroupHandle for ledger item 228's
-// read-receipt tag ruling, and it lands here for the reason the three aad_mls v2 methods above it
-// did: a restored group has to satisfy the same interface a live one does, and the compile-time
-// assertion at the top of this block is what says so before any caller finds out.
-//
-// IT IS A FORWARDER AND NOT A REIMPLEMENTATION, which matters more here than for the other
-// delegating methods. The key is a static-static diffie-hellman over this device's own leaf
-// encryption scalar -- the octets mls.LoadGroup rebuilt out of groupStateBlob.OwnEncPriv -- and mls
-// keeps that scalar on its own side of the seam. A version of this method that did the exchange in
-// this package would need the scalar handed across, which is exactly what the ruling forbids.
-func (self *restoredHandle) PairwiseExport(label string, peer uint32, length int) ([]byte, error) {
-	return self.group.PairwiseExport(label, mls.LeafIndex(peer), length)
-}
-
-func (self *restoredHandle) SenderDataSecret() ([]byte, error) {
-	return self.group.EpochSecret(mls.EpochSecretSenderData)
-}
-
-func (self *restoredHandle) EncryptionSecret() ([]byte, error) {
-	return self.group.EpochSecret(mls.EpochSecretEncryption)
-}
-
-func (self *restoredHandle) EpochAuthenticator() []byte { return self.group.EpochAuthenticator() }
-
-func (self *restoredHandle) RatchetTreeSnapshot() ([]byte, error) { return self.group.RatchetTree() }
-
-func (self *restoredHandle) GroupContextBytes() ([]byte, error) { return self.group.GroupContext() }
-
-func (self *restoredHandle) ProposeAdd(keyPackage []byte) ([]byte, error) {
-	return self.group.ProposeAdd(keyPackage)
-}
-
-func (self *restoredHandle) ProposeRemove(leafIndex uint32) ([]byte, error) {
-	return self.group.ProposeRemove(mls.LeafIndex(leafIndex))
-}
-
-func (self *restoredHandle) ProposeUpdate() ([]byte, error) { return self.group.ProposeUpdate() }
-
-func (self *restoredHandle) ProposeGroupPolicy(policy []byte) ([]byte, error) {
-	return self.group.ProposeGroupContextExtensions([]mls.Extension{{
-		ExtensionType: mls.ExtensionTypeUrmessageGroupPolicy,
-		ExtensionData: policy,
-	}})
-}
-
-func (self *restoredHandle) Commit(byReference [][]byte) ([]byte, []byte, []byte, error) {
-	result, err := self.group.CreateCommit(byReference, nil, nil)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return result.Commit, result.Welcome, result.RatchetTree, nil
-}
-
-func (self *restoredHandle) MergePendingCommit() error { return self.group.MergePendingCommit() }
-
-func (self *restoredHandle) ClearPendingCommit() { self.group.ClearPendingCommit() }
-
-// Process is REFUSED and not implemented. See this type's header: the staged commit it would have
-// to carry lives in an unexported field of `messagegroup.EngineProcessed`, so the value this
-// method could build is one `ApplyCommit` can never apply.
-func (self *restoredHandle) Process(message []byte) (*messagegroup.EngineProcessed, error) {
-	return nil, fmt.Errorf("%w: Process stages a commit and the staged half is messagegroup's own", ErrRestoredHandle)
-}
-
-// ApplyCommit is REFUSED for Process's reason, and refusing both is what keeps the pair honest: a
-// Process that answered and an ApplyCommit that refused would read as a transient failure.
-func (self *restoredHandle) ApplyCommit(processed *messagegroup.EngineProcessed) error {
-	return fmt.Errorf("%w: ApplyCommit enters the epoch a staged commit opens", ErrRestoredHandle)
-}
-
-func (self *restoredHandle) Protect(aad []byte, plaintext []byte) ([]byte, error) {
-	return self.group.Protect(aad, plaintext)
-}
-
-// The three methods connect 4a70be8 added to messagegroup.GroupHandle for MASTER section 8.4.2's
-// aad_mls v2. A restored group has to satisfy the same interface a live one does, and it did not:
-// sdk was written against the pre-v2 interface in the same wave that changed it, so this file was
-// the whole of the drift -- three methods and one import, caught by go build and by nothing else.
-//
-// ProtectBound takes an AAD BUILDER rather than an AAD because v2's preimage carries the
-// generation, which mls chooses INSIDE the seal: the caller cannot know it beforehand, so mls hands
-// it to the builder under the same lock that then consumes it.
-func (self *restoredHandle) ProtectBound(aad func(generation uint32) ([]byte, error),
-	plaintext []byte) ([]byte, error) {
-
-	return self.group.ProtectBound(aad, plaintext)
-}
-
-// PeekSender is MASTER section 8.4.3's pre-ratchet reading. It is written out here rather than
-// delegated because messagegroup's own peekWithGroupSecrets is unexported: the crypto provider has
-// to be rebuilt out of this group's own context on every application record.
-func (self *restoredHandle) PeekSender(frame []byte) (uint32, []byte, uint32, error) {
-	contextBytes, err := self.group.GroupContext()
-	if err != nil {
-		return 0, nil, 0, err
-	}
-	groupContext := &mls.GroupContext{}
-	if err := syntax.Unmarshal(contextBytes, groupContext); err != nil {
-		return 0, nil, 0, err
-	}
-	crypto, err := mls.NewCryptoProvider(groupContext.CipherSuite)
-	if err != nil {
-		return 0, nil, 0, err
-	}
-	senderDataSecret, err := self.group.EpochSecret(mls.EpochSecretSenderData)
-	if err != nil {
-		return 0, nil, 0, err
-	}
-	leaf, authenticatedData, generation, err := mls.PeekPrivateMessageSender(
-		crypto, senderDataSecret, frame)
-	if err != nil {
-		return 0, nil, 0, err
-	}
-	return uint32(leaf), authenticatedData, generation, nil
-}
-
-// Unprotect projects mls's application message down to four values, refusing the nil-with-nil-error
-// shape mls cannot produce -- because the alternative to refusing it is four zero values that read
-// as an empty message from leaf 0 at generation 0.
-func (self *restoredHandle) Unprotect(message []byte) ([]byte, []byte, uint32, uint32, error) {
-	application, err := self.group.Unprotect(message)
-	if err != nil {
-		return nil, nil, 0, 0, err
-	}
-	if application == nil {
-		return nil, nil, 0, 0, fmt.Errorf("%w: an opened application message with no content",
-			messagegroup.ErrEngineProcessedArm)
-	}
-	return application.AuthenticatedData, application.Plaintext,
-		uint32(application.SenderLeaf), application.Generation, nil
-}
-
-func (self *restoredHandle) Close() error { return self.group.Close() }

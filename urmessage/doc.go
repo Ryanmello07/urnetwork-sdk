@@ -208,12 +208,17 @@
 // CONTESTED INDEX PER GROUP PER PROCESS LIFETIME of the losing copy. A copy that reconciled and
 // THEN went dark is bounded by nothing at all, because every clause of the check is fed by
 // something the server said. Both are measured rather than asserted, in `sdk/cp3b`. Closing either
-// needs a new leaf for the copy, which is an MLS Update commit a restored group cannot make. It is
+// needs a new leaf for the copy, which is an MLS Update commit -- reachable at the handle now that
+// J1-8 is closed, and reachable from nothing in this package's own API, which is why it is still
 // filed as S2-28.
 //
-// WHAT IS STILL OPEN, and it is `connect`'s rather than this package's. `messagegroup.GroupEngine`
-// declares four methods and none of them opens a persisted group, so this package carries its own
-// `messagegroup.GroupHandle` over `mls.LoadGroup` to make the restore reachable at all. That is
-// J1-8, the exact change owed is named at [restoredHandle], and this package's copy is meant to be
-// DELETED the day it lands.
+// WHAT WAS OPEN HERE AND IS NOT ANY MORE. `messagegroup.GroupEngine` used to declare four methods,
+// none of which opened a persisted group, so this package carried its own
+// `messagegroup.GroupHandle` over `mls.LoadGroup` to make the restore reachable at all -- a second
+// implementation of twenty six methods, two of which (`Process` and `ApplyCommit`) it could not
+// write at all, because `messagegroup.EngineProcessed` holds its staged commit in an unexported
+// field. A restored group therefore refused to ingest a commit. That was J1-8. `GroupEngine` grew a
+// fifth method, `LoadGroup(groupId []byte, epoch uint64) (GroupHandle, error)`, and this package's
+// copy was DELETED: a restored group is now the same handle type a founded or a joined one is, and
+// TestRestoredGroupIngestsACommitAndEntersEpochTwo drives the pair that used to refuse.
 package urmessage
