@@ -34,7 +34,7 @@ build_windows_amd64:
 		-ldflags "-s -w -X github.com/urnetwork/sdk.Version=$${WARP_VERSION} -buildid=" \
 		-o build/windows/amd64/URnetworkSdk.dll .; \
 	rm -f build/windows/amd64/URnetworkSdk.h; \
-	cp include/urnetwork_sdk.h include/urnetwork_sdk.hpp include/urnetwork_sdk.def build/windows/amd64/;
+	cp include/urnetwork_sdk.h include/urnetwork_sdk.hpp include/urnetwork_sdk.def include/urnetwork_message.h build/windows/amd64/;
 
 build_windows_arm64:
 	export PATH="$$PATH:/usr/local/go/bin:$$HOME/go/bin"; \
@@ -45,7 +45,7 @@ build_windows_arm64:
 		-ldflags "-s -w -X github.com/urnetwork/sdk.Version=$${WARP_VERSION} -buildid=" \
 		-o build/windows/arm64/URnetworkSdk.dll .; \
 	rm -f build/windows/arm64/URnetworkSdk.h; \
-	cp include/urnetwork_sdk.h include/urnetwork_sdk.hpp include/urnetwork_sdk.def build/windows/arm64/;
+	cp include/urnetwork_sdk.h include/urnetwork_sdk.hpp include/urnetwork_sdk.def include/urnetwork_message.h build/windows/arm64/;
 
 build_linux: build_linux_amd64 build_linux_arm64
 	rm -f build/URnetworkSdkLinux.zip; \
@@ -60,7 +60,7 @@ build_linux_amd64:
 		-ldflags "-s -w -X github.com/urnetwork/sdk.Version=$${WARP_VERSION} -buildid=" \
 		-o build/linux/amd64/libURnetworkSdk.so .; \
 	rm -f build/linux/amd64/libURnetworkSdk.h; \
-	cp include/urnetwork_sdk.h include/urnetwork_sdk.hpp build/linux/amd64/;
+	cp include/urnetwork_sdk.h include/urnetwork_sdk.hpp include/urnetwork_message.h build/linux/amd64/;
 
 build_linux_arm64:
 	export PATH="$$PATH:/usr/local/go/bin:$$HOME/go/bin"; \
@@ -71,7 +71,7 @@ build_linux_arm64:
 		-ldflags "-s -w -X github.com/urnetwork/sdk.Version=$${WARP_VERSION} -buildid=" \
 		-o build/linux/arm64/libURnetworkSdk.so .; \
 	rm -f build/linux/arm64/libURnetworkSdk.h; \
-	cp include/urnetwork_sdk.h include/urnetwork_sdk.hpp build/linux/arm64/;
+	cp include/urnetwork_sdk.h include/urnetwork_sdk.hpp include/urnetwork_message.h build/linux/arm64/;
 
 # host (macOS) library, for local development and the smoke test
 build_host:
