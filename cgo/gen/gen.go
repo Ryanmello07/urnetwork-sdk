@@ -24,6 +24,7 @@ import (
 	"go/format"
 	"go/types"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -37,6 +38,7 @@ const sdkPath = "github.com/urnetwork/sdk"
 
 // behavioral types cross the abi as opaque handles
 var behavioralTypes = map[string]bool{
+	"Socket": true,
 	// These immutable observations expose private state through getters.
 	// JSON would erase both their values and their ownership identity.
 	"LocalAuthStateSnapshot":          true,
@@ -95,8 +97,16 @@ var behavioralTypes = map[string]bool{
 // skipped types are not exported. mirror the gomobile validate exclusions
 // (see build/Makefile): rpc gob internals, testing and platform constructors.
 var skipTypes = map[string]string{
-	"DeviceLocalRpc":  "rpc gob internal (macOS parity: ignored)",
-	"DeviceRemoteRpc": "rpc gob internal (macOS parity: ignored)",
+	"Dialer":                    "native Go socket interface; manual C socket exports",
+	"TLSDialer":                 "native Go TLS interface; manual C socket exports",
+	"Conn":                      "net.Conn alias; manual C socket exports",
+	"DeviceSocketRequest":       "socket RPC internal",
+	"DeviceSocketResponse":      "socket RPC internal",
+	"DeviceSubprotocolRequest":  "subprotocol RPC internal",
+	"DeviceSubprotocolResponse": "subprotocol RPC internal",
+	"RemoteSubprotocol":         "Go/JS RPC session; native bindings use DeviceLocal subprotocol methods",
+	"DeviceLocalRpc":            "rpc gob internal (macOS parity: ignored)",
+	"DeviceRemoteRpc":           "rpc gob internal (macOS parity: ignored)",
 }
 
 var skipTypePatterns = []*regexp.Regexp{
@@ -128,7 +138,13 @@ var skipFuncPatterns = []*regexp.Regexp{
 }
 
 var skipMethods = map[string]string{
+	"Device.Dial":                                    "manual export urnet_device_dial",
+	"Device.DialContext":                             "manual export urnet_device_dial",
+	"Device.DialTls":                                 "manual export urnet_device_dial_tls",
+	"Device.DialTlsContext":                          "manual export urnet_device_dial_tls",
 	"DeviceLocal.Ctx":                                "go context does not cross the abi",
+	"DeviceRemote.Ctx":                               "go context does not cross the abi",
+	"DeviceRemote.OpenSubprotocolContext":            "Go/JS RPC session; native bindings use DeviceLocal subprotocol methods",
 	"DeviceLocal.SetUpgradeMuxSettings":              "connect internal type (macOS parity: ignored)",
 	"DeviceLocal.SetClientSecurityPolicyGenerator":   "func param (macOS parity: ignored)",
 	"DeviceLocal.SetProviderSecurityPolicyGenerator": "func param (macOS parity: ignored)",
@@ -163,6 +179,7 @@ var unixOnlySymbols = map[string]bool{
 // c names reserved by hand-written exports in the cgo package
 var reservedCNames = map[string]bool{
 	"urnet_version":           true,
+	"urnet_abi_version":       true,
 	"urnet_free_string":       true,
 	"urnet_release":           true,
 	"urnet_live_handle_count": true,
@@ -183,6 +200,10 @@ func main() {
 type gen struct {
 	pkg   *types.Package
 	scope *types.Scope
+	// Hand-written //export directives are inputs beside the generated files.
+	// Tests can emit into a temporary working directory while retaining this
+	// production source directory.
+	sourceDirectory string
 
 	errorType  types.Type
 	deviceType *types.Named
@@ -253,13 +274,14 @@ func load() (*gen, error) {
 		return nil, fmt.Errorf("expected one package, got %d", len(pkgs))
 	}
 	g := &gen{
-		pkg:           pkgs[0].Types,
-		scope:         pkgs[0].Types.Scope(),
-		errorType:     types.Universe.Lookup("error").Type(),
-		callbacks:     map[string]*types.Named{},
-		dataTypes:     map[string]*types.Named{},
-		cNames:        map[string]string{},
-		deviceDerived: map[string]bool{},
+		pkg:             pkgs[0].Types,
+		scope:           pkgs[0].Types.Scope(),
+		sourceDirectory: ".",
+		errorType:       types.Universe.Lookup("error").Type(),
+		callbacks:       map[string]*types.Named{},
+		dataTypes:       map[string]*types.Named{},
+		cNames:          map[string]string{},
+		deviceDerived:   map[string]bool{},
 	}
 	if obj := g.scope.Lookup("Device"); obj != nil {
 		if named, ok := types.Unalias(obj.Type()).(*types.Named); ok {
@@ -585,7 +607,11 @@ func (g *gen) emitType(obj *types.TypeName) {
 		if deviceIface != nil {
 			if dm := lookupIfaceMethod(deviceIface, m.Name()); dm != nil {
 				if types.Identical(dm.Type(), sel.Type()) {
-					g.skip(qualified, "device interface method: use urnet_device_"+snake(m.Name()))
+					if reason, ok := skipMethods["Device."+m.Name()]; ok {
+						g.skip(qualified, "device interface method: "+reason)
+					} else {
+						g.skip(qualified, "device interface method: use urnet_device_"+snake(m.Name()))
+					}
 					continue
 				}
 			}
@@ -1536,6 +1562,7 @@ func (g *gen) write() error {
 		b.WriteString("/* ----- core ----- */\n\n")
 		b.WriteString("/* the sdk version this library was built from */\n")
 		b.WriteString("char* urnet_version(void);\n")
+		b.WriteString("/* incompatible C ABI revision; additive exports retain this value */\nint32_t urnet_abi_version(void);\n")
 		b.WriteString("void urnet_free_string(char* s);\n")
 		b.WriteString("/* release a handle. returns false if the handle was unknown. */\n")
 		b.WriteString("bool urnet_release(uint64_t handle);\n")
@@ -1662,13 +1689,13 @@ func (g *gen) write() error {
 
 	// ----- include/urnetwork_sdk.def
 	{
-		names := []string{"urnet_version", "urnet_free_string", "urnet_release", "urnet_live_handle_count"}
+		names := []string{"urnet_version", "urnet_abi_version", "urnet_free_string", "urnet_release", "urnet_live_handle_count"}
 		for _, e := range g.exports {
 			if !e.unixOnly {
 				names = append(names, e.cName)
 			}
 		}
-		names = append(names, manualExports()...)
+		names = append(names, manualExports(g.sourceDirectory)...)
 		sort.Strings(names)
 		names = slices.Compact(names)
 		var b strings.Builder
@@ -1721,6 +1748,23 @@ func (g *gen) write() error {
 // hand-written exports (exports_manual.go); keep in sync
 const manualHeaderSection = `/* ----- byte buffer results (hand-written) ----- */
 
+/* Socket calls block: use a worker thread. Timeouts are milliseconds; deadlines
+ * are Unix epoch milliseconds (0 clears). Read consumes bytes/datagrams, and
+ * cannot be used as a size query. A partial result can accompany out_error.
+ * EOF is separate from an empty UDP datagram. Release closes socket handles. */
+uint64_t urnet_device_dial(uint64_t self, const char* network, const char* address, int64_t timeout_millis, char** out_error);
+uint64_t urnet_device_dial_tls(uint64_t self, const char* network, const char* address, int64_t timeout_millis, const char* tls_json, char** out_error);
+int32_t urnet_conn_read(uint64_t self, uint8_t* out, int32_t capacity, bool* eof, char** out_error);
+int32_t urnet_conn_write(uint64_t self, const uint8_t* data, int32_t length, char** out_error);
+bool urnet_conn_set_deadline(uint64_t self, int64_t epoch_millis, char** out_error);
+bool urnet_conn_set_read_deadline(uint64_t self, int64_t epoch_millis, char** out_error);
+bool urnet_conn_set_write_deadline(uint64_t self, int64_t epoch_millis, char** out_error);
+bool urnet_conn_close(uint64_t self, char** out_error);
+bool urnet_conn_close_read(uint64_t self, char** out_error);
+bool urnet_conn_close_write(uint64_t self, char** out_error);
+char* urnet_conn_local_addr(uint64_t self);
+char* urnet_conn_remote_addr(uint64_t self);
+
 /* buffer-out pattern: *inout_len is always set to the needed size. the copy
  * happens and true is returned only when out is non-null and the passed
  * capacity is sufficient. */
@@ -1747,10 +1791,11 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 
 `
 
-// manualExports scans the hand-written package files for //export directives
-func manualExports() []string {
+// manualExports scans the hand-written package files for //export directives.
+// The source directory is independent of the generator's output directory.
+func manualExports(sourceDirectory string) []string {
 	var names []string
-	entries, err := os.ReadDir(".")
+	entries, err := os.ReadDir(sourceDirectory)
 	if err != nil {
 		return names
 	}
@@ -1765,7 +1810,7 @@ func manualExports() []string {
 		if !strings.HasSuffix(name, ".go") || strings.HasPrefix(name, "exports_gen") || name == "exports_core.go" {
 			continue
 		}
-		b, err := os.ReadFile(name)
+		b, err := os.ReadFile(filepath.Join(sourceDirectory, name))
 		if err != nil {
 			continue
 		}

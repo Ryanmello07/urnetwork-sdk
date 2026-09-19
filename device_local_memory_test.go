@@ -179,6 +179,82 @@ func TestDeviceLocalPlatformTransportBudgetOwnership(t *testing.T) {
 	}
 }
 
+func TestDeviceLocalMemoryUsageIncludesCarrierPreemptionTelemetry(t *testing.T) {
+	usage := &DeviceLocalMemoryUsage{}
+	applyPlatformTransportMemoryUsage(usage, connect.PlatformTransportBudgetStats{
+		TotalByteCount:     6 * 1024 * 1024,
+		UsedByteCount:      4 * 1024 * 1024,
+		MaxTransportCount:  16,
+		UsedTransportCount: 16,
+		PendingH1ByteCount: 512 * 1024,
+		PendingH1Count:     1,
+		PreemptedH3Count:   23,
+	})
+	if usage.PlatformTransportBudgetByteCount != 6*1024*1024 ||
+		usage.PlatformTransportUsedByteCount != 4*1024*1024 ||
+		usage.PlatformTransportMaxCount != 16 ||
+		usage.PlatformTransportUsedCount != 16 ||
+		usage.PlatformTransportPendingH1Bytes != 512*1024 ||
+		usage.PlatformTransportPendingH1Count != 1 ||
+		usage.PlatformTransportPreemptedH3Count != 23 {
+		t.Fatalf("platform carrier memory telemetry = %+v", usage)
+	}
+}
+
+// Handoff state comes from the budget sample, not a process-wide policy flag;
+// a new/reset sample overwrites every gauge instead of accumulating history.
+func TestDeviceLocalMemoryUsageIncludesPrivateHandoffSnapshot(t *testing.T) {
+	usage := &DeviceLocalMemoryUsage{}
+	applyPlatformTransportMemoryUsage(usage, connect.PlatformTransportBudgetStats{
+		PendingH1Count: 2, PendingH1ByteCount: 512 * 1024,
+		PendingHandoffCount: 3, ActiveHandoffCount: 1,
+		ActiveHandoffByteCount: 256 * 1024, ActiveHandoffTransportCount: 1,
+		ReservedByteCount: 768 * 1024, ReleasedByteCount: 256 * 1024,
+		ActiveHandoffID: 17, ActiveHandoffFromClass: "h1", ActiveHandoffToClass: "h3_explicit",
+		ActiveHandoffH1ByteCount: 256 * 1024,
+	})
+	if usage.PlatformTransportPendingH1Count != 2 ||
+		usage.PlatformTransportPendingHandoffCount != 3 ||
+		usage.PlatformTransportActiveHandoffCount != 1 ||
+		usage.PlatformTransportHandoffByteCount != 256*1024 ||
+		usage.PlatformTransportHandoffCount != 1 ||
+		usage.PlatformTransportReservedBytes != 768*1024 || usage.PlatformTransportReleasedBytes != 256*1024 ||
+		usage.PlatformTransportHandoffID != 17 || usage.PlatformTransportHandoffFromClass != "h1" ||
+		usage.PlatformTransportHandoffToClass != "h3_explicit" || usage.PlatformTransportHandoffH1ByteCount != 256*1024 {
+		t.Fatalf("private handoff snapshot = %+v", usage)
+	}
+	applyPlatformTransportMemoryUsage(usage, connect.PlatformTransportBudgetStats{})
+	if usage.PlatformTransportPendingHandoffCount != 0 ||
+		usage.PlatformTransportActiveHandoffCount != 0 ||
+		usage.PlatformTransportHandoffByteCount != 0 || usage.PlatformTransportHandoffCount != 0 ||
+		usage.PlatformTransportReservedBytes != 0 || usage.PlatformTransportReleasedBytes != 0 ||
+		usage.PlatformTransportHandoffID != 0 || usage.PlatformTransportHandoffFromClass != "" ||
+		usage.PlatformTransportHandoffToClass != "" || usage.PlatformTransportHandoffH1ByteCount != 0 {
+		t.Fatalf("reset retained handoff state: %+v", usage)
+	}
+}
+
+func TestDeviceLocalMemoryUsageProviderWindowReadinessAndReset(t *testing.T) {
+	usage := &DeviceLocalMemoryUsage{}
+	for _, test := range []struct {
+		name             string
+		window           *connect.WindowExpandEvent
+		known, satisfied bool
+	}{
+		{"missing", nil, false, false},
+		{"unsatisfied", &connect.WindowExpandEvent{}, true, false},
+		{"satisfied", &connect.WindowExpandEvent{MinSatisfied: true}, true, true},
+		{"reset", nil, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			applyProviderWindowMemoryUsage(usage, test.window)
+			if usage.ProviderWindowKnown != test.known || usage.ProviderWindowMinSatisfied != test.satisfied {
+				t.Fatalf("readiness = known:%t satisfied:%t", usage.ProviderWindowKnown, usage.ProviderWindowMinSatisfied)
+			}
+		})
+	}
+}
+
 // A headless provider's source identity must reach its QUIC packet endpoint,
 // not only the TCP/UDP exit dialers. This reproduces the carrier omission that
 // collapsed a thousand simulated miners onto one server rate-limit identity.

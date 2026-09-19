@@ -56,6 +56,8 @@ _build_android:
 	# note the device_rpc types (DeviceLocalRpc, DeviceRemote*, DeviceRpcDialer/Listener, their
 	# Websocket* transports, and the *Rpc gob payload types) should not be included in gomobile
 	# but due to limitations they are and should be ignored
+	# Companion subprotocol RPC types are excluded by sdk_mobile_bind, and the peer
+	# pin-store helper is unexported; neither may appear as an accepted omission
 	# the same applies to the DeviceLocalSettings struct fields, the DeviceLocal security-policy
 	# generator setters, and testing-only constructors whose unsupported field/param types gomobile skips
 	# the Sim* simulation scaffolding (sim_device.go) is a go-embedder surface whose configs
@@ -83,6 +85,7 @@ _build_android:
 	mkdir "$$BUILD_DIR"; \
 	gomobile bind \
 		-target android/arm64,android/arm,android/amd64 -androidapi 24 \
+		-tags sdk_mobile_bind \
 		-javapkg com.bringyour \
 		-trimpath \
 		-gcflags "-dwarf=false" \
@@ -129,6 +132,7 @@ build_apple:
 	mkdir "$$BUILD_DIR"; \
 	gomobile bind \
 		-target ios/arm64,iossimulator/arm64,macos/arm64,macos/amd64 -iosversion 16.0 \
+		-tags sdk_mobile_bind \
 		-bundleid network.ur \
 		-trimpath \
 		-gcflags "-dwarf=false" \
@@ -139,7 +143,7 @@ build_apple:
 	gomobile bind \
 		-target ios/arm64,iossimulator/arm64,macos/arm64,macos/amd64 -iosversion 16.0 \
 		-bundleid network.ur \
-		-tags ios_extension \
+		-tags sdk_mobile_bind,ios_extension \
 		-trimpath \
 		-gcflags "-dwarf=false" \
 		-ldflags "-s -w -X github.com/urnetwork/sdk.Version=$${WARP_VERSION} $(MOBILE_RUNTIME_LDFLAG) -compressdwarf=false -buildid=" \

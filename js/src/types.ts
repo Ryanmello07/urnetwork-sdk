@@ -1,3 +1,6 @@
+import type { SocketDevice } from "./socket";
+import type { SubprotocolDevice } from "./subprotocol";
+
 /**
  * Configuration for proxy behavior
  */
@@ -34,10 +37,9 @@ export interface ProxyConfigResult {
 }
 
 /**
- * Device interface - placeholder for future device methods
+ * Device socket methods shared by local/proxy and remote device wrappers.
  */
-export interface Device {
-  // Device methods will be added as needed
+export interface Device extends SocketDevice {
 }
 
 /**
@@ -55,7 +57,8 @@ export interface ProxyDevice {
   getDevice(): Device;
   getProxyConfigResult(): ProxyConfigResult | null;
   cancel(): void;
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   isDone(): boolean;
 }
 
@@ -178,20 +181,23 @@ export interface ConnectedProviderLocationInfo {
 export type Unsubscribe = () => void;
 
 /**
- * DeviceRemote — the client's handle on a hosted DeviceLocal. It reaches the
- * device over the proxy host's device-rpc websocket (authenticated with the
- * device's signed proxy id) and controls it exactly as the app process controls
- * the device in the native apps.
+ * DeviceRemote — the client's handle on a native DeviceLocal. It reaches the
+ * device through a device-rpc transport and controls it as an app process
+ * controls a local device. Platform remotes use the hosted proxy websocket;
+ * extension remotes use the caller's opaque byte transport.
  *
  * Mirrors the bindings in sdk/js/device_remote.go. Hosted-incompatible setters
  * (route local, provide settings) are accepted but no-op on the hosted device;
  * the getters and listeners still reflect real device state.
  */
-export interface DeviceRemote {
+export interface DeviceRemote extends SocketDevice, SubprotocolDevice {
   // lifecycle
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   cancel(): void;
   getRemoteConnected(): boolean;
+  getClientId(): string;
+  getInstanceId(): string;
   /** Last explicit RPC sync refusal; empty while pending or after success. */
   getSyncError(): string;
   /** A random tag of 1–3 distinct emoji to prefill the emoji-tag editor with; count 0 or omitted picks the length at random. */
@@ -335,7 +341,8 @@ export interface ConnectGrid {
  * connection status, selected location, the provider grid, connect/disconnect.
  */
 export interface ConnectViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -401,7 +408,8 @@ export interface ContractPeerRow {
  * ordering, and reports rows that exactly match the WASM runtime object.
  */
 export interface ContractDetailsViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -450,7 +458,8 @@ export interface PacketStats {
  * signal-only.
  */
 export interface ContractViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -494,7 +503,8 @@ export interface BlockAction {
  * signal-only: re-read the getters on notify.
  */
 export interface BlockActionViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -531,7 +541,8 @@ export interface FilteredLocations {
  * filter and load state.
  */
 export interface LocationsViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -562,7 +573,8 @@ export interface NetworkClientInfo {
  * fired with the current list.
  */
 export interface DevicesViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -627,7 +639,8 @@ export interface EmojiTagValidation {
  * the rows until the new first page lands. Never sort, rank or page yourself.
  */
 export interface PointsLeaderboardViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -721,7 +734,8 @@ export interface PointsLeaderboardScrollLabelParts {
  * when no providers are connected.
  */
 export interface ProviderLocationsViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -820,7 +834,8 @@ export interface LocationsViewControllerOptions {
  * delivers the current connectable list.
  */
 export interface PeerViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -833,7 +848,8 @@ export interface PeerViewController {
 
 /** AccountPreferencesViewController — the product-updates preference. */
 export interface AccountPreferencesViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -859,7 +875,8 @@ export interface NetworkUserInfo {
  * success / error / in-flight listeners.
  */
 export interface NetworkUserViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -876,7 +893,8 @@ export interface NetworkUserViewController {
 
 /** FeedbackViewController — send feedback (message + star count). */
 export interface FeedbackViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -901,7 +919,8 @@ export interface ReferralCodeInfo {
  * the code string.
  */
 export interface ReferralCodeViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -928,7 +947,8 @@ export type PurchaseConfirmationState =
  * are numbers; the platform owns the jwt refresh and calls `jwtRefreshed`.
  */
 export interface SubscriptionBalanceViewController {
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
   start(): void;
   stop(): void;
 
@@ -980,7 +1000,8 @@ export interface AccountHostOptions {
 export interface AccountHost {
   setByJwt(byJwt: string): void;
   getByJwt(): string;
-  close(): void;
+  /** Releases ownership once; await to join teardown without blocking browser events. */
+  close(): Promise<void>;
 
   openLocationsViewController(): LocationsViewController;
   openDevicesViewController(): DevicesViewController;

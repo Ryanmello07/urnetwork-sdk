@@ -39,6 +39,12 @@ type LocalState struct {
 	// In-process publication ownership, guarded by authStateLock. Different
 	// LocalState objects still require their external manager to join teardown.
 	deviceAuthOwner *deviceAuthPublicationGate
+	// Pin publication is independent of JWT ownership: anonymous devices also
+	// replace stores, and must never commit a stale snapshot over durable pins.
+	// Guarded by authStateLock; the private directory has one LocalState owner.
+	peerPinStoreOwner               *boundedPeerClientKeyPinStore
+	peerPinStoreGeneration          uint64
+	peerPinStorePublishedGeneration uint64
 	// Changes on committed auth mutations, including explicit equality no-ops.
 	// Unlike durable Generation, logout must not reset this in-process epoch.
 	deviceAuthGeneration uint64
@@ -61,6 +67,13 @@ type LocalState struct {
 	// providerPriorsStaleAfter; 0 means unlimited. Unexported field, not a
 	// gomobile boundary -- there is no exported setter for it in this task.
 	providerPriorsRetention time.Duration
+
+	// The provider extender setting, read from `.provide_extender` once and
+	// cached after (EXTENDER.md N4). Guarded by provideExtenderLock, which also
+	// serializes the file writes so the file and the cache end on one value.
+	provideExtenderLock   sync.Mutex
+	provideExtenderLoaded bool
+	provideExtender       bool
 }
 
 // One immutable read generation of the persisted

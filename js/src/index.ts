@@ -1,4 +1,8 @@
 import { initWasm, isWasmInitialized, getWasmGlobals } from "./loader";
+import { attachSocketAPI } from "./socket";
+import { attachSubprotocolAPI } from "./subprotocol";
+export * from "./socket";
+export * from "./subprotocol";
 import type {
   InitOptions,
   ProxyDevice,
@@ -69,7 +73,12 @@ export class URNetwork {
     setupCallback?: SetupDeviceCallback,
   ): ProxyDevice {
     const { URnetworkNewProxyDeviceWithDefaults } = getWasmGlobals();
-    return URnetworkNewProxyDeviceWithDefaults(config, setupCallback);
+    const proxy = URnetworkNewProxyDeviceWithDefaults(config, setupCallback
+      ? (device: object, result: Parameters<SetupDeviceCallback>[1]) => setupCallback(attachSocketAPI(device), result)
+      : undefined);
+    const getDevice = proxy.getDevice.bind(proxy);
+    proxy.getDevice = () => attachSocketAPI(getDevice());
+    return proxy;
   }
 
   /**
@@ -84,8 +93,8 @@ export class URNetwork {
    * @example
    * const sdk = await URNetwork.init({ wasmUrl: '/wasm/sdk.wasm', wasmExecUrl: '/wasm/wasm_exec.js' });
    * const device = sdk.createPlatformDeviceRemote({
-   *   apiUrl: 'api.bringyour.com',
-   *   platformUrl: 'connect.bringyour.com',
+   *   apiUrl: 'https://api.bringyour.com',
+   *   platformUrl: 'wss://connect.bringyour.com',
    *   byJwt,
    *   proxyUrl: proxyConfigResult.api_base_url,
    *   signedProxyId: proxyConfigResult.auth_token,
@@ -117,7 +126,7 @@ export class URNetwork {
     if (device.error) {
       throw new Error(String(device.error));
     }
-    return device as DeviceRemote;
+    return attachSubprotocolAPI(attachSocketAPI(device)) as DeviceRemote;
   }
 
   /**
@@ -204,7 +213,7 @@ export class URNetwork {
     if (device.error) {
       throw new Error(String(device.error));
     }
-    return device as DeviceRemote;
+    return attachSubprotocolAPI(attachSocketAPI(device)) as DeviceRemote;
   }
 
   /**

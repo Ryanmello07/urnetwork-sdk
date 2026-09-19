@@ -8,12 +8,14 @@ require (
 	github.com/google/gopacket v1.1.19
 	github.com/gorilla/websocket v1.5.3
 	github.com/multiformats/go-multiaddr v0.16.1
+	github.com/pion/dtls/v3 v3.1.5
 	github.com/quic-go/quic-go v0.61.0
 	github.com/urnetwork/connect v0.0.0
 	github.com/urnetwork/glog v0.0.0
 	github.com/urnetwork/goidenticons v0.0.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.57.0
+	golang.org/x/sys v0.47.0
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -55,7 +57,6 @@ require (
 	github.com/multiformats/go-varint v0.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
-	github.com/pion/dtls/v3 v3.1.5 // indirect
 	github.com/pion/ice/v4 v4.4.1 // indirect
 	github.com/pion/interceptor v0.1.47 // indirect
 	github.com/pion/logging v0.2.4 // indirect
@@ -83,7 +84,6 @@ require (
 	golang.org/x/mobile v0.0.0-20260611195102-4dd8f1dbf5d2 // indirect
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect

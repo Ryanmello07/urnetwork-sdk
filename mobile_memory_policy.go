@@ -47,32 +47,118 @@ const (
 )
 
 func mobilePackQueueBudgetByteCount(clientShareByteCount ByteCount) ByteCount {
+	return mobilePackQueueBudgetByteCountForTarget(
+		clientShareByteCount,
+		mobileSteadyMemoryTargetByteCount,
+	)
+}
+
+func mobilePackQueueBudgetByteCountForTarget(
+	clientShareByteCount ByteCount,
+	memoryTargetByteCount ByteCount,
+) ByteCount {
 	return min(
-		mobilePackQueueBudgetMaxByteCount,
-		max(mobilePackQueueBudgetMinByteCount, clientShareByteCount/10),
+		mobileTargetScaledByteCount(mobilePackQueueBudgetMaxByteCount, memoryTargetByteCount),
+		max(
+			mobileTargetScaledByteCount(mobilePackQueueBudgetMinByteCount, memoryTargetByteCount),
+			clientShareByteCount/10,
+		),
 	)
 }
 
 func mobileReceiveQueueBudgetByteCount(clientShareByteCount ByteCount) ByteCount {
+	return mobileReceiveQueueBudgetByteCountForTarget(
+		clientShareByteCount,
+		mobileSteadyMemoryTargetByteCount,
+	)
+}
+
+func mobileReceiveQueueBudgetByteCountForTarget(
+	clientShareByteCount ByteCount,
+	memoryTargetByteCount ByteCount,
+) ByteCount {
 	return min(
-		mobileReceiveQueueBudgetMaxByteCount,
-		max(mobileReceiveQueueBudgetMinByteCount, clientShareByteCount/10),
+		mobileTargetScaledByteCount(mobileReceiveQueueBudgetMaxByteCount, memoryTargetByteCount),
+		max(
+			mobileTargetScaledByteCount(
+				mobileReceiveQueueBudgetMinByteCount,
+				memoryTargetByteCount,
+			),
+			clientShareByteCount/10,
+		),
 	)
 }
 
 // mobileReceiveQueueBudgetForPlatform preserves the desktop/server share
-// calculation and installs the exact aggregate mobile ceiling only for the
-// <=24-MiB profile. Keeping this pure makes the provider on/off sizing policy
+// calculation and installs the target-scaled exact aggregate mobile ceiling.
+// Keeping this pure makes the provider on/off sizing policy
 // directly testable on a non-mobile host.
 func mobileReceiveQueueBudgetForPlatform(
 	memoryTargetByteCount ByteCount,
 	clientShareByteCount ByteCount,
 	mobile bool,
 ) ByteCount {
-	if mobileLowMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
-		return mobileReceiveQueueBudgetByteCount(clientShareByteCount)
+	if mobileMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
+		return mobileReceiveQueueBudgetByteCountForTarget(
+			clientShareByteCount,
+			memoryTargetByteCount,
+		)
 	}
 	return max(byteCountFraction(clientShareByteCount, 4, 7), 1536*1024)
+}
+
+// mobileReceiveQueueMaxByteCountForPool is the mobile ceiling on the
+// per-sequence receive hold, ReceiveQueueMaxByteCount.
+//
+// Connect advertises the smaller of that field and the attached receive
+// pool's live total (receiveWindowAdvertisement in connect/transfer.go), and
+// the sender clamps its window to the advertisement. The pool is what
+// admission charges -- bytes above it are never taken, and on mobile
+// ReceiveQueueMinByteCount is zero so nothing is held outside it -- so the
+// pool is the bound on what the phone will hold, and it is memory the device
+// has already reserved. A field below the pool therefore costs window and
+// saves nothing: the 768 KiB constant, calibrated for the 24 MiB profile
+// before the pools were attached, was undercutting a 1.5 MiB pool by half.
+//
+// On a pooled client the field's one job is to stay at or above every total
+// the pool can take, so the advertisement reads the pool itself, live through
+// the provide-mode resizes of applyProvideMemorySharesWithLock. That total is
+// at most mobileReceiveQueueBudgetMaxByteCount scaled by the target, the
+// ceiling of mobileReceiveQueueBudgetByteCountForTarget, and the provider
+// pair (4/7 of half the provider share) sits under the same line. Taking the
+// ceiling rather than the pool's total at call time keeps this independent of
+// when the policy runs relative to the pool being attached or resized.
+//
+// One unit mismatch to know about. The mobile pool charges retained bytes
+// (ReceiveQueueRetainedByteAccounting: the carrier root, the frame roots and
+// the owner per held Pack) while the field and the advertisement count
+// payload, so an out-of-order run fills the pool before the advertised
+// payload figure is reached and the receive hold policy evicts or refuses the
+// rest, which the eviction notice turns into resends. That is bandwidth after
+// a loss, never occupancy: admission still stops at the pool. The 768 KiB
+// constant was already above what the pool holds in payload for MTU-sized
+// Packs, so it protected nothing the pool does not.
+//
+// A client with no pool keeps the calibrated constant as its bound: there the
+// field is the only ceiling on the hold.
+func mobileReceiveQueueMaxByteCountForPool(
+	pooled bool,
+	memoryTargetByteCount ByteCount,
+) ByteCount {
+	maxByteCount := mobileTargetScaledByteCount(
+		mobileReceiveQueueMaxByteCount,
+		memoryTargetByteCount,
+	)
+	if pooled {
+		maxByteCount = max(
+			maxByteCount,
+			mobileTargetScaledByteCount(
+				mobileReceiveQueueBudgetMaxByteCount,
+				memoryTargetByteCount,
+			),
+		)
+	}
+	return maxByteCount
 }
 
 func mobilePackQueueBudgetForPlatform(
@@ -80,11 +166,11 @@ func mobilePackQueueBudgetForPlatform(
 	clientShareByteCount ByteCount,
 	mobile bool,
 ) *connect.TransferMemoryBudget {
-	if !mobileLowMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
+	if !mobileMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
 		return nil
 	}
 	return connect.NewTransferMemoryBudget(
-		mobilePackQueueBudgetByteCount(clientShareByteCount),
+		mobilePackQueueBudgetByteCountForTarget(clientShareByteCount, memoryTargetByteCount),
 	)
 }
 
@@ -141,7 +227,10 @@ const (
 	// budget is exhausted, so a per-sequence byte floor is unnecessary for
 	// liveness. Zero makes all subsequent reorder ownership visible to and
 	// bounded by the shared device budget instead of multiplying by flow count.
-	mobileReceiveQueueMinByteCount                  = 0
+	mobileReceiveQueueMinByteCount = 0
+	// The per-sequence receive hold of a client with NO attached pool. On a
+	// pooled client the pool bounds the hold instead; see
+	// mobileReceiveQueueMaxByteCountForPool.
 	mobileReceiveQueueMaxByteCount                  = 768 * 1024
 	mobileUnreliableFlightMaxByteCount              = 128 * 1024
 	mobileUnreliableFlightMaxMessageCount           = 16
@@ -160,16 +249,53 @@ func mobileRuntime() bool {
 	return runtime.GOOS == "android" || runtime.GOOS == "ios"
 }
 
-func mobileLowMemoryPolicyEnabled(memoryTargetByteCount ByteCount) bool {
-	return mobileLowMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobileRuntime())
+func mobileMemoryPolicyEnabled(memoryTargetByteCount ByteCount) bool {
+	return mobileMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobileRuntime())
 }
 
-func mobileLowMemoryPolicyEnabledForPlatform(
+// mobileMemoryPolicyEnabledForPlatform reports whether the mobile memory
+// policy applies. It is deliberately independent of how large the target is:
+// the invariants this policy installs (retained-byte accounting, no standing
+// reserve, the hard admission ceiling, the mobile TCP idle timeout, the
+// packet-group ownership caps) are properties of a phone, not of a particular
+// budget, and the byte/count caps are sized from the target by
+// mobileTargetScaled* rather than gated on it.
+//
+// The predicate it replaces also required memoryTargetByteCount <= 24 MiB, so
+// one byte above the steady target silently restored desktop sequence depths,
+// queue budgets, window sizes and packet-group limits -- the whole policy
+// disappeared exactly when a device was given more memory to work with.
+func mobileMemoryPolicyEnabledForPlatform(
 	memoryTargetByteCount ByteCount,
 	mobile bool,
 ) bool {
-	return mobile && 0 < memoryTargetByteCount &&
-		memoryTargetByteCount <= mobileSteadyMemoryTargetByteCount
+	return mobile && 0 < memoryTargetByteCount
+}
+
+// The mobile caps are calibrated at the 24-MiB steady target. At or below that
+// target the calibrated value stands, which is exactly what the gate these
+// replace did for every target it admitted, so no profile that ships today
+// changes. Above it, a cap grows in proportion to the target.
+//
+// Both are monotone non-decreasing in the target, so a larger budget can never
+// produce a tighter cap.
+func mobileTargetScaledByteCount(
+	calibratedByteCount ByteCount,
+	memoryTargetByteCount ByteCount,
+) ByteCount {
+	if memoryTargetByteCount <= mobileSteadyMemoryTargetByteCount {
+		return calibratedByteCount
+	}
+	return calibratedByteCount * memoryTargetByteCount / mobileSteadyMemoryTargetByteCount
+}
+
+func mobileTargetScaledCount(calibratedCount int, memoryTargetByteCount ByteCount) int {
+	if memoryTargetByteCount <= mobileSteadyMemoryTargetByteCount {
+		return calibratedCount
+	}
+	return int(
+		ByteCount(calibratedCount) * memoryTargetByteCount / mobileSteadyMemoryTargetByteCount,
+	)
 }
 
 func applyMobileLowMemoryPlatformTransportSettings(
@@ -189,10 +315,13 @@ func applyMobileLowMemoryPlatformTransportSettingsForPlatform(
 	mobile bool,
 ) {
 	if settings == nil ||
-		!mobileLowMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
+		!mobileMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
 		return
 	}
-	settings.H1AckPriorityBufferSize = mobileH1AckPriorityBufferSize
+	settings.H1AckPriorityBufferSize = mobileTargetScaledCount(
+		mobileH1AckPriorityBufferSize,
+		memoryTargetByteCount,
+	)
 }
 
 // applyMobileLowMemoryClientSettings bounds the number and bytes of packets
@@ -216,42 +345,62 @@ func applyMobileLowMemoryClientSettingsForPlatform(
 	mobile bool,
 ) {
 	if settings == nil ||
-		!mobileLowMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
+		!mobileMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
 		return
 	}
-	settings.SendBufferSize = min(settings.SendBufferSize, mobileClientSequenceBufferMaxCount)
-	settings.ForwardBufferSize = min(settings.ForwardBufferSize, mobileClientSequenceBufferMaxCount)
+	sequenceBufferMaxCount := mobileTargetScaledCount(
+		mobileClientSequenceBufferMaxCount,
+		memoryTargetByteCount,
+	)
+	settings.SendBufferSize = min(settings.SendBufferSize, sequenceBufferMaxCount)
+	settings.ForwardBufferSize = min(settings.ForwardBufferSize, sequenceBufferMaxCount)
 	if settings.SendBufferSettings != nil {
 		send := settings.SendBufferSettings
-		send.SequenceBufferSize = min(send.SequenceBufferSize, mobileClientSequenceBufferMaxCount)
-		send.AckBufferSize = min(send.AckBufferSize, mobileClientAckBufferMaxCount)
+		// Retained resend roots are lifetime owners, including retries; an
+		// empty flow or its tuning floor cannot overdraw the shared pool.
+		send.ResendQueueRetainedByteAccounting = true
+		send.SequenceBufferSize = min(send.SequenceBufferSize, sequenceBufferMaxCount)
+		send.AckBufferSize = min(
+			send.AckBufferSize,
+			mobileTargetScaledCount(mobileClientAckBufferMaxCount, memoryTargetByteCount),
+		)
 		send.ResendQueueMinByteCount = min(
 			send.ResendQueueMinByteCount,
-			mobileResendQueueMinByteCount,
+			mobileTargetScaledByteCount(mobileResendQueueMinByteCount, memoryTargetByteCount),
 		)
 		send.ResendQueueMaxByteCount = min(
 			send.ResendQueueMaxByteCount,
-			mobileResendQueueMaxByteCount,
+			mobileTargetScaledByteCount(mobileResendQueueMaxByteCount, memoryTargetByteCount),
 		)
 		send.UnreliableMaximumFlightByteCount = min(
 			send.UnreliableMaximumFlightByteCount,
-			mobileUnreliableFlightMaxByteCount,
+			mobileTargetScaledByteCount(
+				mobileUnreliableFlightMaxByteCount,
+				memoryTargetByteCount,
+			),
 		)
 		send.UnreliableMaximumFlightMessageCount = min(
 			send.UnreliableMaximumFlightMessageCount,
-			mobileUnreliableFlightMaxMessageCount,
+			mobileTargetScaledCount(
+				mobileUnreliableFlightMaxMessageCount,
+				memoryTargetByteCount,
+			),
 		)
 	}
 	if settings.ReceiveBufferSettings != nil {
 		receive := settings.ReceiveBufferSettings
+		// invariant: charge every retained reorder byte to the shared budget
 		receive.ReceiveQueueRetainedByteAccounting = true
 		receive.SequenceBufferSize = min(
 			receive.SequenceBufferSize,
-			mobileClientSequenceBufferMaxCount,
+			sequenceBufferMaxCount,
 		)
 		receive.H1SequenceBufferSize = min(
 			receive.H1SequenceBufferSize,
-			mobileH1ReceiveSequenceBufferMaxCount,
+			mobileTargetScaledCount(
+				mobileH1ReceiveSequenceBufferMaxCount,
+				memoryTargetByteCount,
+			),
 		)
 		receive.H1SequenceBufferAdaptiveMaxSize = 0
 		receive.H1SequenceBufferAdaptiveStepSize = 0
@@ -261,11 +410,17 @@ func applyMobileLowMemoryClientSettingsForPlatform(
 		receive.H1SequenceBufferAdaptiveStepByteCount = 0
 		receive.SequenceBufferByteCount = min(
 			receive.SequenceBufferByteCount,
-			mobileReceiveSequenceBufferMaxByteCount,
+			mobileTargetScaledByteCount(
+				mobileReceiveSequenceBufferMaxByteCount,
+				memoryTargetByteCount,
+			),
 		)
 		receive.H1SequenceBufferByteCount = min(
 			receive.H1SequenceBufferByteCount,
-			mobileH1ReceiveSequenceBufferMaxByteCount,
+			mobileTargetScaledByteCount(
+				mobileH1ReceiveSequenceBufferMaxByteCount,
+				memoryTargetByteCount,
+			),
 		)
 		receive.H1PackHandoffTimeout = mobileH1ReceivePackHandoffWaitTimeout
 		receive.ReliablePackHandoffTimeout = mobileH1ReceivePackHandoffWaitTimeout
@@ -276,19 +431,22 @@ func applyMobileLowMemoryClientSettingsForPlatform(
 		)
 		receive.ReceiveQueueMaxByteCount = min(
 			receive.ReceiveQueueMaxByteCount,
-			mobileReceiveQueueMaxByteCount,
+			mobileReceiveQueueMaxByteCountForPool(
+				receive.ReceiveQueueBudget != nil,
+				memoryTargetByteCount,
+			),
 		)
 	}
 	if settings.ForwardBufferSettings != nil {
 		settings.ForwardBufferSettings.SequenceBufferSize = min(
 			settings.ForwardBufferSettings.SequenceBufferSize,
-			mobileClientSequenceBufferMaxCount,
+			sequenceBufferMaxCount,
 		)
 	}
 	if settings.ContractManagerSettings != nil {
 		settings.ContractManagerSettings.SequenceBufferSize = min(
 			settings.ContractManagerSettings.SequenceBufferSize,
-			mobileClientSequenceBufferMaxCount,
+			sequenceBufferMaxCount,
 		)
 	}
 }
@@ -317,14 +475,17 @@ func applyMobileH1PerformanceClientSettingsForPlatform(
 	explicitH1 bool,
 ) {
 	if settings == nil || settings.SendBufferSettings == nil || !explicitH1 ||
-		!mobileLowMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
+		!mobileMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
 		return
 	}
-	settings.SendBufferSettings.LogicalDataLaneCount = mobileH1LogicalDataLaneCount
+	settings.SendBufferSettings.LogicalDataLaneCount = mobileTargetScaledCount(
+		mobileH1LogicalDataLaneCount,
+		memoryTargetByteCount,
+	)
 }
 
-// applyMobileLowMemoryMultiClientSettings reduces the connected control/live
-// set for a 24-MiB mobile DeviceLocal. Explicit fixed destinations are
+// applyMobileLowMemoryMultiClientSettings sizes the connected control/live
+// set for a memory-targeted mobile DeviceLocal. Explicit fixed destinations are
 // unaffected; this changes only Auto's quality and speed windows. Server and
 // desktop defaults never pass the mobile platform gate.
 func applyMobileLowMemoryMultiClientSettings(
@@ -344,16 +505,20 @@ func applyMobileLowMemoryMultiClientSettingsForPlatform(
 	mobile bool,
 ) {
 	if settings == nil ||
-		!mobileLowMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
+		!mobileMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
 		return
 	}
+	sequenceBufferMaxCount := mobileTargetScaledCount(
+		mobileClientSequenceBufferMaxCount,
+		memoryTargetByteCount,
+	)
 	settings.SequenceBufferSize = min(
 		settings.SequenceBufferSize,
-		mobileClientSequenceBufferMaxCount,
+		sequenceBufferMaxCount,
 	)
 	settings.RemovalReceiveQueueSize = min(
 		settings.RemovalReceiveQueueSize,
-		mobileClientSequenceBufferMaxCount,
+		sequenceBufferMaxCount,
 	)
 	// Nonpositive packet-group limits mean "unbounded" in Connect. A partial
 	// custom settings object must not accidentally bypass the mobile ownership
@@ -375,17 +540,19 @@ func applyMobileLowMemoryMultiClientSettingsForPlatform(
 	if settings.WindowSizes == nil {
 		settings.WindowSizes = make(map[connect.WindowType]connect.WindowSizeSettings, 2)
 	}
+	qualityWindowSize := mobileTargetScaledCount(mobileQualityWindowSize, memoryTargetByteCount)
+	speedWindowSize := mobileTargetScaledCount(mobileSpeedWindowSize, memoryTargetByteCount)
 	settings.WindowSizes[connect.WindowTypeQuality] = connect.WindowSizeSettings{
-		WindowSizeMin:            mobileQualityWindowSize,
-		WindowSizeMax:            mobileQualityWindowSize,
-		WindowSizeHardMax:        mobileQualityWindowSize,
+		WindowSizeMin:            qualityWindowSize,
+		WindowSizeMax:            qualityWindowSize,
+		WindowSizeHardMax:        qualityWindowSize,
 		WindowSizeReconnectScale: 1,
 	}
 	settings.WindowSizes[connect.WindowTypeSpeed] = connect.WindowSizeSettings{
-		WindowSizeMin:            mobileSpeedWindowSize,
-		WindowSizeMax:            mobileSpeedWindowSize,
-		WindowSizeHardMax:        mobileSpeedWindowSize,
-		FixedWindowSize:          mobileSpeedWindowSize,
+		WindowSizeMin:            speedWindowSize,
+		WindowSizeMax:            speedWindowSize,
+		WindowSizeHardMax:        speedWindowSize,
+		FixedWindowSize:          speedWindowSize,
 		WindowSizeReconnectScale: 1,
 	}
 }

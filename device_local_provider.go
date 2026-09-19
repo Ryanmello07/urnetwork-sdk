@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"sync"
@@ -106,6 +107,9 @@ type deviceLocalProvider struct {
 	// the extender role while it runs (G2), nil while provide or the setting
 	// is off and on every build that does not carry it (G1)
 	extender *deviceLocalExtender
+	// why the role could not start while it was asked to run, empty while it
+	// runs or was not asked to (N3)
+	extenderStartError string
 	// the device's effective provide mode, which decides whether the standby
 	// dials direct (J4). The device hands it over on every change.
 	provideMode ProvideMode
@@ -154,7 +158,8 @@ func newDeviceLocalProviderWithOverrides(
 	modePreferences map[connect.TransportMode]int,
 	dialContextSettings *connect.DialContextSettings,
 	dnsPumpHost string,
-) *deviceLocalProvider {
+	transferMemory *deviceLocalTransferMemory,
+) (*deviceLocalProvider, error) {
 	providerCtx, providerCancel := context.WithCancel(ctx)
 	apiUrl := networkSpace.apiUrl
 	clientStrategy := networkSpace.clientStrategy
@@ -185,11 +190,32 @@ func newDeviceLocalProviderWithOverrides(
 	// return streams restored by StreamReset after a process restart. Window
 	// clients created for an outbound destination leave this false.
 	clientSettings.ProviderStreamPolicy = true
+	var providerTransferParent *connect.TransferMemoryBudget
+	if transferMemory != nil {
+		providerTransferParent = transferMemory.provider
+	}
 
 	resendQueueBudget, receiveQueueBudget := configureDeviceLocalProviderMemory(
 		clientSettings,
 		providerMemoryTargetByteCount,
+		providerTransferParent,
 	)
+	// Admit the fallback NAT while the new device root is still empty, before
+	// starting the provider client. It is a lifetime owner even with providing
+	// disabled. Refusal is observable; never install a dead/nil NAT as a route.
+	localUserNatSettings := providerLocalUserNatSettings(
+		providerMemoryTargetByteCount,
+		clientSettings.Log,
+	)
+	if transferMemory != nil {
+		localUserNatSettings.MemoryBudget = transferMemory.nat
+	}
+	localUserNat, err := connect.TryNewLocalUserNat(providerCtx, clientId.String(), localUserNatSettings)
+	if err != nil {
+		providerCancel()
+		_ = clientOob.CloseAndWait(context.Background())
+		return nil, fmt.Errorf("admit fallback NAT: %w", err)
+	}
 
 	client := connect.NewClient(
 		providerCtx,
@@ -218,16 +244,6 @@ func newDeviceLocalProviderWithOverrides(
 	// Explicit provider H3 is a required reservation and ignores this priority.
 	platformTransportSettings.PlatformTransportBudgetPriority =
 		connect.PlatformTransportBudgetPriorityBackground
-
-	// This NAT is the local-fallback egress surface: use the explicit
-	// provider profile sized from the provider share, so an unbudgeted
-	// desktop/server build does not become unbounded, while generic local
-	// NAT callers do not inherit phone caps.
-	localUserNatSettings := connect.DefaultProviderLocalUserNatSettingsWithMemoryTarget(
-		providerMemoryTargetByteCount,
-	)
-	localUserNatSettings.Log = clientSettings.Log
-	localUserNat := connect.NewLocalUserNat(client.Ctx(), clientId.String(), localUserNatSettings)
 
 	provider := &deviceLocalProvider{
 		ctx:          providerCtx,
@@ -267,7 +283,7 @@ func newDeviceLocalProviderWithOverrides(
 	// the platform asks the client to migrate its transport when the resident
 	// is draining (make-before-break, CONNECTDRAIN2.md §3.3)
 	client.AddReceiveCallback(provider.handleControlFrames)
-	return provider
+	return provider, nil
 }
 
 // Whether a provide mode serves public peers (J4). The modes are ordered by
@@ -425,6 +441,7 @@ func (self *deviceLocalProvider) familyTransportStatus() *ProviderFamilyTranspor
 func configureDeviceLocalProviderMemory(
 	clientSettings *connect.ClientSettings,
 	memoryTargetByteCount ByteCount,
+	parents ...*connect.TransferMemoryBudget,
 ) (resendQueueBudget *connect.TransferMemoryBudget, receiveQueueBudget *connect.TransferMemoryBudget) {
 	if memoryTargetByteCount <= 0 {
 		return
@@ -433,8 +450,8 @@ func configureDeviceLocalProviderMemory(
 	// Half the provider share is the transfer pair, split 3:4 send:receive;
 	// egress NAT flow caps own the other half.
 	pairTarget := memoryTargetByteCount / 2
-	resendQueueBudget = connect.NewTransferMemoryBudget(max(byteCountFraction(pairTarget, 3, 7), 256*1024))
-	receiveQueueBudget = connect.NewTransferMemoryBudget(max(byteCountFraction(pairTarget, 4, 7), 384*1024))
+	resendQueueBudget = deviceLocalTransferBudgetWithParent(max(byteCountFraction(pairTarget, 3, 7), 256*1024), parents...)
+	receiveQueueBudget = deviceLocalTransferBudgetWithParent(max(byteCountFraction(pairTarget, 4, 7), 384*1024), parents...)
 	clientSettings.SendBufferSettings.ResendQueueBudget = resendQueueBudget
 	clientSettings.ReceiveBufferSettings.ReceiveQueueBudget = receiveQueueBudget
 
@@ -442,7 +459,7 @@ func configureDeviceLocalProviderMemory(
 	// the active transfer receive queue (which is legitimately full precisely
 	// when P2P is needed).
 	clientSettings.WebRtcSettings.ReceiveBufferSize = deviceLocalP2pReceiveBufferByteCount
-	clientSettings.WebRtcSettings.MemoryBudget = deviceLocalWebRtcBudget(memoryTargetByteCount)
+	clientSettings.WebRtcSettings.MemoryBudget = deviceLocalWebRtcBudget(memoryTargetByteCount, parents...)
 	// ICE UDP socket buffers: 4 MiB is the server default; a phone keeps the
 	// provider's ACK drops away at 512 KiB per socket without the footprint
 	// of a gathered candidate set at server size (FLIGHTGATEFIX §13.7,
@@ -454,8 +471,9 @@ func configureDeviceLocalProviderMemory(
 	// starve the many-peer public pool.
 	clientSettings.WebRtcSettings.NetworkPeerReceiveBufferSize =
 		deviceLocalNetworkPeerP2pReceiveBufferByteCount
-	clientSettings.WebRtcSettings.NetworkPeerMemoryBudget = connect.NewTransferMemoryBudget(
-		deviceLocalNetworkPeerP2pConnectionCount * deviceLocalNetworkPeerP2pReceiveBufferByteCount,
+	clientSettings.WebRtcSettings.NetworkPeerMemoryBudget = deviceLocalTransferBudgetWithParent(
+		deviceLocalNetworkPeerP2pConnectionCount*deviceLocalNetworkPeerP2pReceiveBufferByteCount,
+		parents...,
 	)
 	return
 }
@@ -892,13 +910,58 @@ func newDeviceClientSettings(
 		}
 	}
 
+	// Install the signed-identity resolver when none is configured. Unlike the
+	// cross-check above this one is enforcing under `EncryptionModeRequired`:
+	// it withholds the session cipher until the contract-supplied identity key
+	// is corroborated against evidence the operator signed, and a verified
+	// disagreement is terminal for that peer. See connect/DESIGNNOTES3.
+	if clientSettings.EncryptionSettings != nil &&
+		clientSettings.EncryptionSettings.NewPeerClientKeyHistoryFetcher == nil {
+		clientSettings.EncryptionSettings.NewPeerClientKeyHistoryFetcher = func(peerId connect.Id) func(context.Context) ([][]byte, error) {
+			url := fmt.Sprintf("%s/key/%s/history", apiUrl, peerId)
+			return func(fetchCtx context.Context) ([][]byte, error) {
+				r, err := connect.HttpGetWithStrategy(
+					fetchCtx,
+					clientStrategy,
+					url,
+					"",
+					&connect.GetClientKeyHistoryResult{},
+					connect.NewNoopApiCallback[*connect.GetClientKeyHistoryResult](),
+				)
+				if err != nil {
+					// an availability failure, never evidence of substitution
+					return nil, err
+				}
+				return r.History, nil
+			}
+		}
+	}
+
 	return &clientSettings
+}
+
+// All destination generations reuse the device's durable ratchet. Copy the
+// encryption options before attaching it; never mutate shared defaults.
+func shareDevicePeerKeyPinStore(client, device *connect.ClientSettings) {
+	if device.EncryptionSettings == nil {
+		return
+	}
+	if client.EncryptionSettings == nil {
+		client.EncryptionSettings = connect.DefaultEncryptionSettings()
+	}
+	encryption := *client.EncryptionSettings
+	encryption.PeerClientKeyPinStore = device.EncryptionSettings.PeerClientKeyPinStore
+	client.EncryptionSettings = &encryption
 }
 
 // setExtenderEnabled starts or stops the provider extender role (G2). It is
 // called after every provide change and after the setting of F3 changes, and
 // is a no-op when the role is already in the requested state or when this
 // build carries none (G1).
+//
+// A role that was asked for and could not be built records why, which the
+// status reports as the start error of N3 until the role is asked for again
+// or no longer asked for.
 func (self *deviceLocalProvider) setExtenderEnabled(enabled bool) {
 	self.extenderLock.Lock()
 	defer self.extenderLock.Unlock()
@@ -912,25 +975,31 @@ func (self *deviceLocalProvider) setExtenderEnabled(enabled bool) {
 		// ios, android and js carry no role at all (G1)
 		enabled = false
 	}
-	if enabled == (current != nil) {
-		return
-	}
 	if !enabled {
+		// nothing is asked for, so nothing failed to start
 		func() {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
 			self.extender = nil
+			self.extenderStartError = ""
 		}()
-		current.Close()
+		if current != nil {
+			current.Close()
+		}
+		return
+	}
+	if current != nil {
 		return
 	}
 
-	settings := self.extenderSettings()
-	if settings == nil {
+	settings, err := self.extenderSettings()
+	if err != nil {
+		self.setExtenderStartError(err)
 		return
 	}
-	extender := newDeviceLocalExtender(self.ctx, settings)
-	if extender == nil {
+	extender, err := newDeviceLocalExtender(self.ctx, settings)
+	if err != nil {
+		self.setExtenderStartError(err)
 		return
 	}
 	installed := func() bool {
@@ -940,6 +1009,7 @@ func (self *deviceLocalProvider) setExtenderEnabled(enabled bool) {
 			return false
 		}
 		self.extender = extender
+		self.extenderStartError = ""
 		return true
 	}()
 	if !installed {
@@ -948,20 +1018,29 @@ func (self *deviceLocalProvider) setExtenderEnabled(enabled bool) {
 	}
 }
 
-// The role's settings for this space and this device (G2, G3), or nil when
-// there is nothing to run: a space with no identity to activate under, since
-// an extender whose key changed on every launch would be revoked as fast as it
-// activates. The identity is the space's (B1): its persisted `.extender_key`,
+func (self *deviceLocalProvider) setExtenderStartError(err error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.closed {
+		return
+	}
+	self.extenderStartError = err.Error()
+}
+
+// The role's settings for this space and this device (G2, G3), or an error
+// when there is nothing to run: a device with no space, or a space with no
+// identity to activate under, since an extender whose key changed on every
+// launch would be revoked as fast as it activates. The identity is the space's (B1): its persisted `.extender_key`,
 // the seed an embedder supplied through the device's key material, or one the
 // space generated, which the embedder can read back and keep.
-func (self *deviceLocalProvider) extenderSettings() *deviceLocalExtenderSettings {
+func (self *deviceLocalProvider) extenderSettings() (*deviceLocalExtenderSettings, error) {
 	networkSpace := self.networkSpace
 	if networkSpace == nil {
-		return nil
+		return nil, errors.New("the device has no network space")
 	}
 	identityKeySeed := networkSpace.extenderIdentityKeySeed()
 	if len(identityKeySeed) == 0 {
-		return nil
+		return nil, errors.New("the network space has no extender identity")
 	}
 
 	// the relay's forward dial is the device's own egress: the extender
@@ -995,7 +1074,7 @@ func (self *deviceLocalProvider) extenderSettings() *deviceLocalExtenderSettings
 	if self.extenderSettingsConfigure != nil {
 		self.extenderSettingsConfigure(settings)
 	}
-	return settings
+	return settings, nil
 }
 
 // The client jwt of this provider, read at each activation so a refresh is
@@ -1010,12 +1089,27 @@ func (self *deviceLocalProvider) byJwt() string {
 }
 
 // The provider extender status (F3). A provider with no role reports a
-// disabled status.
+// disabled status, carrying why the role did not start when it was asked to
+// (N3).
 func (self *deviceLocalProvider) extenderProvideStatus() *ExtenderProvideStatus {
 	self.stateLock.Lock()
 	extender := self.extender
+	startError := self.extenderStartError
 	self.stateLock.Unlock()
+	if extender == nil && startError != "" {
+		status := disabledExtenderProvideStatus()
+		status.StartError = startError
+		return status
+	}
 	return extender.status()
+}
+
+// The relayed traffic of the running role (O2), nil while there is none.
+func (self *deviceLocalProvider) extenderStats() *ExtenderStats {
+	self.stateLock.Lock()
+	extender := self.extender
+	self.stateLock.Unlock()
+	return extender.stats()
 }
 
 // A channel armed at the instant of the read, so a consumer is woken when the
