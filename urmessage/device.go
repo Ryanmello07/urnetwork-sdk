@@ -210,9 +210,10 @@ type Device struct {
 
 	// The store the engine was built over, HELD BESIDE the engine for [DeviceStore]: every
 	// durable-only path in this package -- [Device.Restore], [Device.persistGroup],
-	// [Device.persistSent] -- asks this value whether it is a [DeviceStore] and does nothing when
-	// it is not. The query, so the claim is checkable: `grep -n "self.stateStore" urmessage/*.go`
-	// answers those three type assertions and nothing else.
+	// [Device.persistSent], [Device.persistPeerHeads] -- asks this value whether it is a
+	// [DeviceStore] and does nothing when it is not. The query, so the claim is checkable:
+	// `grep -n "self.stateStore" urmessage/*.go` answers those four type assertions and nothing
+	// else.
 	//
 	// IT USED TO BE HELD FOR A SECOND REASON AND THAT REASON IS GONE. Until LoadGroup landed,
 	// `restoreOne` called `mls.LoadGroup` DIRECTLY -- because `messagegroup.GroupEngine` had four

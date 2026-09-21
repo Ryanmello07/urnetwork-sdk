@@ -55,7 +55,10 @@ func (self *MemoryStateStore) GetGroupState(groupId []byte, epoch uint64) ([]byt
 	defer self.lock.Unlock()
 	state, held := self.groupStates[fmt.Sprintf("%x/%d", groupId, epoch)]
 	if !held {
-		return nil, fmt.Errorf("urmessage: no mls group state for %x at epoch %d", groupId, epoch)
+		// the SAME sentinel the durable store answers, because the walk branches on it: a
+		// record from an epoch this device holds no state for is a gap, and a store that
+		// answered a bare error for that would make it a failure retried three times instead.
+		return nil, fmt.Errorf("%w: no mls group state for %x at epoch %d", ErrStateNotFound, groupId, epoch)
 	}
 	return append([]byte(nil), state...), nil
 }

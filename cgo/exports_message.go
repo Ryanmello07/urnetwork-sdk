@@ -1018,6 +1018,7 @@ func urnet_message_group_stats(self C.uint64_t) *C.char {
 		GapMalformed:    stats.GapMalformed,
 		GapUnsupported:  stats.GapUnsupported,
 		GapOutOfWindow:  stats.GapOutOfWindow,
+		OpenedPastEpoch: stats.OpenedPastEpoch,
 		Ingested:        stats.Ingested,
 		FailedOpen:      stats.FailedOpen,
 		Submitted:       stats.Submitted,
@@ -1293,10 +1294,15 @@ type messageGroupStats struct {
 	// read -- gap_malformed and the per-message gap field are what is left to learn it from.
 	GapMalformed   uint64 `json:"gap_malformed"`
 	GapUnsupported uint64 `json:"gap_unsupported"`
-	// Records that became an out_of_window gap: sealed at an epoch this device has left, which a
-	// restored device meets re-walking its history at a later epoch. A membership change put them
-	// out of this build's reach; item 241's history-across-a-change is what will carry them instead.
+	// Records that became an out_of_window gap: sealed at an epoch no schedule on this device
+	// reaches -- more than the past epoch window behind, or before this device was admitted. Since
+	// ledger item 241 a member who WAS there produces none of these across a membership change; a
+	// later joiner produces one per pre-admission record, which is MLS's own answer for it.
 	GapOutOfWindow uint64 `json:"gap_out_of_window"`
+	// Records that OPENED under a PRIOR epoch's schedule: sealed at an epoch this device has left
+	// and opened anyway, because it was a member then. Ledger item 241. A subset of opened, carried
+	// apart so that "history survived the change" is a number a caller can show and not an absence.
+	OpenedPastEpoch uint64 `json:"opened_past_epoch"`
 	// Commits this group INGESTED: §6.1 membership-change records this device processed, authorized,
 	// applied and followed into the next epoch. One per epoch this device was carried into rather
 	// than authored.

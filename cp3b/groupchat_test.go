@@ -187,7 +187,7 @@ func TestThreeDevicesConvergeToEpochTwoAndExchangeMessagesEveryDirection(t *test
 	if stats.FailedOpen != 0 {
 		t.Errorf("the restarted bob failed to open %d records; pre-change records must be gaps, not failures", stats.FailedOpen)
 	}
-	t.Logf("MILESTONE: three devices converged to epoch 2 and messaged in every direction; the restart produced %d out_of_window gap(s) (bob's own and alice's epoch-one lines, which item 241 will one day carry) and opened %d record(s) with 0 failures",
+	t.Logf("MILESTONE: three devices converged to epoch 2 and messaged in every direction; the restart produced %d out_of_window gap(s) (bob's own and alice's epoch-one lines now open under the rebuilt epoch-one schedule, item 241) and opened %d record(s) with 0 failures",
 		stats.GapOutOfWindow, stats.Opened+stats.OpenedOwn)
 }
 

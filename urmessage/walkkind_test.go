@@ -95,7 +95,13 @@ func newKindWalk(t *testing.T) *kindWalk {
 	// what is under test. `reconciled` is true for the reason a joined group's is -- this
 	// device's stream in this group starts here -- and it also keeps commitWalkLocked off the
 	// reserver, which a group with no device could not reach.
+	//
+	// IT HAS A DEVICE SINCE LEDGER ITEM 241, and the smallest one: the walk's commit persists
+	// the receiver heads it authenticated through [Device.persistPeerHeads], which reaches the
+	// device's store and nothing else of it. The store is bob's own durable one, so the heads
+	// land in a directory this case owns.
 	bobGroup := &Group{
+		device:         &Device{stateStore: bob.store, engine: bob.engine, reserver: bob.reserver},
 		id:             append([]byte(nil), groupId...),
 		handle:         bobHandle,
 		groupHandleKey: groupHandleKey,

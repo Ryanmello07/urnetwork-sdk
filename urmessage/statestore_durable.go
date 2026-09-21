@@ -162,6 +162,51 @@ type DeviceStore interface {
 	// index. See [SentRecord] for why the copy exists at all.
 	PutSentRecord(groupId []byte, record *SentRecord) error
 	SentRecords(groupId []byte) ([]*SentRecord, error)
+
+	// PutPeerHeads REPLACES the table of receiver-ladder heads one group has authenticated, and
+	// PeerHeads answers it -- EMPTY, and no error, for a group that has none written, which is
+	// every group a build before this one persisted. See [PeerHead] for what one is and why a
+	// restart needs it.
+	PutPeerHeads(groupId []byte, heads []PeerHead) error
+	PeerHeads(groupId []byte) ([]PeerHead, error)
+}
+
+// PeerHead is the highest 5.6 stream index this device has AUTHENTICATED on one peer's receiver
+// ladder AT ONE EPOCH: the number a restarted device tracks that ladder at, so that a peer past
+// the receiver window is not silent for the rest of the epoch. Ledger item 241's restart half.
+//
+// WHY IT IS PER EPOCH AND NOT ONE NUMBER PER LADDER. The stream index is continuous across epochs,
+// so the head of the whole stream is one number -- and it is the WRONG number for a device that
+// re-walks its history. A restarted device opens every record again, from the first, and the
+// ladder for epoch n has to start at the head as of the START of epoch n: the highest index
+// authenticated at epochs BELOW n. The head at n itself, or at any later epoch, stands above the
+// very records the re-walk is about to open, and a ladder tracked there refuses all of them as
+// "below this receiver's head". So the table keeps one head per (ladder, epoch), and
+// [Group.pastHeadLocked] reads it with the strict inequality that makes a restart correct.
+//
+// IT IS NOT SECRET. Every field is a number that is in the cleartext header of a record the server
+// stores, and the leaf-to-handle mapping is what every member computes. It is written through the
+// same framed, checksummed record every other value here is, for the same reason: a file that is
+// not what its name says is refused rather than read as a head.
+//
+// IT IS A HINT AND NOT A PROOF. A head written here was read off records the group's keys
+// authenticated at the time; the ladder it positions still opens nothing that does not open. A
+// table that is missing or stale costs a restart the window only -- a ladder tracked below the
+// truth by less than [messagegroup.DefaultRecordWindowSize] indices absorbs the difference, and
+// one tracked at 0 is what every build before this one did.
+type PeerHead struct {
+	// The MLS epoch the head was authenticated at.
+	Epoch uint64
+
+	// The peer's leaf index, from which its sender_handle is derived; the retention class wire
+	// byte and the eph window that name the ladder. Together with the epoch they are
+	// [Group.peerHeadsAt]'s key.
+	Leaf          uint32
+	RetentionWire byte
+	EphWindow     uint64
+
+	// The highest stream index authenticated on that ladder at that epoch.
+	Head uint64
 }
 
 // SentRecord is this device's copy of one application record it sealed: the only place its own
@@ -263,6 +308,7 @@ const (
 	stateKindDeviceIdentity byte = 4
 	stateKindGroupRecord    byte = 5
 	stateKindSentRecord     byte = 6
+	stateKindPeerHeads      byte = 7
 )
 
 // encodeStateRecord frames one record: magic, version, kind, the parts each length-prefixed, and
@@ -559,6 +605,16 @@ func (self *DurableStateStore) groupRecordPath(groupId []byte) string {
 
 func (self *DurableStateStore) epochDir(groupId []byte) string {
 	return filepath.Join(self.groupDir(groupId), "epoch")
+}
+
+// peerHeadsPath is where one group's [PeerHead] table lives: ONE file beside meta, replaced whole
+// on every write, so that a build that never heard of it -- every build before ledger item 241 --
+// reads the group exactly as it did. That is the whole of the format decision and it is why the
+// table is not a sixth part of the group record: GroupRecords refuses a meta with any part count
+// but five, so a part added there would make every group of this build unreadable to the build
+// before it, and a version bump would do the same to every record in the directory at once.
+func (self *DurableStateStore) peerHeadsPath(groupId []byte) string {
+	return filepath.Join(self.groupDir(groupId), "heads")
 }
 
 // sentDir is where one group's [SentRecord] copies live, each named by its stream index as sixteen
@@ -1094,6 +1150,12 @@ func (self *DurableStateStore) DeleteGroupRecord(groupId []byte) error {
 	if err := self.deleteSentLocked(groupId); err != nil {
 		return err
 	}
+	// the head table THIRD, before the record and after the secrets: it is not secret, so its
+	// order matters only for the directory being empty at the end, and a table left behind is a
+	// directory the best-effort remove below cannot take.
+	if err := self.removeLocked(self.peerHeadsPath(groupId)); err != nil {
+		return err
+	}
 	if err := self.removeLocked(self.groupRecordPath(groupId)); err != nil {
 		return err
 	}
@@ -1238,4 +1300,95 @@ func (self *DurableStateStore) deleteSentLocked(groupId []byte) error {
 			ErrStateStoreState, entries[0].Name(), groupId)
 	}
 	return nil
+}
+
+// The width of one [PeerHead] on the disk: epoch, leaf, wire byte, window and head, big endian,
+// in that order.
+const peerHeadOctets = 8 + 4 + 1 + 8 + 8
+
+// PutPeerHeads writes one group's whole [PeerHead] table, replacing what was there.
+//
+// REPLACED WHOLE AND NOT APPENDED, because a head only ever rises and the table is small: one row
+// per (peer ladder, epoch) this device has opened anything on. The record is the group id and then
+// one fixed-width part per head, so a reader that finds any other shape refuses it by name.
+func (self *DurableStateStore) PutPeerHeads(groupId []byte, heads []PeerHead) error {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return err
+	}
+	if len(groupId) != GroupIdBytes {
+		return fmt.Errorf("%w: a group id is %d octets and this one is %d", ErrStateStoreFormat, GroupIdBytes, len(groupId))
+	}
+	// encodeStateRecord counts parts in a byte, so the table is bounded at 254 rows per write; a
+	// device that authenticated more (peer ladders x epochs) than that in one group keeps the
+	// highest-epoch rows, which are the ones a restart reads for the epochs still inside the
+	// window. Rows are sorted so the choice is stated rather than left to map order.
+	sorted := append([]PeerHead(nil), heads...)
+	sort.Slice(sorted, func(a, b int) bool {
+		if sorted[a].Epoch != sorted[b].Epoch {
+			return sorted[a].Epoch < sorted[b].Epoch
+		}
+		if sorted[a].Leaf != sorted[b].Leaf {
+			return sorted[a].Leaf < sorted[b].Leaf
+		}
+		if sorted[a].RetentionWire != sorted[b].RetentionWire {
+			return sorted[a].RetentionWire < sorted[b].RetentionWire
+		}
+		return sorted[a].EphWindow < sorted[b].EphWindow
+	})
+	if len(sorted) > 254 {
+		sorted = sorted[len(sorted)-254:]
+	}
+	parts := [][]byte{groupId}
+	for _, head := range sorted {
+		row := make([]byte, 0, peerHeadOctets)
+		row = binary.BigEndian.AppendUint64(row, head.Epoch)
+		row = binary.BigEndian.AppendUint32(row, head.Leaf)
+		row = append(row, head.RetentionWire)
+		row = binary.BigEndian.AppendUint64(row, head.EphWindow)
+		row = binary.BigEndian.AppendUint64(row, head.Head)
+		parts = append(parts, row)
+	}
+	return self.writeRecord(self.peerHeadsPath(groupId), stateKindPeerHeads, parts...)
+}
+
+// PeerHeads answers the table PutPeerHeads last wrote for one group, or an EMPTY table and no
+// error when none was ever written.
+//
+// EMPTY AND NOT A REFUSAL is the one decision here and it is what makes an old directory readable:
+// a build before ledger item 241 wrote no table, and a restore that refused the group over that
+// would turn every existing device's groups into a restore failure on upgrade. What a missing
+// table costs is stated on [PeerHead]: the restart tracks at 0, which is what that build did.
+func (self *DurableStateStore) PeerHeads(groupId []byte) ([]PeerHead, error) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if err := self.refuseIfClosed(); err != nil {
+		return nil, err
+	}
+	parts, err := self.readRecord(self.peerHeadsPath(groupId), stateKindPeerHeads)
+	if err != nil {
+		if errors.Is(err, ErrStateNotFound) {
+			return []PeerHead{}, nil
+		}
+		return nil, err
+	}
+	if len(parts) < 1 || !bytes.Equal(parts[0], groupId) {
+		return nil, fmt.Errorf("%w: the head table under group %x's name is not that group's", ErrStateStoreFormat, groupId)
+	}
+	heads := make([]PeerHead, 0, len(parts)-1)
+	for index, row := range parts[1:] {
+		if len(row) != peerHeadOctets {
+			return nil, fmt.Errorf("%w: head row %d of group %x is %d octets and this build writes %d",
+				ErrStateStoreFormat, index, groupId, len(row), peerHeadOctets)
+		}
+		heads = append(heads, PeerHead{
+			Epoch:         binary.BigEndian.Uint64(row[0:8]),
+			Leaf:          binary.BigEndian.Uint32(row[8:12]),
+			RetentionWire: row[12],
+			EphWindow:     binary.BigEndian.Uint64(row[13:21]),
+			Head:          binary.BigEndian.Uint64(row[21:29]),
+		})
+	}
+	return heads, nil
 }

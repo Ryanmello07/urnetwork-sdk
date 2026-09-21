@@ -110,6 +110,14 @@ var (
 	// "the disk is broken" are two readings a restore has to branch on.
 	ErrStateNotFound = errors.New("urmessage: this state store holds no such value")
 
+	// The table of authenticated receiver-ladder heads ([PeerHead]) could not be written after a
+	// walk that raised one. Nothing in THIS process is affected -- the heads are in memory -- and
+	// what it costs is a restart: a device restored without them tracks a peer's ladder at the
+	// head the disk last held, and a peer more than one window past that is silent for the rest
+	// of the epoch. Ledger item 241. It is answered by [Group.Receive] after the walk's own
+	// answer, and the write is tried again on the next walk.
+	ErrPeerHeadsPersist = errors.New("urmessage: the receiver-ladder heads could not be persisted")
+
 	// The store holds no device identity yet, which is the ordinary state of a fresh
 	// directory and is what makes [NewDevice] mint one rather than refuse.
 	ErrNoDeviceIdentity = errors.New("urmessage: this state store holds no device identity")

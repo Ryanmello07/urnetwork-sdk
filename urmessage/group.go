@@ -162,10 +162,12 @@ type Message struct {
 //   - "expired"          a DESTROYED disappearing key. Needs the disappearing-message timer and
 //     `DeleteGroupStateBefore`, and EPH(1..5) is not a class this walk opens.
 //   - "not_a_member_yet" a record from before this device joined. A member added at a later epoch
-//     holds no earlier epoch's schedule, so its earlier records refuse under THIS session's epoch
-//     exactly as a pre-change record does -- and so they reach [GapOutOfWindow], not a value of
-//     their own. Telling the two apart needs the multi-epoch open item 241 owes; until it exists
-//     a record from an epoch this device cannot open is one gap however this device came to miss it.
+//     holds no earlier epoch's schedule, so the store answers not-found for it and it reaches
+//     [GapOutOfWindow], not a value of its own. Since ledger item 241 the walk CAN tell the two
+//     apart -- an epoch below the window refuses by arithmetic and an epoch this device never
+//     stood in refuses through the store -- and still renders one reason, because spec C's copy
+//     for this value is the history grant's banner and the grant is not built; a reason with no
+//     grant beside it would promise a UI something nothing can deliver yet.
 //   - "withheld"         section 9.6's attestation refusal. The deployed server signs nothing;
 //     see [Group.Receive] and S2-27.
 //   - "no_wrap"          this device has no key wrap for the record's class yet. The wrap ceremony
@@ -190,20 +192,25 @@ const (
 	// feature, and spec C section 5.1's copy for it is the one that offers the upgrade.
 	GapUnsupported GapReason = "unsupported"
 
-	// A RECORD SEALED AT AN EPOCH THIS DEVICE HAS LEFT. A [messagegroup.GroupSession] is
-	// single-epoch, so a record from a past epoch refuses at §8.4.1's epoch check and no key on
-	// THIS session opens it. The ordinary way to meet one is a restored device re-walking its
-	// history at a later epoch -- the cursor is not persisted -- or an existing member re-reading
-	// records it had not opened when a membership change moved the group on.
+	// A RECORD SEALED AT AN EPOCH THIS DEVICE CANNOT OPEN ANY MORE -- OR NEVER COULD. Since ledger
+	// item 241 a record from a PRIOR epoch is opened under that epoch's own schedule, rebuilt out
+	// of the MLS state this device persisted when it stood there ([Group.pastHeadLocked] and
+	// connect's [messagegroup.GroupSession.TrackSenderAt] are the two halves), so a member that
+	// WAS in the group keeps its history across a membership change. What is left as a gap is
+	// exactly what no schedule reaches: an epoch more than [messagegroup.PastEpochWindow] behind
+	// this device's -- the line MLS itself deletes state below -- and an epoch this device holds
+	// no state for, which is every epoch before it was admitted. The second is MLS's own answer
+	// for a later joiner and item 241 rules it stays that way unless the group GRANTS history,
+	// which is Spec A section 7's MessageHistoryGrant and is not built.
 	//
 	// IT IS A GAP AND NOT A fail(), and that is the decision A5 takes deliberately. Retrying it
 	// three times spends three fetches on a disagreement no re-fetch repairs -- the epoch will not
 	// come back -- and abandoning it names it [ErrRecordAbandoned], loudly, for a record that is a
-	// known and expected consequence of a membership change rather than a fault. Item 241 rules
-	// that history SURVIVES a membership change for existing members, through a per-epoch open
-	// (an ExportAt / per-epoch LoadGroup door) this build does not have; until it lands, a
-	// pre-change record is one visible, quiet gap the walk moves past. It sets no `firstFailure`,
-	// so it does not hold the cursor and does not stop a restored group reconciling.
+	// known and expected consequence of a membership change rather than a fault. It sets no
+	// `firstFailure`, so it does not hold the cursor and does not stop a restored group
+	// reconciling. The two causes still share ONE reason: telling "before you were admitted"
+	// from "too long ago" needs `not_a_member_yet`, which the grant's arrival will give a
+	// producer; see [GapReason].
 	GapOutOfWindow GapReason = "out_of_window"
 )
 
@@ -363,12 +370,18 @@ type Stats struct {
 	GapMalformed   uint64
 	GapUnsupported uint64
 
-	// Records that became a [GapOutOfWindow] gap: sealed at an epoch this device has left, so no
-	// key on this single-epoch session opens them. A restored device re-walking its history at a
-	// later epoch produces one per pre-change record it holds; see [GapReason] and
-	// [Group.noteEpochGapLocked]. It is the count "how much of this conversation's history a
-	// membership change put out of this build's reach", which item 241 is what closes.
+	// Records that became a [GapOutOfWindow] gap: sealed at an epoch no schedule on this device
+	// reaches -- below the past epoch window, or before this device was admitted. See [GapReason]
+	// and [Group.noteEpochGapLocked]. Since ledger item 241 a member that WAS there produces none
+	// of these across a membership change; a later joiner produces one per pre-admission record,
+	// which is the count the milestone measured as 602 and which stays 602 for the joiner.
 	GapOutOfWindow uint64
+
+	// Records that OPENED under a PRIOR epoch's schedule: sealed at an epoch this device has left,
+	// and opened anyway because this device was a member then. Ledger item 241. It is a subset of
+	// [Stats.Opened] counted separately so that "history survived the change" is a number and
+	// not an absence of gaps.
+	OpenedPastEpoch uint64
 
 	// Commits INGESTED into this group: §6.1 membership-change records this device processed,
 	// authorized, applied and followed into the next epoch. One per epoch this device did NOT
@@ -418,6 +431,18 @@ type ladderKey struct {
 	leaf          uint32
 	retentionWire byte
 	ephWindow     uint64
+}
+
+// epochLadderKey is one receiver ladder AT one epoch: what [Group.peerHeadsAt] and
+// [Group.persistedHeads] are keyed by, and what one [PeerHead] row names.
+//
+// It is a distinct type from [trackedKey] although the two carry the same pair, because they
+// answer different questions: a trackedKey says "this ladder is installed at this epoch", which is
+// cleared at every epoch change, and this says "this is the head authenticated at this epoch",
+// which is exactly what must NOT be cleared.
+type epochLadderKey struct {
+	epoch uint64
+	ladderKey
 }
 
 // trackedKey is one receiver ladder this group has installed AT one epoch. A second TrackSender
@@ -627,7 +652,28 @@ type Group struct {
 	// [Group.crossEpochLadderLocked] does not clear. It is the peer analogue of
 	// [Group.ownIndexSeen]. 0 for a ladder never seen -- a member just added, or a fresh group at
 	// epoch one -- which is exactly the head [Group.trackLocked] used to pass unconditionally.
+	//
+	// IT IS THE CURRENT EPOCH'S HEAD AND IT MUST NOT POSITION A PRIOR EPOCH'S LADDER. A record
+	// opened at epoch n+1 raises it above every record of epoch n, and a ladder for epoch n tracked
+	// there refuses all of them; [Group.peerHeadsAt] below is what a prior epoch reads instead.
 	peerHeads map[ladderKey]uint64
+
+	// peerHeadsAt is [Group.peerHeads] PER EPOCH: the highest stream index this group's keys have
+	// authenticated on each peer ladder AT each epoch, in THIS process. It is what positions a
+	// PRIOR epoch's ladder ([Group.pastHeadLocked]) and it is what [Group.commitWalkLocked]
+	// persists as [PeerHead]s when it has changed. Ledger item 241.
+	peerHeadsAt map[epochLadderKey]uint64
+
+	// persistedHeads is the [PeerHead] table as it stood ON THE DISK when this group was restored,
+	// and it is READ ONLY afterwards. It is kept apart from peerHeadsAt on purpose: a head written
+	// before the restart at epoch n is the head of records the re-walk is about to open AGAIN, so it
+	// positions the ladder for epochs ABOVE n and never for n itself. [PeerHead] has the argument.
+	// Empty for a group founded or joined in this process, and for one restored from a directory a
+	// build before item 241 wrote.
+	persistedHeads map[epochLadderKey]uint64
+
+	// headsDirty is whether peerHeadsAt has risen since the table was last persisted.
+	headsDirty bool
 
 	// reconciled is whether this group has compared its own stream position against the
 	// server's rows since it came back. A group created or joined in THIS process is
@@ -746,6 +792,13 @@ func (self *Device) Join(ctx context.Context, invite *Invite) (*Group, error) {
 		handle.Close()
 		return nil, fmt.Errorf("urmessage: the session at epoch %d: %w", handle.Epoch(), err)
 	}
+	// the door to prior epochs, ledger item 241. A member admitted here holds state from its
+	// admission on, so every epoch before it answers not-found through this door and renders as
+	// a gap; that is MLS's own answer for a later member and item 241 rules it stays that way.
+	if err := session.InstallPastEpochLoader(self.pastEpochLoader(invite.GroupId)); err != nil {
+		session.Close()
+		return nil, fmt.Errorf("urmessage: the past epoch loader: %w", err)
+	}
 	group := &Group{
 		device:         self,
 		id:             append([]byte(nil), invite.GroupId...),
@@ -835,6 +888,13 @@ func (self *Group) AddMember(keyPackage []byte) (*Invite, error) {
 		self.device.reserver, self.device.nowMs, nonce)
 	if err != nil {
 		return nil, fmt.Errorf("urmessage: the session at epoch %d: %w", self.handle.Epoch(), err)
+	}
+	// the door to prior epochs, ledger item 241: the founder's session is the one that will
+	// commit later adds and then meet, on its next walk, the records the others sealed before
+	// the commit it did not fetch first.
+	if err := session.InstallPastEpochLoader(self.device.pastEpochLoader(self.id)); err != nil {
+		session.Close()
+		return nil, fmt.Errorf("urmessage: the past epoch loader: %w", err)
 	}
 	self.session = session
 	self.sessionBound = nonceEpoch
@@ -1903,13 +1963,14 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 	}
 
 	walk := &pageWalk{
-		own:        own,
-		leaves:     leaves,
-		opened:     []*Message{},
-		from:       self.cursor,
-		reached:    self.cursor,
-		resolvedTo: self.cursor,
-		reconciled: self.reconciled,
+		own:          own,
+		leaves:       leaves,
+		opened:       []*Message{},
+		from:         self.cursor,
+		reached:      self.cursor,
+		resolvedTo:   self.cursor,
+		reconciled:   self.reconciled,
+		unobtainable: map[uint64]bool{},
 	}
 	for page := 0; ; page += 1 {
 		if maxFetchPages <= page {
@@ -2086,6 +2147,13 @@ type pageWalk struct {
 	foreignIndex  uint64
 	foreignRecord uint64
 	foreignBody   bool
+
+	// unobtainable is every prior epoch this walk asked the session for and was told this device
+	// holds no state at: a member admitted later, draining the records from before its admission.
+	// The first record of such an epoch costs one store read and the rest cost nothing, and the
+	// memo is the WALK's rather than the group's because the store's answer is a fact about the
+	// disk right now and not about the group.
+	unobtainable map[uint64]bool
 }
 
 // commitWalkLocked folds one walk back into the group and answers what its caller must be told.
@@ -2100,6 +2168,10 @@ type pageWalk struct {
 // not it is the value returned.
 func (self *Group) commitWalkLocked(walk *pageWalk) error {
 	self.cursor = walk.resolvedTo
+	// THE HEADS THIS WALK AUTHENTICATED GO TO THE DISK HERE, once per walk and only when one rose.
+	// The write's failure is held and answered LAST, below the walk's own three, because it is the
+	// weakest of the four: it costs a future restart the window, and nothing in this process.
+	headsErr := self.persistPeerHeadsLocked()
 	// AND THE EFFECTS THIS WALK NOTED ARE REBUILT HERE, ONCE PER TARGET. Every [Group.Receive] exit
 	// runs through this function, including the ones that return an error, so a walk that ended
 	// badly still leaves the targets it touched consistent with the effects it recorded.
@@ -2170,7 +2242,10 @@ func (self *Group) commitWalkLocked(walk *pageWalk) error {
 	if walk.firstFailure != nil {
 		return walk.firstFailure
 	}
-	return walk.omitted
+	if walk.omitted != nil {
+		return walk.omitted
+	}
+	return headsErr
 }
 
 // walkReconcilesLocked is whether THIS walk is one the clone check may conclude anything from.
@@ -2359,17 +2434,32 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			resolve(recordId)
 			continue
 		}
-		if header.Epoch < self.epoch {
-			// A RECORD SEALED AT AN EPOCH THIS DEVICE HAS LEFT. A [messagegroup.GroupSession] is
-			// single-epoch, so no key on this session opens it -- and this walk has already routed
-			// past the commit that would have kept the two epochs' records together (the cursor is
-			// not persisted, so a restored device re-walks its whole history at its later epoch).
-			// It is a VISIBLE GAP and not a fail(): see [GapOutOfWindow]. Own and peer alike, because
-			// the own-copy path refuses an epoch mismatch too and item 241's history-across-a-change
-			// is a later step; what THIS build owes is that the record is not lost silently.
+		if header.Epoch < self.epoch && !self.pastEpochOpenableLocked(walk, header.Epoch) {
+			// A RECORD SEALED AT AN EPOCH NO SCHEDULE ON THIS DEVICE REACHES: below the past epoch
+			// window, or one this walk has already been told this device holds no state for. It
+			// is a VISIBLE GAP and not a fail(): see [GapOutOfWindow]. Every OTHER prior-epoch
+			// record falls through to the open below, which the session routes to that epoch's
+			// own schedule (ledger item 241): the own-copy road, the ladder track and OpenRecord
+			// all take the record's epoch off its header and never this group's.
 			self.noteEpochGapLocked(walk, recordId, header)
 			resolve(recordId)
 			continue
+		}
+		// pastEpochGap is the one refusal on the roads below that is a gap and not a failure: the
+		// session could not obtain the record's epoch because this device never stood in it, or
+		// because it is below the window. Either way no re-fetch repairs it. The store's own
+		// not-found is what says "never stood in it" -- a store that would not READ is a failure
+		// like any other and is retried, because a broken disk must not render as history that
+		// was never there.
+		pastEpochGap := func(err error) bool {
+			if errors.Is(err, messagegroup.ErrEpochOutOfWindow) {
+				return true
+			}
+			if errors.Is(err, messagegroup.ErrPastEpochUnobtainable) && errors.Is(err, ErrStateNotFound) {
+				walk.unobtainable[header.Epoch] = true
+				return true
+			}
+			return false
 		}
 		if mine {
 			shown, err := self.openOwnFromCopyLocked(walk, recordId, parsed)
@@ -2389,17 +2479,32 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			continue
 		}
 		if err := self.trackLocked(leaf, header); err != nil {
+			if pastEpochGap(err) {
+				self.noteEpochGapLocked(walk, recordId, header)
+				resolve(recordId)
+				continue
+			}
 			fail(recordId, err)
 			continue
 		}
 		if mine {
 			if err := self.advanceOwnLadderLocked(leaf, header); err != nil {
+				if pastEpochGap(err) {
+					self.noteEpochGapLocked(walk, recordId, header)
+					resolve(recordId)
+					continue
+				}
 				fail(recordId, err)
 				continue
 			}
 		}
 		headPlain, bodyPlain, err := self.session.OpenRecord(parsed)
 		if err != nil {
+			if pastEpochGap(err) {
+				self.noteEpochGapLocked(walk, recordId, header)
+				resolve(recordId)
+				continue
+			}
 			if mine && ownFrameAlreadySpent(err) {
 				// connect MG-4, and the ONE refusal on this path that is not a failure. See
 				// ownFrameAlreadySpent for exactly what it establishes and what it does not.
@@ -2513,6 +2618,9 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			continue
 		}
 		self.stats.Opened += 1
+		if header.Epoch < self.epoch {
+			self.stats.OpenedPastEpoch += 1
+		}
 		if mine {
 			// A RECORD OF THIS DEVICE'S OWN THAT OPENED. This device cannot open what IT sealed
 			// (MG-4), so what just opened was sealed by something else holding this leaf's
@@ -2629,8 +2737,14 @@ func (self *Group) openOwnFromCopyLocked(walk *pageWalk, recordId uint64, parsed
 	// device sealed in another group or epoch hashes to a body_hash no copy in THIS group's table
 	// holds, so the hash half already refuses it. It stays because it is free and says what a copy
 	// is for.
+	//
+	// AND SINCE LEDGER ITEM 241 THE EPOCH HALF ADMITS A PRIOR EPOCH. A restarted device re-walks
+	// its own lines from epochs it has left, and a copy path that refused them sent each one down
+	// the open road to be authenticated at the spent generation and counted as a line this device
+	// cannot show -- while holding the copy. The hash half is what identifies the copy; the epoch
+	// half refuses only what no schedule could reach, a record from the FUTURE.
 	if sha256.Sum256(parsed.CtBody) != header.BodyHash || !bytes.Equal(header.GroupId[:], self.id) ||
-		header.Epoch != self.epoch {
+		self.epoch < header.Epoch {
 		return false, nil
 	}
 	if sealed.recordId != 0 && sealed.recordId != recordId {
@@ -3456,6 +3570,8 @@ func (self *Group) initTables() {
 	self.withoutCopy = map[uint64]bool{}
 	self.ownHeads = map[trackedKey]uint64{}
 	self.peerHeads = map[ladderKey]uint64{}
+	self.peerHeadsAt = map[epochLadderKey]uint64{}
+	self.persistedHeads = map[epochLadderKey]uint64{}
 	self.logIndex = map[[MessageIdBytes]byte]int{}
 	self.effects = map[[MessageIdBytes]byte]*contentEffect{}
 	self.effectsOn = map[[MessageIdBytes]byte][]*contentEffect{}
@@ -3488,7 +3604,10 @@ func (self *Group) advanceOwnLadderLocked(leaf uint32, header *message.RecordHea
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrRecordOpen, err)
 	}
-	key := trackedKey{epoch: self.epoch, ladderKey: ladderKey{leaf: leaf, retentionWire: retentionWire, ephWindow: header.EphWindow}}
+	// THE RECORD'S EPOCH AND NOT THIS GROUP'S, since ledger item 241: an own record from a prior
+	// epoch that has no copy is authenticated under that epoch's schedule, so the ladder it moves
+	// is that epoch's. trackSessionLadderLocked is what routes the install.
+	key := trackedKey{epoch: header.Epoch, ladderKey: ladderKey{leaf: leaf, retentionWire: retentionWire, ephWindow: header.EphWindow}}
 	head := self.ownHeads[key]
 	if header.StreamIndex <= head+uint64(messagegroup.DefaultRecordWindowSize) {
 		return nil
@@ -3497,12 +3616,68 @@ func (self *Group) advanceOwnLadderLocked(leaf uint32, header *message.RecordHea
 	if next <= head {
 		return nil
 	}
-	if err := self.session.TrackSender(leaf, header.RetentionClass, header.EphBucket, header.EphWindow, next); err != nil {
+	if err := self.trackSessionLadderLocked(header.Epoch, leaf, header, next); err != nil {
 		return fmt.Errorf("%w: moving this device's own ladder to index %d: %w", ErrRecordOpen, next, err)
 	}
 	self.ownHeads[key] = next
 	self.tracked[key] = true
 	return nil
+}
+
+// trackSessionLadderLocked installs one receiver ladder in the session, at the CURRENT epoch
+// through TrackSender or at a PRIOR one through TrackSenderAt, and it is the only place this
+// package chooses between the two. Ledger item 241.
+//
+// The prior-epoch arm's refusals are the session's own sentinels and are passed through
+// unwrapped, because the walk branches on them: [messagegroup.ErrEpochOutOfWindow] and
+// [messagegroup.ErrPastEpochUnobtainable] carrying [ErrStateNotFound] are gaps, and everything
+// else is a failure.
+func (self *Group) trackSessionLadderLocked(epoch uint64, leaf uint32, header *message.RecordHeader, head uint64) error {
+	if epoch < self.epoch {
+		return self.session.TrackSenderAt(epoch, leaf, header.RetentionClass, header.EphBucket, header.EphWindow, head)
+	}
+	return self.session.TrackSender(leaf, header.RetentionClass, header.EphBucket, header.EphWindow, head)
+}
+
+// pastEpochOpenableLocked is whether the walk should hand a record from one PRIOR epoch to the
+// session at all: inside the window, and not an epoch this walk was already told this device
+// holds no state for. The session makes the same window check itself and refuses by name; this
+// is the cheaper answer taken first, so that a later joiner draining hundreds of pre-admission
+// records costs one store read and not hundreds.
+func (self *Group) pastEpochOpenableLocked(walk *pageWalk, epoch uint64) bool {
+	if self.epoch-epoch > messagegroup.PastEpochWindow {
+		return false
+	}
+	return !walk.unobtainable[epoch]
+}
+
+// pastHeadLocked is the head a PRIOR epoch's ladder is tracked at: the highest index this
+// process has authenticated on that ladder AT OR BELOW that epoch, or the highest index the disk
+// held for it STRICTLY BELOW that epoch -- whichever is higher.
+//
+// THE TWO INEQUALITIES DIFFER AND BOTH ARE LOAD-BEARING. A head this process authenticated at
+// epoch n was raised by records that are in [Group.delivered] and will not be opened again, so
+// the ladder may stand above them; a head the disk held at epoch n was raised by records a
+// restart is about to open AGAIN, from the first, so the ladder must stand below all of them --
+// at the head as of the START of n, which is the highest head of any epoch before it. [PeerHead]
+// carries the same argument from the disk's side.
+//
+// It never reads [Group.peerHeads], which a later epoch's records may have raised above every
+// record of this one. A member never seen at or before this epoch answers 0, which is where a
+// stream a member just started stands.
+func (self *Group) pastHeadLocked(ladder ladderKey, epoch uint64) uint64 {
+	head := uint64(0)
+	for key, at := range self.peerHeadsAt {
+		if key.ladderKey == ladder && key.epoch <= epoch && head < at {
+			head = at
+		}
+	}
+	for key, at := range self.persistedHeads {
+		if key.ladderKey == ladder && key.epoch < epoch && head < at {
+			head = at
+		}
+	}
+	return head
 }
 
 // crossEpochLadderLocked carries this group's receiver-ladder bookkeeping across an epoch change.
@@ -3562,19 +3737,36 @@ func (self *Group) crossEpochLadderLocked(newEpoch uint64) error {
 // walks one expansion per index below the head, and peerHeads is only ever raised off a record
 // this group's keys AUTHENTICATED (see [Group.notePeerHeadLocked]), so a peer cannot choose how far
 // this device walks.
+//
+// AT THE RECORD'S EPOCH, since ledger item 241, which is this group's epoch for every record but
+// one from an epoch this device has left; for those the ladder is installed in that epoch's own
+// schedule, at the head [Group.pastHeadLocked] answers rather than the current one -- which a later
+// epoch's records may already have raised above every record of the earlier one. The memo carries
+// the epoch, so an epoch-one ladder installed during a walk at epoch two is not mistaken for the
+// epoch-two one, and [Group.crossEpochLadderLocked] clears both at the next change in the same
+// block as the session erases both.
+//
+// A refusal of the prior-epoch arm is passed through UNWRAPPED for the walk to branch on; see
+// [Group.trackSessionLadderLocked].
 func (self *Group) trackLocked(leaf uint32, header *message.RecordHeader) error {
 	retentionWire, err := message.RetentionClassWire(header.RetentionClass, header.EphBucket)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrRecordOpen, err)
 	}
 	ladder := ladderKey{leaf: leaf, retentionWire: retentionWire, ephWindow: header.EphWindow}
-	key := trackedKey{epoch: self.epoch, ladderKey: ladder}
+	key := trackedKey{epoch: header.Epoch, ladderKey: ladder}
 	if self.tracked[key] {
 		return nil
 	}
 	head := self.peerHeads[ladder]
-	if err := self.session.TrackSender(leaf, header.RetentionClass, header.EphBucket, header.EphWindow, head); err != nil {
-		return fmt.Errorf("%w: tracking leaf %d at head %d: %w", ErrRecordOpen, leaf, head, err)
+	if header.Epoch < self.epoch {
+		head = self.pastHeadLocked(ladder, header.Epoch)
+	}
+	if err := self.trackSessionLadderLocked(header.Epoch, leaf, header, head); err != nil {
+		if errors.Is(err, messagegroup.ErrEpochOutOfWindow) || errors.Is(err, messagegroup.ErrPastEpochUnobtainable) {
+			return err
+		}
+		return fmt.Errorf("%w: tracking leaf %d at head %d for epoch %d: %w", ErrRecordOpen, leaf, head, header.Epoch, err)
 	}
 	self.tracked[key] = true
 	return nil
@@ -3599,6 +3791,53 @@ func (self *Group) notePeerHeadLocked(leaf uint32, header *message.RecordHeader)
 	if self.peerHeads[ladder] < header.StreamIndex {
 		self.peerHeads[ladder] = header.StreamIndex
 	}
+	// AND THE PER-EPOCH HEAD, under the RECORD's epoch: a prior-epoch open raises the head of the
+	// epoch it was sealed at and never the current epoch's, and it is this table that the disk
+	// gets and a restart reads back. See [Group.pastHeadLocked] and [PeerHead].
+	at := epochLadderKey{epoch: header.Epoch, ladderKey: ladder}
+	if self.peerHeadsAt[at] < header.StreamIndex {
+		self.peerHeadsAt[at] = header.StreamIndex
+		self.headsDirty = true
+	}
+}
+
+// persistPeerHeadsLocked writes [Group.peerHeadsAt] to the disk when it has risen since the last
+// write, and is a no-op otherwise and on a store that is not durable.
+//
+// WHAT IS WRITTEN IS THE UNION OF WHAT THE DISK HELD AND WHAT THIS PROCESS AUTHENTICATED, per
+// key at the higher of the two, so that a restart that opened nothing at some epoch does not
+// write a table that forgets that epoch's head. The dirty bit stays set on a failed write, so
+// the next walk tries again; the failure is returned so that a caller can see the restart it
+// would cost, and it is returned AFTER the walk's own answer is committed because a head not
+// written is a weaker fact than a record not opened.
+func (self *Group) persistPeerHeadsLocked() error {
+	if !self.headsDirty {
+		return nil
+	}
+	merged := map[epochLadderKey]uint64{}
+	for key, head := range self.persistedHeads {
+		merged[key] = head
+	}
+	for key, head := range self.peerHeadsAt {
+		if merged[key] < head {
+			merged[key] = head
+		}
+	}
+	heads := make([]PeerHead, 0, len(merged))
+	for key, head := range merged {
+		heads = append(heads, PeerHead{
+			Epoch:         key.epoch,
+			Leaf:          key.leaf,
+			RetentionWire: key.retentionWire,
+			EphWindow:     key.ephWindow,
+			Head:          head,
+		})
+	}
+	if err := self.device.persistPeerHeads(self.id, heads); err != nil {
+		return fmt.Errorf("%w: group %x: %w", ErrPeerHeadsPersist, self.id, err)
+	}
+	self.headsDirty = false
+	return nil
 }
 
 // leavesLocked is every member's sender_handle at this epoch, mapped to its leaf index.

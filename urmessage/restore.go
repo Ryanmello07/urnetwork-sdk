@@ -260,6 +260,10 @@ func (self *Device) restoreOne(store DeviceStore, record *GroupRecord, nonce []b
 		return nil, fmt.Errorf("%w: group %x: the session at epoch %d: %w",
 			ErrRestore, record.GroupId, record.Epoch, err)
 	}
+	if err := session.InstallPastEpochLoader(self.pastEpochLoader(record.GroupId)); err != nil {
+		session.Close()
+		return nil, fmt.Errorf("%w: group %x: the past epoch loader: %w", ErrRestore, record.GroupId, err)
+	}
 	restored := &Group{
 		device:         self,
 		id:             append([]byte(nil), record.GroupId...),
@@ -297,6 +301,28 @@ func (self *Device) restoreOne(store DeviceStore, record *GroupRecord, nonce []b
 			sentAtMs: one.SentAtMs,
 		}
 	}
+	// AND THE HEADS THIS DEVICE HAD AUTHENTICATED, ledger item 241's restart half. They go into
+	// TWO places and the split is the whole of what makes the re-walk correct. The table itself
+	// goes to [Group.persistedHeads], read only, and positions a PRIOR epoch's ladder at the head
+	// as of the START of that epoch. And the CURRENT epoch's ladders are seeded from the same
+	// table at the highest head of any epoch BELOW the current one -- never the current epoch's
+	// own head, because the re-walk opens the current epoch's records again from the first and a
+	// ladder above them refuses every one. A store that answers no table -- a directory the build
+	// before this one wrote -- leaves both empty, which is what that build did. A store that will
+	// not READ refuses this group by name, for SentRecords' reason one paragraph up.
+	heads, err := store.PeerHeads(record.GroupId)
+	if err != nil {
+		session.Close()
+		handle.Close()
+		return nil, fmt.Errorf("%w: group %x: the authenticated receiver heads: %w", ErrRestore, record.GroupId, err)
+	}
+	for _, head := range heads {
+		ladder := ladderKey{leaf: head.Leaf, retentionWire: head.RetentionWire, ephWindow: head.EphWindow}
+		restored.persistedHeads[epochLadderKey{epoch: head.Epoch, ladderKey: ladder}] = head.Head
+		if head.Epoch < record.Epoch && restored.peerHeads[ladder] < head.Head {
+			restored.peerHeads[ladder] = head.Head
+		}
+	}
 	self.hold(restored)
 	return restored, nil
 }
@@ -317,6 +343,36 @@ func (self *Device) persistSent(groupId []byte, streamIndex uint64, sealed *ownS
 		SentAtMs:    sealed.sentAtMs,
 		Body:        sealed.body,
 	})
+}
+
+// persistPeerHeads writes one group's [PeerHead] table, when the store can hold one.
+//
+// A NO-OP ON A STORE THAT IS NOT DURABLE, for persistSent's reason: a device over a map loses its
+// groups at exit, and with them any use for the heads a restart would track them at.
+func (self *Device) persistPeerHeads(groupId []byte, heads []PeerHead) error {
+	store, durable := self.stateStore.(DeviceStore)
+	if !durable {
+		return nil
+	}
+	return store.PutPeerHeads(groupId, heads)
+}
+
+// pastEpochLoader is the door a group's session rebuilds a PRIOR epoch's schedule through: the
+// engine's own LoadGroup over this device's store, at the epoch asked for, and nothing wider.
+// Ledger item 241; the whole account of what the session does with the handle is connect's
+// messagegroup/pastepoch.go.
+//
+// IT IS INSTALLED ON EVERY SESSION A GROUP RECEIVES THROUGH -- the founder's after its first
+// commit, the joiner's, and the restored one -- and never on the founding session at epoch zero,
+// which seals one commit and opens nothing. A session it is not installed on is the single-epoch
+// session this package shipped before item 241, and the walk would see every prior-epoch record
+// as [ErrRecordOpen] carrying messagegroup.ErrRecordNotForThisSession: a loud failure and not a
+// quiet gap, which is the right shape for a wiring mistake.
+func (self *Device) pastEpochLoader(groupId []byte) messagegroup.PastEpochLoader {
+	id := append([]byte(nil), groupId...)
+	return func(epoch uint64) (messagegroup.GroupHandle, error) {
+		return self.engine.LoadGroup(id, epoch)
+	}
 }
 
 // holdsGroup reports whether this device already has a live view of that group, so that a second
