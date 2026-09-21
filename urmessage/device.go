@@ -67,6 +67,13 @@ type DeviceConfig struct {
 	// How [Device.Connect] rides out a reconnect window. The zero value is the default policy
 	// and is what every caller that says nothing gets; see [ConnectPolicy].
 	Connect ConnectPolicy
+
+	// The receiving-client authorization decision on an ingested commit: MASTER §11's "rejected
+	// by every receiving client on validation." NIL is the alpha's behaviour and allows every
+	// commit -- the full role model (item 242) is not built. It is a config field now, before the
+	// role model, so the CALL is on the ingest path and a later step fills the body without moving
+	// it. See [CommitAuthorizer].
+	CommitAuthorizer CommitAuthorizer
 }
 
 // ── §4.3.1's Hello, across an operator window this package does not own ──────────────────────
@@ -227,6 +234,11 @@ type Device struct {
 	// called concurrently without the policy being a second thing to synchronise.
 	connect ConnectPolicy
 
+	// commitAuthorizer is [DeviceConfig.CommitAuthorizer], read on the commit-ingest path. Nil
+	// allows every commit, which is the alpha until the role model lands. Read without a lock and
+	// never written after construction, for `connect`'s reason one field up.
+	commitAuthorizer CommitAuthorizer
+
 	mutex  sync.Mutex
 	groups map[string]*Group
 }
@@ -295,17 +307,18 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 		return nil, fmt.Errorf("urmessage: the mls engine: %w", err)
 	}
 	return &Device{
-		transport:   config.Transport,
-		reserver:    config.Reserver,
-		connect:     config.Connect.withDefaults(),
-		crypto:      crypto,
-		engine:      engine,
-		leafKeys:    leafKeys,
-		stateStore:  stateStore,
-		identityPub: append([]byte(nil), signerPub...),
-		nowMs:       nowMs,
-		random:      random,
-		groups:      map[string]*Group{},
+		transport:        config.Transport,
+		reserver:         config.Reserver,
+		connect:          config.Connect.withDefaults(),
+		crypto:           crypto,
+		engine:           engine,
+		leafKeys:         leafKeys,
+		stateStore:       stateStore,
+		identityPub:      append([]byte(nil), signerPub...),
+		nowMs:            nowMs,
+		random:           random,
+		commitAuthorizer: config.CommitAuthorizer,
+		groups:           map[string]*Group{},
 	}, nil
 }
 

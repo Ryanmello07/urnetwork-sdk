@@ -154,23 +154,24 @@ type Message struct {
 // (spec A section 7.4, verbatim). The position is kept, the message_id is kept, and the record after
 // it arrives.
 //
-// THE SET IS CLOSED AT SEVEN AND THIS BUILD PRODUCES TWO. The two below are the two the receive walk
-// can reach. THE OTHER FIVE ARE DELIBERATELY NOT DECLARED HERE -- a constant with no producer is a
-// constant the next reader assumes is reachable, and each of these is waiting on something this
-// package does not have:
+// THE SET IS CLOSED AT SEVEN AND THIS BUILD PRODUCES THREE. The three below are the three the
+// receive walk can reach. THE OTHER FOUR ARE DELIBERATELY NOT DECLARED HERE -- a constant with no
+// producer is a constant the next reader assumes is reachable, and each of these is waiting on
+// something this package does not have:
 //
 //   - "expired"          a DESTROYED disappearing key. Needs the disappearing-message timer and
 //     `DeleteGroupStateBefore`, and EPH(1..5) is not a class this walk opens.
-//   - "out_of_window"    the read-key window closed on a device that was offline across too many
-//     epochs. Needs multi-epoch key history, which this build does not keep.
-//   - "not_a_member_yet" a record from before this device joined. The alpha's groups are two
-//     members added in one commit, so there is no such record.
+//   - "not_a_member_yet" a record from before this device joined. A member added at a later epoch
+//     holds no earlier epoch's schedule, so its earlier records refuse under THIS session's epoch
+//     exactly as a pre-change record does -- and so they reach [GapOutOfWindow], not a value of
+//     their own. Telling the two apart needs the multi-epoch open item 241 owes; until it exists
+//     a record from an epoch this device cannot open is one gap however this device came to miss it.
 //   - "withheld"         section 9.6's attestation refusal. The deployed server signs nothing;
 //     see [Group.Receive] and S2-27.
 //   - "no_wrap"          this device has no key wrap for the record's class yet. The wrap ceremony
 //     is section 6.1's and no walk here reaches its absence as a gap.
 //
-// A sixth value for "the server erased the body" is OWED and does not exist in the closed set yet:
+// A further value for "the server erased the body" is OWED and does not exist in the closed set yet:
 // that is ledger item 220, and a pruned DURABLE body refuses at the body-hash compare BEFORE either
 // AEAD, so it is a pre-open refusal and is a fail() here today. It is deliberately not invented.
 type GapReason string
@@ -188,6 +189,22 @@ const (
 	// record opened and its signature verified, so the sender did nothing wrong -- it is a newer
 	// feature, and spec C section 5.1's copy for it is the one that offers the upgrade.
 	GapUnsupported GapReason = "unsupported"
+
+	// A RECORD SEALED AT AN EPOCH THIS DEVICE HAS LEFT. A [messagegroup.GroupSession] is
+	// single-epoch, so a record from a past epoch refuses at §8.4.1's epoch check and no key on
+	// THIS session opens it. The ordinary way to meet one is a restored device re-walking its
+	// history at a later epoch -- the cursor is not persisted -- or an existing member re-reading
+	// records it had not opened when a membership change moved the group on.
+	//
+	// IT IS A GAP AND NOT A fail(), and that is the decision A5 takes deliberately. Retrying it
+	// three times spends three fetches on a disagreement no re-fetch repairs -- the epoch will not
+	// come back -- and abandoning it names it [ErrRecordAbandoned], loudly, for a record that is a
+	// known and expected consequence of a membership change rather than a fault. Item 241 rules
+	// that history SURVIVES a membership change for existing members, through a per-epoch open
+	// (an ExportAt / per-epoch LoadGroup door) this build does not have; until it lands, a
+	// pre-change record is one visible, quiet gap the walk moves past. It sets no `firstFailure`,
+	// so it does not hold the cursor and does not stop a restored group reconciling.
+	GapOutOfWindow GapReason = "out_of_window"
 )
 
 // Reaction is one emoji standing on one message, from one member.
@@ -346,6 +363,18 @@ type Stats struct {
 	GapMalformed   uint64
 	GapUnsupported uint64
 
+	// Records that became a [GapOutOfWindow] gap: sealed at an epoch this device has left, so no
+	// key on this single-epoch session opens them. A restored device re-walking its history at a
+	// later epoch produces one per pre-change record it holds; see [GapReason] and
+	// [Group.noteEpochGapLocked]. It is the count "how much of this conversation's history a
+	// membership change put out of this build's reach", which item 241 is what closes.
+	GapOutOfWindow uint64
+
+	// Commits INGESTED into this group: §6.1 membership-change records this device processed,
+	// authorized, applied and followed into the next epoch. One per epoch this device did NOT
+	// author but was carried into. See [Group.ingestCommitLocked].
+	Ingested uint64
+
 	// ATTEMPTS to open a record from a member of this group that did not open -- one per
 	// fetch, so a record retried [maxRecordAttempts] times moves this three times. It counts
 	// attempts and not records because that is what it can honestly count: the retry is what
@@ -376,13 +405,37 @@ type Stats struct {
 	Unattested uint64
 }
 
-// trackedKey is one receiver ladder this group has installed. A second TrackSender over a live
-// ladder would reset it to its head index and re-derive rungs it has already committed, so each
-// one is installed exactly once.
-type trackedKey struct {
+// ladderKey names one receiver ladder INDEPENDENT of the epoch its key schedule is derived at.
+//
+// IT IS THE EPOCH-INDEPENDENT HALF ON PURPOSE, and it is what [Group.peerHeads] is keyed by.
+// §5.6's stream index is continuous across epochs -- a sender's counter does not rewind at a
+// commit, because [messagegroup.SenderHandle] is derived from the epoch-zero group_handle_key and
+// never moves -- so "the head this device has authenticated for this sender" is a fact about the
+// whole stream and not about one epoch's schedule. A record layer key that carried the epoch would
+// forget that head at every commit, which is the D3 starvation [Group.crossEpochLadderLocked]
+// exists to prevent.
+type ladderKey struct {
 	leaf          uint32
 	retentionWire byte
 	ephWindow     uint64
+}
+
+// trackedKey is one receiver ladder this group has installed AT one epoch. A second TrackSender
+// over a live ladder would reset it to its head index and re-derive rungs it has already
+// committed, so each one is installed exactly once -- and [Group.tracked] is the memo that keeps
+// it to once.
+//
+// THE EPOCH IS IN THE KEY AND IT IS LOAD-BEARING. [messagegroup.GroupSession.AdvanceEpoch] (and
+// the constructor it shares an install with) ZEROIZES every receiver ratchet on an epoch change
+// and nothing rebuilds them, so a memo that carried no epoch would still say "this ladder is
+// tracked" after the change and the first open at the new epoch would fail with "no receiver
+// ratchet is tracked for this sender and retention class." The epoch is what makes a new-epoch key
+// miss the memo and re-track; [Group.crossEpochLadderLocked] clears the whole map in the same block
+// as the install anyway, so the two are the one rule stated twice, and the AST-adjacent gate
+// TestNoTrackedKeySurvivesAnEpochChangeWithoutItsEpoch holds it.
+type trackedKey struct {
+	epoch uint64
+	ladderKey
 }
 
 // ownSealed is what this group knows about one stream index of its own.
@@ -557,8 +610,24 @@ type Group struct {
 	ownIndexSeen uint64
 
 	// ownHeads is the head the receiver ladder over this device's OWN leaf was last tracked at, per
-	// ladder. See [Group.advanceOwnLadderLocked].
+	// ladder. See [Group.advanceOwnLadderLocked]. It is CLEARED at every epoch install, in the
+	// same block, because the ratchet it describes is zeroized there; [Group.ownIndexSeen] is the
+	// authenticated own head that survives the clear and re-seeds it.
 	ownHeads map[trackedKey]uint64
+
+	// peerHeads is the highest §5.6 stream index of a record from each PEER ladder that this group's
+	// keys have AUTHENTICATED, keyed epoch-independent by [ladderKey].
+	//
+	// IT IS THE HEAD AN EPOCH CHANGE RE-TRACKS THAT PEER AT, AND NEVER 0. A ratchet re-tracked at 0
+	// answers [messagegroup.DefaultRecordWindowSize] rungs and then ErrOutOfWindow, so a peer that
+	// had sent more than 1024 records before a membership change would go silent on its very next
+	// message -- the D3 starvation from the group-chat survey. Because the stream index is
+	// continuous across epochs (see [ladderKey]), the head the previous epoch left off at is the
+	// head the next epoch resumes from, so this is the ONE piece of ladder bookkeeping
+	// [Group.crossEpochLadderLocked] does not clear. It is the peer analogue of
+	// [Group.ownIndexSeen]. 0 for a ladder never seen -- a member just added, or a fresh group at
+	// epoch one -- which is exactly the head [Group.trackLocked] used to pass unconditionally.
+	peerHeads map[ladderKey]uint64
 
 	// reconciled is whether this group has compared its own stream position against the
 	// server's rows since it came back. A group created or joined in THIS process is
@@ -944,6 +1013,176 @@ func (self *Group) Open(ctx context.Context) error {
 		Opened:         true,
 	}); err != nil {
 		return fmt.Errorf("urmessage: this group is open on the server and its record could not be persisted, so a restart would refuse to send in it: %w", err)
+	}
+	return nil
+}
+
+// AddMemberAndPublish adds one device to an ALREADY-OPEN group and publishes the epoch it opens:
+// the commit that admits the member, the wrap fan-out for the new epoch, and the marker that closes
+// it -- and it answers the [Invite] the new member joins with.
+//
+// IT IS THE SECOND-EPOCH SIBLING OF [Group.AddMember] + [Group.Open], and the split is the alpha's
+// two shapes of an add. AddMember/Open is the FOUNDING add: it runs before the group is open, needs
+// the epoch-zero founding session to self-certify the founding commit, and reaches the server
+// through CreateGroup. This one is every add AFTER: the group is open, there is no founding session,
+// and the commit is an ordinary submit that opens the next epoch. Item 239 is what lifted the
+// one-add limit that used to make this method [ErrAlphaOneAdd].
+//
+// THE COMMIT RECORD IS SEALED AT THE OLD EPOCH AND ANNOUNCES THE NEW ONE, which is the one subtlety.
+// The server takes a commit iff its header names the current epoch and its attachment opens the
+// next, so [Group.session] -- still at the old epoch after [messagegroup.GroupHandle.MergePendingCommit]
+// moves the handle, for the reason [Group.AddMember]'s own comment gives -- seals the record, while a
+// session freshly built at the NEW epoch supplies the write and read keys the attachment carries.
+// That new session then becomes this group's, in the same block as A4's re-track and A3's persist.
+//
+// TWO WRITERS OF EPOCH STATE, IN ORDER. mls persists the new epoch's MLS state inside
+// MergePendingCommit; [Group.enterEpochLocked] persists this package's record after the whole
+// ceremony -- and nothing is a third writer. A restored group is refused ([ErrNotReconciled]) until
+// it has received once, because a committer that has not checked its own stream against the server
+// must not seal.
+func (self *Group) AddMemberAndPublish(ctx context.Context, keyPackage []byte) (*Invite, error) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if self.closed {
+		return nil, fmt.Errorf("urmessage: this group is closed")
+	}
+	if !self.opened {
+		return nil, ErrGroupNotOpen
+	}
+	if self.session == nil {
+		return nil, ErrNoMemberAdded
+	}
+	if self.identityInUse != nil {
+		return nil, self.identityInUse
+	}
+	if !self.reconciled {
+		return nil, fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
+	}
+	if err := self.rebindLocked(); err != nil {
+		return nil, err
+	}
+
+	// (1) build the commit that admits the new member, BY VALUE, and merge it locally -- which is
+	// where mls persists the new epoch's state. The handle moves to the new epoch; self.session
+	// does NOT, and seals the commit record below at the epoch that is closing.
+	commit, welcome, ratchetTree, err := self.handle.CommitAdd([][]byte{keyPackage})
+	if err != nil {
+		return nil, fmt.Errorf("urmessage: CommitAdd: %w", err)
+	}
+	if err := self.handle.MergePendingCommit(); err != nil {
+		return nil, fmt.Errorf("urmessage: MergePendingCommit: %w", err)
+	}
+	newEpoch := self.handle.Epoch()
+
+	// (2) the NEW epoch's write and read keys, which the commit's attachment announces so the
+	// server can key the epoch it opens. They are derived STRAIGHT OFF the handle's new exporter --
+	// the same three steps installEpochOnLoop takes inside a session -- rather than off a second
+	// GroupSession, because a GroupSession's Close closes the handle it shares with this group, so
+	// a transient session over this handle could not be closed without breaking the one that stays.
+	// A [messagegroup.GroupSession.AdvanceEpoch] on this group's OWN session below is what actually
+	// moves it, with no second goroutine to leak. write_key and read_key travel to the server in
+	// the clear in the attachment, so nothing here is a new secret; the intermediates are erased.
+	newMlsSecret, err := self.handle.Export(storageExporterLabel, nil, storageExporterBytes)
+	if err != nil {
+		return nil, fmt.Errorf("urmessage: the new epoch's exporter: %w", err)
+	}
+	newRoot := messagegroup.StorageRoot(newMlsSecret, self.pqSecret)
+	writeKey := message.WriteKey(newRoot)
+	readKey := message.ReadKey(newRoot)
+	zeroizeState(newMlsSecret)
+	zeroizeState(newRoot)
+	groupContext, err := self.handle.GroupContextBytes()
+	if err != nil {
+		return nil, fmt.Errorf("urmessage: the group context: %w", err)
+	}
+	contextHash := sha256.Sum256(groupContext)
+	memberCount := self.handle.MemberCount()
+
+	// (3) the commit record, sealed at the OLD epoch by self.session, announcing the new epoch.
+	commitRecord, err := self.session.SealRecord(message.RetentionPermanent, 0, true,
+		encodeHead(self.device.nowMs()), commit, 0, &message.ServerAttachment{
+			Kind: message.AttachmentEpoch,
+			Epoch: &message.EpochAttachment{
+				Epoch:             newEpoch,
+				AlgId:             epochAttachmentAlgId,
+				WriteKey:          writeKey,
+				ReadKey:           readKey,
+				GroupContextHash:  contextHash[:],
+				ExpectedWrapCount: uint32(memberCount),
+			},
+		})
+	if err != nil {
+		return nil, fmt.Errorf("urmessage: sealing the epoch commit: %w", err)
+	}
+	if _, err := self.submitLocked(ctx, self.session, commitRecord, "an epoch commit"); err != nil {
+		return nil, err
+	}
+
+	// (4) the epoch is open on the server. Advance this group's OWN session onto it -- reusing the
+	// lifetime pq_secret (item 243), the same value AdvanceEpoch re-extracts the new root from --
+	// then carry the ladder bookkeeping across (A4) and persist through the one door (A3). Session
+	// and epoch move together, so a persist failure leaves the disk behind and never leaves the two
+	// disagreeing. AdvanceEpoch is the committer's install, as ApplyCommit's AdvanceEpoch is the
+	// receiver's; either way self.session is the one session, never a second one.
+	if err := self.session.AdvanceEpoch(self.pqSecret); err != nil {
+		return nil, fmt.Errorf("urmessage: advancing the session to epoch %d: %w", newEpoch, err)
+	}
+	self.commit = append([]byte(nil), commit...)
+	if err := self.crossEpochLadderLocked(newEpoch); err != nil {
+		return nil, err
+	}
+	if err := self.enterEpochLocked(); err != nil {
+		return nil, err
+	}
+
+	// (5) the wrap fan-out and the marker that makes the new epoch writable.
+	if err := self.publishEpochFanoutLocked(ctx); err != nil {
+		return nil, err
+	}
+
+	return &Invite{
+		GroupId:        append([]byte(nil), self.id...),
+		Welcome:        append([]byte(nil), welcome...),
+		RatchetTree:    append([]byte(nil), ratchetTree...),
+		PqSecret:       append([]byte(nil), self.pqSecret...),
+		GroupHandleKey: append([]byte(nil), self.groupHandleKey...),
+	}, nil
+}
+
+// publishEpochFanoutLocked seals and submits §6.1 step (2)'s wrap set and the marker that closes
+// it, at this group's CURRENT epoch. It is the half of [Group.Open] that is not the founding
+// commit, and [Group.AddMemberAndPublish] runs it after the group has entered the new epoch.
+func (self *Group) publishEpochFanoutLocked(ctx context.Context) error {
+	wrapTargets, err := self.wrapTargetsLocked()
+	if err != nil {
+		return err
+	}
+	if len(wrapTargets) == 0 {
+		return ErrNoMemberAdded
+	}
+	for _, target := range wrapTargets {
+		wrap, err := self.session.SealRecord(message.RetentionPermanent, 0, false,
+			encodeHead(self.device.nowMs()), []byte(alphaWrapBody), 0, &message.ServerAttachment{
+				Kind: message.AttachmentWrap,
+				Wrap: &message.WrapTag{WrapTargetHandle: append([]byte(nil), target[:]...), Epoch: self.epoch},
+			})
+		if err != nil {
+			return fmt.Errorf("urmessage: sealing an epoch wrap: %w", err)
+		}
+		if _, err := self.submitLocked(ctx, self.session, wrap, "an epoch wrap"); err != nil {
+			return err
+		}
+	}
+	marker, err := self.session.SealRecord(message.RetentionDurable, 0, false,
+		encodeHead(self.device.nowMs()), []byte(alphaEpochCompleteBody), 0, &message.ServerAttachment{
+			Kind:     message.AttachmentComplete,
+			Complete: &message.EpochComplete{Epoch: self.epoch, WrapCount: uint32(len(wrapTargets))},
+		})
+	if err != nil {
+		return fmt.Errorf("urmessage: sealing the epoch complete marker: %w", err)
+	}
+	if _, err := self.submitLocked(ctx, self.session, marker, "the epoch complete marker"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1618,14 +1857,41 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	keys, err := self.session.EpochKeys()
-	if err != nil {
-		return nil, fmt.Errorf("urmessage: this epoch's keys: %w", err)
-	}
-	defer keys.Destroy()
-	readKey, err := keys.ReadKey()
-	if err != nil {
-		return nil, err
+	// THE READ KEY IS RE-DERIVED WHEN THE EPOCH MOVES UNDER THIS WALK, and it used to be derived
+	// once. A5's ingest can advance [Group.epoch] in the MIDDLE of a walk -- an is_commit record on
+	// one page opens an epoch whose messages arrive on the next -- and §4.3.4's read authenticator
+	// is a mac under the read key of the epoch the fetch NAMES. A page requested with ReadEpoch set
+	// to the new epoch but MAC'd under the old epoch's read key is refused by the server, so the
+	// read key follows the epoch. It is a closure over a captured epoch rather than a re-derivation
+	// per page, so a walk that does not cross an epoch pays exactly the one derivation it did before.
+	var epochKeys *messagegroup.EpochKeys
+	var readKey []byte
+	readKeyEpoch := ^uint64(0)
+	defer func() {
+		if epochKeys != nil {
+			epochKeys.Destroy()
+		}
+	}()
+	refreshReadKey := func() error {
+		if epochKeys != nil && readKeyEpoch == self.epoch {
+			return nil
+		}
+		next, err := self.session.EpochKeys()
+		if err != nil {
+			return fmt.Errorf("urmessage: this epoch's keys: %w", err)
+		}
+		key, err := next.ReadKey()
+		if err != nil {
+			next.Destroy()
+			return err
+		}
+		if epochKeys != nil {
+			epochKeys.Destroy()
+		}
+		epochKeys = next
+		readKey = key
+		readKeyEpoch = self.epoch
+		return nil
 	}
 	own, err := self.session.SenderHandle()
 	if err != nil {
@@ -1649,6 +1915,10 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 		if maxFetchPages <= page {
 			self.commitWalkLocked(walk)
 			return walk.opened, fmt.Errorf("%w: %d pages, cursor at record %d", ErrFetchIncomplete, page, self.cursor)
+		}
+		if err := refreshReadKey(); err != nil {
+			self.commitWalkLocked(walk)
+			return walk.opened, err
 		}
 		since := walk.from
 		request := &protocol.FetchRequest{
@@ -2030,7 +2300,36 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			continue
 		}
 		header := &parsed.Header
-		if header.IsCommit || len(header.ServerAttachment) != 0 {
+		if header.IsCommit {
+			// A5: AN is_commit RECORD IS INGESTED, NOT SKIPPED -- but only the ONE that opens the
+			// epoch this session is at, which is the commit whose header names this epoch (a
+			// commit sealed at epoch E opens E+1, and this member at epoch E is the member that
+			// must follow it). Every other is_commit record is ceremony this walk reads past: the
+			// FOUNDING commit once this device is past epoch one (header epoch 0), and any commit
+			// this device has already ingested and moved beyond on an earlier walk. Both would be
+			// refused by OpenCeremonyRecord under this session's epoch check anyway (§8.4.1), so the
+			// guard here and that check are the one rule; deciding it here keeps a stale commit off
+			// the ingest path and out of a fail().
+			if header.Epoch != self.epoch {
+				self.stats.SkippedCeremony += 1
+				resolve(recordId)
+				continue
+			}
+			if err := self.ingestCommitLocked(walk, parsed); err != nil {
+				fail(recordId, err)
+				continue
+			}
+			self.stats.SkippedCeremony += 1
+			resolve(recordId)
+			continue
+		}
+		if len(header.ServerAttachment) != 0 {
+			// THE CEREMONY RECORDS AROUND A COMMIT: the epoch's wrap fan-out and the epoch-complete
+			// marker. They are STILL SKIPPED, deliberately. In the alpha a wrap carries no key
+			// material ([alphaWrapBody]) and the marker is the server's own step-(2) fence, so
+			// there is nothing in either for a receiving member to read: the epoch's key schedule
+			// comes off the MLS exporter the COMMIT moved, not off these. A joiner gets its material
+			// from the Welcome. So the ingest reads the commit and skips the fan-out around it.
 			self.stats.SkippedCeremony += 1
 			resolve(recordId)
 			continue
@@ -2057,6 +2356,18 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			// authenticated as this device's own on an earlier walk, and still not showable. Its
 			// evidence is already in [Group.ownIndexSeen] and, when it was a copy's, already in
 			// identityInUse, so nothing is taken from the header re-fetched here.
+			resolve(recordId)
+			continue
+		}
+		if header.Epoch < self.epoch {
+			// A RECORD SEALED AT AN EPOCH THIS DEVICE HAS LEFT. A [messagegroup.GroupSession] is
+			// single-epoch, so no key on this session opens it -- and this walk has already routed
+			// past the commit that would have kept the two epochs' records together (the cursor is
+			// not persisted, so a restored device re-walks its whole history at its later epoch).
+			// It is a VISIBLE GAP and not a fail(): see [GapOutOfWindow]. Own and peer alike, because
+			// the own-copy path refuses an epoch mismatch too and item 241's history-across-a-change
+			// is a later step; what THIS build owes is that the record is not lost silently.
+			self.noteEpochGapLocked(walk, recordId, header)
 			resolve(recordId)
 			continue
 		}
@@ -2210,6 +2521,11 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			// because it is a message somebody in this group really wrote.
 			self.stats.OpenedOwn += 1
 			self.noteOwnIndexLocked(walk, recordId, header.StreamIndex, header.BodyHash)
+		} else {
+			// A PEER RECORD THAT OPENED, so its stream index is one this group's keys
+			// authenticated: raise the head this peer's ladder will be re-tracked at after the
+			// next epoch change. See [Group.notePeerHeadLocked] and [Group.crossEpochLadderLocked].
+			self.notePeerHeadLocked(leaf, header)
 		}
 		var received *Message
 		if gap == "" {
@@ -2402,6 +2718,230 @@ func (self *Group) openOwnFromCopyLocked(walk *pageWalk, recordId uint64, parsed
 	}
 	self.delivered[recordId] = true
 	return true, nil
+}
+
+// ── ingesting a commit: §6.1's membership change on the receiving side (A5) ───────────────────
+
+// CommitMember is one member of a group as it stands at the moment a commit is authorized: the
+// leaf a role is read at, and the sender_handle that names it on the wire.
+type CommitMember struct {
+	// Leaf is the member's leaf index in the ratchet tree.
+	Leaf uint32
+
+	// SenderHandle is [messagegroup.SenderHandle] for this leaf at this epoch: the 16 octets its
+	// records carry. A copy.
+	SenderHandle []byte
+}
+
+// CommitAuthorization is everything a receiving client's authorization decision is handed about one
+// ingested commit, BEFORE it is applied.
+//
+// IT IS THE RECEIVING ARM OF MASTER §11, shaped now and filled later. §11 rules that a bad commit
+// "is refused by the committing client, and is rejected by every receiving client on validation."
+// The receiving-client arm is the commit-ingest path, and this is the value the check reads. The
+// full role model (item 242) is not built; [CommitAuthorizer] returns nil today. What is built is
+// the CALL, on the path, with the inputs a role check needs -- so the check fills the body without
+// moving the call, which the plan says is strictly cheaper than retrofitting the path later.
+type CommitAuthorization struct {
+	// GroupId is the 32-octet group this commit is in. A copy.
+	GroupId []byte
+
+	// Epoch is the epoch this commit OPENS -- the current epoch plus one. The membership below and
+	// the committer are as they stood at the epoch that is closing, which is where a role is read.
+	Epoch uint64
+
+	// CommitterLeaf is the AUTHENTICATED leaf that authored the commit: the commit's signature has
+	// been verified against this leaf by [messagegroup.GroupHandle.Process] before this value is
+	// built. A role check reads the committer's role at this leaf in [CommitAuthorization.Members].
+	CommitterLeaf uint32
+
+	// AddedLeaves, RemovedLeaves and UpdatedLeaves are where the commit's proposals landed, off the
+	// staged commit rather than off any header. A role check reads them to decide whether the
+	// committer's role permits what the commit does -- e.g. MASTER §11's ErrAdminRemovedByNonOwner.
+	AddedLeaves   []uint32
+	RemovedLeaves []uint32
+	UpdatedLeaves []uint32
+
+	// Members is the membership as it stands BEFORE the commit is applied. A role check reads the
+	// committer's role and every affected member's role off this. It is the pre-commit tree because
+	// the decision is taken before ApplyCommit, which is the only order under which a commit that
+	// removes the owner can be refused by reading the owner's role.
+	Members []CommitMember
+}
+
+// CommitAuthorizer is a device's receiving-client decision on an ingested commit. It returns nil to
+// ALLOW, or an error to REFUSE -- which [Group.Receive] surfaces as [ErrCommitUnauthorized] with
+// the returned cause carried, and which leaves this group at the epoch it was already at.
+//
+// A NIL AUTHORIZER ALLOWS EVERY COMMIT, which is the alpha's behaviour: the full role model (item
+// 242) is not built, so there is no role to refuse on. It is a function value rather than a method
+// on an interface so that the day the role model lands, the check is a body swap at one call site
+// and not a new seam.
+type CommitAuthorizer func(*CommitAuthorization) error
+
+// ingestCommitLocked follows one received commit into the epoch it opens: the whole of A5, in the
+// order A5's plan fixes and in one place.
+//
+//	OpenCeremonyRecord -> Process -> authorization hook -> ApplyCommit -> AdvanceEpoch ->
+//	A4's re-track -> enterEpochLocked (A3's persist)
+//
+// THE ORDER IS NOT INTERCHANGEABLE. The hook is BEFORE ApplyCommit because a decision taken after
+// the commit is applied cannot refuse a commit that removes the owner. ApplyCommit is BEFORE
+// AdvanceEpoch because the session installs the epoch the HANDLE is at, so the handle must have
+// moved first -- and mls persists the new epoch's MLS state inside ApplyCommit, which is the first
+// of the two writers of epoch state. AdvanceEpoch reuses this group's LIFETIME pq_secret (item 243):
+// the same value re-extracts the new epoch's storage root, which is why item 243 was a prerequisite.
+// crossEpochLadderLocked (A4) runs in the same block as that install, and enterEpochLocked (A3) is
+// LAST -- the second writer -- so a persist that named the new epoch never outruns the ladders that
+// serve it.
+//
+// THE RECEIVER HOLDS THE GROUP MUTEX ACROSS THIS. Nothing here re-enters it: the handle and the
+// session run their own loops, and the persist is the durable store's own lock. What it can block on
+// is bounded -- one commit's worth of MLS work and one disk write -- so it does not stall the walk.
+func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) error {
+	header := &parsed.Header
+	// (0) track the committer's ladder at the commit's own retention class, so the ceremony open
+	// below has a receiver ratchet to peek. A commit is a PERMANENT record and this device may only
+	// ever have tracked this sender's DURABLE ladder (its ordinary messages), so the class the
+	// commit rides is one no ordinary record installed. The committer is a member of this group at
+	// the epoch that is closing, so its sender_handle is a leaf of walk.leaves; a record whose
+	// committer is not is refused rather than opened. The ceremony arm commits no ratchet, so this
+	// peek costs nothing this device's own next record needs.
+	committerLeaf, known := walk.leaves[header.SenderHandle]
+	if !known {
+		return fmt.Errorf("%w: the commit names sender_handle %x, which is no leaf of this group at epoch %d",
+			ErrCommitIngest, header.SenderHandle, self.epoch)
+	}
+	if err := self.trackLocked(committerLeaf, header); err != nil {
+		return fmt.Errorf("%w: %w", ErrCommitIngest, err)
+	}
+	// (1) open the ceremony record. It authenticates NOBODY -- the body is judged by mls below,
+	// not by the sender_handle the record claims. The epoch check inside it has already been
+	// satisfied by the caller's guard (header.Epoch == self.epoch).
+	_, commitBytes, err := self.session.OpenCeremonyRecord(parsed)
+	if err != nil {
+		return fmt.Errorf("%w: opening the commit ceremony record: %w", ErrCommitIngest, err)
+	}
+	// (2) process the commit against this member's own tree, staging it. This is where the
+	// commit's signature is verified against its committer and where its proposals are resolved.
+	processed, err := self.handle.Process(commitBytes)
+	if err != nil {
+		return fmt.Errorf("%w: processing the commit: %w", ErrCommitIngest, err)
+	}
+	if processed.Kind != messagegroup.EngineProcessedCommit {
+		return fmt.Errorf("%w: a record marked is_commit processed as kind %d rather than a commit",
+			ErrCommitIngest, processed.Kind)
+	}
+	// (3) THE AUTHORIZATION HOOK, before anything is applied. Returns allow today; see the header.
+	if err := self.authorizeCommitLocked(processed); err != nil {
+		return err
+	}
+	// (4) apply it: the handle enters the epoch the commit opens, and mls persists that epoch's
+	// state HERE -- the first of the two writers of epoch state.
+	if err := self.handle.ApplyCommit(processed); err != nil {
+		return fmt.Errorf("%w: applying the commit: %w", ErrCommitIngest, err)
+	}
+	newEpoch := self.handle.Epoch()
+	// (5) advance the session onto the epoch the handle is now at, reusing the lifetime pq_secret.
+	if err := self.session.AdvanceEpoch(self.pqSecret); err != nil {
+		return fmt.Errorf("%w: advancing the session to epoch %d: %w", ErrCommitIngest, newEpoch, err)
+	}
+	// (6) A4: the ladder bookkeeping crosses the epoch here, in the same block as the install above.
+	if err := self.crossEpochLadderLocked(newEpoch); err != nil {
+		return err
+	}
+	// (7) A3: persist the new epoch through the one door -- the second writer, after mls.
+	if err := self.enterEpochLocked(); err != nil {
+		return err
+	}
+	// (8) THE MEMBERSHIP HAS CHANGED, AND THE WALK IS STILL RUNNING. walk.leaves was built at the
+	// start of this Receive from the membership at the epoch that just closed, so a record from a
+	// member this commit ADDED -- whose leaf did not exist then -- would fail "no leaf of this
+	// group" if it arrives later in the same page. Rebuilt here off the handle at the new epoch, so
+	// the rest of the walk resolves the new membership. walk.own does not change: this device's leaf
+	// and the epoch-zero group_handle_key its handle is derived from both survive an epoch change.
+	leaves, err := self.leavesLocked()
+	if err != nil {
+		return fmt.Errorf("%w: the membership at epoch %d: %w", ErrCommitIngest, newEpoch, err)
+	}
+	walk.leaves = leaves
+	self.stats.Ingested += 1
+	return nil
+}
+
+// authorizeCommitLocked takes the receiving-client decision on one processed commit. It is A5's
+// hook, and it runs BEFORE ApplyCommit.
+//
+// A nil authorizer allows every commit and the membership is not even read, because building the
+// [CommitAuthorization] a nil authorizer would ignore is work with no reader. When there IS an
+// authorizer, it is handed the committer and what the commit does off [messagegroup.EngineProcessed]
+// (authenticated by Process) and the PRE-commit membership off the handle. A refusal is surfaced as
+// [ErrCommitUnauthorized] with the returned cause carried.
+func (self *Group) authorizeCommitLocked(processed *messagegroup.EngineProcessed) error {
+	authorizer := self.device.commitAuthorizer
+	if authorizer == nil {
+		return nil
+	}
+	members, err := self.membershipLocked()
+	if err != nil {
+		return fmt.Errorf("%w: the membership the authorization check reads: %w", ErrCommitIngest, err)
+	}
+	decision := &CommitAuthorization{
+		GroupId:       append([]byte(nil), self.id...),
+		Epoch:         self.epoch + 1,
+		CommitterLeaf: processed.CommitterLeaf,
+		AddedLeaves:   append([]uint32(nil), processed.AddedLeaves...),
+		RemovedLeaves: append([]uint32(nil), processed.RemovedLeaves...),
+		UpdatedLeaves: append([]uint32(nil), processed.UpdatedLeaves...),
+		Members:       members,
+	}
+	if err := authorizer(decision); err != nil {
+		return fmt.Errorf("%w: %w", ErrCommitUnauthorized, err)
+	}
+	return nil
+}
+
+// membershipLocked is this group's members as they stand right now, one [CommitMember] per member,
+// with each sender_handle DERIVED from the group_handle_key and the leaf rather than read off any
+// record. It is the pre-commit membership when the caller is [Group.authorizeCommitLocked].
+func (self *Group) membershipLocked() ([]CommitMember, error) {
+	members := make([]CommitMember, 0, self.handle.MemberCount())
+	for at := 0; at < self.handle.MemberCount(); at += 1 {
+		leaf, _, _, err := self.handle.MemberAt(at)
+		if err != nil {
+			return nil, fmt.Errorf("urmessage: the group's member %d: %w", at, err)
+		}
+		handle := messagegroup.SenderHandle(self.groupHandleKey, leaf)
+		members = append(members, CommitMember{
+			Leaf:         leaf,
+			SenderHandle: append([]byte(nil), handle[:]...),
+		})
+	}
+	return members, nil
+}
+
+// noteEpochGapLocked delivers one pre-change record as a [GapOutOfWindow] gap: something is at this
+// record id, it was sealed at an epoch this device has left, and no key on this single-epoch session
+// opens it. See [GapReason].
+//
+// IT READS NO BODY, because it cannot -- the body is under the old epoch's key -- so the gap carries
+// no kind and no text, only its position and its message_id. message_id is a function of the header
+// and the group_handle_key, both of which this session holds whatever epoch it is at, so the gap is
+// still NAMED. A record whose id cannot be derived is counted and resolved past rather than retried:
+// the epoch will not come back, so there is nothing a re-fetch repairs.
+func (self *Group) noteEpochGapLocked(walk *pageWalk, recordId uint64, header *message.RecordHeader) {
+	self.stats.GapOutOfWindow += 1
+	messageId, err := self.session.MessageIdOf(header)
+	if err != nil {
+		return
+	}
+	mine := header.SenderHandle == walk.own
+	entry := &Content{}
+	received := newGap(GapOutOfWindow, entry, recordId, header.SenderHandle[:], mine, 0, messageId[:])
+	if self.deliverLocked(received, entry) {
+		walk.opened = append(walk.opened, received)
+	}
+	self.delivered[recordId] = true
 }
 
 // ── what a record becomes ────────────────────────────────────────────────────────────────────
@@ -2915,6 +3455,7 @@ func (self *Group) initTables() {
 	self.ownIndices = map[uint64]*ownSealed{}
 	self.withoutCopy = map[uint64]bool{}
 	self.ownHeads = map[trackedKey]uint64{}
+	self.peerHeads = map[ladderKey]uint64{}
 	self.logIndex = map[[MessageIdBytes]byte]int{}
 	self.effects = map[[MessageIdBytes]byte]*contentEffect{}
 	self.effectsOn = map[[MessageIdBytes]byte][]*contentEffect{}
@@ -2947,7 +3488,7 @@ func (self *Group) advanceOwnLadderLocked(leaf uint32, header *message.RecordHea
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrRecordOpen, err)
 	}
-	key := trackedKey{leaf: leaf, retentionWire: retentionWire, ephWindow: header.EphWindow}
+	key := trackedKey{epoch: self.epoch, ladderKey: ladderKey{leaf: leaf, retentionWire: retentionWire, ephWindow: header.EphWindow}}
 	head := self.ownHeads[key]
 	if header.StreamIndex <= head+uint64(messagegroup.DefaultRecordWindowSize) {
 		return nil
@@ -2964,24 +3505,100 @@ func (self *Group) advanceOwnLadderLocked(leaf uint32, header *message.RecordHea
 	return nil
 }
 
-// trackLocked installs this sender's receiver ladder once and only once.
+// crossEpochLadderLocked carries this group's receiver-ladder bookkeeping across an epoch change.
+// It is A4, and its ONE caller is the commit-ingest path ([Group.ingestCommitLocked]), where it
+// runs in the same statement block as the [messagegroup.GroupSession] install that zeroized the
+// ratchets it describes -- not before it, because a peer record could still be opened against the
+// epoch that is closing, and not after A3's persist, because a persist that named the new epoch
+// with the ladders still describing the old one would come back from a restart tracked at nothing.
+//
+// TWO THINGS ARE CLEARED AND ONE IS KEPT. [Group.tracked] and [Group.ownHeads] both name receiver
+// ratchets [messagegroup.GroupSession.AdvanceEpoch] has just zeroized, so they are cleared -- and
+// [trackedKey] now carries the epoch, so a memo that survived would also be a memo at the epoch
+// before, which is the same rule read the other way. [Group.peerHeads] is NOT cleared: it is the
+// head this device authenticated for each peer, the stream index is continuous across epochs, and
+// it is the whole of what stops a re-track at 0 from starving a busy peer.
+//
+// EACH PEER LADDER IS RE-TRACKED AT ITS AUTHENTICATED HEAD, keyed by the NEW epoch. A member just
+// added has no head here and is tracked lazily at 0 by [Group.trackLocked] on first sight, which is
+// correct: its stream starts at this epoch. The own ladder is not re-tracked here -- it is rebuilt
+// lazily by [Group.advanceOwnLadderLocked] off [Group.ownIndexSeen], which survives the clear for
+// peerHeads' reason.
+//
+// newEpoch is [Group.handle.Epoch], which [messagegroup.GroupHandle.ApplyCommit] has already
+// advanced; [Group.epoch] does not move until [Group.enterEpochLocked] runs after this, so the key
+// is built off the handle rather than the field. [Group.trackLocked]'s later keys use
+// [Group.epoch], which enterEpochLocked then sets equal to this, so the two agree.
+func (self *Group) crossEpochLadderLocked(newEpoch uint64) error {
+	clear(self.tracked)
+	clear(self.ownHeads)
+	for ladder, head := range self.peerHeads {
+		class, ephBucket, err := message.RetentionClassOf(ladder.retentionWire)
+		if err != nil {
+			return fmt.Errorf("%w: re-tracking leaf %d across the change to epoch %d: %w",
+				ErrRecordOpen, ladder.leaf, newEpoch, err)
+		}
+		if err := self.session.TrackSender(ladder.leaf, class, ephBucket, ladder.ephWindow, head); err != nil {
+			return fmt.Errorf("%w: re-tracking leaf %d at head %d across the change to epoch %d: %w",
+				ErrRecordOpen, ladder.leaf, head, newEpoch, err)
+		}
+		self.tracked[trackedKey{epoch: newEpoch, ladderKey: ladder}] = true
+	}
+	return nil
+}
+
+// trackLocked installs this sender's receiver ladder once and only once, AT THIS GROUP'S EPOCH.
+//
+// THE HEAD IS THE ONE THIS DEVICE HAS AUTHENTICATED FOR THIS SENDER AND NEVER 0. It used to be a
+// literal 0, which was the only honest answer WHILE a group had one epoch: a ladder followed from
+// its root opens the sender's whole stream. It stops being honest at the first membership change.
+// The receiver ratchets are zeroized at every epoch install and the stream index is continuous
+// across epochs, so a peer that had reached index N by the epoch before is at N+1 now -- and a
+// ladder re-tracked at 0 answers ErrOutOfWindow for it once N passes
+// [messagegroup.DefaultRecordWindowSize]. [Group.peerHeads] holds that authenticated head, keyed
+// epoch-independent, and is 0 for a ladder never seen -- a member just added, or a fresh group at
+// epoch one -- so this collapses to the old literal in every case that used to reach it and only
+// differs after an epoch change. It is CALLER STATE and never a number off the record: TrackSender
+// walks one expansion per index below the head, and peerHeads is only ever raised off a record
+// this group's keys AUTHENTICATED (see [Group.notePeerHeadLocked]), so a peer cannot choose how far
+// this device walks.
 func (self *Group) trackLocked(leaf uint32, header *message.RecordHeader) error {
 	retentionWire, err := message.RetentionClassWire(header.RetentionClass, header.EphBucket)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrRecordOpen, err)
 	}
-	key := trackedKey{leaf: leaf, retentionWire: retentionWire, ephWindow: header.EphWindow}
+	ladder := ladderKey{leaf: leaf, retentionWire: retentionWire, ephWindow: header.EphWindow}
+	key := trackedKey{epoch: self.epoch, ladderKey: ladder}
 	if self.tracked[key] {
 		return nil
 	}
-	// headIndex zero: the ladder is followed from its root, which is the only honest answer for a
-	// device that has been in this group since the epoch opened. It is the CALLER'S state and
-	// never a number off the record, so a peer cannot choose how far this device walks.
-	if err := self.session.TrackSender(leaf, header.RetentionClass, header.EphBucket, header.EphWindow, 0); err != nil {
-		return fmt.Errorf("%w: tracking leaf %d: %w", ErrRecordOpen, leaf, err)
+	head := self.peerHeads[ladder]
+	if err := self.session.TrackSender(leaf, header.RetentionClass, header.EphBucket, header.EphWindow, head); err != nil {
+		return fmt.Errorf("%w: tracking leaf %d at head %d: %w", ErrRecordOpen, leaf, head, err)
 	}
 	self.tracked[key] = true
 	return nil
+}
+
+// notePeerHeadLocked raises [Group.peerHeads] for one peer ladder to a stream index this group's
+// keys have just AUTHENTICATED, which is the head a later epoch change re-tracks that ladder at.
+//
+// IT IS RAISED ONLY OFF AN OPENED RECORD, never off a header, for [Group.trackLocked]'s reason: the
+// head decides how far TrackSender walks, so a number a server chose would be a number of
+// expansions a server chose. §3.1's stream_index is inside both AEADs, so a record that opened is
+// one whose index this device's own key schedule agreed to.
+func (self *Group) notePeerHeadLocked(leaf uint32, header *message.RecordHeader) {
+	retentionWire, err := message.RetentionClassWire(header.RetentionClass, header.EphBucket)
+	if err != nil {
+		// unreachable past an open: the class already went through the AEAD. Left as a nil-op
+		// rather than a panic, because a head not raised is a re-track one index too low, which
+		// the window absorbs, and a panic here would take down a Receive over a record that opened.
+		return
+	}
+	ladder := ladderKey{leaf: leaf, retentionWire: retentionWire, ephWindow: header.EphWindow}
+	if self.peerHeads[ladder] < header.StreamIndex {
+		self.peerHeads[ladder] = header.StreamIndex
+	}
 }
 
 // leavesLocked is every member's sender_handle at this epoch, mapped to its leaf index.

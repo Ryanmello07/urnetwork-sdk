@@ -1017,6 +1017,8 @@ func urnet_message_group_stats(self C.uint64_t) *C.char {
 		SkippedClass:    stats.SkippedClass,
 		GapMalformed:    stats.GapMalformed,
 		GapUnsupported:  stats.GapUnsupported,
+		GapOutOfWindow:  stats.GapOutOfWindow,
+		Ingested:        stats.Ingested,
 		FailedOpen:      stats.FailedOpen,
 		Submitted:       stats.Submitted,
 		Rebound:         stats.Rebound,
@@ -1291,11 +1293,19 @@ type messageGroupStats struct {
 	// read -- gap_malformed and the per-message gap field are what is left to learn it from.
 	GapMalformed   uint64 `json:"gap_malformed"`
 	GapUnsupported uint64 `json:"gap_unsupported"`
-	FailedOpen     uint64 `json:"failed_open"`
-	Submitted      uint64 `json:"submitted"`
-	Rebound        uint64 `json:"rebound"`
-	Pages          uint64 `json:"pages"`
-	Unattested     uint64 `json:"unattested"`
+	// Records that became an out_of_window gap: sealed at an epoch this device has left, which a
+	// restored device meets re-walking its history at a later epoch. A membership change put them
+	// out of this build's reach; item 241's history-across-a-change is what will carry them instead.
+	GapOutOfWindow uint64 `json:"gap_out_of_window"`
+	// Commits this group INGESTED: §6.1 membership-change records this device processed, authorized,
+	// applied and followed into the next epoch. One per epoch this device was carried into rather
+	// than authored.
+	Ingested   uint64 `json:"ingested"`
+	FailedOpen uint64 `json:"failed_open"`
+	Submitted  uint64 `json:"submitted"`
+	Rebound    uint64 `json:"rebound"`
+	Pages      uint64 `json:"pages"`
+	Unattested uint64 `json:"unattested"`
 }
 
 func messageInfoOf(entry messageEntry) *messageInfo {

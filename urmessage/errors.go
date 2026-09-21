@@ -43,6 +43,20 @@ var (
 	// A record came back that a key should have opened and did not.
 	ErrRecordOpen = errors.New("urmessage: a record from a member of this group did not open")
 
+	// ── ingesting a commit (§6.1's membership change, MASTER §11) ──────────────────────────
+
+	// An is_commit record was received and this device could not follow the group into the epoch
+	// it opens: the commit would not process, would not apply, or the session could not be advanced
+	// onto the new epoch. It is carried rather than swallowed because a member that cannot ingest a
+	// commit has fallen off the group and cannot read the next message.
+	ErrCommitIngest = errors.New("urmessage: this group received a membership-change commit it could not follow into the next epoch")
+
+	// The receiving-client authorization decision refused an ingested commit: MASTER §11's
+	// "rejected by every receiving client on validation." The cause the [CommitAuthorizer]
+	// returned is carried. A NIL authorizer never produces this; it exists so the role model
+	// (item 242) has a name to refuse a bad commit with, on a path that is already built.
+	ErrCommitUnauthorized = errors.New("urmessage: a received commit was refused by this device's authorization check")
+
 	// The head this package writes, read back as something else.
 	ErrHeadFormat = errors.New("urmessage: this record's head is not one this build wrote")
 

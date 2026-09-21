@@ -73,13 +73,22 @@ func TestEveryRecordThisBuildSealsCarriesA25OctetCtHead(t *testing.T) {
 	}
 }
 
-// THE FOUR SEAL SITES ALL PASS encodeHead, AND THERE ARE FOUR OF THEM, IN THE WHOLE PACKAGE.
+// EVERY SEAL SITE PASSES encodeHead, AND THERE ARE SEVEN OF THEM ACROSS THE FOUR KINDS.
 //
 // The case above seals its own four records, which makes it a statement about encodeHead's width
 // and not yet a statement about the SOURCE. This is the other half: every SealRecord call this
-// package makes hands encodeHead's answer as its head argument, and there are exactly four. A fifth
-// site -- or one that built a head some other way -- would leave the case above green over a build
-// that seals a head it never measured.
+// package makes hands encodeHead's answer as its head argument. A site that built a head some other
+// way would leave the case above green over a build that seals a head it never measured.
+//
+// IT COUNTS SITES AND THE COUNT IS SEVEN, NOT FOUR, SINCE THE SECOND EPOCH LANDED. There are still
+// only four record KINDS -- the case above seals one of each -- but a group now publishes those
+// kinds from TWO sets of sites: [Group.Open] founds epoch one (the founding commit, a wrap, the
+// marker), and [Group.AddMemberAndPublish] with [Group.publishEpochFanoutLocked] opens every epoch
+// after it (an epoch commit, a wrap, the marker), plus the one application site in
+// [Group.sendContentLocked]. Three of the seven are new sites of three kinds this gate already
+// covers, not new kinds; what matters is that each still passes encodeHead, which is what the loop
+// below checks on all seven. A site added or one that stopped passing encodeHead is red rather than
+// uncovered.
 //
 // IT MEASURES THE CALL AND NOT THE NAME, and it used to measure the name. The old body asked whether
 // `call.Args[3].(*ast.CallExpr).Fun` was an [ast.Ident] spelled "encodeHead" -- which is a question
@@ -157,10 +166,10 @@ func TestTheFourSealSitesAllPassEncodeHead(t *testing.T) {
 			return true
 		})
 	}
-	if len(sites) != 4 {
-		t.Errorf("this package holds %d SealRecord call(s) and the build has four record kinds: %v", len(sites), sites)
+	if len(sites) != 7 {
+		t.Errorf("this package holds %d SealRecord call(s); the build has four record kinds published from seven sites (Open founds epoch one, AddMemberAndPublish opens every epoch after, plus the one application site): %v", len(sites), sites)
 	}
-	t.Logf("the four seal sites: %v", sites)
+	t.Logf("the seven seal sites: %v", sites)
 }
 
 // headGateParsePackage parses every production source in this package, WHATEVER GOOS IT IS
