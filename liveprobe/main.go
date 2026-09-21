@@ -433,32 +433,29 @@ func main() {
 	}
 	fmt.Printf("  and B's own %d pre-restart line(s) came back as B's own, out of %d in its log\n",
 		len(bsOwn), len(held))
-	// THE PRE-CHANGE HISTORY, COUNTED AND NOT HIDDEN. The restarted B re-walks its whole history at
-	// epoch 2 with a single-epoch session, so every epoch-1 line -- A's and B's own alike -- refuses
-	// under the epoch check and comes back as an out_of_window GAP: a visible position that says
-	// "something is here", not a failure and not silence. The count is asserted EXACTLY against the
-	// lines the group exchanged at epoch 1, because a number that merely "looks about right" would
-	// hide a line lost in the change. This is what item 241's history-across-a-membership-change
-	// will one day carry instead; until it does, the probe prints how much of the conversation the
-	// change put out of this build's reach.
+	// THE PRE-CHANGE HISTORY COMES BACK. B was a member at epoch 1, so item 241 says every epoch-1
+	// line is B's to read after the membership change: A's lines open under a REBUILT epoch-1
+	// schedule (loaded once from the epoch-1 state blob the 32-epoch window keeps), and B's own come
+	// from its local copies. Before 241 landed this block asserted the OPPOSITE -- exactly 602
+	// out_of_window gaps -- and printed it as "out of this build's reach". Now the count that must be
+	// exact is the other way round: ZERO gaps for a member who was there, and every A line from
+	// epoch 1 counted under Stats.OpenedPastEpoch. A gap here is a line the change lost; an
+	// OpenedPastEpoch below A's epoch-1 count is a line that came back some other way than the one
+	// this build claims.
 	check(bGroup.Epoch() == 2, "the restarted B's re-walk over the epoch commit left it at epoch %d, want 2", bGroup.Epoch())
 	bGaps, bOpenedAfterRestart, bOtherGaps := gapCount(afterRestart)
-	ownGaps := 0
-	for _, one := range afterRestart {
-		if one.Gap == urmessage.GapOutOfWindow && one.Mine {
-			ownGaps += 1
-		}
-	}
 	check(bOtherGaps == 0, "the restarted B's re-walk produced %d gap(s) of a reason other than out_of_window", bOtherGaps)
-	check(bGaps == epochOneLines,
-		"the restarted B re-walked %d epoch-one line(s) as out_of_window gaps and the group exchanged %d before the epoch moved; a line is missing or a line was invented",
-		bGaps, epochOneLines)
-	check(ownGaps == 1, "%d of the restarted B's gaps are B's own, and B sealed exactly one line (step 3's answer) at epoch 1", ownGaps)
-	check(bGroup.Stats().GapOutOfWindow == uint64(bGaps), "the restarted B's Stats.GapOutOfWindow is %d and its re-walk handed back %d gaps",
-		bGroup.Stats().GapOutOfWindow, bGaps)
-	fmt.Printf("  %d pre-change record(s) came back as out_of_window GAPS on the restarted device: every epoch-1 line,\n"+
-		"  %d of A's and %d of B's own, is out of this build's reach after the membership change (item 241);\n"+
-		"  the %d epoch-2 line(s) opened and 0 failed\n", bGaps, bGaps-ownGaps, ownGaps, bOpenedAfterRestart)
+	check(bGaps == 0,
+		"the restarted B re-walked %d epoch-one line(s) as out_of_window gaps; B was a member at epoch 1 and item 241 says it keeps every one of them",
+		bGaps)
+	check(bGroup.Stats().GapOutOfWindow == 0, "the restarted B's Stats.GapOutOfWindow is %d, want 0", bGroup.Stats().GapOutOfWindow)
+	asEpochOne := uint64(epochOneLines - 1) // B sealed exactly one line at epoch 1 (step 3's answer); the rest are A's
+	check(bGroup.Stats().OpenedPastEpoch == asEpochOne,
+		"the restarted B opened %d record(s) under the rebuilt epoch-1 schedule and A sealed %d at epoch 1",
+		bGroup.Stats().OpenedPastEpoch, asEpochOne)
+	fmt.Printf("  the restarted B re-walked its whole history at epoch 2 with 0 out_of_window gaps: %d of A's epoch-1\n"+
+		"  line(s) opened under the REBUILT epoch-1 schedule (item 241, live), B's own came from copies, and\n"+
+		"  %d line(s) in all opened with 0 failures\n", bGroup.Stats().OpenedPastEpoch, bOpenedAfterRestart)
 	const afterTheRestart = "typed by the SAME device after it was restarted"
 	if _, err := bGroup.Send(ctx, afterTheRestart); err != nil {
 		fail("the restarted B Send: %v", err)
