@@ -66,11 +66,17 @@ func TestEveryRecordTypeUrmessageSealsLandsOnTheRungItsBodyNeeds(t *testing.T) {
 		want := message.SizeBucket(0xFF)
 		switch {
 		case row.IsCommit:
-			// the founding commit's body is the MLS commit that added bob, measured at 272 octets
-			// of ct_body at this commit. Pinned for the same reason as the other two, and if it
-			// moves the cause may equally be a bigger commit rather than a frame.
+			// the founding commit's body is the MLS commit that added bob. IT MOVED ON 2026-09-18
+			// AND THE CAUSE IS A BIGGER COMMIT AND NOT A FRAME, which is the alternative the
+			// sentence that stood here anticipated: urmessage.Group.AddMember now commits the add
+			// BY VALUE (GroupHandle.CommitAdd, ledger item 239 step A2), so the commit carries
+			// bob's whole key package inline -- the X-Wing public key in urmessage_leaf_keys is
+			// 1,216 octets on its own -- where the by-reference arm carried a 32 octet proposal
+			// reference. Measured: 272 octets of ct_body on the 256 rung before, 4,112 on the
+			// 4,096 rung after. The wraps and the marker below did not move, which is what says
+			// the founding commit grew rather than that the ceremony was framed.
 			kind, commits = "founding commit", commits+1
-			want = message.SizeBucket256
+			want = message.SizeBucket4K
 		case row.Attachment != nil && row.Attachment.Kind == store.AttachmentWrap:
 			kind, wraps = "epoch wrap", wraps+1
 			want = message.SizeBucket256

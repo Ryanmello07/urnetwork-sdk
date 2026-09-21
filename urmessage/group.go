@@ -738,13 +738,17 @@ func (self *Group) AddMember(keyPackage []byte) (*Invite, error) {
 		return nil, err
 	}
 
-	if _, err := self.handle.ProposeAdd(keyPackage); err != nil {
-		return nil, fmt.Errorf("urmessage: ProposeAdd: %w", err)
-	}
-	commit, welcome, ratchetTree, err := self.handle.Commit(nil)
+	// BY VALUE AND NOT BY REFERENCE, since 2026-09-18's CommitAdd (ledger item 239, step A2).
+	// ProposeAdd-then-Commit names the add by a reference every receiver resolves against its
+	// own proposal cache, so it only works while every member is handed the proposal before the
+	// commit; the founding add has no other member to hand it to, and the second add -- the one
+	// track A builds towards -- would have to fan a proposal record to every member first.
+	// CommitAdd carries the Add inside the commit, attributed to the committer, and the SAME
+	// call takes N key packages: one commit admits N members. Nothing is staged on its refusal,
+	// and mls refuses the same things it refused through ProposeAdd, at the same call.
+	commit, welcome, ratchetTree, err := self.handle.CommitAdd([][]byte{keyPackage})
 	if err != nil {
-		self.handle.ClearPendingCommit()
-		return nil, fmt.Errorf("urmessage: Commit: %w", err)
+		return nil, fmt.Errorf("urmessage: CommitAdd: %w", err)
 	}
 	if err := self.handle.MergePendingCommit(); err != nil {
 		return nil, fmt.Errorf("urmessage: MergePendingCommit: %w", err)
@@ -765,7 +769,6 @@ func (self *Group) AddMember(keyPackage []byte) (*Invite, error) {
 	}
 	self.session = session
 	self.sessionBound = nonceEpoch
-	self.epoch = self.handle.Epoch()
 	self.commit = append([]byte(nil), commit...)
 	// NOTHING IS PERSISTED HERE EITHER, for CreateGroup's reason carried one step further, and
 	// it is written down because a record here LOOKS obviously right and is not.
@@ -781,6 +784,13 @@ func (self *Group) AddMember(keyPackage []byte) (*Invite, error) {
 	// MEASURED rather than reasoned: a record written here was deleted and the whole suite
 	// stayed green, because [Group.Open] writes the founder's record and [Device.Join] writes
 	// the joiner's, and those are the two moments a group becomes usable.
+	//
+	// AND THE EPOCH STILL MOVES THROUGH THE ONE DOOR. enterEpochLocked is what writes the record
+	// on every later epoch change; here it finds the group unopened and writes nothing, which is
+	// the paragraph above stated as a rule rather than as a site that remembered.
+	if err := self.enterEpochLocked(); err != nil {
+		return nil, err
+	}
 	return &Invite{
 		GroupId:        append([]byte(nil), self.id...),
 		Welcome:        append([]byte(nil), welcome...),
@@ -949,6 +959,56 @@ func (self *Group) wrapTargetsLocked() ([][16]byte, error) {
 		targets = append(targets, messagegroup.WrapTargetHandle(self.groupHandleKey, self.epoch, leaf))
 	}
 	return targets, nil
+}
+
+// enterEpochLocked moves this group to the epoch its handle now stands at, AND WRITES THE RECORD IN
+// THE SAME BLOCK. It is the one place [Group.epoch] is assigned, and epochpersist_test.go holds
+// the package to that by reading the syntax tree rather than by trusting this sentence.
+//
+// WHY ONE DOOR. [GroupRecord.Epoch] is the epoch `messagegroup.GroupEngine.LoadGroup` is asked
+// for at the next restart, and nothing below this package can answer "the latest" -- the mls
+// store holds one blob per epoch and enumerates none of them. Until this door the record was
+// written at exactly two moments, [Device.Join] and [Group.Open], both of which are epoch one.
+// Every epoch change after them -- a commit this member ingests, an add it makes to a live group
+// -- moved the handle and left the record naming the epoch before, and mls keeps 32 past epochs'
+// state, so the next restart did not refuse: LoadGroup answered the OLD epoch, internally
+// consistent in every way, and the restored device sealed under a schedule every peer had left.
+// Nothing on that path says so. A record that moves with the epoch is what makes the restart
+// come back at the epoch the group is at, and the only way a site can forget to write it is to
+// not go through here, which the gate refuses.
+//
+// A GROUP WITH NO RECORD YET WRITES NONE. [Group.AddMember]'s paragraph is the rule: the
+// founder's record is written by Open, because a founder that died before Open must NOT come
+// back as a conversation it can see and never send in. `opened` is the field both record
+// writers set, so it is the fact "a record exists" read off the group rather than a second flag
+// to keep agreeing with the first.
+//
+// THE CALLER HAS ALREADY REBUILT THE SESSION, or is about to and holds no record of the epoch
+// either way. This method does not touch [Group.session]: a session is an epoch's whole key
+// schedule installed at construction, and which nonce, reserver and clock it is built over is
+// the caller's business. What this method owes is that the number the next restart is handed is
+// the number the handle answers now, and that the two are written in one place.
+//
+// ON A REFUSAL THE IN-MEMORY GROUP HAS MOVED AND THE DISK HAS NOT, and the error says so. The
+// alternative -- move the field only after the write -- leaves a group whose session is at one
+// epoch and whose epoch field names another, which every header this group seals would carry.
+func (self *Group) enterEpochLocked() error {
+	self.epoch = self.handle.Epoch()
+	if !self.opened {
+		return nil
+	}
+	if err := self.device.persistGroup(&GroupRecord{
+		GroupId:        self.id,
+		PqSecret:       self.pqSecret,
+		GroupHandleKey: self.groupHandleKey,
+		Epoch:          self.epoch,
+		Opened:         true,
+	}); err != nil {
+		return fmt.Errorf(
+			"urmessage: this group entered epoch %d and its record could not be persisted, so a restart would come back at the epoch before: %w",
+			self.epoch, err)
+	}
+	return nil
 }
 
 // ── sending ──────────────────────────────────────────────────────────────────────────────────
