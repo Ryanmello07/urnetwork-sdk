@@ -1,7 +1,8 @@
 # liveprobe
 
-Two real URnetwork accounts, two real platform connections, one **deployed** message server — and
-the whole of what the alpha can do, scenario by scenario.
+Three real URnetwork accounts, three real platform connections, one **deployed** message server —
+and the whole of what the alpha can do, scenario by scenario, including the membership change
+that makes a group chat a group chat.
 
 Every other transport test in this workspace runs two `connect.Client`s over in-process
 `connect.Route` channels in one binary — including `cp3b`, which is where the key schedule is
@@ -16,6 +17,7 @@ developer's machine must not require an operator account.
     liveprobe \
       -a  <file holding party A's by_client_jwt> \
       -b  <file holding party B's by_client_jwt> \
+      -c  <file holding party C's by_client_jwt, the third member step 5 adds> \
       -server <the message server's client_id> \
       -host beta-test.net \
       -dir /var/lib/urmessage/probe
@@ -44,12 +46,19 @@ party holds a single-writer exclusion on its own subdirectory — if a second pr
    must page until the server says `complete`. The step prints the page count, and **warns loudly
    if one page carried everything** — in which case `-lines` is below this server's
    `max_records_per_fetch` and the truncation path was not exercised.
-5. **A third member — and the refusal.** The alpha adds **exactly one** member, in the commit that
-   opens epoch 1, before `Open`. A second add is a second epoch and none of it is built. So this
-   step does not add a third member: it holds that a second `AddMember` is refused **by name**
-   (`ErrAlphaOneAdd` / `ErrGroupOpen`) rather than as a `REASON_REJECTED` a caller has to decode.
-   With `-c <a third by_client_jwt>` it uses a real third device's key package; without it, B's own
-   stands in. **This is a gap being measured, not a feature being tested.**
+5. **A third member is added to a group that has been chatting — a second epoch, live.** Everything
+   above ran at epoch 1. A calls `AddMemberAndPublish` on the OPEN group with C's key package:
+   a commit sealed at epoch 1 announcing epoch 2, the wrap fan-out for the new epoch and the marker,
+   all submitted to the deployed server. C joins from the Welcome at epoch 2. B, who authored
+   nothing, INGESTS the commit on its next `Receive` and follows into epoch 2 — asserted on B's own
+   counters (`Stats.Ingested == 1`, `Epoch() == 2`, and zero `out_of_window` gaps, because a member
+   that was current loses nothing). C drains the pre-join history: every epoch-1 line comes back as
+   an `out_of_window` GAP, counted exactly against the lines exchanged at epoch 1 (`2 + -lines`),
+   not tolerated. Then one line from each of A, B and C opens on both others — six directions,
+   each asserted on the FAR side against the exact text and against being a line rather than a gap.
+   `-c` is required; the founding-time `AddMember` still refuses a second add by name and this is
+   the other door. (In-process, this is `cp3b`'s
+   `TestThreeDevicesConvergeToEpochTwoAndExchangeMessagesEveryDirection`.)
 6. **A `-big` octet message** (default 40000), which crosses §4.6's 2048-octet cut as roughly
    twenty frames and is reassembled on the far side. No live test had ever fragmented. The text is
    compared octet for octet and the step prints the offset of the first difference if there is one.
@@ -63,6 +72,14 @@ party holds a single-writer exclusion on its own subdirectory — if a second pr
    so a user who closed the app and reopened it got the other side's half of the conversation and
    none of their own — with a nil error. A probe that checks only the far side's half cannot see
    that, and this one could not.
+
+   **And the pre-change history is counted, not hidden.** The restarted B re-walks its whole
+   history at epoch 2 with a single-epoch session, so every epoch-1 line — A's and B's own alike —
+   comes back as an `out_of_window` gap. The step asserts that count EXACTLY against the lines the
+   group exchanged at epoch 1, that exactly one of them is B's own (step 3's answer), that
+   `Stats.GapOutOfWindow` agrees with the walk, and that no gap of any other reason appeared; then
+   it prints the number. That number is what item 241's history-across-a-membership-change will
+   one day carry instead.
 
    **This step lands in the operator's reconnect window every time, and that is expected.**
    Measured on the deployed server: a `client_id` that has just re-dialled **is not routed to for

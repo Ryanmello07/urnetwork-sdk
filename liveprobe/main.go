@@ -1,5 +1,6 @@
-// Two real URnetwork accounts, two real platform connections, one DEPLOYED message server, and
-// the whole of what the alpha can do, scenario by scenario.
+// Three real URnetwork accounts, three real platform connections, one DEPLOYED message server, and
+// the whole of what the alpha can do, scenario by scenario -- including the membership change that
+// makes a group chat a group chat.
 //
 // Everything before this ran two connect.Clients over in-process Routes in one binary. This
 // crosses the operator's mesh to a server it did not start.
@@ -62,7 +63,7 @@ var (
 func main() {
 	aJwt := flag.String("a", "", "file holding party A's by_client_jwt")
 	bJwt := flag.String("b", "", "file holding party B's by_client_jwt")
-	cJwt := flag.String("c", "", "file holding party C's by_client_jwt; optional, and see step 5")
+	cJwt := flag.String("c", "", "file holding party C's by_client_jwt; C is the third member step 5 adds, so it is required")
 	serverId := flag.String("server", "", "the message server's client_id")
 	host := flag.String("host", "beta-test.net", "operator host")
 	dir := flag.String("dir", "/var/lib/urmessage/probe", "where each party's durable state lives")
@@ -77,6 +78,11 @@ func main() {
 	server, err := connect.ParseId(*serverId)
 	if err != nil {
 		fail("parse server id: %v", err)
+	}
+	// REFUSED HERE AND NOT IN STEP 5, because step 5 is four minutes and six hundred records in,
+	// and a probe that spends them before saying it needed a third credential has wasted them.
+	if *cJwt == "" {
+		fail("-c is required: step 5 adds a THIRD real device to the group, and a third device is a third credential")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -216,39 +222,115 @@ func main() {
 	}
 
 	// ── 5 ────────────────────────────────────────────────────────────────────────────────
-	step("a third member -- AND WHY THIS BUILD REFUSES ONE")
-	fmt.Printf("  The alpha adds EXACTLY ONE member, in the commit that opens epoch 1, before Open.\n" +
-		"  A second add is a second epoch: every member's session has to advance, the server has to\n" +
-		"  be handed the new epoch's keys in a new commit, and 6.1's wrap fan-out has to run again.\n" +
-		"  None of that is built. So this step does not add a third member -- it holds that the\n" +
-		"  refusal is BY NAME rather than a REASON_REJECTED a caller has to decode, which is the\n" +
-		"  only thing about a third member that is true today.\n")
-	if *cJwt != "" {
-		c := mesh.dial("C", *cJwt)
-		defer c.close()
-		if err := c.device.Connect(ctx); err != nil {
-			fail("C Connect: %v", err)
-		}
-		thirdKeyPackage, err := c.device.KeyPackage()
-		if err != nil {
-			fail("C KeyPackage: %v", err)
-		}
-		_, err = aGroup.AddMember(thirdKeyPackage)
-		check(err != nil, "a SECOND AddMember was accepted; the alpha has no second epoch and this build just made one")
-		check(errors.Is(err, urmessage.ErrAlphaOneAdd) || errors.Is(err, urmessage.ErrGroupOpen),
-			"the second AddMember answered %v, want ErrAlphaOneAdd or ErrGroupOpen", err)
-		fmt.Printf("  a real third device was refused by name: %v\n", err)
-	} else {
-		_, err := aGroup.AddMember(keyPackage)
-		check(err != nil, "a SECOND AddMember was accepted; the alpha has no second epoch and this build just made one")
-		// THE SAME ASSERTION AS THE -c BRANCH, which this one used to be missing: it held only
-		// `err != nil`, so any refusal at all read as the refusal being tested -- a closed
-		// group, a nil invite, a transport failure. A step that accepts every error is a step
-		// that cannot go red for the reason it is about.
-		check(errors.Is(err, urmessage.ErrAlphaOneAdd) || errors.Is(err, urmessage.ErrGroupOpen),
-			"the second AddMember answered %v, want ErrAlphaOneAdd or ErrGroupOpen", err)
-		fmt.Printf("  refused by name (no -c credential, so B's own key package stood in): %v\n", err)
+	step("a THIRD member is added to a group that has been chatting: a second epoch, on the real mesh")
+	fmt.Printf("  WHAT THIS IS FOR: this is where group chats start to exist. Everything above ran at\n" +
+		"  epoch 1, the one epoch the founding add opened. A adds C to the OPEN group, which is a\n" +
+		"  commit sealed at epoch 1 announcing epoch 2, a wrap fan-out for the new epoch and a marker\n" +
+		"  -- all submitted to the deployed server. C joins from a Welcome. B, who authored nothing,\n" +
+		"  learns of it only by fetching the commit and INGESTING it, and must follow into epoch 2.\n" +
+		"  Then one line from each device opens on both others, which is the assertion that says the\n" +
+		"  three share one epoch-2 key schedule rather than merely agreeing on the number 2. The\n" +
+		"  founding-time AddMember still refuses a second add by name; this is the other door.\n")
+	// THE EPOCH-ONE LINES ARE COUNTED HERE, once, because two later assertions are about what became
+	// of them: A's first text, B's answer, and step 4's lines. Nothing else at epoch 1 is a line.
+	epochOneLines := 2 + lineCount
+	c := mesh.dial("C", *cJwt)
+	defer c.close()
+	if err := c.device.Connect(ctx); err != nil {
+		fail("C Connect: %v", err)
 	}
+	thirdKeyPackage, err := c.device.KeyPackage()
+	if err != nil {
+		fail("C KeyPackage: %v", err)
+	}
+	epochBefore := aGroup.Epoch()
+	thirdInvite, err := aGroup.AddMemberAndPublish(ctx, thirdKeyPackage)
+	if err != nil {
+		fail("A AddMemberAndPublish: %v", err)
+	}
+	check(aGroup.Epoch() == epochBefore+1, "the commit that added C left A at epoch %d, want %d", aGroup.Epoch(), epochBefore+1)
+	check(aGroup.Epoch() == 2, "A is at epoch %d after the second add, want 2", aGroup.Epoch())
+	thirdEncoded, err := thirdInvite.Encode()
+	if err != nil {
+		fail("encode C's invite: %v", err)
+	}
+	thirdCarried, err := urmessage.ParseInvite(thirdEncoded)
+	if err != nil {
+		fail("parse C's invite: %v", err)
+	}
+	cGroup, err := c.device.Join(ctx, thirdCarried)
+	if err != nil {
+		fail("C Join: %v", err)
+	}
+	check(cGroup.Epoch() == 2, "C joined at epoch %d, want 2", cGroup.Epoch())
+	check(string(cGroup.Id()) == string(groupId), "C joined group %x and A founded %x", cGroup.Id()[:8], groupId[:8])
+	fmt.Printf("  A's commit opened epoch %d on the server; C joined from a %d octet invite at epoch %d\n",
+		aGroup.Epoch(), len(thirdEncoded), cGroup.Epoch())
+
+	// B INGESTS THE COMMIT. This is the one arm neither the committer (who merges its own commit)
+	// nor the joiner (who is handed a Welcome) exercises, and it is asserted on B's own counters:
+	// Ingested moves once, the epoch follows, and NOTHING of B's history goes out of reach, because
+	// B was current when the epoch moved. A commit is not a line, so the Receive hands back none.
+	ingestedBefore := bGroup.Stats().Ingested
+	atIngest := receive(bGroup, ctx, "B")
+	check(bGroup.Epoch() == 2, "B did not follow A's commit into epoch 2: B is at epoch %d", bGroup.Epoch())
+	check(bGroup.Stats().Ingested == ingestedBefore+1, "B's Stats.Ingested is %d after following one commit, want %d",
+		bGroup.Stats().Ingested, ingestedBefore+1)
+	check(bGroup.Stats().Ingested == 1, "B has ingested %d commit(s) in its life and there has been exactly one", bGroup.Stats().Ingested)
+	check(len(atIngest) == 0, "B's ingesting Receive handed back %d entries and a commit is not a line: %s", len(atIngest), texts(atIngest))
+	check(bGroup.Stats().GapOutOfWindow == 0,
+		"B was current when the epoch moved and still has %d out_of_window gap(s); an up-to-date member must lose nothing to a commit",
+		bGroup.Stats().GapOutOfWindow)
+	fmt.Printf("  B ingested the commit on its next Receive and followed into epoch %d (Stats.Ingested=%d), with 0 gaps\n",
+		bGroup.Epoch(), bGroup.Stats().Ingested)
+
+	// C DRAINS THE PRE-JOIN HISTORY. C holds no epoch-1 key schedule, so every epoch-1 line is a
+	// record it cannot open -- an out_of_window GAP, one per line, and NOT a failure. Counted
+	// exactly rather than tolerated: it is the number item 241's history-for-new-members owes.
+	drained := receive(cGroup, ctx, "C")
+	cGaps, cOpened, cOtherGaps := gapCount(drained)
+	check(cOpened == 0, "C opened %d line(s) from before it was a member; it holds no key that could", cOpened)
+	check(cOtherGaps == 0, "C's drain produced %d gap(s) of a reason other than out_of_window", cOtherGaps)
+	check(cGaps == epochOneLines, "C's drain produced %d out_of_window gap(s) and the group exchanged %d line(s) at epoch 1",
+		cGaps, epochOneLines)
+	check(cGroup.Stats().GapOutOfWindow == uint64(cGaps), "C's Stats.GapOutOfWindow is %d and the drain handed back %d gaps",
+		cGroup.Stats().GapOutOfWindow, cGaps)
+	fmt.Printf("  C drained %d pre-join record(s) as out_of_window gaps, opened 0, failed 0 -- the history it was not there for\n", cGaps)
+
+	// ALL THREE AT EPOCH TWO.
+	check(aGroup.Epoch() == 2 && bGroup.Epoch() == 2 && cGroup.Epoch() == 2,
+		"epochs did not converge: A %d, B %d, C %d", aGroup.Epoch(), bGroup.Epoch(), cGroup.Epoch())
+
+	// SIX DIRECTIONS. One line from each device, opened on both others, every one asserted on the
+	// FAR side against the exact text and against being a line rather than a gap.
+	const (
+		aAtTwo = "epoch two: A, to a group that now has three members"
+		bAtTwo = "epoch two: B, who followed a commit it did not author"
+		cAtTwo = "epoch two: C, the third member, sealing under its own new leaf"
+	)
+	if _, err := aGroup.Send(ctx, aAtTwo); err != nil {
+		fail("A Send at epoch 2: %v", err)
+	}
+	opens(bGroup, ctx, "B", "A", aAtTwo)
+	opens(cGroup, ctx, "C", "A", aAtTwo)
+	if _, err := bGroup.Send(ctx, bAtTwo); err != nil {
+		fail("B Send at epoch 2: %v", err)
+	}
+	opens(aGroup, ctx, "A", "B", bAtTwo)
+	opens(cGroup, ctx, "C", "B", bAtTwo)
+	if _, err := cGroup.Send(ctx, cAtTwo); err != nil {
+		fail("C Send at epoch 2: %v", err)
+	}
+	opens(aGroup, ctx, "A", "C", cAtTwo)
+	opens(bGroup, ctx, "B", "C", cAtTwo)
+	for _, member := range []struct {
+		name  string
+		group *urmessage.Group
+	}{{"A", aGroup}, {"B", bGroup}, {"C", cGroup}} {
+		check(member.group.Stats().FailedOpen == 0, "%s failed to open %d record(s) across the epoch change",
+			member.name, member.group.Stats().FailedOpen)
+	}
+	fmt.Printf("  six directions at epoch 2: A->B A->C B->A B->C C->A C->B, each opened on the far side with the exact text\n")
 
 	// ── 6 ────────────────────────────────────────────────────────────────────────────────
 	step(fmt.Sprintf("a %d octet message, which no live test has ever fragmented", *bigBytes))
@@ -351,6 +433,32 @@ func main() {
 	}
 	fmt.Printf("  and B's own %d pre-restart line(s) came back as B's own, out of %d in its log\n",
 		len(bsOwn), len(held))
+	// THE PRE-CHANGE HISTORY, COUNTED AND NOT HIDDEN. The restarted B re-walks its whole history at
+	// epoch 2 with a single-epoch session, so every epoch-1 line -- A's and B's own alike -- refuses
+	// under the epoch check and comes back as an out_of_window GAP: a visible position that says
+	// "something is here", not a failure and not silence. The count is asserted EXACTLY against the
+	// lines the group exchanged at epoch 1, because a number that merely "looks about right" would
+	// hide a line lost in the change. This is what item 241's history-across-a-membership-change
+	// will one day carry instead; until it does, the probe prints how much of the conversation the
+	// change put out of this build's reach.
+	check(bGroup.Epoch() == 2, "the restarted B's re-walk over the epoch commit left it at epoch %d, want 2", bGroup.Epoch())
+	bGaps, bOpenedAfterRestart, bOtherGaps := gapCount(afterRestart)
+	ownGaps := 0
+	for _, one := range afterRestart {
+		if one.Gap == urmessage.GapOutOfWindow && one.Mine {
+			ownGaps += 1
+		}
+	}
+	check(bOtherGaps == 0, "the restarted B's re-walk produced %d gap(s) of a reason other than out_of_window", bOtherGaps)
+	check(bGaps == epochOneLines,
+		"the restarted B re-walked %d epoch-one line(s) as out_of_window gaps and the group exchanged %d before the epoch moved; a line is missing or a line was invented",
+		bGaps, epochOneLines)
+	check(ownGaps == 1, "%d of the restarted B's gaps are B's own, and B sealed exactly one line (step 3's answer) at epoch 1", ownGaps)
+	check(bGroup.Stats().GapOutOfWindow == uint64(bGaps), "the restarted B's Stats.GapOutOfWindow is %d and its re-walk handed back %d gaps",
+		bGroup.Stats().GapOutOfWindow, bGaps)
+	fmt.Printf("  %d pre-change record(s) came back as out_of_window GAPS on the restarted device: every epoch-1 line,\n"+
+		"  %d of A's and %d of B's own, is out of this build's reach after the membership change (item 241);\n"+
+		"  the %d epoch-2 line(s) opened and 0 failed\n", bGaps, bGaps-ownGaps, ownGaps, bOpenedAfterRestart)
 	const afterTheRestart = "typed by the SAME device after it was restarted"
 	if _, err := bGroup.Send(ctx, afterTheRestart); err != nil {
 		fail("the restarted B Send: %v", err)
@@ -487,6 +595,7 @@ func main() {
 	step("the counters")
 	report("A", aGroup)
 	report("B", bGroup)
+	report("C", cGroup)
 	fmt.Printf("\n=== %d STEPS, %d ASSERTIONS, ALL HELD ===\n", steps, checks)
 	fmt.Printf("WHAT THIS PROBE DOES NOT ASSERT, and it needs a database credential this binary must\n" +
 		"not hold: that the plaintext is absent from the server's `message_record` rows.\n")
@@ -677,6 +786,34 @@ func receive(group *urmessage.Group, ctx context.Context, who string) []*urmessa
 	return got
 }
 
+// opens is one direction of a group chat: [receive] on the far side, then the assertion that the
+// exact text came back OPENED -- a line and not a gap -- and that it came back ALONE, because
+// every group here has drained before the send, so a second entry is a record nobody sent.
+func opens(group *urmessage.Group, ctx context.Context, reader string, writer string, want string) {
+	got := receive(group, ctx, reader)
+	check(len(got) == 1, "%s read %d entries for the one line %s sent: %s", reader, len(got), writer, texts(got))
+	check(got[0].Gap == "", "%s received %s's line as a %q gap rather than opening it", reader, writer, got[0].Gap)
+	check(got[0].Text == want, "%s opened %q and %s typed %q", reader, got[0].Text, writer, want)
+	check(!got[0].Mine, "%s opened %s's line and its own log marks it as %s's own", reader, writer, reader)
+	fmt.Printf("  %s->%s opened on %s: %q\n", writer, reader, reader, got[0].Text)
+}
+
+// gapCount sorts one Receive's entries three ways: out_of_window gaps, opened lines, and gaps of
+// any OTHER reason -- which the epoch change never produces, so the third is asserted zero.
+func gapCount(got []*urmessage.Message) (outOfWindow int, opened int, other int) {
+	for _, one := range got {
+		switch one.Gap {
+		case "":
+			opened += 1
+		case urmessage.GapOutOfWindow:
+			outOfWindow += 1
+		default:
+			other += 1
+		}
+	}
+	return outOfWindow, opened, other
+}
+
 // countOnce holds that every expected line arrived EXACTLY once, which is what a concurrent send
 // can break in both directions: a lost line and a duplicated one.
 func countOnce(got []*urmessage.Message, expected map[string]bool, reader string, writer string) {
@@ -701,6 +838,11 @@ func report(who string, group *urmessage.Group) {
 func texts(messages []*urmessage.Message) string {
 	out := []string{}
 	for _, one := range messages {
+		if one.Gap != "" {
+			// a gap has no text, and rendering it as "" would make it a blank line somebody sent
+			out = append(out, fmt.Sprintf("<gap:%s@%d>", one.Gap, one.RecordId))
+			continue
+		}
 		if 80 < len(one.Text) {
 			out = append(out, fmt.Sprintf("%q...(%d octets)", one.Text[:80], len(one.Text)))
 			continue
