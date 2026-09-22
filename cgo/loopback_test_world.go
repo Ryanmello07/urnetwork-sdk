@@ -254,8 +254,9 @@ func urnet_message_loopback_world_unrouted_client(self C.uint64_t) C.uint64_t {
 // key_package both -- so the C consumer decodes the hex once, in hex_to_id(), and that decode is
 // now part of what the consumer test proves works.
 
-// urnet_message_loopback_gap_list is a message list handle holding one ordinary message and the two
-// GAPS this build can produce, so that a C caller can measure that it can tell them apart.
+// urnet_message_loopback_gap_list is a message list handle holding one ordinary message and the
+// three GAPS this build can produce, so that a C caller can measure that it can tell them apart --
+// and, since R4, that sender_role_at_send is non-empty on exactly the rows that OPENED.
 //
 // THESE THREE ARE BUILT IN GO AND ARE NOT OPENED OFF THE WIRE, WHICH IS STATED RATHER THAN HIDDEN.
 // Nothing in this tree can seal a malformed body or an unknown kind from OUTSIDE urmessage: Send
@@ -277,6 +278,10 @@ func urnet_message_loopback_gap_list() C.uint64_t {
 			RecordId: 41, SenderHandle: handle, SentAtMs: 1,
 			MessageId: bytes.Repeat([]byte{0x01}, 32),
 			Kind:      urmessage.KindText, Text: "a message that is a message",
+			// THE THREE ROLES BELOW ARE THREE DIFFERENT VALUES ON PURPOSE. A projection that
+			// carried sender_role_at_send as one constant would satisfy any single-row check,
+			// and the C consumer reads all four rows.
+			SenderRoleAtSend: "owner",
 		},
 		{
 			// A CODE THIS BUILD DOES NOT KNOW, on a class its range allows: the record opened
@@ -285,6 +290,8 @@ func urnet_message_loopback_gap_list() C.uint64_t {
 			RecordId: 42, SenderHandle: handle, SentAtMs: 2,
 			MessageId: bytes.Repeat([]byte{0x02}, 32),
 			Kind:      urmessage.KindAttachment, Gap: urmessage.GapUnsupported,
+			// A GAP THAT OPENED STILL KNOWS WHO SENT IT AND WHAT ROLE THEY HELD.
+			SenderRoleAtSend: "member",
 		},
 		{
 			// A SENDER THAT BROKE A RULE ALREADY WRITTEN, and the kind is the code the record
@@ -293,6 +300,21 @@ func urnet_message_loopback_gap_list() C.uint64_t {
 			RecordId: 43, SenderHandle: handle, SentAtMs: 3,
 			MessageId: bytes.Repeat([]byte{0x03}, 32),
 			Kind:      urmessage.KindReply, Gap: urmessage.GapMalformed,
+			// AND A MALFORMED RECORD FROM AN OBSERVER IS BOTH THINGS AT ONCE: a gap a UI draws
+			// as a closed placeholder, and a record whose sender may not send.
+			SenderRoleAtSend: "observer",
+		},
+		{
+			// THE ONE REASON THIS BUILD PRODUCES THAT CARRIES NO ROLE, and the reason the field
+			// is not simply always filled: an out_of_window record NEVER OPENED -- it was sealed
+			// at an epoch no schedule on this device reaches -- so nothing on this device can say
+			// what role its sender held then, and the handle it names is an unauthenticated
+			// claim. Non-empty IFF the record opened; this is the "only if" half, at the
+			// boundary. It also carries no kind, because no body was read.
+			RecordId: 44, SenderHandle: handle, SentAtMs: 0,
+			MessageId:        bytes.Repeat([]byte{0x04}, 32),
+			Gap:              urmessage.GapOutOfWindow,
+			SenderRoleAtSend: "",
 		},
 	}))
 }

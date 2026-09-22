@@ -442,16 +442,26 @@ func gcReencodeInvite(t *testing.T, invite *urmessage.Invite) *urmessage.Invite 
 // hands back. It fails the test if the text is missing or came back as a gap.
 func gcReceiveText(t *testing.T, ctx context.Context, who string, group *urmessage.Group, want string) {
 	t.Helper()
+	gcReceiveTextMessage(t, ctx, who, group, want)
+}
+
+// gcReceiveTextMessage is gcReceiveText with the [urmessage.Message] answered, for a caller that
+// wants to read more off it than that it arrived.
+func gcReceiveTextMessage(t *testing.T, ctx context.Context, who string, group *urmessage.Group,
+	want string) *urmessage.Message {
+
+	t.Helper()
 	received, err := group.Receive(ctx)
 	if err != nil {
 		t.Fatalf("%s's Receive (looking for %q): %v", who, want, err)
 	}
 	for _, one := range received {
 		if one.Gap == "" && one.Text == want {
-			return
+			return one
 		}
 	}
 	t.Fatalf("%s did not open %q; it received %v", who, want, gcTexts(received))
+	return nil
 }
 
 // gcTextsPresent is the set of OPENED (non-gap) texts in a Receive result.

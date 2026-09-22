@@ -765,6 +765,63 @@ int main(void) {
   CHECK(urnet_message_list_info(back, -1) == NULL, "index -1 answered metadata");
   CHECK(urnet_release(back), "releasing A's message list answered false");
 
+  step("SENDER_ROLE_AT_SEND crosses on a real record, and the sender's row and the receiver's agree");
+  {
+    /* A FOUNDED THIS GROUP, SO A IS ITS OWNER; B WAS ADDED AND THE POLICY NAMES NOBODY BUT THE
+     * FOUNDER, so B is UNNAMED and reads as "member" (MASTER section 11, item 242's ruling 8).
+     * That is the shape of every live group in this build, not a contrivance.
+     *
+     * THE PROPERTY IS AGREEMENT ACROSS THE BOUNDARY: the role a sender stamps on its own row and
+     * the role a receiver captures off the record's own epoch are one value, because both are the
+     * same function of the same tree at the same epoch. A build where the two could differ would
+     * be two answers to one question.
+     *
+     * WHAT THIS DOES NOT MEASURE, said rather than implied: nothing has changed role here, so a
+     * projection that read the CURRENT roster instead of the sending epoch would agree too. That
+     * half -- a demotion, a send, then a promotion, with the line still carrying the old role --
+     * is measured in go, over real epochs, in sdk/urmessage and sdk/cp3b. */
+    uint64_t roles_a = urnet_message_group_messages(group_a);
+    uint64_t roles_b = urnet_message_group_messages(group_b);
+    REQUIRE(roles_a != 0 && roles_b != 0, "a log is empty");
+    REQUIRE(urnet_message_list_count(roles_a) == 2 && urnet_message_list_count(roles_b) == 2,
+            "the logs hold %d and %d, want 2 each",
+            (int)urnet_message_list_count(roles_a), (int)urnet_message_list_count(roles_b));
+    /* row 0 is A's message and row 1 is B's, in server order, at BOTH devices */
+    char* a_own = urnet_message_list_info(roles_a, 0);
+    char* a_copy_of_b = urnet_message_list_info(roles_a, 1);
+    char* b_copy_of_a = urnet_message_list_info(roles_b, 0);
+    char* b_own = urnet_message_list_info(roles_b, 1);
+    REQUIRE(a_own != NULL && a_copy_of_b != NULL && b_copy_of_a != NULL && b_own != NULL,
+            "a row had no metadata");
+    char a_sent[64] = { 0 }, a_seen[64] = { 0 }, b_sent[64] = { 0 }, b_seen[64] = { 0 };
+    CHECK(json_string_field(a_own, "sender_role_at_send", a_sent, sizeof(a_sent)),
+          "A's own row carries no sender_role_at_send at all: %s", a_own);
+    CHECK(json_string_field(b_copy_of_a, "sender_role_at_send", a_seen, sizeof(a_seen)),
+          "B's copy of A's message carries no sender_role_at_send at all: %s", b_copy_of_a);
+    CHECK(json_string_field(b_own, "sender_role_at_send", b_sent, sizeof(b_sent)),
+          "B's own row carries no sender_role_at_send at all: %s", b_own);
+    CHECK(json_string_field(a_copy_of_b, "sender_role_at_send", b_seen, sizeof(b_seen)),
+          "A's copy of B's message carries no sender_role_at_send at all: %s", a_copy_of_b);
+    printf("      A sent as %s and B read %s; B sent as %s and A read %s\n",
+           a_sent, a_seen, b_sent, b_seen);
+    CHECK(strcmp(a_sent, "owner") == 0, "A founded this group and its own row says %s", a_sent);
+    CHECK(strcmp(b_sent, "member") == 0,
+          "B is unnamed in the policy and its own row says %s, want member", b_sent);
+    CHECK(strcmp(a_sent, a_seen) == 0,
+          "A sent under %s and B reads that record as %s", a_sent, a_seen);
+    CHECK(strcmp(b_sent, b_seen) == 0,
+          "B sent under %s and A reads that record as %s", b_sent, b_seen);
+    /* AND THE TWO ARE DIFFERENT VALUES IN ONE RUN, which is what an agreement between two copies
+     * of one constant would also satisfy */
+    CHECK(strcmp(a_sent, b_sent) != 0,
+          "the owner and the member both read as %s, so this step would pass on a constant", a_sent);
+    urnet_free_string(a_own);
+    urnet_free_string(a_copy_of_b);
+    urnet_free_string(b_copy_of_a);
+    urnet_free_string(b_own);
+    CHECK(urnet_release(roles_a) && urnet_release(roles_b), "releasing a log answered false");
+  }
+
   step("the logs and the counters");
   uint64_t log_a = urnet_message_group_messages(group_a);
   uint64_t log_b = urnet_message_group_messages(group_b);
@@ -784,6 +841,13 @@ int main(void) {
    * learn a line was missing. */
   CHECK(strstr(stats, "\"gap_malformed\":") != NULL, "the stats carry no gap_malformed counter");
   CHECK(strstr(stats, "\"gap_unsupported\":") != NULL, "the stats carry no gap_unsupported counter");
+  /* AND R4's TWO, which are the numbers behind sender_role_at_send: how many lines this build had
+   * to HIDE because their sender was an observer that sent anyway, and how many opened without a
+   * readable role -- the second must stay 0, here and everywhere. */
+  CHECK(strstr(stats, "\"hidden_observer\":0") != NULL,
+        "B has hidden an observer's message in a group that has none: %s", stats);
+  CHECK(strstr(stats, "\"role_undeterminable\":0") != NULL,
+        "B opened a record whose sender's role it could not read: %s", stats);
   urnet_free_string(stats);
 
   step("the device's own group list, which is a second handle onto the same group");
@@ -1425,18 +1489,20 @@ int main(void) {
 
   step("A GAP IS NOT A MESSAGE WITH NO TEXT, which is the whole of ledger item 236");
   {
-    /* the three entries are built in Go -- see urnet_message_loopback_gap_list, and the reason
+    /* the four entries are built in Go -- see urnet_message_loopback_gap_list, and the reason
      * nothing here can seal a malformed record -- so what this step measures is the BOUNDARY and
      * not the walk: that a gap reaches a C caller as something it can tell apart. */
     uint64_t gaps = urnet_message_loopback_gap_list();
     REQUIRE(gaps != 0, "the gap list answered 0");
-    CHECK(urnet_message_list_count(gaps) == 3, "the gap list holds %d entries, want 3",
+    CHECK(urnet_message_list_count(gaps) == 4, "the gap list holds %d entries, want 4",
           (int)urnet_message_list_count(gaps));
     char* message = urnet_message_list_info(gaps, 0);
     char* unsupported = urnet_message_list_info(gaps, 1);
     char* malformed = urnet_message_list_info(gaps, 2);
-    REQUIRE(message != NULL && unsupported != NULL && malformed != NULL, "an entry had no metadata");
-    printf("      %s\n      %s\n      %s\n", message, unsupported, malformed);
+    char* out_of_window = urnet_message_list_info(gaps, 3);
+    REQUIRE(message != NULL && unsupported != NULL && malformed != NULL && out_of_window != NULL,
+            "an entry had no metadata");
+    printf("      %s\n      %s\n      %s\n      %s\n", message, unsupported, malformed, out_of_window);
 
     CHECK(strstr(message, "\"gap\":\"\"") != NULL, "a message reports a gap: %s", message);
     /* BOTH GAPS ARE body_len 0 AND SO IS A MESSAGE NOBODY PUT TEXT IN. that is the whole defect:
@@ -1463,9 +1529,43 @@ int main(void) {
     char gap_id[128] = { 0 };
     CHECK(json_string_field(unsupported, "message_id", gap_id, sizeof(gap_id)) && is_message_id(gap_id),
           "the gap carries no message_id, so it is a hole and not an entry: %s", unsupported);
+
+    /* ── SENDER_ROLE_AT_SEND, AND THE RULE THAT DECIDES WHEN IT IS EMPTY (item 242's R4) ────
+     *
+     * NON-EMPTY ON EXACTLY THE ROWS THAT OPENED. The message and the two gaps above all opened --
+     * their AEADs were satisfied and their frames were signed -- so each says what role its
+     * sender held AT THE EPOCH IT SEALED THE RECORD AT. The fourth did not open at all: it was
+     * sealed at an epoch no key schedule on this device reaches, so the only thing naming its
+     * sender is the record's own unauthenticated claim and there is no epoch to read a role in.
+     *
+     * THE THREE VALUES ARE THREE DIFFERENT ROLES, which is what a projection that carried one
+     * constant would fail. A malformed record from an OBSERVER is both things at once: a closed
+     * placeholder to draw, and a sender whose messages this build hides. */
+    char role[64] = { 0 };
+    CHECK(json_string_field(message, "sender_role_at_send", role, sizeof(role)) &&
+              strcmp(role, "owner") == 0,
+          "the message reports sender_role_at_send %s, want owner: %s", role, message);
+    memset(role, 0, sizeof(role));
+    CHECK(json_string_field(unsupported, "sender_role_at_send", role, sizeof(role)) &&
+              strcmp(role, "member") == 0,
+          "the unsupported gap reports sender_role_at_send %s, want member: %s", role, unsupported);
+    memset(role, 0, sizeof(role));
+    CHECK(json_string_field(malformed, "sender_role_at_send", role, sizeof(role)) &&
+              strcmp(role, "observer") == 0,
+          "the malformed gap reports sender_role_at_send %s, want observer: %s", role, malformed);
+    /* and the record that never opened carries NO role, which is the "only if" half */
+    CHECK(strstr(out_of_window, "\"sender_role_at_send\":\"\"") != NULL,
+          "a record that never opened claims a role for its sender: %s", out_of_window);
+    memset(reason, 0, sizeof(reason));
+    CHECK(json_string_field(out_of_window, "gap", reason, sizeof(reason)), "no gap field: %s", out_of_window);
+    CHECK(strcmp(reason, URNET_MESSAGE_GAP_OUT_OF_WINDOW) == 0,
+          "a record from an unreachable epoch reports gap %s, want %s",
+          reason, URNET_MESSAGE_GAP_OUT_OF_WINDOW);
+
     urnet_free_string(message);
     urnet_free_string(unsupported);
     urnet_free_string(malformed);
+    urnet_free_string(out_of_window);
     CHECK(urnet_release(gaps), "releasing the gap list answered false");
   }
 

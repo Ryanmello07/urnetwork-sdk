@@ -126,7 +126,7 @@ func TestAReactionReAddedAfterItsRemoveStandsAgain(t *testing.T) {
 		group := &Group{}
 		group.initTables()
 		line := &Content{Kind: KindText, Text: "a line reacted to, taken back, and reacted to again"}
-		if !deliverOneThroughAWalk(group, newMessage(line, 1, sender, false, 0, lineId), line) {
+		if !deliverOneThroughAWalk(group, newMessage(line, 1, sender, false, 0, lineId, "member"), line) {
 			t.Fatal("a TEXT did not become a line of the conversation")
 		}
 		// record 11 ADD, record 12 REMOVE, record 13 ADD -- one reactor, one emoji.
@@ -137,7 +137,7 @@ func TestAReactionReAddedAfterItsRemoveStandsAgain(t *testing.T) {
 		}
 		for _, step := range order {
 			entry := steps[step]
-			group.deliverLocked(newMessage(entry, uint64(11+step), sender, false, 0, countedId(0xC8, step)), entry)
+			group.deliverLocked(newMessage(entry, uint64(11+step), sender, false, 0, countedId(0xC8, step), "member"), entry)
 		}
 		group.rebuildDirtyLocked()
 		// THE GROUP'S ANSWER AND NOT THE MESSAGE THIS HELPER DELIVERED: the rebuild REPLACES the
@@ -215,7 +215,7 @@ func mallocsToReplayOnOneMessage(t *testing.T, n int) uint64 {
 
 	lineId := aTarget(0xF1)
 	line := &Content{Kind: KindText, Text: "one message, and every reaction in the group"}
-	held := newMessage(line, 1, sender, false, 0, lineId)
+	held := newMessage(line, 1, sender, false, 0, lineId, "member")
 	if !deliverOneThroughAWalk(group, held, line) {
 		t.Fatal("a TEXT did not become a line of the conversation")
 	}
@@ -261,7 +261,7 @@ func mallocsToReplayOverDistinctMessages(t *testing.T, n int) uint64 {
 	for index := range targets {
 		targets[index] = countedId(0xA0, index)
 		line := &Content{Kind: KindText, Text: "a line"}
-		if !deliverOneThroughAWalk(group, newMessage(line, uint64(index+1), sender, false, 0, targets[index]), line) {
+		if !deliverOneThroughAWalk(group, newMessage(line, uint64(index+1), sender, false, 0, targets[index], "member"), line) {
 			t.Fatalf("line %d did not become a line of the conversation", index)
 		}
 	}
@@ -299,7 +299,7 @@ func reactionRecords(n int, sender []byte, targetOf func(index int) []byte) ([]*
 			Emoji:  distinctEmoji(index),
 		}
 		records[index] = newMessage(entries[index], uint64(index+1_000_000), sender, false, 0,
-			countedId(0xE0, index))
+			countedId(0xE0, index), "member")
 	}
 	return entries, records
 }

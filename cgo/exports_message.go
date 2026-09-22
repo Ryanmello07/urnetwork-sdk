@@ -1013,20 +1013,24 @@ func urnet_message_group_stats(self C.uint64_t) *C.char {
 	}
 	stats := self_.Stats()
 	return cJson(&messageGroupStats{
-		Fetched:          stats.Fetched,
-		Opened:           stats.Opened,
-		SkippedCeremony:  stats.SkippedCeremony,
-		SkippedOwn:       stats.SkippedOwn,
-		OpenedOwn:        stats.OpenedOwn,
-		OwnWithoutCopy:   stats.OwnWithoutCopy,
-		SkippedSeen:      stats.SkippedSeen,
-		Unopened:         stats.Unopened,
-		Omitted:          stats.Omitted,
-		SkippedClass:     stats.SkippedClass,
-		GapMalformed:     stats.GapMalformed,
-		GapUnsupported:   stats.GapUnsupported,
-		GapOutOfWindow:   stats.GapOutOfWindow,
-		OpenedPastEpoch:  stats.OpenedPastEpoch,
+		Fetched:         stats.Fetched,
+		Opened:          stats.Opened,
+		SkippedCeremony: stats.SkippedCeremony,
+		SkippedOwn:      stats.SkippedOwn,
+		OpenedOwn:       stats.OpenedOwn,
+		OwnWithoutCopy:  stats.OwnWithoutCopy,
+		SkippedSeen:     stats.SkippedSeen,
+		Unopened:        stats.Unopened,
+		Omitted:         stats.Omitted,
+		SkippedClass:    stats.SkippedClass,
+		GapMalformed:    stats.GapMalformed,
+		GapUnsupported:  stats.GapUnsupported,
+		GapOutOfWindow:  stats.GapOutOfWindow,
+		OpenedPastEpoch: stats.OpenedPastEpoch,
+
+		HiddenObserver:     stats.HiddenObserver,
+		RoleUndeterminable: stats.RoleUndeterminable,
+
 		Ingested:         stats.Ingested,
 		CommitRefused:    stats.CommitRefused,
 		CommitRefusedOwn: stats.CommitRefusedOwn,
@@ -1401,7 +1405,22 @@ type messageInfo struct {
 	// that sealed the record and IT IS NOT A NAME: the alpha has no identity system.
 	SenderHandle string `json:"sender_handle"`
 	Mine         bool   `json:"mine"`
-	SentAtMs     int64  `json:"sent_at_ms"`
+	// THE ROLE THE SENDER HELD AT THE EPOCH THIS RECORD WAS SEALED AT: "owner", "admin", "member"
+	// or "observer", and "" on a record that did not open. Spec C §5.6's SenderRoleAtSend.
+	//
+	// IT IS A FACT ABOUT AN EPOCH AND NOT ABOUT NOW, which is why it is carried on the message
+	// rather than looked up in the roster: urnet_message_group_members answers the roles the group
+	// has TODAY, and a line written before a demotion was written under the role its sender held
+	// THEN. A caller that joined a row to the roster on sender_handle and read the role off that
+	// row would relabel history at every role change.
+	//
+	// "observer" IS THE ONE VALUE THAT ASKS A CALLER FOR ANYTHING: collapse the row to §5.1's
+	// system line -- "A message from an observer was hidden." -- with the content one expansion
+	// away. THE RECORD IS HERE AND ITS BODY IS INTACT: body_len is the real length and
+	// urnet_message_list_body still hands it back, because a row dropped here is indistinguishable
+	// from a record that never arrived. It is NOT a gap, and gap stays "".
+	SenderRoleAtSend string `json:"sender_role_at_send"`
+	SentAtMs         int64  `json:"sent_at_ms"`
 	// The body's length in octets, which is what urnet_message_list_body will ask for.
 	BodyLen int32 `json:"body_len"`
 	// MASTER section 8.4.5's message_id, 32 octets as 64 lower case hex characters.
@@ -1535,6 +1554,19 @@ type messageGroupStats struct {
 	// and opened anyway, because it was a member then. Ledger item 241. A subset of opened, carried
 	// apart so that "history survived the change" is a number a caller can show and not an absence.
 	OpenedPastEpoch uint64 `json:"opened_past_epoch"`
+	// Records that became a line of the conversation whose sender was an OBSERVER at the epoch it
+	// sealed them (ledger item 242's R4, spec C §5.6): a member running a build that does not take
+	// the send refusal. OBSERVER is enforced in the client and by the MLS proposal rules and NOT by
+	// the server -- an observer holds the group keys and can encrypt a valid application message --
+	// so this is the number of times this build had to HIDE one rather than stop it. The records
+	// are in the log with their bodies intact; sender_role_at_send is which ones.
+	HiddenObserver uint64 `json:"hidden_observer"`
+	// Records that OPENED and whose sender's role at the sending epoch could not be read, so their
+	// sender_role_at_send is empty on a row that is otherwise whole. IT MUST STAY ZERO: the role is
+	// read off the same handle the open read. It is NOT gap_out_of_window's counterpart -- a record
+	// whose epoch no schedule reaches never opens and is never asked about -- so a rising number
+	// here is a defect and not a membership change.
+	RoleUndeterminable uint64 `json:"role_undeterminable"`
 	// Commits this group INGESTED: §6.1 membership-change records this device processed, authorized,
 	// applied and followed into the next epoch. One per epoch this device was carried into rather
 	// than authored.
@@ -1571,14 +1603,15 @@ func messageInfoOf(entry messageEntry) *messageInfo {
 	// the gate as a false-positive class; the standard library is the better answer either way.
 	handle := []byte(hex.EncodeToString(message.SenderHandle))
 	return &messageInfo{
-		RecordId:     message.RecordId,
-		SenderHandle: string(handle),
-		Mine:         message.Mine,
-		SentAtMs:     message.SentAtMs,
-		BodyLen:      int32(len(message.Text)),
-		MessageId:    hex.EncodeToString(message.MessageId),
-		Kind:         uint8(message.Kind),
-		Gap:          string(message.Gap),
+		RecordId:         message.RecordId,
+		SenderHandle:     string(handle),
+		Mine:             message.Mine,
+		SenderRoleAtSend: message.SenderRoleAtSend,
+		SentAtMs:         message.SentAtMs,
+		BodyLen:          int32(len(message.Text)),
+		MessageId:        hex.EncodeToString(message.MessageId),
+		Kind:             uint8(message.Kind),
+		Gap:              string(message.Gap),
 		// EncodeToString of a nil slice is "", which is the "not a reply" answer and is why
 		// there is no branch here. A REPLY always carries 32 octets: encodeReply refuses a
 		// target of any other width, so a non-empty value is always 64 characters.

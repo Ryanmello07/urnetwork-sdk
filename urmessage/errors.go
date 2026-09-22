@@ -151,6 +151,26 @@ var (
 	// policy rather than a pointless request.
 	ErrAlreadyOwner = errors.New("urmessage: that identity already owns this group")
 
+	// THIS DEVICE HOLDS OBSERVER IN THIS GROUP, SO IT MAY READ AND MAY NOT SEND (MASTER §11, spec
+	// C §5.6, ledger item 242's R4). It is answered by [Group.Send], [Group.SendReply],
+	// [Group.React], [Group.Unreact] and [Group.Delete] alike -- all four sendable kinds, which is
+	// the whole askable set -- from the one clause in [Group.sendableLocked], and nothing is
+	// sealed, no stream index is spent and no MLS generation is spent.
+	//
+	// ITS SENTENCE IS SPEC C'S OWN AND CARRIES NO CAVEAT, which is ruling 22: what a composer says
+	// is about THIS app's behaviour, and after R4 "you can read this group but not send to it" is
+	// true of this build unqualified. The caveat that belongs beside it -- someone who modifies
+	// their app CAN still send, and this version cannot stop it at the server, only hide the
+	// result -- is a fact about OTHER people's clients and belongs where the group is configured,
+	// not above the box a person types in. [Stats.HiddenObserver] is what the hiding costs.
+	//
+	// IT IS NOT A SENDABILITY SURFACE AND R4 DELIBERATELY BUILDS NONE. Spec C requires only that
+	// an app never infer sendability from a send FAILING, and no app has to: the role is readable
+	// before the fact through [Group.MyRole] (and `urnet_message_group_my_role` over the abi).
+	// A `CanSend`/`MessageSendability` vocabulary on top of that would be a second source of truth
+	// for one question, naming states this build does not have (item 242's ruling 23).
+	ErrObserverMayNotSend = errors.New("urmessage: you can read this group but not send to it")
+
 	// A commit this device built and submitted LOST THE EPOCH RACE: the server answered
 	// REASON_COMMIT_LOST or REASON_EPOCH_STALE to it, which is MASTER §9.3's delivery service
 	// saying another commit closed this epoch first. Both reasons are answered only after

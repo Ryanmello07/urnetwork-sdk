@@ -280,14 +280,18 @@ func TestTheMessageInfoCarriesEveryFieldUrmessageKeeps(t *testing.T) {
 		RecordId:     7,
 		SenderHandle: []byte{0x00, 0x11, 0xAB, 0xFF, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
 		Mine:         true,
-		Text:         "a body",
-		SentAtMs:     1234,
-		MessageId:    bytes.Repeat([]byte{0x5A}, 32),
-		Kind:         urmessage.KindReply,
-		Gap:          urmessage.GapUnsupported,
-		ReplyToId:    bytes.Repeat([]byte{0xC3}, 32),
-		Deleted:      true,
-		Reactions:    []urmessage.Reaction{{SenderHandle: []byte{0x01}, Emoji: "x", Mine: true}},
+		// "observer" and not "member", because it is the one value of this field a caller must
+		// ACT on: a projection that carried the field and answered "" for it would pass the
+		// non-zero check with any other role in the fixture and would hide every observer.
+		SenderRoleAtSend: "observer",
+		Text:             "a body",
+		SentAtMs:         1234,
+		MessageId:        bytes.Repeat([]byte{0x5A}, 32),
+		Kind:             urmessage.KindReply,
+		Gap:              urmessage.GapUnsupported,
+		ReplyToId:        bytes.Repeat([]byte{0xC3}, 32),
+		Deleted:          true,
+		Reactions:        []urmessage.Reaction{{SenderHandle: []byte{0x01}, Emoji: "x", Mine: true}},
 	}
 
 	kept := reflect.TypeOf(urmessage.Message{})
@@ -909,6 +913,25 @@ func jsonKeysOf(t *testing.T, value any) []string {
 	return keys
 }
 
+// THE HEADER'S DOCUMENTED MESSAGE JSON IS THE JSON'S OWN, KEY FOR KEY AND IN ORDER -- the stats
+// header gate, over the row a conversation is actually made of.
+//
+// IT IS THE GATE THAT WAS MISSING WHEN R4 ADDED A FIELD. The projection gate above catches a field
+// of urmessage.Message that does not reach C at all; nothing caught a field that reaches C and
+// that the HEADER does not name, which is the same drift the stats list suffered (four counters,
+// every test green). A C caller reads this header before it reads anything else.
+//
+// WHAT WOULD GO RED: add a field to messageInfo and not to the header's shape, or the reverse, or
+// reorder either.
+func TestTheHeaderDocumentsExactlyTheMessageJsonKeys(t *testing.T) {
+	documented := headerJsonKeys(t, "char* urnet_message_list_info(", "one message's metadata as json")
+	carried := jsonKeysOf(t, &messageInfo{})
+	if !reflect.DeepEqual(documented, carried) {
+		t.Fatalf("the header documents the message keys as\n  %v\nand the json carries\n  %v", documented, carried)
+	}
+	t.Logf("%d keys, in order: %v", len(carried), carried)
+}
+
 // THE HEADER'S DOCUMENTED MEMBER JSON IS THE JSON'S OWN, KEY FOR KEY AND IN ORDER -- the stats
 // header gate, over the roster row. The stats list drifted by four counters before its gate
 // existed; this one is born with its shape.
@@ -920,6 +943,53 @@ func TestTheHeaderDocumentsExactlyTheMemberJsonKeys(t *testing.T) {
 	carried := jsonKeysOf(t, &memberInfo{})
 	if !reflect.DeepEqual(documented, carried) {
 		t.Fatalf("the header documents the member keys as\n  %v\nand the json carries\n  %v", documented, carried)
+	}
+}
+
+// THE HEADER'S URNET_MESSAGE_GAP_* DEFINES ARE THE GapReason VALUES THIS BUILD PRODUCES.
+//
+// IT WENT STALE THE WAY THE STATS LIST WENT STALE. The header declared two and said "THIS BUILD
+// PRODUCES TWO" while urmessage had been producing three since ledger item 241: out_of_window is
+// the commonest gap in the product -- a later joiner produces one per pre-admission record -- and
+// a C caller branching on the defines read it as an unrecognised string. R4 made it visible
+// because out_of_window is the one reason for which sender_role_at_send is "".
+//
+// ITS LIMIT IS THE COMMIT-KIND GATE'S AND IS STATED RATHER THAN HIDDEN: the go side is a list
+// written here, because GapReason is a string type whose constants reflection cannot enumerate. So
+// this catches a define that no constant matches, a value that drifted, and a constant this list
+// knows about that the header forgot -- and it does NOT catch a brand new GapReason that nobody
+// adds to either. The producers are three and each is named in [urmessage.GapReason]'s own
+// comment, which is where the next one is declared.
+//
+// WHAT WOULD GO RED: drop a define, misspell one, change a string on either side, add a define
+// with no constant behind it.
+func TestTheHeaderDefinesExactlyTheGapReasonsThisBuildProduces(t *testing.T) {
+	header, err := os.ReadFile("include/urnetwork_message.h")
+	if err != nil {
+		t.Fatalf("reading the header: %v", err)
+	}
+	defined := map[string]string{}
+	for _, match := range regexp.MustCompile(`(?m)^#define URNET_MESSAGE_GAP_([A-Z_]+)\s+"([a-z_]+)"`).
+		FindAllStringSubmatch(string(header), -1) {
+		defined[match[1]] = match[2]
+	}
+	produced := map[string]string{
+		"MALFORMED":     string(urmessage.GapMalformed),
+		"UNSUPPORTED":   string(urmessage.GapUnsupported),
+		"OUT_OF_WINDOW": string(urmessage.GapOutOfWindow),
+	}
+	if len(defined) < 2 {
+		t.Fatalf("the header defines %d URNET_MESSAGE_GAP_* reasons; the positive control is not met", len(defined))
+	}
+	if !reflect.DeepEqual(defined, produced) {
+		t.Fatalf("the header defines the gap reasons as %v and this build produces %v", defined, produced)
+	}
+	// AND A MESSAGE THAT IS A MESSAGE IS NONE OF THEM, which is what "" means on the wire and is
+	// the value a caller branches on first.
+	for name, value := range produced {
+		if value == "" {
+			t.Errorf("%s is the empty string, which is the answer for a message that is NOT a gap", name)
+		}
 	}
 }
 

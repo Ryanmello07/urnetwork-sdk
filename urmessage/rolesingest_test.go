@@ -148,6 +148,14 @@ func (self *roleWorld) enroll(name string, dev *crossProcessDevice, handle messa
 		reconciled:     true,
 	}
 	group.initTables()
+	// AND THE PAST EPOCH LOADER, WHICH PRODUCTION INSTALLS ON EVERY SESSION A GROUP RECEIVES
+	// THROUGH (ledger item 241, [Device.pastEpochLoader]). Without it a member reads every record
+	// from an epoch it has left as a loud ErrRecordOpen rather than opening it under that epoch's
+	// own schedule -- which is not what a real member does, and is the road R4's capture is taken
+	// on when a walk meets a commit before it meets the lines that preceded it.
+	if err := session.InstallPastEpochLoader(group.device.pastEpochLoader(group.id)); err != nil {
+		self.t.Fatalf("%s's past epoch loader: %v", name, err)
+	}
 	member := &roleMember{name: name, dev: dev, handle: handle, session: session, group: group, leaf: handle.OwnLeafIndex()}
 	self.members[name] = member
 	return member

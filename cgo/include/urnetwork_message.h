@@ -110,16 +110,25 @@ extern "C" {
 #define URNET_MESSAGE_KIND_COVER           0x07
 
 /* the values urnet_message_list_info's "gap" takes, as strings, and "" for a message that is a
- * message. spec A section 7.4's set is closed at seven and THIS BUILD PRODUCES TWO; the other five
- * are waiting on machinery that does not exist here, so a caller that shows a default for an
+ * message. spec A section 7.4's set is closed at seven and THIS BUILD PRODUCES THREE; the other
+ * four are waiting on machinery that does not exist here, so a caller that shows a default for an
  * unrecognised reason is right rather than lazy.
  *
- * THE DISTINCTION BETWEEN THESE TWO IS LOAD BEARING IN BOTH DIRECTIONS and the copy differs:
+ * THE DISTINCTION BETWEEN THE FIRST TWO IS LOAD BEARING IN BOTH DIRECTIONS and the copy differs:
  * MALFORMED is a fault and NO upgrade fixes it, so it must not offer one; UNSUPPORTED is a member
  * running a newer build and the upgrade is the whole answer. showing either sentence for the other
- * either accuses a correct sender or sends a user after an upgrade that cannot help. */
-#define URNET_MESSAGE_GAP_MALFORMED   "malformed"
-#define URNET_MESSAGE_GAP_UNSUPPORTED "unsupported"
+ * either accuses a correct sender or sends a user after an upgrade that cannot help.
+ *
+ * OUT_OF_WINDOW IS NEITHER AND IS NOBODY'S FAULT: the record was sealed at an epoch no key
+ * schedule on this device reaches -- more than the past epoch window behind, or before this device
+ * was admitted -- so it never opened. it is the one reason this build produces for which
+ * sender_role_at_send is "", because a device that cannot obtain an epoch cannot say who held
+ * which role in it. it was undeclared here while the library produced it (a later joiner produces
+ * one per pre-admission record), which left a C caller reading the product's commonest gap as an
+ * unrecognised string. */
+#define URNET_MESSAGE_GAP_MALFORMED     "malformed"
+#define URNET_MESSAGE_GAP_UNSUPPORTED   "unsupported"
+#define URNET_MESSAGE_GAP_OUT_OF_WINDOW "out_of_window"
 
 /* what urnet_message_group_set_role and urnet_message_group_transfer_ownership answer. out_error is
  * set on everything but OK. BRANCH ON THE KIND AND SHOW THE TEXT: the kind is what to do next and
@@ -340,15 +349,22 @@ uint64_t urnet_message_group_epoch(uint64_t self);
 bool urnet_message_group_is_open(uint64_t self);
 /* what this group has SEEN, as json: fetched, opened, skipped_ceremony, skipped_own, opened_own,
  * own_without_copy, skipped_seen, unopened, omitted, skipped_class, gap_malformed, gap_unsupported,
- * gap_out_of_window, opened_past_epoch, ingested, commit_refused, commit_refused_own, failed_open,
- * submitted, rebound, pages, unattested.
+ * gap_out_of_window, opened_past_epoch, hidden_observer, role_undeterminable, ingested,
+ * commit_refused, commit_refused_own, failed_open, submitted, rebound, pages, unattested.
  *
  * THE LIST ABOVE IS THE JSON'S OWN KEY LIST, IN ITS ORDER, and a go test in this directory reads it
  * off this file and holds it equal to the keys the json carries -- it went stale once, omitting
  * four counters with every test green, and a documented list nothing checks is a list a C caller
  * trusts for nothing. gap_out_of_window counts records sealed at an epoch no schedule on this
  * device reaches; opened_past_epoch counts records opened under a prior epoch's schedule because
- * this device was a member then. ingested counts membership-change commits this device followed
+ * this device was a member then. hidden_observer counts lines whose sender was an OBSERVER at the
+ * epoch it sealed them -- a member running a build that does not take the send refusal, since
+ * OBSERVER is enforced in the client and not at the server -- and the rows are in the log with
+ * their bodies intact, collapsed by sender_role_at_send rather than dropped. role_undeterminable
+ * counts records that opened and whose sender's role could not be read: it MUST STAY ZERO, because
+ * the role is read off the same handle the open read, and it is not gap_out_of_window's
+ * counterpart -- a record no schedule reaches never opens and is never asked about.
+ * ingested counts membership-change commits this device followed
  * into the next epoch; commit_refused counts the ones its receiving-side role check refused --
  * a number there is a member that committed what its role does not permit, and a group this
  * device can no longer write to until it is re-founded. commit_refused_own counts the commits
@@ -409,10 +425,22 @@ uint64_t urnet_message_group_list_at(uint64_t self, int32_t index);
 
 int32_t urnet_message_list_count(uint64_t self);
 /* one message's metadata as json, WITHOUT the body and WITHOUT its reactions:
- *   {"record_id":u64,"sender_handle":"<32 hex>","mine":bool,"sent_at_ms":i64,"body_len":i32,
- *    "message_id":"<64 hex>","kind":u8,"gap":"","reply_to_id":"","deleted":bool,
- *    "reaction_count":i32}
+ *   {"record_id":u64,"sender_handle":"<32 hex>","mine":bool,"sender_role_at_send":"member",
+ *    "sent_at_ms":i64,"body_len":i32,"message_id":"<64 hex>","kind":u8,"gap":"","reply_to_id":"",
+ *    "deleted":bool,"reaction_count":i32}
+ * THE KEY LIST ABOVE IS THE JSON'S OWN, IN ITS ORDER, and a go test in this directory holds it so.
  * sender_handle is 16 opaque octets and IS NOT A NAME: the alpha has no identity system.
+ *
+ * sender_role_at_send is the role the SENDER HELD AT THE EPOCH THIS RECORD WAS SEALED AT --
+ * "owner", "admin", "member", "observer" -- and "" on a record that did not open. IT IS A FACT
+ * ABOUT AN EPOCH AND NOT ABOUT NOW: urnet_message_group_members answers the roles the group has
+ * today, and a line written before a demotion was written under the role its sender held then, so
+ * joining a row to the roster on sender_handle and reading the role off that row relabels history
+ * at every role change. "observer" IS THE ONE VALUE THAT ASKS FOR ANYTHING: collapse the row to
+ * the system line "A message from an observer was hidden.", with the content one expansion away.
+ * THE RECORD IS STILL HERE AND ITS BODY IS INTACT -- body_len is the real length and
+ * urnet_message_list_body still hands it back -- because a row dropped is indistinguishable from a
+ * record that never arrived. it is not a gap: gap stays "".
  *
  * message_id is 32 octets and IS the name to quote: a reply, a reaction, a tombstone or a read
  * cursor has to say which message it is about, and record_id cannot -- record_id is the SERVER's

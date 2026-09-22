@@ -92,8 +92,9 @@ func TestRolesConvergeAcrossThreeDevices(t *testing.T) {
 	groups := map[string]*urmessage.Group{"alice": aliceGroup, "bob": bobGroup}
 	aliceId, bobId := rolesIdentityOf(t, aliceGroup), rolesIdentityOf(t, bobGroup)
 	identities := map[string][]byte{"alice": aliceId, "bob": bobId}
-	rolesAssertRoster(t, 1, groups, identities, map[string]string{"alice": "owner", "bob": "member"})
-	rolesAssertMesh(t, ctx, 1, groups)
+	rolesAtOne := map[string]string{"alice": "owner", "bob": "member"}
+	rolesAssertRoster(t, 1, groups, identities, rolesAtOne)
+	rolesAssertMesh(t, ctx, 1, groups, rolesAtOne)
 
 	// ── epoch 2: the owner promotes bob, through the verb ───────────────────────────────────────
 	if err := aliceGroup.SetRole(ctx, bobId, "admin"); err != nil {
@@ -104,11 +105,12 @@ func TestRolesConvergeAcrossThreeDevices(t *testing.T) {
 	}
 	rolesReceiveAll(t, ctx, groups)
 	rolesAssertEpoch(t, 2, groups)
-	rolesAssertRoster(t, 2, groups, identities, map[string]string{"alice": "owner", "bob": "admin"})
+	rolesAtTwo := map[string]string{"alice": "owner", "bob": "admin"}
+	rolesAssertRoster(t, 2, groups, identities, rolesAtTwo)
 	if role, err := bobGroup.MyRole(); err != nil || role != "admin" {
 		t.Fatalf("bob's MyRole after the promotion is %q, %v; want admin", role, err)
 	}
-	rolesAssertMesh(t, ctx, 2, groups)
+	rolesAssertMesh(t, ctx, 2, groups, rolesAtTwo)
 
 	// ── epoch 3: bob, an admin, adds carol ──────────────────────────────────────────────────────
 	carolKeyPackage, err := carol.KeyPackage()
@@ -128,8 +130,9 @@ func TestRolesConvergeAcrossThreeDevices(t *testing.T) {
 	identities["carol"] = carolId
 	rolesReceiveAll(t, ctx, groups)
 	rolesAssertEpoch(t, 3, groups)
-	rolesAssertRoster(t, 3, groups, identities, map[string]string{"alice": "owner", "bob": "admin", "carol": "member"})
-	rolesAssertMesh(t, ctx, 3, groups)
+	rolesAtThree := map[string]string{"alice": "owner", "bob": "admin", "carol": "member"}
+	rolesAssertRoster(t, 3, groups, identities, rolesAtThree)
+	rolesAssertMesh(t, ctx, 3, groups, rolesAtThree)
 
 	// ── carol, a MEMBER, is refused on the send side, and nothing moves anywhere ────────────────
 	serverEpoch := func() uint64 {
@@ -187,14 +190,15 @@ func TestRolesConvergeAcrossThreeDevices(t *testing.T) {
 	}
 	rolesReceiveAll(t, ctx, groups)
 	rolesAssertEpoch(t, 4, groups)
-	rolesAssertRoster(t, 4, groups, identities, map[string]string{"alice": "admin", "bob": "owner", "carol": "member"})
+	rolesAtFour := map[string]string{"alice": "admin", "bob": "owner", "carol": "member"}
+	rolesAssertRoster(t, 4, groups, identities, rolesAtFour)
 	if role, _ := bobGroup.MyRole(); role != "owner" {
 		t.Errorf("bob's MyRole after the transfer is %q, want owner", role)
 	}
 	if role, _ := aliceGroup.MyRole(); role != "admin" {
 		t.Errorf("alice's MyRole after the transfer is %q, want admin", role)
 	}
-	rolesAssertMesh(t, ctx, 4, groups)
+	rolesAssertMesh(t, ctx, 4, groups, rolesAtFour)
 	// the old owner, now an admin, may no longer touch the admin set or the ownership
 	if err := aliceGroup.SetRole(ctx, carolId, "admin"); !errors.Is(err, urmessage.ErrCommitRoleChangeByNonOwner) {
 		t.Errorf("the old owner's SetRole promoting carol answered %v, want R4's refusal", err)
@@ -212,11 +216,12 @@ func TestRolesConvergeAcrossThreeDevices(t *testing.T) {
 	}
 	rolesReceiveAll(t, ctx, groups)
 	rolesAssertEpoch(t, 5, groups)
-	rolesAssertRoster(t, 5, groups, identities, map[string]string{"alice": "admin", "bob": "owner", "carol": "admin"})
+	rolesAtFive := map[string]string{"alice": "admin", "bob": "owner", "carol": "admin"}
+	rolesAssertRoster(t, 5, groups, identities, rolesAtFive)
 	if role, _ := carolGroup.MyRole(); role != "admin" {
 		t.Errorf("carol's MyRole after her promotion is %q, want admin", role)
 	}
-	rolesAssertMesh(t, ctx, 5, groups)
+	rolesAssertMesh(t, ctx, 5, groups, rolesAtFive)
 
 	// ── epoch 6: bob adds mallory, a member that is the seam and a session and no device ────────
 	mallory := world.seamMember(t, ctx, "mallory")
@@ -233,7 +238,7 @@ func TestRolesConvergeAcrossThreeDevices(t *testing.T) {
 	}
 	rosterAtSix := map[string]string{"alice": "admin", "bob": "owner", "carol": "admin", "mallory": "member"}
 	rolesAssertRoster(t, 6, groups, identities, rosterAtSix)
-	rolesAssertMesh(t, ctx, 6, groups)
+	rolesAssertMesh(t, ctx, 6, groups, rosterAtSix)
 	ingestedAtSix := map[string]uint64{}
 	for name, group := range groups {
 		if got := group.Stats().CommitRefused; got != 0 {
@@ -264,6 +269,26 @@ func TestRolesConvergeAcrossThreeDevices(t *testing.T) {
 		}
 	}
 	rolesAssertRoster(t, 6, groups, identities, rosterAtSix)
+
+	// ── AND THE HISTORY STILL SAYS WHO EVERYBODY WAS WHEN THEY SAID IT (item 242's R4, ruling 21) ──
+	//
+	// Every role in this group has changed since epoch one: alice owner -> admin, bob member ->
+	// admin -> owner, carol member -> admin. The lines each of them sent at each epoch still carry
+	// the role they held THEN, at every device, read back off the log rather than off a Receive.
+	// A build that derived the role at render time, or off the current roster, answers today's
+	// role for every line and fails on every epoch but the last.
+	byEpoch := map[uint64]map[string]string{
+		1: rolesAtOne, 2: rolesAtTwo, 3: rolesAtThree, 4: rolesAtFour, 5: rolesAtFive, 6: rosterAtSix,
+	}
+	for name, group := range groups {
+		rolesAssertHistoryKeepsItsRoles(t, name, group, byEpoch)
+		if got := group.Stats().RoleUndeterminable; got != 0 {
+			t.Errorf("%s opened %d record(s) whose sender's role it could not read", name, got)
+		}
+		if got := group.Stats().HiddenObserver; got != 0 {
+			t.Errorf("%s hid %d observer message(s) in a group that has no observer", name, got)
+		}
+	}
 	t.Logf("roles: five epochs through the verbs with every roster and every exporter agreeing; carol's three send-side refusals moved nothing; mallory's hand-built add moved the server to 7 and every honest device refused it at 6")
 }
 
@@ -345,20 +370,79 @@ func rolesAssertRoster(t *testing.T, epoch uint64, groups map[string]*urmessage.
 
 // rolesAssertMesh has every member send one line at the epoch and every other member open it: the
 // public surface's proof that every pair shares the epoch's storage root.
-func rolesAssertMesh(t *testing.T, ctx context.Context, epoch uint64, groups map[string]*urmessage.Group) {
+//
+// AND SINCE R4 IT IS ALSO WHERE SenderRoleAtSend IS MEASURED OVER A RUNNING SERVER, through
+// [urmessage.Group.Send] and [urmessage.Group.Receive] and nothing below them. `roles` is the same
+// map [rolesAssertRoster] has just held every roster to, so what is asserted is that the role
+// stamped on a line at epoch n is the role its sender held AT EPOCH n -- at the sender, which
+// captures it at the seal, and at every receiver, which captures it at the open. The two are
+// different code paths reading different trees and they must answer one value.
+//
+// IT IS NOT A FIXED VALUE ACROSS THE RUN, which is what makes it a measurement: this case moves
+// alice owner -> admin, bob member -> admin -> owner and carol member -> admin, and a line from
+// each epoch keeps the role of THAT epoch afterwards.
+func rolesAssertMesh(t *testing.T, ctx context.Context, epoch uint64, groups map[string]*urmessage.Group,
+	roles map[string]string) {
+
 	t.Helper()
 	for sender, group := range groups {
 		line := fmt.Sprintf("%s at epoch %d", sender, epoch)
-		if _, err := group.Send(ctx, line); err != nil {
+		sent, err := group.Send(ctx, line)
+		if err != nil {
 			t.Fatalf("%s's Send at epoch %d: %v", sender, epoch, err)
+		}
+		want, named := roles[sender]
+		if !named {
+			t.Fatalf("this case did not say what role %s holds at epoch %d", sender, epoch)
+		}
+		if sent.SenderRoleAtSend != want {
+			t.Errorf("%s sent at epoch %d and stamped its own line %q, want %q",
+				sender, epoch, sent.SenderRoleAtSend, want)
 		}
 		for receiver, other := range groups {
 			if receiver == sender {
 				continue
 			}
-			gcReceiveText(t, ctx, receiver, other, line)
+			got := gcReceiveTextMessage(t, ctx, receiver, other, line)
+			if got.SenderRoleAtSend != want {
+				t.Errorf("%s reads %s's epoch-%d line as sent by a %q, want %q",
+					receiver, sender, epoch, got.SenderRoleAtSend, want)
+			}
 		}
 	}
+}
+
+// rolesAssertHistoryKeepsItsRoles re-reads a member's whole log and holds every line to the role
+// its sender held AT THE EPOCH IT WAS SENT, after every role in the group has changed since.
+//
+// THIS IS RULING 21 OVER A RUNNING SERVER. The lines are named "<who> at epoch <n>", so the log
+// itself says what each one's answer must be; a build that derived the role at render time, or off
+// the current roster, answers today's role for every line and fails on every epoch but the last.
+func rolesAssertHistoryKeepsItsRoles(t *testing.T, who string, group *urmessage.Group,
+	byEpoch map[uint64]map[string]string) {
+
+	t.Helper()
+	checked := 0
+	for _, held := range group.Messages() {
+		var sender string
+		var epoch uint64
+		if _, err := fmt.Sscanf(held.Text, "%s at epoch %d", &sender, &epoch); err != nil {
+			continue
+		}
+		want, named := byEpoch[epoch][sender]
+		if !named {
+			continue
+		}
+		checked += 1
+		if held.SenderRoleAtSend != want {
+			t.Errorf("%s's log reads %q as sent by a %q, want %q -- a role is a fact about the epoch "+
+				"it was sent at and not about now", who, held.Text, held.SenderRoleAtSend, want)
+		}
+	}
+	if checked < 4 {
+		t.Fatalf("%s's log matched %d line(s) against a known role; this control examined nothing", who, checked)
+	}
+	t.Logf("%s: %d line(s) across five epochs still carry the role their sender held then", who, checked)
 }
 
 // ── a member that is the seam and a session, and no device ───────────────────────────────────

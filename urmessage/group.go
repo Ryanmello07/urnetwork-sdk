@@ -77,6 +77,38 @@ type Message struct {
 	// True when this device sealed it.
 	Mine bool
 
+	// THE ROLE THE SENDER HELD AT THE EPOCH THIS RECORD WAS SEALED AT, as the wire stable name:
+	// "owner", "admin", "member" or "observer". Spec C section 5.6's
+	// `MessageEntry.SenderRoleAtSend`, and ledger item 242's R4.
+	//
+	// IT IS A FACT ABOUT AN EPOCH AND NOT ABOUT NOW, which is the whole reason it is a field on the
+	// message rather than a lookup at render time. Spec A rules where the answer comes from --
+	// "READ FROM THE TRANSCRIPT-COVERED GROUP-CONTEXT EXTENSION OF THE SENDING EPOCH, never from
+	// current membership" -- so a member demoted at a later epoch keeps the role it held on every
+	// line it had already written, and one promoted later does not acquire the new role
+	// retroactively. [Group.Members] answers the roles NOW, which is the wrong answer for a
+	// historical message.
+	//
+	// IT IS CAPTURED AT THE OPEN (item 242's ruling 21) and never derived afterwards. Two reasons,
+	// and the first decides it: the role must survive a restart that can no longer re-derive it --
+	// an epoch aged past [messagegroup.PastEpochWindow] is one whose state mls has deleted, and the
+	// record is still in this group's log. The second is cost: one field against two (the epoch and
+	// the leaf) plus a seam call per render.
+	//
+	// IT IS EMPTY EXACTLY WHEN THE RECORD DID NOT OPEN. A [GapOutOfWindow] gap carries none,
+	// because nothing on this device can say what a sender's role was at an epoch it holds no state
+	// for -- and reading it off the CURRENT policy would be answering a question about a different
+	// epoch. A malformed or an unsupported gap DID open and carries one like any other record. See
+	// [Stats.RoleUndeterminable] for the residual case that is neither.
+	//
+	// "observer" IS THE ONE VALUE THAT ASKS A UI FOR ANYTHING. Spec C section 5.6: a receiving
+	// client HIDES an observer's message -- collapsed to section 5.1's system row, "A message from
+	// an observer was hidden.", expanding to the content with a warning. THE RECORD IS KEPT AND ITS
+	// CONTENT IS INTACT (item 242's ruling 16): dropping it would be indistinguishable from a
+	// record that never arrived, and it is not an eighth [GapReason] -- that set is closed at
+	// seven. [Stats.HiddenObserver] is how many.
+	SenderRoleAtSend string
+
 	// The text.
 	Text string
 
@@ -383,6 +415,43 @@ type Stats struct {
 	// [Stats.Opened] counted separately so that "history survived the change" is a number and
 	// not an absence of gaps.
 	OpenedPastEpoch uint64
+
+	// Records that became a LINE of the conversation whose sender was an OBSERVER at the epoch it
+	// sealed them: [Message.SenderRoleAtSend] == "observer", ledger item 242's R4, spec C §5.6.
+	//
+	// A NUMBER HERE IS NOT AN ERROR AND IT IS NOT A DROP. The record opened, it is in this group's
+	// log, its text is intact, and a UI collapses it to §5.1's system row with the content one
+	// expansion away (ruling 16). What it IS is a member of this group running a build that does
+	// not take R4's send refusal, because OBSERVER is enforced in the client and by the MLS
+	// proposal rules and NOT by the server: an observer holds the group keys and can encrypt a
+	// valid application message. Spec C's own settings copy says exactly that -- "this version of
+	// URmessage cannot stop it at the server -- it can only hide the result" -- and this counter is
+	// how often it had to.
+	//
+	// AN OBSERVER'S REACTION OR TOMBSTONE IS NOT COUNTED HERE AND IS NOT HIDDEN, and that is a
+	// stated limit rather than an oversight. Ruling 19 refuses all four sendable kinds on the send
+	// side and says of the receiving side that "hiding a reaction has no design": a reaction is a
+	// change to another message and not a line, so there is no row to collapse. What keeps one off
+	// the wire is [Group.sendableLocked], which every honest client runs.
+	HiddenObserver uint64
+
+	// Records that OPENED and whose sender's role at the sending epoch could NOT be read, so
+	// [Message.SenderRoleAtSend] is empty on a record that is otherwise whole.
+	//
+	// IT MUST STAY ZERO AND IT IS HERE BECAUSE "must" is not "does". The ask goes through
+	// [messagegroup.GroupSession.RoleAt], which reads the SAME handle the open read (item 242's
+	// ruling 17), so a door that answered the record cannot refuse to say who sent it -- with one
+	// measured condition, written on that method: the sentence holds for an ask with NO EPOCH
+	// INSTALL between it and the open. This package keeps the ask inside that window by taking it
+	// in the same loop iteration as [messagegroup.GroupSession.OpenRecord], which is what ruling
+	// 21's capture-at-open buys. A number here is that window having been left, or a store that
+	// would not read a past epoch it had just served.
+	//
+	// IT IS NOT [Stats.GapOutOfWindow]'s counterpart and never moves with it. A record whose epoch
+	// no schedule reaches never opens and is never asked about, so it contributes a gap and not a
+	// number here; R4 introduces no new disappearance, and the records whose role is underivable
+	// are a subset of the records that do not open.
+	RoleUndeterminable uint64
 
 	// Commits INGESTED into this group: §6.1 membership-change records this device processed,
 	// authorized, applied and followed into the next epoch. One per epoch this device did NOT
@@ -1461,7 +1530,8 @@ func (self *Group) enterEpochLocked() error {
 func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
-	if err := self.sendableLocked(); err != nil {
+	role, err := self.sendableLocked(KindText)
+	if err != nil {
 		return nil, err
 	}
 	// THE ENCODE IS THE LENGTH REFUSAL AND IT IS BEFORE THE SEAL, one clause further out than the
@@ -1469,14 +1539,14 @@ func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 	// length against the rung, and the frame that decides the real rung does not exist until an
 	// index has been reserved and a generation spent.
 	//
-	// IT IS AFTER THE STICKY REFUSALS IN sendableLocked AND THAT ORDER IS DELIBERATE. A group that
-	// has seen a second writer, or a restored group that has not reconciled, must say THAT rather
-	// than report a fact about the length of this particular line.
+	// IT IS AFTER EVERY REFUSAL IN sendableLocked AND THAT ORDER IS DELIBERATE. A group that has
+	// seen a second writer, one that has not reconciled, and a caller whose role may not send must
+	// each say THAT rather than report a fact about the length of this particular line.
 	plaintext, err := encodeText(text)
 	if err != nil {
 		return nil, err
 	}
-	return self.sendContentLocked(ctx, plaintext, "a message")
+	return self.sendContentLocked(ctx, plaintext, "a message", role)
 }
 
 // SendReply seals one line of text that names the message it answers, and submits it.
@@ -1492,7 +1562,8 @@ func (self *Group) Send(ctx context.Context, text string) (*Message, error) {
 func (self *Group) SendReply(ctx context.Context, replyTo []byte, text string) (*Message, error) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
-	if err := self.sendableLocked(); err != nil {
+	role, err := self.sendableLocked(KindReply)
+	if err != nil {
 		return nil, err
 	}
 	// THE PARENT IS NOT REQUIRED TO BE PRESENT, and that is the one place this differs from
@@ -1504,7 +1575,7 @@ func (self *Group) SendReply(ctx context.Context, replyTo []byte, text string) (
 	if err != nil {
 		return nil, err
 	}
-	return self.sendContentLocked(ctx, plaintext, "a reply")
+	return self.sendContentLocked(ctx, plaintext, "a reply", role)
 }
 
 // React seals one REACTION_ADD naming a message this group holds, and submits it.
@@ -1531,7 +1602,8 @@ func (self *Group) Unreact(ctx context.Context, target []byte, emoji string) (*M
 func (self *Group) react(ctx context.Context, kind ContentKind, target []byte, emoji string) (*Message, error) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
-	if err := self.sendableLocked(); err != nil {
+	role, err := self.sendableLocked(kind)
+	if err != nil {
 		return nil, err
 	}
 	// K9/K5: a reaction may name a stored content message and nothing else, and a call naming an
@@ -1545,7 +1617,7 @@ func (self *Group) react(ctx context.Context, kind ContentKind, target []byte, e
 	if err != nil {
 		return nil, err
 	}
-	return self.sendContentLocked(ctx, plaintext, "a reaction")
+	return self.sendContentLocked(ctx, plaintext, "a reaction", role)
 }
 
 // Delete seals one TOMBSTONE naming a message of THIS DEVICE'S OWN, and submits it.
@@ -1569,7 +1641,8 @@ func (self *Group) react(ctx context.Context, kind ContentKind, target []byte, e
 func (self *Group) Delete(ctx context.Context, target []byte) (*Message, error) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
-	if err := self.sendableLocked(); err != nil {
+	role, err := self.sendableLocked(KindTombstone)
+	if err != nil {
 		return nil, err
 	}
 	held, err := self.reactableLocked(target)
@@ -1584,31 +1657,94 @@ func (self *Group) Delete(ctx context.Context, target []byte) (*Message, error) 
 	if err != nil {
 		return nil, err
 	}
-	return self.sendContentLocked(ctx, plaintext, "a tombstone")
+	return self.sendContentLocked(ctx, plaintext, "a tombstone", role)
 }
 
-// sendableLocked is every refusal a send owes BEFORE it looks at what is being sent. It is one
-// function because four entry points owe the same five, in the same order, and a fifth entry point
-// that forgot one would seal under a reused identity.
-func (self *Group) sendableLocked() error {
+// kindsAnObserverMaySend is the exception list ruling 19 leaves behind, AND IT IS EMPTY.
+//
+// THE EMPTINESS IS THE RULING AND THE LIST IS THE SHAPE. Item 242's ruling 19 refuses an OBSERVER
+// all four sendable kinds -- TEXT, REPLY, REACTION_ADD/REMOVE and TOMBSTONE -- because that is the
+// entire askable set (COVER has zero call sites, the whole TRANSIENT range including READ_THROUGH
+// needs an EPH(0) channel that does not exist, and ATTACHMENT and EDIT have no bodies), and because
+// the refusal has to be sayable in one sentence: "You can read this group but not send to it." A
+// reaction exception fails that test, and hiding a reaction has no design (see
+// [Stats.HiddenObserver]). So the rule is one clause and one sentence -- and the day a kind IS
+// excepted, this map is where it goes and nothing else moves.
+var kindsAnObserverMaySend = map[ContentKind]bool{}
+
+// sendableLocked is every refusal a send owes BEFORE it looks at what is being sent, and it answers
+// THE ROLE THIS DEVICE IS SENDING UNDER. It is one function because four entry points owe the same
+// six, in the same order, and a fifth entry point that forgot one would seal under a reused
+// identity.
+//
+// THE ROLE IT ANSWERS IS THE ROLE THE RECORD WILL CARRY, which is why it is a return value and not
+// a second read at the seal. The clause below and [Message.SenderRoleAtSend] are then the same
+// value from the same call: a build in which the role a send is JUDGED by and the role its message
+// ADVERTISES could differ would be two answers to one question, which is the defect ruling 20
+// forbids across the two arms of the predicate and there is no reason to allow inside one arm. The
+// group's mutex is held from here through the seal, so no commit moves the epoch in between.
+//
+// THE SIXTH CLAUSE IS R4 (item 242) AND ITS PLACE IN THE ORDER IS LOAD-BEARING. It is AFTER
+// identityInUse and AFTER the reconciled check, because a group that has seen a second writer, or a
+// restored group that has not yet compared its stream position, must say THAT rather than report a
+// fact about the caller's role: the first two are about a key this device is about to reuse and
+// this one is about a permission, and a permission refusal on a group that is already unsafe to
+// seal in would send a user looking for an admin instead of for their other device.
+//
+// THE ROLE IS READ THROUGH THE SAME DOOR THE RECEIVING SIDE READS IT THROUGH. Not
+// [Group.MyRole]'s road through the live policy, but [messagegroup.GroupSession.RoleAt] at this
+// group's own epoch and this device's own leaf -- the one door R4 added -- so that the refusal a
+// sender takes and the role every receiver captures are the same function of the same tree. Both
+// arms of one predicate must not disagree about one group at one epoch (ruling 20).
+//
+// AND THE ROLE IS NOT CACHED HERE, deliberately. A send is a network round trip and the ask is a
+// map lookup behind the seam; connect already holds the epoch's leaf -> role table as a field of
+// the SCHEDULE it belongs to, so it dies at the one moment it must (ruling 18's install), whereas a
+// copy kept here would need [Group.enterEpochLocked] to be remembered as its single invalidation
+// site for ever. One cache with the right owner beats two caches with one reminder.
+func (self *Group) sendableLocked(kind ContentKind) (string, error) {
 	if self.closed {
-		return fmt.Errorf("urmessage: this group is closed")
+		return "", fmt.Errorf("urmessage: this group is closed")
 	}
 	if self.session == nil {
-		return ErrNoMemberAdded
+		return "", ErrNoMemberAdded
 	}
 	if !self.opened {
-		return ErrGroupNotOpen
+		return "", ErrGroupNotOpen
 	}
 	// BEFORE THE REBIND AND BEFORE THE SEAL, because the seal is the irreversible half: a
 	// record sealed under a reused (key, nonce) exists whatever this method then returns.
 	if self.identityInUse != nil {
-		return self.identityInUse
+		return "", self.identityInUse
 	}
 	if !self.reconciled {
-		return fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
+		return "", fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
 	}
-	return nil
+	role, err := self.myRoleAtSendLocked()
+	if err != nil {
+		return "", err
+	}
+	if role == mls.RoleObserver.String() && !kindsAnObserverMaySend[kind] {
+		return "", fmt.Errorf("%w: group %x, %s", ErrObserverMayNotSend, self.id, kind)
+	}
+	return role, nil
+}
+
+// myRoleAtSendLocked is the role this device holds AT THIS GROUP'S CURRENT EPOCH: what
+// [Message.SenderRoleAtSend] will say about anything sealed now, read at this device's OWN leaf.
+//
+// IT CANNOT FAIL BECAUSE THE EPOCH IS STALE, and that is why the send arm does not have the
+// receiving arm's [Stats.RoleUndeterminable]: the ask is at self.epoch, where the seam answers off
+// the session's own live handle with no load and no window arithmetic. What is left to fail is a
+// closed session and a leaf this group's tree does not carry -- a device that is no longer in the
+// group it thinks it is in -- and both are refusals a send owes rather than facts to swallow.
+func (self *Group) myRoleAtSendLocked() (string, error) {
+	_, role, err := self.session.RoleAt(self.epoch, self.handle.OwnLeafIndex())
+	if err != nil {
+		return "", fmt.Errorf("urmessage: this device could not read its own role in group %x at epoch %d: %w",
+			self.id, self.epoch, err)
+	}
+	return role, nil
 }
 
 // reactableLocked answers the message a reaction or a tombstone may name, and refuses one it may
@@ -1656,7 +1792,13 @@ func (self *Group) reactableLocked(target []byte) (*Message, error) {
 // disagree the sender ships a record every receiver refuses as malformed while its own screen shows
 // it correctly. Taking the refusal here costs nothing -- no stream index, no MLS generation -- and
 // what a sender then displays is built by the SAME code path the receiver's display is.
-func (self *Group) sendContentLocked(ctx context.Context, plaintext []byte, what string) (*Message, error) {
+//
+// senderRoleAtSend IS THE ROLE [Group.sendableLocked] JUDGED THIS SEND BY, carried in rather than
+// read again. The group's mutex has been held since that clause, so it is the role at the epoch
+// this record is about to be sealed at -- which is exactly what [Message.SenderRoleAtSend] means --
+// and it is the same value every receiver will capture off this record's own epoch.
+func (self *Group) sendContentLocked(ctx context.Context, plaintext []byte, what string,
+	senderRoleAtSend string) (*Message, error) {
 	entry, verdict, why := ParseContent(plaintext, message.RetentionDurable, 0)
 	if verdict != ContentParsed {
 		return nil, fmt.Errorf("urmessage: this build would not read back the %s it was about to seal (%s): %w",
@@ -1730,7 +1872,8 @@ func (self *Group) sendContentLocked(ctx context.Context, plaintext []byte, what
 	// every verdict but [ContentParsed] at its first line, BEFORE the seal, so a record this device
 	// sends is by construction one it can read back. A send path that could produce a gap would be a
 	// device showing itself a placeholder for a message it had just written.
-	sent := newMessage(entry, recordId, record.Header.SenderHandle[:], true, sentAtMs, messageId[:])
+	sent := newMessage(entry, recordId, record.Header.SenderHandle[:], true, sentAtMs, messageId[:],
+		senderRoleAtSend)
 	line := self.deliverLocked(sent, entry)
 	// THIS IS A SEND AND NOT A WALK, SO THE REBUILD CANNOT WAIT FOR ONE. A reaction or a tombstone
 	// this device has just sealed is one the caller is about to read back off [Group.Messages], and
@@ -2689,6 +2832,29 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			fail(recordId, fmt.Errorf("%w: record %d from leaf %d: %w", ErrRecordOpen, recordId, leaf, err))
 			continue
 		}
+		// ── R4: THE ROLE, CAPTURED HERE AND NOWHERE ELSE ────────────────────────────────────
+		//
+		// THE ORDERING IS THE WHOLE POINT AND IT IS TWO ORDERINGS AT ONCE.
+		//
+		// FIRST, IT IS AFTER THE OPEN. Above this line `leaf` is a value resolved from
+		// header.SenderHandle through walk.leaves, which is keyed on a PLAINTEXT CLAIM any member
+		// can write -- [messagegroup.GroupSession.PeekSender] "authenticates nothing and is never
+		// the answer", and a lookup in a table built from handles is the same reading. OpenRecord
+		// returning nil is what makes that leaf the SIGNED one: MASTER §8.4.3's R1 refuses any
+		// frame whose signing leaf's SenderHandle is not the one the record carries. So the role
+		// asked for here is the role of the member that really wrote this, and a role read one
+		// clause earlier would be a role read off a forgeable claim (item 242's ruling 24).
+		//
+		// SECOND, IT IS IN THE SAME LOOP ITERATION AS THE OPEN, and that is measured rather than
+		// tidy. RoleAt reads the same handle the open read, so it cannot fail where the open
+		// succeeded -- ON THE CONDITION that no epoch INSTALL has run in between. One can:
+		// [Group.ingestCommitLocked] is called from this very loop, over a commit row, and the
+		// install behind it closes every held past handle and re-makes the schedule map wholesale.
+		// A capture deferred to render time, or to the end of this walk, would be asking a
+		// question this session may by then have to answer with a fresh load -- which CAN refuse
+		// at the window edge where the open did not. Ruling 21 capturing the role AT THE OPEN is
+		// exactly what keeps the ask inside that window.
+		senderRoleAtSend := self.roleAtSendLocked(header.Epoch, leaf)
 		sentAtMs, err := decodeHead(headPlain)
 		if err != nil {
 			fail(recordId, fmt.Errorf("%w: record %d: %w", ErrRecordOpen, recordId, err))
@@ -2796,9 +2962,11 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 		}
 		var received *Message
 		if gap == "" {
-			received = newMessage(entry, recordId, header.SenderHandle[:], mine, sentAtMs, messageId[:])
+			received = newMessage(entry, recordId, header.SenderHandle[:], mine, sentAtMs, messageId[:],
+				senderRoleAtSend)
 		} else {
-			received = newGap(gap, entry, recordId, header.SenderHandle[:], mine, sentAtMs, messageId[:])
+			received = newGap(gap, entry, recordId, header.SenderHandle[:], mine, sentAtMs, messageId[:],
+				senderRoleAtSend)
 		}
 		// WHAT A RECORD BECOMES IS ONE DECISION AND IT IS TAKEN IN ONE PLACE. A reaction, a
 		// tombstone and a COVER are records that add no line, and [Group.deliverLocked] is what
@@ -2981,10 +3149,20 @@ func (self *Group) openOwnFromCopyLocked(walk *pageWalk, recordId uint64, parsed
 	// blank message in a build that has no others -- the exact failure this whole change is for,
 	// surviving at the one call site nobody was looking at. The malformed 63 never reach this line:
 	// they answered false above and are counted in [Stats.OwnWithoutCopy] by the ordinary path.
-	received := newMessage(entry, recordId, header.SenderHandle[:], true, sealed.sentAtMs, messageId[:])
+	// R4: THE ROLE ON THIS ROAD IS THIS DEVICE'S OWN, AT THE RECORD'S OWN EPOCH. There is no
+	// authenticated leaf to read here because there is no open here -- what identifies the record
+	// is that its body_hash is one THIS device sealed, over this group, and the leaf that follows
+	// from that is [messagegroup.GroupHandle.OwnLeafIndex] and not anything off the header. A
+	// restarted device re-walks its own lines from epochs it has left, so the epoch asked for is
+	// the header's and never this group's: a line this device wrote as a MEMBER before being made
+	// an admin still says "member", exactly as every peer's copy of it does.
+	senderRoleAtSend := self.roleAtSendLocked(header.Epoch, self.handle.OwnLeafIndex())
+	received := newMessage(entry, recordId, header.SenderHandle[:], true, sealed.sentAtMs, messageId[:],
+		senderRoleAtSend)
 	if verdict == ContentUnsupported {
 		self.stats.GapUnsupported += 1
-		received = newGap(GapUnsupported, entry, recordId, header.SenderHandle[:], true, sealed.sentAtMs, messageId[:])
+		received = newGap(GapUnsupported, entry, recordId, header.SenderHandle[:], true, sealed.sentAtMs,
+			messageId[:], senderRoleAtSend)
 	}
 	if self.deliverLocked(received, entry) {
 		walk.opened = append(walk.opened, received)
@@ -3387,6 +3565,14 @@ func roleNameIn(policy *mls.GroupPolicyExtension, identity []byte) string {
 // and the group_handle_key, both of which this session holds whatever epoch it is at, so the gap is
 // still NAMED. A record whose id cannot be derived is counted and resolved past rather than retried:
 // the epoch will not come back, so there is nothing a re-fetch repairs.
+//
+// AND IT READS NO ROLE EITHER, WHICH IS A RULE AND NOT AN OMISSION (item 242's R4). This is the one
+// site of the walk that attributes a record to the header's UNAUTHENTICATED SenderHandle: nothing
+// opened, so nothing signed, and the handle is the sender's own claim. A role tag here would be a
+// role read off a forgeable claim -- and there is no epoch to read it at, because the whole reason
+// this record is a gap is that no schedule on this device reaches the epoch it was sealed at.
+// [Message.SenderRoleAtSend] is "" here, which is the value that says so, and
+// [Stats.RoleUndeterminable] does NOT move: nothing was asked.
 func (self *Group) noteEpochGapLocked(walk *pageWalk, recordId uint64, header *message.RecordHeader) {
 	self.stats.GapOutOfWindow += 1
 	messageId, err := self.session.MessageIdOf(header)
@@ -3395,11 +3581,43 @@ func (self *Group) noteEpochGapLocked(walk *pageWalk, recordId uint64, header *m
 	}
 	mine := header.SenderHandle == walk.own
 	entry := &Content{}
-	received := newGap(GapOutOfWindow, entry, recordId, header.SenderHandle[:], mine, 0, messageId[:])
+	received := newGap(GapOutOfWindow, entry, recordId, header.SenderHandle[:], mine, 0, messageId[:], "")
 	if self.deliverLocked(received, entry) {
 		walk.opened = append(walk.opened, received)
 	}
 	self.delivered[recordId] = true
+}
+
+// roleAtSendLocked is the ONE place a receiving road asks what role a leaf held at the epoch a
+// record was sealed at, and its answer is what [Message.SenderRoleAtSend] carries.
+//
+// THE LEAF MUST BE ONE THE RECORD'S OWN AUTHENTICATION PRODUCED. On the peer road that is the leaf
+// OpenRecord signed at; on the own-copy road it is this device's own leaf, which no header chose.
+// It is never a leaf resolved from a header's claimed sender_handle alone (item 242's ruling 24),
+// and the seam's own door carries the same sentence.
+//
+// THE EPOCH IS THE RECORD'S AND NEVER THIS GROUP'S. Spec A: "read from the transcript-covered
+// group-context extension of the SENDING EPOCH -- never from current membership."
+//
+// A REFUSAL IS AN EMPTY ROLE AND A COUNTER, AND NEVER A FAILED RECORD. The record has opened by the
+// time this is asked: its position, its message_id, its text and its effects are all facts, and a
+// build that dropped it because a second read came back short would be inventing a disappearance
+// out of a metadata miss -- which is the one thing this package's whole gap design exists to
+// prevent. So the message arrives with no role, a UI that has nothing to say says nothing, and
+// [Stats.RoleUndeterminable] is the number that says how often. It is expected to stay zero: RoleAt
+// reads the handle the open read.
+//
+// THE IDENTITY RoleAt ALSO ANSWERS IS DISCARDED HERE, deliberately: the alpha has no identity
+// system, [Message] carries a sender_handle and says in its own doc that it is not a name, and a
+// second identity field on every message would be 32 octets per line of a value nothing can
+// resolve to a person. [Group.Members] is where an identity crosses.
+func (self *Group) roleAtSendLocked(epoch uint64, leaf uint32) string {
+	_, role, err := self.session.RoleAt(epoch, leaf)
+	if err != nil {
+		self.stats.RoleUndeterminable += 1
+		return ""
+	}
+	return role
 }
 
 // ── what a record becomes ────────────────────────────────────────────────────────────────────
@@ -3437,17 +3655,25 @@ func (self *Group) heldLocked(messageId []byte) (*Message, bool) {
 // arrived, its Text is empty, and nothing else is set -- because a build that does not know a code
 // must not guess at its layout, and a Text filled from a body it could not parse is exactly the
 // failure headVersion 0x02 was bumped to prevent.
+//
+// senderRoleAtSend IS A PARAMETER AND NOT SOMETHING THIS FUNCTION CAN READ, which is item 242's
+// ruling 21 expressed in a signature: the role belongs to the epoch the record was SEALED at, this
+// constructor holds no epoch, and a constructor that went looking for one would find this group's
+// CURRENT epoch -- the one answer spec C §5.6 says is wrong for a historical message. Every caller
+// captures it beside the open that authenticated the sender, and [Group.noteEpochGapLocked] passes
+// "" because its record never opened.
 func newMessage(entry *Content, recordId uint64, senderHandle []byte, mine bool, sentAtMs int64,
-	messageId []byte) *Message {
+	messageId []byte, senderRoleAtSend string) *Message {
 
 	received := &Message{
-		RecordId:     recordId,
-		SenderHandle: append([]byte(nil), senderHandle...),
-		Mine:         mine,
-		Text:         entry.Text,
-		SentAtMs:     sentAtMs,
-		MessageId:    append([]byte(nil), messageId...),
-		Kind:         entry.Kind,
+		RecordId:         recordId,
+		SenderHandle:     append([]byte(nil), senderHandle...),
+		Mine:             mine,
+		SenderRoleAtSend: senderRoleAtSend,
+		Text:             entry.Text,
+		SentAtMs:         sentAtMs,
+		MessageId:        append([]byte(nil), messageId...),
+		Kind:             entry.Kind,
 	}
 	if entry.Kind == KindReply {
 		received.ReplyToId = append([]byte(nil), entry.Target...)
@@ -3470,10 +3696,14 @@ func newMessage(entry *Content, recordId uint64, senderHandle []byte, mine bool,
 // answers the code and the raw body and nothing else, and a malformed gap's entry is synthesised in
 // [Group.openPageLocked] from octet 0 alone. A line that cleared them would be a line no mutation
 // could kill, so there is none.
+// AND A GAP'S ROLE IS THE CALLER'S TO PASS, for the same reason a message's is. The two gaps that
+// OPENED -- malformed and unsupported -- carry the role the open authenticated, because they are
+// records this device read the sender of; [GapOutOfWindow] carries "" because its record never
+// opened and no epoch this device holds says anything about it.
 func newGap(reason GapReason, entry *Content, recordId uint64, senderHandle []byte, mine bool,
-	sentAtMs int64, messageId []byte) *Message {
+	sentAtMs int64, messageId []byte, senderRoleAtSend string) *Message {
 
-	received := newMessage(entry, recordId, senderHandle, mine, sentAtMs, messageId)
+	received := newMessage(entry, recordId, senderHandle, mine, sentAtMs, messageId, senderRoleAtSend)
 	received.Gap = reason
 	return received
 }
@@ -3510,6 +3740,23 @@ func (self *Group) deliverLocked(received *Message, entry *Content) bool {
 		if received.Kind == KindCover {
 			return false
 		}
+	}
+	// R4 AND ITS RULING 16: AN OBSERVER'S MESSAGE IS COUNTED AND KEPT, AND THE KEEPING IS THE
+	// DECISION. It goes into the log below like any other line, with its text intact and its
+	// message_id and its position, because a record dropped here is indistinguishable from a
+	// record that never arrived -- and this package's whole gap design exists because silent
+	// omission is the one thing a messenger may not do. It is NOT an eighth [GapReason] either:
+	// that set is closed at seven, and a gap is a record this build could not SHOW, while this is
+	// one it read perfectly well and has been asked to collapse. What a UI does with it is spec C
+	// §5.6's, and [Stats.HiddenObserver] is the only thing this layer owes.
+	//
+	// IT IS COUNTED WHERE IT IS DECIDED, which is why the clause is here and not at the capture:
+	// this is the one place a record becomes a LINE, and only a line has a row to collapse. An
+	// observer's reaction or tombstone has already answered false above -- it is an effect, not an
+	// entry -- and is neither counted nor hidden; see [Stats.HiddenObserver] for why that is a
+	// stated limit rather than an oversight.
+	if received.SenderRoleAtSend == mls.RoleObserver.String() {
+		self.stats.HiddenObserver += 1
 	}
 	key := messageKeyOf(received.MessageId)
 	self.logIndex[key] = len(self.log)

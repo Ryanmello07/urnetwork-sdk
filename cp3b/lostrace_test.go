@@ -165,7 +165,7 @@ func TestALostEpochRaceLeavesTheHonestCommitterWhereItWasAndItRetries(t *testing
 	rolesAssertEpoch(t, 5, groups)
 	rosterAtFive := map[string]string{"alice": "admin", "bob": "owner", "carol": "member", "dave": "member"}
 	rolesAssertRoster(t, 5, groups, identities, rosterAtFive)
-	rolesAssertMesh(t, ctx, 5, groups)
+	rolesAssertMesh(t, ctx, 5, groups, rosterAtFive)
 
 	// ── race 2: bob's SetRole wins; alice's Add of erin, built at 5 unfetched, loses ───────────
 	if err := bobGroup.SetRole(ctx, identities["carol"], "admin"); err != nil {
@@ -211,9 +211,9 @@ func TestALostEpochRaceLeavesTheHonestCommitterWhereItWasAndItRetries(t *testing
 	if got := serverEpoch(); got != 7 {
 		t.Fatalf("the server is at epoch %d at the end, want 7", got)
 	}
-	rolesAssertRoster(t, 7, groups, identities,
-		map[string]string{"alice": "admin", "bob": "owner", "carol": "admin", "dave": "member", "erin": "member"})
-	rolesAssertMesh(t, ctx, 7, groups)
+	rosterAtSeven := map[string]string{"alice": "admin", "bob": "owner", "carol": "admin", "dave": "member", "erin": "member"}
+	rolesAssertRoster(t, 7, groups, identities, rosterAtSeven)
+	rolesAssertMesh(t, ctx, 7, groups, rosterAtSeven)
 	t.Logf("lost race: the owner lost a transfer to an admin's add and an admin lost an add to the owner's promotion; both times she stayed at her epoch, followed the winner, retried, and five devices converged at 7")
 }
 
