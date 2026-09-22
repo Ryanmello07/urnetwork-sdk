@@ -3,7 +3,6 @@ package urmessage
 import (
 	"crypto/rand"
 	"errors"
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -732,42 +731,117 @@ func TestAConfiguredAuthorizerComposesWithTheRulesAndCannotLoosenThem(t *testing
 // a fully derived second epoch that nothing else would erase, and the seam's door for it is
 // DiscardProcessed. The pin is that [Group.ingestCommitLocked] defers that call, so no return
 // between Process and ApplyCommit -- the refusal's included -- can leave it out.
+//
+// WHAT "DEFERS" HAS TO MEAN for the pin to track the property rather than the spelling. A defer
+// erases only the exits taken AFTER it is registered, so a DiscardProcessed defer that exists but
+// sits below the authorization check leaves every refused commit's staged epoch in the heap with
+// the defer still in the file. The first form of this pin asked only whether the defer existed and
+// stayed green under exactly that move (the connect erase gate scans ../messagegroup, not this
+// module, so nothing else would have seen it). This form reads positions instead: the staged
+// epoch is born at the Process call; the statement after it is Process's own error check, whose
+// returns stage nothing; between that check and the defer NO return may lie; the defer is a
+// top-level statement of the body rather than one nested under a condition; and it precedes both
+// named landmarks, the authorizeCommitLocked call and the ApplyCommit call, which are the exits
+// the property is about. Each landmark must be found -- a pin whose needle has been renamed passes
+// for nothing.
 func TestTheIngestPathDefersTheDiscardOfTheStagedEpoch(t *testing.T) {
 	fileSet := token.NewFileSet()
 	parsed, err := parser.ParseFile(fileSet, "group.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	deferred := false
-	found := false
+	var function *ast.FuncDecl
 	for _, declaration := range parsed.Decls {
-		function, isFunction := declaration.(*ast.FuncDecl)
-		if !isFunction || function.Name.Name != "ingestCommitLocked" {
-			continue
+		if candidate, isFunction := declaration.(*ast.FuncDecl); isFunction && candidate.Name.Name == "ingestCommitLocked" {
+			function = candidate
 		}
-		found = true
-		ast.Inspect(function.Body, func(node ast.Node) bool {
-			statement, isDefer := node.(*ast.DeferStmt)
-			if !isDefer {
-				return true
+	}
+	if function == nil {
+		t.Fatal("group.go declares no ingestCommitLocked")
+	}
+	at := func(node ast.Node) string { return fileSet.Position(node.Pos()).String() }
+	// callsSelector answers whether node contains a call whose method selector is exactly name.
+	callsSelector := func(node ast.Node, name string) bool {
+		found := false
+		ast.Inspect(node, func(inner ast.Node) bool {
+			if call, isCall := inner.(*ast.CallExpr); isCall {
+				if selector, isSelector := call.Fun.(*ast.SelectorExpr); isSelector && selector.Sel.Name == name {
+					found = true
+				}
 			}
-			ast.Inspect(statement.Call, func(inner ast.Node) bool {
-				call, isCall := inner.(*ast.CallExpr)
-				if !isCall {
-					return true
-				}
-				if selector, isSelector := call.Fun.(*ast.SelectorExpr); isSelector && selector.Sel.Name == "DiscardProcessed" {
-					deferred = true
-				}
-				return true
-			})
+			return !found
+		})
+		return found
+	}
+	// the landmarks, each the FIRST top-level statement of the body that reaches it
+	body := function.Body.List
+	processIndex, deferIndex, authorizeIndex, applyIndex := -1, -1, -1, -1
+	for index, statement := range body {
+		if processIndex < 0 && callsSelector(statement, "Process") {
+			processIndex = index
+		}
+		if deferIndex < 0 {
+			if deferral, isDefer := statement.(*ast.DeferStmt); isDefer && callsSelector(deferral.Call, "DiscardProcessed") {
+				deferIndex = index
+			}
+		}
+		if authorizeIndex < 0 && callsSelector(statement, "authorizeCommitLocked") {
+			authorizeIndex = index
+		}
+		if applyIndex < 0 && callsSelector(statement, "ApplyCommit") {
+			applyIndex = index
+		}
+	}
+	if processIndex < 0 {
+		t.Fatal("ingestCommitLocked calls no Process: the staged epoch this pin follows is born nowhere")
+	}
+	if deferIndex < 0 {
+		// a nested defer is the second way to have the spelling without the property: it runs only
+		// on the exits below the condition it is under
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if deferral, isDefer := node.(*ast.DeferStmt); isDefer && callsSelector(deferral.Call, "DiscardProcessed") {
+				t.Fatalf("ingestCommitLocked's DiscardProcessed defer at %s is nested under a condition, not a statement of the body: the exits outside it leave the staged epoch in the heap", at(deferral))
+			}
+			return true
+		})
+		t.Fatal("ingestCommitLocked defers no DiscardProcessed: a refused commit's staged epoch is left in the heap")
+	}
+	if deferIndex <= processIndex {
+		t.Fatalf("the DiscardProcessed defer at %s precedes the Process call at %s that stages the epoch it erases", at(body[deferIndex]), at(body[processIndex]))
+	}
+	// the statement after Process is its own error check -- `err != nil`, where nothing is staged
+	// -- and it is the only statement before the defer that may return
+	errorCheck, isIf := body[processIndex+1].(*ast.IfStmt)
+	if !isIf {
+		t.Fatalf("the statement after the Process call at %s is not its error check but %T at %s", at(body[processIndex]), body[processIndex+1], at(body[processIndex+1]))
+	}
+	condition, isBinary := errorCheck.Cond.(*ast.BinaryExpr)
+	if !isBinary || condition.Op != token.NEQ {
+		t.Fatalf("the statement after the Process call at %s is an if, but not `err != nil`", at(errorCheck))
+	}
+	if subject, isIdent := condition.X.(*ast.Ident); !isIdent || subject.Name != "err" {
+		t.Fatalf("the statement after the Process call at %s is an if, but not on `err`", at(errorCheck))
+	}
+	for _, statement := range body[processIndex+2 : deferIndex] {
+		ast.Inspect(statement, func(node ast.Node) bool {
+			if exit, isReturn := node.(*ast.ReturnStmt); isReturn {
+				t.Errorf("a return at %s lies between the Process call at %s and the DiscardProcessed defer at %s: a commit that exits there leaves its staged epoch in the heap",
+					at(exit), at(body[processIndex]), at(body[deferIndex]))
+			}
 			return true
 		})
 	}
-	if !found {
-		t.Fatal("group.go declares no ingestCommitLocked")
-	}
-	if !deferred {
-		t.Fatal(fmt.Sprintf("ingestCommitLocked defers no DiscardProcessed: a refused commit's staged epoch is left in the heap"))
+	// and the named landmarks, each found and each below the defer
+	for _, landmark := range []struct {
+		name  string
+		index int
+	}{{"authorizeCommitLocked", authorizeIndex}, {"ApplyCommit", applyIndex}} {
+		if landmark.index < 0 {
+			t.Fatalf("ingestCommitLocked calls no %s: the landmark this pin orders the defer against is gone", landmark.name)
+		}
+		if landmark.index < deferIndex {
+			t.Errorf("the %s call at %s precedes the DiscardProcessed defer at %s: a commit refused or failed there leaves its staged epoch in the heap",
+				landmark.name, at(body[landmark.index]), at(body[deferIndex]))
+		}
 	}
 }
