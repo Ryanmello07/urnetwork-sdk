@@ -1020,6 +1020,7 @@ func urnet_message_group_stats(self C.uint64_t) *C.char {
 		GapOutOfWindow:  stats.GapOutOfWindow,
 		OpenedPastEpoch: stats.OpenedPastEpoch,
 		Ingested:        stats.Ingested,
+		CommitRefused:   stats.CommitRefused,
 		FailedOpen:      stats.FailedOpen,
 		Submitted:       stats.Submitted,
 		Rebound:         stats.Rebound,
@@ -1306,12 +1307,17 @@ type messageGroupStats struct {
 	// Commits this group INGESTED: §6.1 membership-change records this device processed, authorized,
 	// applied and followed into the next epoch. One per epoch this device was carried into rather
 	// than authored.
-	Ingested   uint64 `json:"ingested"`
-	FailedOpen uint64 `json:"failed_open"`
-	Submitted  uint64 `json:"submitted"`
-	Rebound    uint64 `json:"rebound"`
-	Pages      uint64 `json:"pages"`
-	Unattested uint64 `json:"unattested"`
+	Ingested uint64 `json:"ingested"`
+	// Commits this group REFUSED on the receiving-client authorization check (MASTER §11, ledger
+	// item 242): processed, judged against the role model, not applied, and the group left at
+	// the epoch it was at. A number here is a member that committed what its role does not
+	// permit, and a group this device can no longer write to until it is re-founded.
+	CommitRefused uint64 `json:"commit_refused"`
+	FailedOpen    uint64 `json:"failed_open"`
+	Submitted     uint64 `json:"submitted"`
+	Rebound       uint64 `json:"rebound"`
+	Pages         uint64 `json:"pages"`
+	Unattested    uint64 `json:"unattested"`
 }
 
 func messageInfoOf(entry messageEntry) *messageInfo {

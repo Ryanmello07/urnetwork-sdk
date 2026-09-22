@@ -52,10 +52,64 @@ var (
 	ErrCommitIngest = errors.New("urmessage: this group received a membership-change commit it could not follow into the next epoch")
 
 	// The receiving-client authorization decision refused an ingested commit: MASTER §11's
-	// "rejected by every receiving client on validation." The cause the [CommitAuthorizer]
-	// returned is carried. A NIL authorizer never produces this; it exists so the role model
-	// (item 242) has a name to refuse a bad commit with, on a path that is already built.
+	// "rejected by every receiving client on validation." The rule that refused it is carried,
+	// as one of the sentinels below, mls's own, or the cause a configured [CommitAuthorizer]
+	// returned -- so a caller can errors.Is this AND the rule. Since ledger item 242's R1 the
+	// role model's rules ([authorizeCommit]) run on every ingested commit, and this is what a
+	// commit that breaks one of them answers.
 	ErrCommitUnauthorized = errors.New("urmessage: a received commit was refused by this device's authorization check")
+
+	// ── the role model's rules, MASTER §11 and ledger item 242 (roles.go) ──────────────────
+	//
+	// One sentinel per rule, so that a refusal names the rule and a test can hold each rule
+	// apart from its neighbours. Three rules answer connect/mls's own sentinels instead and are
+	// not redeclared here: R3 is mls.ErrAdminRemovedByNonOwner, and the two caps are
+	// mls.ErrGroupSizeExceeded and mls.ErrDeviceLimitExceeded.
+
+	// R0a: the commit leaves the group with no urmessage_group_policy, or with one that does not
+	// parse or does not validate (two owners, no owner, a non canonical role list). The mls
+	// reason is carried -- mls.ErrNoGroupPolicy for the absence.
+	ErrCommitPolicyInvalid = errors.New("urmessage: the commit leaves the group without a valid urmessage_group_policy")
+
+	// R0b: a group context extension other than 0xF001 -- 0x0003 required_capabilities above
+	// all -- is not byte identical before and after the commit.
+	ErrCommitExtensionChanged = errors.New("urmessage: the commit changes a group context extension a policy commit may not touch")
+
+	// R0c: the post-commit policy names an identity that holds no leaf after the commit.
+	ErrCommitPolicyPhantom = errors.New("urmessage: the post-commit policy names an identity with no leaf in the group")
+
+	// R6a: an Add whose credential claims an identity already in the group, committed by anyone
+	// but that identity. A second device is the identity's own to add.
+	ErrCommitIdentityClaimed = errors.New("urmessage: an added leaf claims an identity already in the group and the committer is not that identity")
+
+	// R6c: a leaf present before and after the commit changed its credential identity (an
+	// Update, or the committer's own path), or the leaf sets before and after do not agree with
+	// what the commit says it added and removed.
+	ErrCommitIdentityChanged = errors.New("urmessage: a leaf's identity changed across the commit, or the membership change is not the one the commit declares")
+
+	// R1: an Add of a NEW identity by a committer who is neither ADMIN nor OWNER (ruling 1).
+	ErrCommitAddByNonAdmin = errors.New("urmessage: only an admin or the owner may add a new identity to the group")
+
+	// R2: a Remove of a MEMBER's or OBSERVER's leaf, not the committer's own identity, by a
+	// committer who is neither ADMIN nor OWNER.
+	ErrCommitRemoveByNonAdmin = errors.New("urmessage: only an admin or the owner may remove another member")
+
+	// R5: the owner changed and the committer is not the owner, the new owner holds no leaf, or
+	// the outgoing owner is still present and is not an ADMIN afterwards (ruling 4).
+	ErrCommitOwnerTransfer = errors.New("urmessage: ownership may only be transferred by the owner, to a current member, and the outgoing owner becomes an admin")
+
+	// R4: a change to the admin set -- any role to ADMIN, or ADMIN to MEMBER or OBSERVER -- by a
+	// committer who is not the owner.
+	ErrCommitRoleChangeByNonOwner = errors.New("urmessage: only the owner may change who is an admin")
+
+	// R4: a MEMBER to OBSERVER or OBSERVER to MEMBER change, or a retention, disappearing bucket
+	// or server id change, by a committer who is neither ADMIN nor OWNER.
+	ErrCommitPolicyChangeByNonAdmin = errors.New("urmessage: only an admin or the owner may change a member's role or the group's policy")
+
+	// A role name on a [CommitAuthorization] that is not one of the four this profile defines.
+	// The ingest path never builds one; it is here so the pure rule function refuses rather
+	// than guesses when handed a value it did not build.
+	ErrCommitRoleUnknown = errors.New("urmessage: a role name on the commit authorization is not one this profile defines")
 
 	// The head this package writes, read back as something else.
 	ErrHeadFormat = errors.New("urmessage: this record's head is not one this build wrote")

@@ -12,6 +12,7 @@ import (
 	"github.com/urnetwork/connect/message"
 	"github.com/urnetwork/connect/messagegroup"
 	"github.com/urnetwork/connect/mls"
+	"github.com/urnetwork/connect/mls/syntax"
 	"github.com/urnetwork/connect/protocol"
 )
 
@@ -387,6 +388,20 @@ type Stats struct {
 	// authorized, applied and followed into the next epoch. One per epoch this device did NOT
 	// author but was carried into. See [Group.ingestCommitLocked].
 	Ingested uint64
+
+	// Commits REFUSED by the receiving-client authorization check (MASTER §11, ledger item 242):
+	// processed, judged against the role model's rules and this device's [CommitAuthorizer], and
+	// not applied. The staged epoch is erased and this group stays at the epoch it was at. A
+	// number here is a member of this group that committed something its role does not permit --
+	// and, because the server has already advanced past it, a group this device can no longer
+	// write to: a hostile committer can halt a group and cannot take it. It is a security event
+	// and it is counted rather than logged, because this package logs nothing; [Group.Receive]
+	// answers the refusal, wrapping [ErrCommitUnauthorized] and the rule, and this is the number
+	// that persists past the call. A refused record is retried like any other ingest failure,
+	// and the retry never reaches the rules: the first Process opened the commit's MLS frame and
+	// spent that generation of the committer's ratchet, so every later walk is refused by mls at
+	// Process as an ingest failure. One refusal moves this once.
+	CommitRefused uint64
 
 	// ATTEMPTS to open a record from a member of this group that did not open -- one per
 	// fetch, so a record retried [maxRecordAttempts] times moves this three times. It counts
@@ -2836,26 +2851,39 @@ func (self *Group) openOwnFromCopyLocked(walk *pageWalk, recordId uint64, parsed
 
 // ── ingesting a commit: §6.1's membership change on the receiving side (A5) ───────────────────
 
-// CommitMember is one member of a group as it stands at the moment a commit is authorized: the
-// leaf a role is read at, and the sender_handle that names it on the wire.
+// CommitMember is one member of a group as it stands on one side of a commit: the leaf a role is
+// read at, the sender_handle that names it on the wire, the credential identity the leaf carries,
+// and the role the policy on that side gives that identity.
 type CommitMember struct {
 	// Leaf is the member's leaf index in the ratchet tree.
 	Leaf uint32
 
-	// SenderHandle is [messagegroup.SenderHandle] for this leaf at this epoch: the 16 octets its
-	// records carry. A copy.
+	// SenderHandle is [messagegroup.SenderHandle] for this leaf: the 16 octets its records carry.
+	// group_handle_key is the epoch-zero expansion and never moves, so a post-commit leaf's handle
+	// is as derivable as a pre-commit one's. A copy.
 	SenderHandle []byte
+
+	// IdentityPub is the credential identity this leaf carries -- the member's Ed25519 identity
+	// public key, which is what urmessage_group_policy keys a role by (MASTER §6) and, in this
+	// build, the leaf's own signer ([NewDevice]). A copy.
+	IdentityPub []byte
+
+	// Role is the role the policy on this side of the commit gives IdentityPub, as the mls
+	// Role.String() name: "owner", "admin", "member" or "observer". An identity the policy does
+	// not name is "member" (MASTER §11, ruling 8). For [CommitAuthorization.Members] it is read off
+	// the PRE-commit policy; for [CommitAuthorization.MembersAfter] off the post-commit one.
+	Role string
 }
 
 // CommitAuthorization is everything a receiving client's authorization decision is handed about one
 // ingested commit, BEFORE it is applied.
 //
-// IT IS THE RECEIVING ARM OF MASTER §11, shaped now and filled later. §11 rules that a bad commit
-// "is refused by the committing client, and is rejected by every receiving client on validation."
-// The receiving-client arm is the commit-ingest path, and this is the value the check reads. The
-// full role model (item 242) is not built; [CommitAuthorizer] returns nil today. What is built is
-// the CALL, on the path, with the inputs a role check needs -- so the check fills the body without
-// moving the call, which the plan says is strictly cheaper than retrofitting the path later.
+// IT IS THE RECEIVING ARM OF MASTER §11. §11 rules that a bad commit "is refused by the committing
+// client, and is rejected by every receiving client on validation," and the receiving-client arm is
+// the commit-ingest path: [authorizeCommit] reads this value there, before ApplyCommit, on every
+// commit. Everything the rules need is on this struct -- who committed and with what role, what the
+// commit does to the leaves and to their identities, and the policy and the whole extension list on
+// both sides of the commit -- so the rule function is pure and is tested without a device.
 type CommitAuthorization struct {
 	// GroupId is the 32-octet group this commit is in. A copy.
 	GroupId []byte
@@ -2866,41 +2894,75 @@ type CommitAuthorization struct {
 
 	// CommitterLeaf is the AUTHENTICATED leaf that authored the commit: the commit's signature has
 	// been verified against this leaf by [messagegroup.GroupHandle.Process] before this value is
-	// built. A role check reads the committer's role at this leaf in [CommitAuthorization.Members].
+	// built.
 	CommitterLeaf uint32
 
+	// CommitterIdentity is the credential identity CommitterLeaf carried in the PRE-commit tree --
+	// the identity the signature was verified against -- and CommitterRole is the role the
+	// pre-commit policy gives it. Every proposal the commit carries, by value or by reference, is
+	// judged against this role and never against a proposer's (ruling 3). The committer's own path
+	// can rewrite its leaf's identity and mls accepts it, so the rules compare this against the
+	// identity MembersAfter holds at CommitterLeaf (R6c).
+	CommitterIdentity []byte
+	CommitterRole     string
+
 	// AddedLeaves, RemovedLeaves and UpdatedLeaves are where the commit's proposals landed, off the
-	// staged commit rather than off any header. A role check reads them to decide whether the
-	// committer's role permits what the commit does -- e.g. MASTER §11's ErrAdminRemovedByNonOwner.
+	// staged commit rather than off any header.
 	AddedLeaves   []uint32
 	RemovedLeaves []uint32
 	UpdatedLeaves []uint32
 
-	// Members is the membership as it stands BEFORE the commit is applied. A role check reads the
-	// committer's role and every affected member's role off this. It is the pre-commit tree because
-	// the decision is taken before ApplyCommit, which is the only order under which a commit that
-	// removes the owner can be refused by reading the owner's role.
+	// Members is the membership as it stands BEFORE the commit is applied, with each identity and
+	// its role under PolicyBefore. It is the pre-commit tree because the decision is taken before
+	// ApplyCommit, which is the only order under which a commit that removes the owner can be
+	// refused by reading the owner's role.
 	Members []CommitMember
+
+	// MembersAfter is every occupied leaf of the tree the commit ENTERS, with its identity and its
+	// role under PolicyAfter -- read off the staged commit's own tree and never off a membership
+	// diff. The added identities, identity continuity, the phantom check and the caps are all
+	// computed from it.
+	MembersAfter []CommitMember
+
+	// PolicyBefore and PolicyAfter are the decoded urmessage_group_policy (0xF001) of the group
+	// context on each side of the commit, parsed and validated through mls.GroupPolicyOf. Each is
+	// nil when that side carries no policy or one that does not parse or validate, and the matching
+	// error field says why (mls.ErrNoGroupPolicy for the absence). A nil PolicyBefore reads every
+	// member as unnamed -- MEMBER -- and so lets nobody do anything but their own device changes;
+	// a nil PolicyAfter is refused outright (R0a).
+	PolicyBefore    *mls.GroupPolicyExtension
+	PolicyAfter     *mls.GroupPolicyExtension
+	PolicyBeforeErr error
+	PolicyAfterErr  error
+
+	// ExtensionsBefore and ExtensionsAfter are the FULL group context extension lists on each side
+	// of the commit, in list order, as the seam spells them. A policy commit may touch 0xF001 and
+	// nothing else (R0b): 0x0003 required_capabilities above all must be byte identical.
+	ExtensionsBefore []messagegroup.ExtensionBytes
+	ExtensionsAfter  []messagegroup.ExtensionBytes
 }
 
-// CommitAuthorizer is a device's receiving-client decision on an ingested commit. It returns nil to
-// ALLOW, or an error to REFUSE -- which [Group.Receive] surfaces as [ErrCommitUnauthorized] with
-// the returned cause carried, and which leaves this group at the epoch it was already at.
+// CommitAuthorizer is a device's ADDITIONAL receiving-client decision on an ingested commit. It
+// returns nil to allow, or an error to REFUSE -- which [Group.Receive] surfaces as
+// [ErrCommitUnauthorized] with the returned cause carried, and which leaves this group at the epoch
+// it was already at.
 //
-// A NIL AUTHORIZER ALLOWS EVERY COMMIT, which is the alpha's behaviour: the full role model (item
-// 242) is not built, so there is no role to refuse on. It is a function value rather than a method
-// on an interface so that the day the role model lands, the check is a body swap at one call site
-// and not a new seam.
+// IT RUNS AFTER THE ROLE MODEL'S OWN RULES AND MAY ONLY REFUSE MORE. Since ledger item 242's R1
+// [authorizeCommit] runs on every ingested commit whether or not a device configures one of these,
+// and a commit the rules refuse is refused before this is asked; a configured authorizer that
+// answers nil allows nothing the rules do not. Nil here therefore no longer means "allow every
+// commit" -- it means "nothing beyond MASTER §11". It is a function value rather than a method on
+// an interface so that a product's extra rule is a config field and not a new seam.
 type CommitAuthorizer func(*CommitAuthorization) error
 
 // ingestCommitLocked follows one received commit into the epoch it opens: the whole of A5, in the
 // order A5's plan fixes and in one place.
 //
-//	OpenCeremonyRecord -> Process -> authorization hook -> ApplyCommit -> AdvanceEpoch ->
-//	A4's re-track -> enterEpochLocked (A3's persist)
+//	OpenCeremonyRecord -> Process -> authorization (the rules, then the hook) -> ApplyCommit ->
+//	AdvanceEpoch -> A4's re-track -> enterEpochLocked (A3's persist)
 //
-// THE ORDER IS NOT INTERCHANGEABLE. The hook is BEFORE ApplyCommit because a decision taken after
-// the commit is applied cannot refuse a commit that removes the owner. ApplyCommit is BEFORE
+// THE ORDER IS NOT INTERCHANGEABLE. The authorization is BEFORE ApplyCommit because a decision
+// taken after the commit is applied cannot refuse a commit that removes the owner. ApplyCommit is BEFORE
 // AdvanceEpoch because the session installs the epoch the HANDLE is at, so the handle must have
 // moved first -- and mls persists the new epoch's MLS state inside ApplyCommit, which is the first
 // of the two writers of epoch state. AdvanceEpoch reuses this group's LIFETIME pq_secret (item 243):
@@ -2912,7 +2974,7 @@ type CommitAuthorizer func(*CommitAuthorization) error
 // THE RECEIVER HOLDS THE GROUP MUTEX ACROSS THIS. Nothing here re-enters it: the handle and the
 // session run their own loops, and the persist is the durable store's own lock. What it can block on
 // is bounded -- one commit's worth of MLS work and one disk write -- so it does not stall the walk.
-func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) error {
+func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (err error) {
 	header := &parsed.Header
 	// (0) track the committer's ladder at the commit's own retention class, so the ceremony open
 	// below has a receiver ratchet to peek. A commit is a PERMANENT record and this device may only
@@ -2942,12 +3004,28 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) er
 	if err != nil {
 		return fmt.Errorf("%w: processing the commit: %w", ErrCommitIngest, err)
 	}
+	// THE STAGED EPOCH IS ERASED ON EVERY EXIT BUT THE INSTALL, through the seam's own door. A
+	// processed commit is a fully derived second epoch -- key schedule, secret tree, leaf private
+	// state -- and a refusal below, or an ApplyCommit that fails, would otherwise leave it in the
+	// heap for the collector to move around. DiscardProcessed after a SUCCESSFUL ApplyCommit is a
+	// no-op that answers nil (the seam detaches the staged half on the install), which is what
+	// lets this be one deferred call rather than a discard on each of the exits. Its own error is
+	// surfaced only when nothing else is: a refusal is the sentence a caller needs, and the erase
+	// is what it costs.
+	defer func() {
+		if discardErr := self.handle.DiscardProcessed(processed); discardErr != nil && err == nil {
+			err = fmt.Errorf("%w: erasing the staged epoch: %w", ErrCommitIngest, discardErr)
+		}
+	}()
 	if processed.Kind != messagegroup.EngineProcessedCommit {
 		return fmt.Errorf("%w: a record marked is_commit processed as kind %d rather than a commit",
 			ErrCommitIngest, processed.Kind)
 	}
-	// (3) THE AUTHORIZATION HOOK, before anything is applied. Returns allow today; see the header.
+	// (3) THE AUTHORIZATION, before anything is applied: MASTER §11's rules on every commit, then
+	// this device's own hook. A refusal is counted, the staged epoch is erased by the defer above,
+	// and this group stays at the epoch it was at -- the commit is neither applied nor crashed on.
 	if err := self.authorizeCommitLocked(processed); err != nil {
+		self.stats.CommitRefused += 1
 		return err
 	}
 	// (4) apply it: the handle enters the epoch the commit opens, and mls persists that epoch's
@@ -2986,52 +3064,160 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) er
 // authorizeCommitLocked takes the receiving-client decision on one processed commit. It is A5's
 // hook, and it runs BEFORE ApplyCommit.
 //
-// A nil authorizer allows every commit and the membership is not even read, because building the
-// [CommitAuthorization] a nil authorizer would ignore is work with no reader. When there IS an
-// authorizer, it is handed the committer and what the commit does off [messagegroup.EngineProcessed]
-// (authenticated by Process) and the PRE-commit membership off the handle. A refusal is surfaced as
-// [ErrCommitUnauthorized] with the returned cause carried.
+// DEFAULT ON, AND NOTHING CAN LOOSEN IT. [authorizeCommit] -- MASTER §11's rules, ledger item
+// 242's R1 -- runs on every commit this group ingests, whether or not the device configured a
+// [CommitAuthorizer]. A configured one runs AFTER the rules, over the same [CommitAuthorization],
+// and may only refuse more: it is never asked about a commit the rules refused, and nil from it
+// allows nothing the rules did not. Before R1 a nil authorizer allowed every commit and the
+// membership was not even read; that arm is gone.
+//
+// A refusal, from either, is surfaced as [ErrCommitUnauthorized] with the rule or the hook's own
+// cause carried, so a caller can errors.Is both.
 func (self *Group) authorizeCommitLocked(processed *messagegroup.EngineProcessed) error {
-	authorizer := self.device.commitAuthorizer
-	if authorizer == nil {
-		return nil
-	}
-	members, err := self.membershipLocked()
+	decision, err := self.commitAuthorizationLocked(processed)
 	if err != nil {
-		return fmt.Errorf("%w: the membership the authorization check reads: %w", ErrCommitIngest, err)
+		return fmt.Errorf("%w: the inputs the authorization check reads: %w", ErrCommitIngest, err)
 	}
-	decision := &CommitAuthorization{
-		GroupId:       append([]byte(nil), self.id...),
-		Epoch:         self.epoch + 1,
-		CommitterLeaf: processed.CommitterLeaf,
-		AddedLeaves:   append([]uint32(nil), processed.AddedLeaves...),
-		RemovedLeaves: append([]uint32(nil), processed.RemovedLeaves...),
-		UpdatedLeaves: append([]uint32(nil), processed.UpdatedLeaves...),
-		Members:       members,
-	}
-	if err := authorizer(decision); err != nil {
+	if err := authorizeCommit(decision); err != nil {
 		return fmt.Errorf("%w: %w", ErrCommitUnauthorized, err)
+	}
+	if authorizer := self.device.commitAuthorizer; authorizer != nil {
+		if err := authorizer(decision); err != nil {
+			return fmt.Errorf("%w: %w", ErrCommitUnauthorized, err)
+		}
 	}
 	return nil
 }
 
+// commitAuthorizationLocked builds the [CommitAuthorization] for one processed commit: the
+// committer and what the commit does off [messagegroup.EngineProcessed] (authenticated by
+// Process), the PRE-commit membership and group context off the handle, and the POST-commit
+// membership and extension list off the staged value the seam reported.
+//
+// Every slice is this value's own -- cloned out of the seam's answer or freshly derived -- so a
+// configured authorizer that keeps the value keeps nothing that aliases the epoch ApplyCommit is
+// about to enter.
+func (self *Group) commitAuthorizationLocked(processed *messagegroup.EngineProcessed) (*CommitAuthorization, error) {
+	extensionsBefore, err := self.contextExtensionsLocked()
+	if err != nil {
+		return nil, err
+	}
+	policyBefore, policyBeforeErr := mls.GroupPolicyOf(mlsExtensionsOf(extensionsBefore))
+	extensionsAfter := cloneExtensionBytes(processed.ContextExtensionsAfter)
+	policyAfter, policyAfterErr := mls.GroupPolicyOf(mlsExtensionsOf(extensionsAfter))
+	members, err := self.membershipLocked(policyBefore)
+	if err != nil {
+		return nil, err
+	}
+	membersAfter := make([]CommitMember, 0, len(processed.MembersAfter))
+	for _, member := range processed.MembersAfter {
+		membersAfter = append(membersAfter, self.commitMemberLocked(member.Leaf, member.Identity, policyAfter))
+	}
+	return &CommitAuthorization{
+		GroupId:           append([]byte(nil), self.id...),
+		Epoch:             self.epoch + 1,
+		CommitterLeaf:     processed.CommitterLeaf,
+		CommitterIdentity: append([]byte(nil), processed.CommitterIdentity...),
+		CommitterRole:     roleNameIn(policyBefore, processed.CommitterIdentity),
+		AddedLeaves:       append([]uint32(nil), processed.AddedLeaves...),
+		RemovedLeaves:     append([]uint32(nil), processed.RemovedLeaves...),
+		UpdatedLeaves:     append([]uint32(nil), processed.UpdatedLeaves...),
+		Members:           members,
+		MembersAfter:      membersAfter,
+		PolicyBefore:      policyBefore,
+		PolicyAfter:       policyAfter,
+		PolicyBeforeErr:   policyBeforeErr,
+		PolicyAfterErr:    policyAfterErr,
+		ExtensionsBefore:  extensionsBefore,
+		ExtensionsAfter:   extensionsAfter,
+	}, nil
+}
+
 // membershipLocked is this group's members as they stand right now, one [CommitMember] per member,
 // with each sender_handle DERIVED from the group_handle_key and the leaf rather than read off any
-// record. It is the pre-commit membership when the caller is [Group.authorizeCommitLocked].
-func (self *Group) membershipLocked() ([]CommitMember, error) {
+// record, the identity MemberAt answers, and the role the policy handed in gives that identity. It
+// is the pre-commit membership when the caller is [Group.commitAuthorizationLocked], and the policy
+// is then the pre-commit one; nil reads every member as unnamed.
+func (self *Group) membershipLocked(policy *mls.GroupPolicyExtension) ([]CommitMember, error) {
 	members := make([]CommitMember, 0, self.handle.MemberCount())
 	for at := 0; at < self.handle.MemberCount(); at += 1 {
-		leaf, _, _, err := self.handle.MemberAt(at)
+		leaf, identity, _, err := self.handle.MemberAt(at)
 		if err != nil {
 			return nil, fmt.Errorf("urmessage: the group's member %d: %w", at, err)
 		}
-		handle := messagegroup.SenderHandle(self.groupHandleKey, leaf)
-		members = append(members, CommitMember{
-			Leaf:         leaf,
-			SenderHandle: append([]byte(nil), handle[:]...),
-		})
+		members = append(members, self.commitMemberLocked(leaf, identity, policy))
 	}
 	return members, nil
+}
+
+// commitMemberLocked is one [CommitMember]: the leaf, its derived sender_handle, a copy of its
+// identity, and the role the policy gives that identity.
+func (self *Group) commitMemberLocked(leaf uint32, identity []byte, policy *mls.GroupPolicyExtension) CommitMember {
+	handle := messagegroup.SenderHandle(self.groupHandleKey, leaf)
+	return CommitMember{
+		Leaf:         leaf,
+		SenderHandle: append([]byte(nil), handle[:]...),
+		IdentityPub:  append([]byte(nil), identity...),
+		Role:         roleNameIn(policy, identity),
+	}
+}
+
+// contextExtensionsLocked is the group context extension list at this group's CURRENT epoch, as
+// the seam spells it, decoded out of the same octets [messagegroup.GroupHandle.GroupContextBytes]
+// answers -- the pre-commit list when the caller is the authorization check.
+func (self *Group) contextExtensionsLocked() ([]messagegroup.ExtensionBytes, error) {
+	contextBytes, err := self.handle.GroupContextBytes()
+	if err != nil {
+		return nil, fmt.Errorf("urmessage: the group context: %w", err)
+	}
+	context := &mls.GroupContext{}
+	if err := syntax.Unmarshal(contextBytes, context); err != nil {
+		return nil, fmt.Errorf("urmessage: decoding the group context: %w", err)
+	}
+	out := make([]messagegroup.ExtensionBytes, 0, len(context.Extensions))
+	for _, extension := range context.Extensions {
+		out = append(out, messagegroup.ExtensionBytes{
+			Type: uint16(extension.ExtensionType),
+			Data: append([]byte(nil), extension.ExtensionData...),
+		})
+	}
+	return out, nil
+}
+
+// mlsExtensionsOf is the seam's extension list as mls's own type, for the one door that parses a
+// policy out of a list: mls.GroupPolicyOf, which refuses a list carrying 0xF001 twice and validates
+// what it finds. The bodies are shared, not copied; the caller owns both slices.
+func mlsExtensionsOf(extensions []messagegroup.ExtensionBytes) []mls.Extension {
+	out := make([]mls.Extension, 0, len(extensions))
+	for _, extension := range extensions {
+		out = append(out, mls.Extension{
+			ExtensionType: mls.ExtensionType(extension.Type),
+			ExtensionData: extension.Data,
+		})
+	}
+	return out
+}
+
+// cloneExtensionBytes deep copies a seam extension list, body by body.
+func cloneExtensionBytes(extensions []messagegroup.ExtensionBytes) []messagegroup.ExtensionBytes {
+	out := make([]messagegroup.ExtensionBytes, 0, len(extensions))
+	for _, extension := range extensions {
+		out = append(out, messagegroup.ExtensionBytes{
+			Type: extension.Type,
+			Data: append([]byte(nil), extension.Data...),
+		})
+	}
+	return out
+}
+
+// roleNameIn is the role a policy gives one identity, as the name [CommitMember.Role] carries. A
+// nil policy, and an identity the policy does not name, both answer MEMBER (MASTER §11, ruling 8).
+func roleNameIn(policy *mls.GroupPolicyExtension, identity []byte) string {
+	if policy == nil {
+		return mls.RoleMember.String()
+	}
+	role, _ := policy.RoleOf(identity)
+	return role.String()
 }
 
 // noteEpochGapLocked delivers one pre-change record as a [GapOutOfWindow] gap: something is at this

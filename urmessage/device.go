@@ -68,11 +68,11 @@ type DeviceConfig struct {
 	// and is what every caller that says nothing gets; see [ConnectPolicy].
 	Connect ConnectPolicy
 
-	// The receiving-client authorization decision on an ingested commit: MASTER §11's "rejected
-	// by every receiving client on validation." NIL is the alpha's behaviour and allows every
-	// commit -- the full role model (item 242) is not built. It is a config field now, before the
-	// role model, so the CALL is on the ingest path and a later step fills the body without moving
-	// it. See [CommitAuthorizer].
+	// An ADDITIONAL receiving-client decision on an ingested commit, run AFTER the role model's
+	// own rules ([authorizeCommit], MASTER §11, ledger item 242's R1) over the same
+	// [CommitAuthorization], and able only to refuse more. The rules run on every commit whether
+	// or not this is set; nil means "nothing beyond §11" and not "allow every commit", which is
+	// what it meant before R1 landed. See [CommitAuthorizer].
 	CommitAuthorizer CommitAuthorizer
 }
 
@@ -235,9 +235,9 @@ type Device struct {
 	// called concurrently without the policy being a second thing to synchronise.
 	connect ConnectPolicy
 
-	// commitAuthorizer is [DeviceConfig.CommitAuthorizer], read on the commit-ingest path. Nil
-	// allows every commit, which is the alpha until the role model lands. Read without a lock and
-	// never written after construction, for `connect`'s reason one field up.
+	// commitAuthorizer is [DeviceConfig.CommitAuthorizer], read on the commit-ingest path after
+	// the role model's own rules. Nil adds no rule of its own. Read without a lock and never
+	// written after construction, for `connect`'s reason one field up.
 	commitAuthorizer CommitAuthorizer
 
 	mutex  sync.Mutex
