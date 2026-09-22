@@ -146,8 +146,10 @@ func TestRolesConvergeAcrossThreeDevices(t *testing.T) {
 	if !errors.Is(err, urmessage.ErrCommitUnauthorized) || !errors.Is(err, urmessage.ErrCommitAddByNonAdmin) {
 		t.Fatalf("carol's AddMemberAndPublish as a member answered %v, want ErrCommitUnauthorized wrapping ErrCommitAddByNonAdmin", err)
 	}
-	if err := carolGroup.SetRole(ctx, bobId, "member"); !errors.Is(err, urmessage.ErrCommitRoleChangeByNonOwner) {
-		t.Errorf("carol's SetRole demoting bob answered %v, want R4's ErrCommitRoleChangeByNonOwner", err)
+	// ruling 15: SetRole is an admin's or the owner's verb, and a MEMBER calling it is refused
+	// before the predicate runs, with R4's own sentence -- whatever it asked for
+	if err := carolGroup.SetRole(ctx, bobId, "member"); !errors.Is(err, urmessage.ErrCommitPolicyChangeByNonAdmin) {
+		t.Errorf("carol's SetRole demoting bob answered %v, want R4's ErrCommitPolicyChangeByNonAdmin", err)
 	}
 	if err := carolGroup.TransferOwnership(ctx, carolId); !errors.Is(err, urmessage.ErrCommitOwnerTransfer) {
 		t.Errorf("carol's TransferOwnership to herself answered %v, want R5's ErrCommitOwnerTransfer", err)

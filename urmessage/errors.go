@@ -51,13 +51,15 @@ var (
 	// commit has fallen off the group and cannot read the next message.
 	ErrCommitIngest = errors.New("urmessage: this group received a membership-change commit it could not follow into the next epoch")
 
-	// The receiving-client authorization decision refused an ingested commit: MASTER §11's
-	// "rejected by every receiving client on validation." The rule that refused it is carried,
-	// as one of the sentinels below, mls's own, or the cause a configured [CommitAuthorizer]
-	// returned -- so a caller can errors.Is this AND the rule. Since ledger item 242's R1 the
-	// role model's rules ([authorizeCommit]) run on every ingested commit, and this is what a
-	// commit that breaks one of them answers.
-	ErrCommitUnauthorized = errors.New("urmessage: a received commit was refused by this device's authorization check")
+	// The role model refused a commit, on either arm: MASTER §11's "refused by the committing
+	// client, and rejected by every receiving client on validation". On RECEIPT it is an ingested
+	// commit this device would not follow (ledger item 242's R1, [authorizeCommit] on every
+	// commit before ApplyCommit); on SEND it is a commit this device was asked to build and
+	// refused before building it (R2, the same predicate over the value the commit would
+	// produce, and ruling 15's caller check in [Group.SetRole]). The rule that refused it is
+	// carried, as one of the sentinels below, mls's own, or the cause a configured
+	// [CommitAuthorizer] returned -- so a caller can errors.Is this AND the rule.
+	ErrCommitUnauthorized = errors.New("urmessage: the role model refused this commit: on receipt, this device would not follow it; on send, this device's role does not permit it and nothing was built")
 
 	// ── the role model's rules, MASTER §11 and ledger item 242 (roles.go) ──────────────────
 	//

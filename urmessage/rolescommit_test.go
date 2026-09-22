@@ -304,14 +304,19 @@ func TestAMembersRoleVerbsAreRefusedOnTheSendSideAndNothingIsBuilt(t *testing.T)
 		}
 	}
 
-	// bob, an unnamed non-founder: a MEMBER (ruling 8)
+	// bob, an unnamed non-founder: a MEMBER (ruling 8). SetRole is an admin's or the owner's
+	// verb whatever the delta (ruling 15), so every one of bob's calls is refused before the
+	// predicate with R4's ErrCommitPolicyChangeByNonAdmin -- the promotion that the predicate
+	// would have refused as ErrCommitRoleChangeByNonOwner and the self-naming it would have
+	// refused as R7 included: the answer does not depend on what bob asked for or on whether
+	// bob was ever named.
 	refused(t, bob, "SetRole(carol, observer)", ErrCommitPolicyChangeByNonAdmin, func() error {
 		return bob.group.SetRole(ctx, carol.dev.identityPub, "observer")
 	})
-	refused(t, bob, "SetRole(carol, admin)", ErrCommitRoleChangeByNonOwner, func() error {
+	refused(t, bob, "SetRole(carol, admin)", ErrCommitPolicyChangeByNonAdmin, func() error {
 		return bob.group.SetRole(ctx, carol.dev.identityPub, "admin")
 	})
-	refused(t, bob, "SetRole(bob, member), a naming that changes no role", ErrCommitBeyondOwnDevices, func() error {
+	refused(t, bob, "SetRole(bob, member), a naming that changes no role", ErrCommitPolicyChangeByNonAdmin, func() error {
 		return bob.group.SetRole(ctx, bob.dev.identityPub, "member")
 	})
 	refused(t, bob, "TransferOwnership(carol)", ErrCommitOwnerTransfer, func() error {
@@ -600,6 +605,256 @@ func TestMembersAndMyRoleReadTheLivePolicy(t *testing.T) {
 	if role, _ := bob.group.MyRole(); role != mls.RoleAdmin.String() {
 		t.Errorf("bob's MyRole after the promotion is %q, want admin", role)
 	}
+}
+
+// ── ruling 15: SetRole is an admin's or the owner's verb, and a same-role call is a no-op ────
+
+// SetRole REFUSES A NON-ADMIN CALLER BEFORE THE PREDICATE RUNS, AND ITS ANSWER DOES NOT DEPEND ON
+// WHETHER THE CALLER WAS EVER NAMED. The R2 verifier found the hole: a NAMED member calling
+// SetRole(self, <its current role>) built a policy commit that changed no entry, which the
+// predicate could not tell from ruling 12's path-only self-heal, so a non-admin moved the epoch
+// through a public verb -- while an UNNAMED member making the same call was refused by R7. Both
+// members' devices sit over a SILENT transport here, so a call that reached the connection would
+// answer ErrNotConnected: the assertion that the refusal is R4's and NOT ErrNotConnected is the
+// assertion that the caller was judged before anything was built.
+//
+// WHAT WOULD GO RED: drop the caller check and the NAMED bob's same-role call passes the predicate
+// and answers ErrNotConnected from the rebind; keep it after the predicate and the UNNAMED bob's
+// call answers R7's sentence rather than R4's.
+func TestSetRoleRefusesANonAdminCallerBeforeThePredicateWhetherOrNotItWasNamed(t *testing.T) {
+	ctx := context.Background()
+	world := newRoleWorld(t, "owner", "bob", "carol")
+	owner, bob, carol := world.member("owner"), world.member("bob"), world.member("carol")
+	bob.group.device.transport = newSilentTransport(t)
+
+	refusedBeforeTheConnection := func(t *testing.T, what string) {
+		t.Helper()
+		before := bob.group.Stats()
+		err := bob.group.SetRole(ctx, bob.dev.identityPub, "member")
+		if err == nil {
+			t.Fatalf("%s: bob's SetRole(bob, member) was allowed; bob is at epoch %d", what, bob.group.Epoch())
+		}
+		if errors.Is(err, ErrNotConnected) {
+			t.Errorf("%s: bob's SetRole(bob, member) reached the connection (%v): the caller was not judged before the build", what, err)
+		}
+		if !errors.Is(err, ErrCommitUnauthorized) || !errors.Is(err, ErrCommitPolicyChangeByNonAdmin) {
+			t.Errorf("%s: bob's SetRole(bob, member) answered %v, want ErrCommitUnauthorized wrapping R4's ErrCommitPolicyChangeByNonAdmin", what, err)
+		}
+		if errors.Is(err, ErrCommitBeyondOwnDevices) {
+			t.Errorf("%s: bob's SetRole(bob, member) was refused by R7 (%v), so the answer depended on the predicate", what, err)
+		}
+		after := bob.group.Stats()
+		if after.CommitRefusedOwn != before.CommitRefusedOwn+1 {
+			t.Errorf("%s: Stats.CommitRefusedOwn went %d -> %d, want one more", what, before.CommitRefusedOwn, after.CommitRefusedOwn)
+		}
+		if after.Submitted != before.Submitted {
+			t.Errorf("%s: something was submitted", what)
+		}
+	}
+
+	// UNNAMED: bob is a MEMBER by ruling 8 and the policy carries no entry for it
+	if _, named := world.policyOf(bob).RoleOf(bob.dev.identityPub); named {
+		t.Fatal("bob is named in the founding policy; this case needs an unnamed member first")
+	}
+	refusedBeforeTheConnection(t, "unnamed")
+
+	// NAMED, with the same role: the owner writes an explicit member entry for bob through the
+	// seam -- the verb itself would be a no-op now -- and every honest member ingests it
+	naming := world.policyOf(owner)
+	naming.SetRole(bob.dev.identityPub, mls.RoleMember)
+	record := world.commitAndPublish(owner, "CommitPolicy naming bob a member", func() ([]byte, []byte, []byte, error) {
+		return owner.handle.CommitPolicy(world.policyBody(naming))
+	})
+	for _, honest := range []*roleMember{bob, carol} {
+		world.ingest(honest, owner, record)
+	}
+	if role, named := world.policyOf(bob).RoleOf(bob.dev.identityPub); !named || role != mls.RoleMember {
+		t.Fatalf("bob reads its own entry as %s named=%v after the naming, want member named", role, named)
+	}
+	refusedBeforeTheConnection(t, "named")
+
+	// and every honest member is where the naming left it: nothing bob asked for was published
+	for _, member := range []*roleMember{owner, bob, carol} {
+		if member.group.Epoch() != 2 || member.handle.Epoch() != 2 {
+			t.Errorf("%s is at group epoch %d / handle epoch %d after bob's refused calls, want 2 / 2",
+				member.name, member.group.Epoch(), member.handle.Epoch())
+		}
+	}
+
+	// THE CONTROL that the silent transport is what an allowed call meets: the owner's real
+	// change over the same transport gets as far as the connection
+	owner.group.device.transport = newSilentTransport(t)
+	if err := owner.group.SetRole(ctx, carol.dev.identityPub, "observer"); !errors.Is(err, ErrNotConnected) {
+		t.Errorf("the owner's SetRole(carol, observer) answered %v, want ErrNotConnected: the decision passed and the connection was the next thing asked", err)
+	}
+}
+
+// A SetRole THAT NAMES THE ROLE THE IDENTITY ALREADY HOLDS IS A NO-OP: nil, nothing built, nothing
+// submitted, and the epoch where it was at EVERY member -- ruling 15's second half. Before it, the
+// named-member-same-role call built and published a policy commit that changed no entry, and
+// every honest receiver followed it into an epoch that carried nothing.
+//
+// THE SILENT TRANSPORT IS THE MEASUREMENT: an owner's verb that reached the connection answers
+// ErrNotConnected, so a nil here is a call that never got that far. Three shapes of "already
+// holds": an UNNAMED member named "member" (ruling 8's default is the role it holds), a NAMED
+// member named its own role, and a NAMED admin named "admin" -- by the owner and by the admin
+// itself, since an admin passes the caller check.
+//
+// AND THE PHANTOM CONTROL: a stranger holds no leaf, so "member" is not a role it holds, and the
+// call is NOT a no-op -- it reaches the predicate and is refused as R0c's phantom, as before.
+//
+// WHAT WOULD GO RED: drop the no-op check and every same-role call answers ErrNotConnected; read
+// the subject's role off the policy's RoleOf instead of the membership and the stranger's call
+// answers nil.
+func TestASetRoleToTheRoleAlreadyHeldIsANoOpThatMovesNoEpochAnywhere(t *testing.T) {
+	ctx := context.Background()
+	world := newRoleWorld(t, "owner", "bob", "carol")
+	owner, bob, carol := world.member("owner"), world.member("bob"), world.member("carol")
+	all := []*roleMember{owner, bob, carol}
+	for _, member := range all {
+		member.group.device.transport = newSilentTransport(t)
+	}
+	stranger := world.device("stranger")
+
+	noOp := func(t *testing.T, who *roleMember, what string, subject []byte, role string, epoch uint64) {
+		t.Helper()
+		before := who.group.Stats()
+		err := who.group.SetRole(ctx, subject, role)
+		if err != nil {
+			t.Errorf("%s's %s answered %v, want nil: a role already held is a no-op", who.name, what, err)
+		}
+		after := who.group.Stats()
+		if after.CommitRefusedOwn != before.CommitRefusedOwn || after.Submitted != before.Submitted {
+			t.Errorf("%s's %s moved CommitRefusedOwn %d -> %d or Submitted %d -> %d over a no-op",
+				who.name, what, before.CommitRefusedOwn, after.CommitRefusedOwn, before.Submitted, after.Submitted)
+		}
+		for _, member := range all {
+			if member.group.Epoch() != epoch || member.handle.Epoch() != epoch {
+				t.Errorf("%s is at group epoch %d / handle epoch %d after %s's %s, want %d / %d: the no-op moved an epoch",
+					member.name, member.group.Epoch(), member.handle.Epoch(), who.name, what, epoch, epoch)
+			}
+		}
+	}
+
+	// an UNNAMED member named "member": the role ruling 8 already gives it
+	noOp(t, owner, "SetRole(carol, member) over an unnamed carol", carol.dev.identityPub, "member", 1)
+
+	// a NAMED member named its own role -- the case that used to publish an epoch
+	naming := world.policyOf(owner)
+	naming.SetRole(carol.dev.identityPub, mls.RoleMember)
+	record := world.commitAndPublish(owner, "CommitPolicy naming carol a member", func() ([]byte, []byte, []byte, error) {
+		return owner.handle.CommitPolicy(world.policyBody(naming))
+	})
+	for _, honest := range []*roleMember{bob, carol} {
+		world.ingest(honest, owner, record)
+	}
+	if _, named := world.policyOf(owner).RoleOf(carol.dev.identityPub); !named {
+		t.Fatal("carol is not named after the naming commit")
+	}
+	noOp(t, owner, "SetRole(carol, member) over a named carol", carol.dev.identityPub, "member", 2)
+
+	// a NAMED admin named "admin", by the owner and by itself
+	promotion := world.policyOf(owner)
+	promotion.SetRole(bob.dev.identityPub, mls.RoleAdmin)
+	record = world.commitAndPublish(owner, "CommitPolicy promoting bob", func() ([]byte, []byte, []byte, error) {
+		return owner.handle.CommitPolicy(world.policyBody(promotion))
+	})
+	for _, honest := range []*roleMember{bob, carol} {
+		world.ingest(honest, owner, record)
+	}
+	noOp(t, owner, "SetRole(bob, admin) over an admin bob", bob.dev.identityPub, "admin", 3)
+	noOp(t, bob, "SetRole(bob, admin) by the admin itself", bob.dev.identityPub, "admin", 3)
+
+	// THE CONTROLS. A real change reaches the connection ...
+	if err := owner.group.SetRole(ctx, carol.dev.identityPub, "observer"); !errors.Is(err, ErrNotConnected) {
+		t.Errorf("the owner's SetRole(carol, observer) answered %v, want ErrNotConnected: a real change must reach the connection", err)
+	}
+	if err := bob.group.SetRole(ctx, carol.dev.identityPub, "observer"); !errors.Is(err, ErrNotConnected) {
+		t.Errorf("the admin's SetRole(carol, observer) answered %v, want ErrNotConnected: a real change must reach the connection", err)
+	}
+	// ... and a stranger is not an unnamed member: "member" is not a role it holds, and the call
+	// is refused as a phantom rather than swallowed as a no-op
+	err := owner.group.SetRole(ctx, stranger.identityPub, "member")
+	if !errors.Is(err, ErrCommitUnauthorized) || !errors.Is(err, ErrCommitPolicyPhantom) {
+		t.Errorf("the owner's SetRole(a stranger, member) answered %v, want ErrCommitUnauthorized wrapping R0c's ErrCommitPolicyPhantom", err)
+	}
+	for _, member := range all {
+		if member.group.Epoch() != 3 || member.handle.Epoch() != 3 {
+			t.Errorf("%s is at group epoch %d / handle epoch %d at the end, want 3 / 3", member.name, member.group.Epoch(), member.handle.Epoch())
+		}
+	}
+}
+
+// ── publishCommitLocked's first exit erases the staged epoch like every later one ────────────
+
+// pendingFailingHandle is the seam with PendingEpoch answering an injected error once, and the
+// erase door counted, so that what publishCommitLocked does with a staged commit whose facts it
+// cannot read is observed at the seam and not inferred.
+type pendingFailingHandle struct {
+	messagegroup.GroupHandle
+	pendingOnce error
+	cleared     int
+}
+
+func (self *pendingFailingHandle) PendingEpoch() (*messagegroup.PendingEpoch, error) {
+	if self.pendingOnce != nil {
+		err := self.pendingOnce
+		self.pendingOnce = nil
+		return nil, err
+	}
+	return self.GroupHandle.PendingEpoch()
+}
+
+func (self *pendingFailingHandle) ClearPendingCommit() {
+	self.cleared += 1
+	self.GroupHandle.ClearPendingCommit()
+}
+
+// publishCommitLocked's FIRST EXIT -- PendingEpoch failing -- ERASES THE STAGED COMMIT through
+// the seam's ClearPendingCommit, as every later exit does. Until 2026-09-22 it alone returned
+// with the commit still staged, and a staged value left behind rides under the next verb: the
+// seam's by-value arms refuse to stage over one. The commit is staged through the real seam, the
+// wrapped handle fails the one read, and the erase is counted at the door; the control is the
+// real handle staging the SAME shape again afterwards, which it can only do if the first staging
+// was erased.
+//
+// WHAT WOULD GO RED: the first exit returning without ClearPendingCommit -- cleared stays 0 and
+// the second CommitPolicy is refused by the seam for the value the first left behind.
+func TestPublishCommitLockedsFirstExitErasesTheStagedEpoch(t *testing.T) {
+	ctx := context.Background()
+	world := newRoleWorld(t, "owner", "bob")
+	owner, bob := world.member("owner"), world.member("bob")
+	owner.group.device.transport = newSilentTransport(t)
+
+	promotion := world.policyOf(owner)
+	promotion.SetRole(bob.dev.identityPub, mls.RoleAdmin)
+	body := world.policyBody(promotion)
+
+	injected := errors.New("the staged epoch's facts could not be read")
+	wrapped := &pendingFailingHandle{GroupHandle: owner.handle, pendingOnce: injected}
+	owner.group.handle = wrapped
+	defer func() { owner.group.handle = owner.handle }()
+
+	commit, _, _, err := owner.handle.CommitPolicy(body)
+	if err != nil {
+		t.Fatalf("staging the promotion: %v", err)
+	}
+	err = owner.group.publishCommitLocked(ctx, commit)
+	if !errors.Is(err, injected) {
+		t.Fatalf("publishCommitLocked answered %v, want the injected PendingEpoch error", err)
+	}
+	if wrapped.cleared != 1 {
+		t.Errorf("the first exit called ClearPendingCommit %d time(s), want 1: the staged commit was left behind", wrapped.cleared)
+	}
+	if owner.handle.Epoch() != 1 || owner.group.Epoch() != 1 {
+		t.Errorf("the owner's handle is at epoch %d and its group at %d after the first exit, want 1 and 1", owner.handle.Epoch(), owner.group.Epoch())
+	}
+	// THE CONTROL: the real seam takes the same shape again, which it refuses over a value left
+	// staged
+	if _, _, _, err := owner.handle.CommitPolicy(body); err != nil {
+		t.Errorf("the seam refused to stage the same policy again after the first exit: %v -- the staged value was not erased", err)
+	}
+	owner.handle.ClearPendingCommit()
 }
 
 // ── ruling 13: the sdk never commits by reference in production ──────────────────────────────

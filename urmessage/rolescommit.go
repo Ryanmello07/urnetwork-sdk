@@ -310,12 +310,28 @@ func seamExtensionsOf(extensions []mls.Extension) []messagegroup.ExtensionBytes 
 // survive (item 242's P4), and published down the road [Group.AddMemberAndPublish] walks -- merged
 // only once the server has taken it, so a lost epoch race answers [ErrCommitLost] and moves nothing.
 //
-// WHO MAY, is the predicate's to say and not this method's: §11's table gives the OWNER the admin
+// IT IS AN ADMIN'S OR THE OWNER'S VERB, WHATEVER THE DELTA (ruling 15, 2026-09-22), and that is
+// decided here, BEFORE the predicate runs and off the same membership reading every receiver
+// would take of this device's commit. The predicate alone could not hold it: a NAMED member
+// calling SetRole(self, <its current role>) built a policy commit that changed no entry, which the
+// predicate cannot tell from ruling 12's path-only self-heal, so a non-admin moved the epoch
+// through a public verb -- while an UNNAMED member making the same call was refused by R7 for
+// adding an entry. The verb's answer must not depend on whether the caller was ever named: a
+// caller that is neither ADMIN nor OWNER is refused with R4's own sentence,
+// [ErrCommitUnauthorized] wrapping [ErrCommitPolicyChangeByNonAdmin], counted in
+// [Stats.CommitRefusedOwn], with nothing built.
+//
+// AND A CALL THAT NAMES THE ROLE THE IDENTITY ALREADY HOLDS IS A NO-OP: nil, nothing committed,
+// nothing published, the epoch where it was everywhere -- the second half of ruling 15. "Already
+// holds" is read off the live membership under the live policy with an unnamed identity a MEMBER
+// (ruling 8), so an owner naming an unnamed member "member" moves nothing rather than bumping the
+// epoch to write an entry that changes no role. An identity that holds NO leaf is not read as an
+// unnamed member: it falls through to the predicate, which refuses it as a phantom (R0c).
+//
+// WHAT AN ADMIN MAY SET, is still the predicate's to say: §11's table gives the OWNER the admin
 // set and an ADMIN "set MEMBER/OBSERVER", so any role to admin or admin to anything is the
 // owner's (R4, [ErrCommitRoleChangeByNonOwner]) and member to observer and back is an admin's or
-// the owner's (R4, [ErrCommitPolicyChangeByNonAdmin]); a MEMBER calling this at all is refused by
-// R4, or by R7 for a change no role can see, and each refusal is [ErrCommitUnauthorized] wrapping
-// the rule with nothing built. An identity that holds no leaf is refused as a phantom (R0c).
+// the owner's, and each refusal is [ErrCommitUnauthorized] wrapping the rule with nothing built.
 //
 // "owner" IS NOT A ROLE THIS SETS: [ErrRoleNotSettable], and [Group.TransferOwnership] is the door.
 func (self *Group) SetRole(ctx context.Context, identityPub []byte, role string) error {
@@ -330,6 +346,38 @@ func (self *Group) SetRole(ctx context.Context, identityPub []byte, role string)
 	defer self.mutex.Unlock()
 	if err := self.committableLocked(); err != nil {
 		return err
+	}
+	// ruling 15, first half: the caller's role, before anything is built or judged
+	members, err := self.membersLocked()
+	if err != nil {
+		return err
+	}
+	var mine *Member
+	var subject *Member
+	for at := range members {
+		if members[at].Mine {
+			mine = &members[at]
+		}
+		if subject == nil && bytes.Equal(members[at].IdentityPub, identityPub) {
+			subject = &members[at]
+		}
+	}
+	if mine == nil {
+		return fmt.Errorf("urmessage: this device's leaf %d is not among the group's %d members",
+			self.handle.OwnLeafIndex(), len(members))
+	}
+	callerRole, err := roleNamed(mine.Role)
+	if err != nil {
+		return err
+	}
+	if !isAdminOrOwner(callerRole) {
+		self.stats.CommitRefusedOwn += 1
+		return fmt.Errorf("%w: %w: SetRole is an admin's or the owner's verb and this device is a %s",
+			ErrCommitUnauthorized, ErrCommitPolicyChangeByNonAdmin, mine.Role)
+	}
+	// ruling 15, second half: the role the identity already holds is a no-op, not an epoch
+	if subject != nil && subject.Role == wanted.String() {
+		return nil
 	}
 	policy, err := self.editablePolicyLocked()
 	if err != nil {

@@ -1253,6 +1253,11 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 	// is a new secret; the intermediates are erased.
 	pending, err := self.handle.PendingEpoch()
 	if err != nil {
+		// THE FIRST EXIT ERASES LIKE EVERY LATER ONE. A staged commit whose facts cannot be read
+		// is a staged commit all the same, and one left behind here would ride under the next
+		// verb's build: the seam's by-value arms refuse to stage over a pending value, so the
+		// group would answer every later commit with a sentence about this one.
+		self.handle.ClearPendingCommit()
 		return fmt.Errorf("urmessage: the epoch the staged commit opens: %w", err)
 	}
 	newEpoch := pending.Epoch
