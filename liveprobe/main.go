@@ -588,6 +588,112 @@ func main() {
 	check(anchorAtB.Deleted, "A deleted its line and B's copy of it is not marked deleted")
 	fmt.Printf("  a TOMBSTONE crossed: B's copy of A's line is marked deleted and still present\n")
 
+	// ── 10 ───────────────────────────────────────────────────────────────────────────────
+	step("roles: a promotion, a member's refused add, a transfer of ownership and a demotion, with every party's roster agreeing at every stage")
+	fmt.Printf("  WHAT THIS IS FOR: MASTER 11's role model (ledger item 242) is live on both arms --\n" +
+		"  a commit the committer's role does not permit is refused before it is built and rejected\n" +
+		"  by every receiver -- and this is the first time the two arms run over the deployed\n" +
+		"  server with three real devices. Every stage prints each party's roster off its OWN\n" +
+		"  Members() and asserts that the three agree, because a role only exists if every member\n" +
+		"  reads the same one; and the refused add asserts that NO party's epoch moved, which is\n" +
+		"  the send-side arm doing its job rather than the receivers cleaning up after it.\n")
+	parties := []*namedGroup{{"A", aGroup}, {"B", bGroup}, {"C", cGroup}}
+	// EVERY PARTY IS DRAINED FIRST. Steps 6 to 9 are conversations between A and B alone, so C
+	// holds a backlog of every line since step 5, and the assertion below that a Receive after a
+	// role commit hands back NO line is about the commit only if nothing else is waiting. The
+	// first run of this step failed exactly here: C's Receive of the promotion answered 47 lines
+	// it had simply not fetched yet.
+	for _, one := range parties {
+		backlog := receive(one.group, ctx, one.name)
+		fmt.Printf("  %s drained %d entr%s of backlog before the first role change\n", one.name, len(backlog),
+			map[bool]string{true: "y", false: "ies"}[len(backlog) == 1])
+	}
+	identities := map[string]string{}
+	for _, one := range parties {
+		identities[string(identityOf(one.group, one.name))] = one.name
+	}
+	check(len(identities) == 3, "the three parties hold %d distinct identities", len(identities))
+	bId, cId := identityOf(bGroup, "B"), identityOf(cGroup, "C")
+	epochAtStart := aGroup.Epoch()
+	rolesAgree("before any role change", parties, identities, epochAtStart,
+		map[string]string{"A": "owner", "B": "member", "C": "member"})
+
+	// STAGE 1: the owner promotes B. A commits and moves; B and C follow on their next Receive,
+	// which hands back no line because a commit is not one.
+	if err := aGroup.SetRole(ctx, bId, "admin"); err != nil {
+		fail("A SetRole(B, admin): %v", err)
+	}
+	check(aGroup.Epoch() == epochAtStart+1, "A's promotion of B left A at epoch %d, want %d", aGroup.Epoch(), epochAtStart+1)
+	for _, follower := range []*namedGroup{{"B", bGroup}, {"C", cGroup}} {
+		got := receive(follower.group, ctx, follower.name)
+		check(len(got) == 0, "%s's Receive of the promotion handed back %d entries and a commit is not a line: %s",
+			follower.name, len(got), texts(got))
+	}
+	rolesAgree("A promoted B to admin", parties, identities, epochAtStart+1,
+		map[string]string{"A": "owner", "B": "admin", "C": "member"})
+	if role, err := bGroup.MyRole(); err != nil || role != "admin" {
+		fail("B's MyRole after the promotion is %q, %v; want admin", role, err)
+	}
+
+	// STAGE 2: C, a MEMBER, tries to add a stranger. The send side refuses it with the
+	// receivers' own sentence, nothing is built, and no party's epoch moves -- asserted on
+	// every party after a Receive that finds nothing to ingest.
+	stranger := mesh.stranger(c)
+	defer stranger.close()
+	strangerKeyPackage, err := stranger.device.KeyPackage()
+	if err != nil {
+		fail("the stranger's KeyPackage: %v", err)
+	}
+	refusedBefore := cGroup.Stats().CommitRefusedOwn
+	_, err = cGroup.AddMemberAndPublish(ctx, strangerKeyPackage)
+	check(err != nil, "C, a MEMBER, ADDED A STRANGER TO THE GROUP: the send-side arm of the role model is not running")
+	check(errors.Is(err, urmessage.ErrCommitUnauthorized), "C's add was refused with %v, which does not wrap ErrCommitUnauthorized", err)
+	check(errors.Is(err, urmessage.ErrCommitAddByNonAdmin), "C's add was refused with %v, which does not wrap R1's ErrCommitAddByNonAdmin", err)
+	check(cGroup.Stats().CommitRefusedOwn == refusedBefore+1, "C's Stats.CommitRefusedOwn went %d -> %d over one refused add, want one more",
+		refusedBefore, cGroup.Stats().CommitRefusedOwn)
+	fmt.Printf("  C's AddMemberAndPublish as a member was refused on the SEND side: %v\n", err)
+	for _, one := range []*namedGroup{{"A", aGroup}, {"B", bGroup}} {
+		got := receive(one.group, ctx, one.name)
+		check(len(got) == 0, "%s fetched %d entries after C's refused add; something was published: %s", one.name, len(got), texts(got))
+	}
+	rolesAgree("C's add of a stranger was refused, nothing moved", parties, identities, epochAtStart+1,
+		map[string]string{"A": "owner", "B": "admin", "C": "member"})
+
+	// STAGE 3: A hands the group to B. B is the owner and A is an admin from then (ruling 4).
+	if err := aGroup.TransferOwnership(ctx, bId); err != nil {
+		fail("A TransferOwnership(B): %v", err)
+	}
+	check(aGroup.Epoch() == epochAtStart+2, "the transfer left A at epoch %d, want %d", aGroup.Epoch(), epochAtStart+2)
+	for _, follower := range []*namedGroup{{"B", bGroup}, {"C", cGroup}} {
+		got := receive(follower.group, ctx, follower.name)
+		check(len(got) == 0, "%s's Receive of the transfer handed back %d entries: %s", follower.name, len(got), texts(got))
+	}
+	rolesAgree("A transferred ownership to B", parties, identities, epochAtStart+2,
+		map[string]string{"A": "admin", "B": "owner", "C": "member"})
+	if role, _ := bGroup.MyRole(); role != "owner" {
+		fail("B's MyRole after the transfer is %q, want owner", role)
+	}
+	if role, _ := aGroup.MyRole(); role != "admin" {
+		fail("A's MyRole after the transfer is %q, want admin", role)
+	}
+
+	// STAGE 4: the new owner demotes C to observer, and A -- now an admin -- follows a commit
+	// it did not make.
+	if err := bGroup.SetRole(ctx, cId, "observer"); err != nil {
+		fail("B SetRole(C, observer) as the new owner: %v", err)
+	}
+	check(bGroup.Epoch() == epochAtStart+3, "B's demotion of C left B at epoch %d, want %d", bGroup.Epoch(), epochAtStart+3)
+	for _, follower := range []*namedGroup{{"A", aGroup}, {"C", cGroup}} {
+		got := receive(follower.group, ctx, follower.name)
+		check(len(got) == 0, "%s's Receive of the demotion handed back %d entries: %s", follower.name, len(got), texts(got))
+	}
+	rolesAgree("B, the new owner, demoted C to observer", parties, identities, epochAtStart+3,
+		map[string]string{"A": "admin", "B": "owner", "C": "observer"})
+	if role, _ := cGroup.MyRole(); role != "observer" {
+		fail("C's MyRole after the demotion is %q, want observer", role)
+	}
+	fmt.Printf("  four role commits crossed the mesh and three rosters agreed at every one of them\n")
+
 	// ── the counters, which are the last thing a reader should see ───────────────────────
 	step("the counters")
 	report("A", aGroup)
@@ -684,6 +790,32 @@ func (self *dialer) restart(previous *party) *party {
 	// the exclusions are the operating system's and are released by the closes above; if the new
 	// open is refused as locked, the previous process did NOT let go and that is the finding.
 	return self.dial(name, self.jwtOf(name))
+}
+
+// stranger is a device with a FRESH identity that never connects: its one job is a key package
+// naming an identity the group has never seen, which is what a member's refused add (step 10) has
+// to carry -- a key package from any existing member would be that member's own second device,
+// which a member of any role MAY add (MASTER 11's self-service rule). It rides the transport of
+// the party it is built beside because a Device needs one, and it never speaks over it; its state
+// store is the in-memory one, and its stream store is a directory of its own under -dir so that
+// nothing of the real party's is touched.
+func (self *dialer) stranger(beside *party) *party {
+	dir := self.root + "/stranger"
+	if err := os.MkdirAll(dir+"/stream", 0o700); err != nil {
+		fail("the stranger's stream dir: %v", err)
+	}
+	streamStore, err := sdk.OpenStreamStore(dir + "/stream")
+	if err != nil {
+		fail("the stranger's OpenStreamStore: %v", err)
+	}
+	device, err := urmessage.NewDevice(urmessage.DeviceConfig{
+		Transport: beside.transport,
+		Reserver:  sdk.NewStreamIndexReserver(streamStore),
+	})
+	if err != nil {
+		fail("the stranger's NewDevice: %v", err)
+	}
+	return &party{name: "stranger", dir: dir, streamStore: streamStore, device: device}
 }
 
 // jwtOf is where a party's credential path lives across a restart. The flags are the source of
@@ -822,6 +954,67 @@ func countOnce(got []*urmessage.Message, expected map[string]bool, reader string
 		check(seen[line] == 1, "%s read %s's line %q %d times, want exactly 1", reader, writer, line, seen[line])
 	}
 	check(len(got) == len(expected), "%s read %d messages and %s sent %d", reader, len(got), writer, len(expected))
+}
+
+// namedGroup is one party's group under the name the tables print.
+type namedGroup struct {
+	name  string
+	group *urmessage.Group
+}
+
+// identityOf is a party's own identity public key, read off its own roster's Mine row -- the
+// value SetRole and TransferOwnership take, and the key every roster is joined on.
+func identityOf(group *urmessage.Group, who string) []byte {
+	members, err := group.Members()
+	if err != nil {
+		fail("%s Members: %v", who, err)
+	}
+	for _, member := range members {
+		if member.Mine {
+			return append([]byte(nil), member.IdentityPub...)
+		}
+	}
+	fail("%s's roster marks no row as its own", who)
+	return nil
+}
+
+// rolesAgree prints one roles table per party -- every row of its OWN Members(), with the epoch
+// -- and asserts three things at once: every party is at the wanted epoch, every party's roster
+// names exactly the three identities with exactly the wanted roles, and so the three rosters
+// agree. A disagreement is a FAIL line naming the party, the identity and both roles.
+func rolesAgree(stage string, parties []*namedGroup, identities map[string]string, epoch uint64, want map[string]string) {
+	fmt.Printf("  roles after %q:\n", stage)
+	for _, one := range parties {
+		members, err := one.group.Members()
+		if err != nil {
+			fail("%s Members after %s: %v", one.name, stage, err)
+		}
+		row := []string{}
+		seen := map[string]string{}
+		for _, member := range members {
+			name, known := identities[string(member.IdentityPub)]
+			if !known {
+				name = "?" + fmt.Sprintf("%x", member.IdentityPub[:4])
+			}
+			mine := ""
+			if member.Mine {
+				mine = "*"
+			}
+			row = append(row, fmt.Sprintf("leaf%d %s%s=%s", member.LeafIndex, name, mine, member.Role))
+			seen[name] = member.Role
+		}
+		fmt.Printf("    %s @epoch %d: %s\n", one.name, one.group.Epoch(), strings.Join(row, "  "))
+		check(one.group.Epoch() == epoch, "%s is at epoch %d after %s, want %d", one.name, one.group.Epoch(), stage, epoch)
+		check(len(members) == len(want), "%s's roster holds %d rows after %s, want %d", one.name, len(members), stage, len(want))
+		for name, role := range want {
+			check(seen[name] == role, "%s reads %s as %q after %s, want %q", one.name, name, seen[name], stage, role)
+		}
+		for name := range seen {
+			if _, wanted := want[name]; !wanted {
+				fail("%s's roster names %s, which no party is, after %s", one.name, name, stage)
+			}
+		}
+	}
 }
 
 func report(who string, group *urmessage.Group) {

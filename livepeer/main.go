@@ -8,12 +8,12 @@
 //
 // THE SEAM IS TWO FILES AND IT IS A HANDOFF, not a protocol:
 //
-//	  the app                                   this helper
-//	  ───────                                   ───────────
-//	  device.KeyPackage() -> -keypackage   →    reads it, deletes it
-//	                                            CreateGroup, AddMember(kp), Open
-//	  reads it, deletes it                 ←    invite.Encode() -> -invite
-//	  device.Join(invite)                       Send / SendReply / React
+//	the app                                   this helper
+//	───────                                   ───────────
+//	device.KeyPackage() -> -keypackage   →    reads it, deletes it
+//	                                          CreateGroup, AddMember(kp), Open
+//	reads it, deletes it                 ←    invite.Encode() -> -invite
+//	device.Join(invite)                       Send / SendReply / React
 //
 // EACH FILE IS CONSUMED BY ITS READER AND DELETED BY ITS READER, and that is not tidiness. A key
 // package is SINGLE USE — the private halves are taken destructively at the join (device.go:510) —
@@ -312,6 +312,11 @@ func converse(ctx context.Context, group *urmessage.Group, serve time.Duration, 
 	say(fmt.Sprintf("fetching every %v for %v, printing what arrives", poll, serve))
 	fmt.Printf("  THERE IS NO PUSH. This transport is a poll and so is the app's; a line the app\n" +
 		"  sends becomes visible here on the next fetch and not before.\n")
+	// THE ROSTER, AS THIS PEER READS IT, at the start and again after every commit it ingests:
+	// a role change the app makes -- promoting this peer, say -- lands here as a policy commit
+	// on some later fetch, and the row that changes is the proof that the far side's view moved.
+	printRoster(group, "at the start of serving")
+	ingested := group.Stats().Ingested
 	deadline := time.Now().Add(serve)
 	seen := map[string]bool{}
 	for time.Now().Before(deadline) {
@@ -326,6 +331,10 @@ func converse(ctx context.Context, group *urmessage.Group, serve time.Duration, 
 			// A NON-EMPTY RESULT AND AN ERROR CAN BOTH COME BACK, so the messages are printed
 			// before the reason rather than instead of it.
 			fmt.Printf("  receive reported: %v (and still answered %d record(s))\n", err, len(got))
+		}
+		if now := group.Stats().Ingested; now != ingested {
+			printRoster(group, fmt.Sprintf("after ingesting commit %d", now))
+			ingested = now
 		}
 		for _, one := range got {
 			key := hex.EncodeToString(one.MessageId)
@@ -496,6 +505,26 @@ func writeSecret(path string, content []byte) error {
 // ── the harness ──────────────────────────────────────────────────────────────────────────────
 
 func say(s string) { fmt.Printf("\n=== %s ===\n", s) }
+
+// printRoster is this peer's Members() -- every leaf, its role, its identity's first octets and
+// whether it is this device -- with the epoch it was read at, and this peer's own role beside it.
+func printRoster(group *urmessage.Group, when string) {
+	members, err := group.Members()
+	if err != nil {
+		fmt.Printf("  <- ROSTER %s could not be read: %v\n", when, err)
+		return
+	}
+	myRole, _ := group.MyRole()
+	rows := []string{}
+	for _, member := range members {
+		mine := ""
+		if member.Mine {
+			mine = " (this peer)"
+		}
+		rows = append(rows, fmt.Sprintf("leaf %d %s %s%s", member.LeafIndex, member.Role, short(member.IdentityPub), mine))
+	}
+	fmt.Printf("  <- ROSTER %s, epoch %d, my role %s: %s\n", when, group.Epoch(), myRole, strings.Join(rows, "; "))
+}
 
 func short(id []byte) string {
 	if len(id) == 0 {

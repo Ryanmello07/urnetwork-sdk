@@ -17,7 +17,7 @@ developer's machine must not require an operator account.
     liveprobe \
       -a  <file holding party A's by_client_jwt> \
       -b  <file holding party B's by_client_jwt> \
-      -c  <file holding party C's by_client_jwt, the third member step 5 adds> \
+      -c  <file holding party C's by_client_jwt, the third member step 5 adds and the member step 10 refuses> \
       -server <the message server's client_id> \
       -host beta-test.net \
       -dir /var/lib/urmessage/probe
@@ -31,7 +31,7 @@ starts it again over the same directory. Use a path that survives the run, and n
 party holds a single-writer exclusion on its own subdirectory — if a second probe is refused with
 "the state directory is held", a previous run is still alive.
 
-## The eight steps, and what each one is for
+## The ten steps, and what each one is for
 
 1. **Hello on both parties.** A 32-octet `server_nonce`, and the capabilities the server
    advertises are PRINTED — `max_records_per_fetch`, `max_request_bytes`,
@@ -93,6 +93,23 @@ party holds a single-writer exclusion on its own subdirectory — if a second pr
    and the step says so by name. None of this removes the sixty seconds; the user waits them.
 8. **Two senders at once.** Both parties send 20 lines concurrently. Each line is distinct, so a
    lost one and a duplicated one are both visible in the counts.
+9. **The content envelope over the mesh: a reply, two reactions, one taken back, and a delete.**
+   Every kind is asserted on the FAR side -- the reply names the anchor's `message_id`, the
+   reactions land on the anchor rather than as lines, the un-reaction leaves exactly one
+   standing, B is refused a tombstone for A's line on the send side, and A's own tombstone marks
+   B's copy without removing it.
+10. **Roles: a promotion, a member's refused add, a transfer of ownership and a demotion.** MASTER
+    §11's role model (ledger item 242) over the deployed server with three real devices. A, the
+    founder and OWNER, promotes B to ADMIN; B and C ingest the policy commit and every party's
+    `Members()` reads A owner / B admin / C member. C, a MEMBER, calls `AddMemberAndPublish`
+    with a fresh stranger's key package and is **refused on the send side**
+    (`ErrCommitUnauthorized` wrapping `ErrCommitAddByNonAdmin`), `Stats.CommitRefusedOwn` moves
+    by one, and **no party's epoch moves** -- A and B fetch nothing. Then A transfers ownership to
+    B: every roster reads B owner / A admin (ruling 4) / C member, and `MyRole()` agrees on both.
+    Then B, the new owner, demotes C to OBSERVER and A -- now an admin -- follows a commit it did
+    not make. A roles table is printed per party at every stage, off each party's OWN roster with
+    its epoch, and any disagreement between the three is a `FAIL` line naming the party, the
+    identity and both roles. (In-process, this is `cp3b`'s `TestRolesConvergeAcrossThreeDevices`.)
 
 Then the counters, per party: `fetched opened ceremony own otherClasses FAILED submitted rebound
 pages unattested`. **`FAILED` must be 0.**
