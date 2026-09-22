@@ -333,7 +333,10 @@ func seamExtensionsOf(extensions []mls.Extension) []messagegroup.ExtensionBytes 
 // owner's (R4, [ErrCommitRoleChangeByNonOwner]) and member to observer and back is an admin's or
 // the owner's, and each refusal is [ErrCommitUnauthorized] wrapping the rule with nothing built.
 //
-// "owner" IS NOT A ROLE THIS SETS: [ErrRoleNotSettable], and [Group.TransferOwnership] is the door.
+// "owner" IS NOT A ROLE THIS SETS, AND THE OWNER IS NOT AN IDENTITY THIS SETS: both are
+// [ErrRoleNotSettable], and [Group.TransferOwnership] is the door. The second is refused by name
+// because the policy it would build has no owner, and the encoder's refusal of that describes a
+// broken policy rather than a request at the wrong door.
 func (self *Group) SetRole(ctx context.Context, identityPub []byte, role string) error {
 	wanted, err := mls.ParseRole(role)
 	if err != nil {
@@ -374,6 +377,13 @@ func (self *Group) SetRole(ctx context.Context, identityPub []byte, role string)
 		self.stats.CommitRefusedOwn += 1
 		return fmt.Errorf("%w: %w: SetRole is an admin's or the owner's verb and this device is a %s",
 			ErrCommitUnauthorized, ErrCommitPolicyChangeByNonAdmin, mine.Role)
+	}
+	// the OWNER's role is not this verb's to set either: any role for the owner leaves the
+	// group ownerless, which the policy encoder refuses as "no owner" -- a sentence about a
+	// broken policy for what is a request naming the wrong door. Refused by name, after the
+	// caller check so that a member is still answered R4 and not this.
+	if subject != nil && subject.Role == mls.RoleOwner.String() {
+		return fmt.Errorf("%w: %x owns this group", ErrRoleNotSettable, identityPub)
 	}
 	// ruling 15, second half: the role the identity already holds is a no-op, not an epoch
 	if subject != nil && subject.Role == wanted.String() {

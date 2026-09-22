@@ -19,6 +19,11 @@
  * SHIP, and the four steps below drive those -- so what they measure now is the whole verb, from a
  * C caller's call to the far device's row.
  *
+ * AND THE ROLE MODEL'S SURFACE IS DRIVEN FROM HERE TOO: the roster, this device's role, and the two
+ * policy verbs, with the owner's promotion of B landing on B's roster through a real receive, and
+ * the member's attempt on the owner REFUSED by kind with nothing moved anywhere -- the two arms of
+ * MASTER section 11 as a C caller sees them.
+ *
  * WHY A HARNESS IS NEEDED AT ALL, AND IT IS NO LONGER "NO SHIPPING EXPORT PRODUCES A CLIENT".
  * urnet_message_client_new does, and the step near the end of this file builds one. What it cannot
  * do is reach anything: there is no operator here to dial and no credential to dial one with, so
@@ -209,6 +214,47 @@ static int submitted_by(uint64_t group) {
   int submitted = (at == NULL) ? -1 : (int)strtol(at + strlen("\"submitted\":"), NULL, 10);
   urnet_free_string(stats);
   return submitted;
+}
+
+/* any one counter off urnet_message_group_stats, by its json key; -1 when it cannot be read. The
+ * roles step reads commit_refused_own with it, which is the number a REFUSED verb leaves behind. */
+static int counter_of(uint64_t group, const char* key) {
+  char needle[64];
+  snprintf(needle, sizeof(needle), "\"%s\":", key);
+  char* stats = urnet_message_group_stats(group);
+  if (stats == NULL) {
+    return -1;
+  }
+  const char* at = strstr(stats, needle);
+  int value = (at == NULL) ? -1 : (int)strtol(at + strlen(needle), NULL, 10);
+  urnet_free_string(stats);
+  return value;
+}
+
+/* one roster row's role and identity, found by whether it is this device's own. It answers false
+ * when no row with that mine value exists, when a row lacks a field, or when two rows claim it --
+ * a roster that marks two leaves as one device's own is not a roster. */
+static bool roster_row(uint64_t roster, bool mine, char* role, size_t role_cap,
+                       char* identity, size_t identity_cap) {
+  int32_t count = urnet_message_member_list_count(roster);
+  int found = 0;
+  for (int32_t at = 0; at < count; at += 1) {
+    char* info = urnet_message_member_list_info(roster, at);
+    if (info == NULL) {
+      return false;
+    }
+    bool is_mine = strstr(info, "\"mine\":true") != NULL;
+    if (is_mine == mine) {
+      found += 1;
+      if (!json_string_field(info, "role", role, role_cap) ||
+          !json_string_field(info, "identity_pub", identity, identity_cap)) {
+        urnet_free_string(info);
+        return false;
+      }
+    }
+    urnet_free_string(info);
+  }
+  return found == 1;
 }
 
 /* ── a temp directory per store ──────────────────────────────────────────────────────────── */
@@ -1171,6 +1217,210 @@ int main(void) {
           "B did not apply the sender's own tombstone: %s", b_row);
     urnet_free_string(b_row);
     CHECK(urnet_release(log_db), "releasing B's log answered false");
+  }
+
+  step("the ROSTER and the two ROLE VERBS: the owner promotes, the member is refused by kind, nothing moves");
+  {
+    /* WHAT THIS IS FOR. The role model (MASTER section 11) judges every commit on both sides
+     * underneath this abi, and until these exports a C caller could see none of it. This drives
+     * the whole of what crosses: the roster with a role per row and one row marked mine, this
+     * device's own role, a REFUSED verb whose refusal is a KIND a caller can branch on and after
+     * which nothing has moved for anybody, three INVALID requests refused by name, and the
+     * owner's promotion of B -- which B learns of through a real receive and which both rosters
+     * then agree on. LOST cannot be produced here (it takes a race); the go side holds its
+     * projection and cp3b's lost-race case holds the verb. */
+    char a_role[32] = { 0 }, b_role[32] = { 0 };
+    char a_identity[256] = { 0 }, b_identity[256] = { 0 }, b_identity_at_b[256] = { 0 };
+    char other_role[32] = { 0 }, other_identity[256] = { 0 };
+
+    /* drain A first, so that "nothing arrived" below is about the refused verb and not about
+     * the tombstone step's own record coming back */
+    err = NULL;
+    uint64_t drained = urnet_message_group_receive(group_a, ctx, &err);
+    if (drained != 0) { urnet_release(drained); }
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+
+    uint64_t roster_a = urnet_message_group_members(group_a, &err);
+    if (roster_a == 0) {
+      show_error("A members", err);
+      err = NULL;
+    }
+    REQUIRE(roster_a != 0, "A's group answered no roster");
+    CHECK(urnet_message_member_list_count(roster_a) == 2, "A's roster holds %d rows, want 2",
+          (int)urnet_message_member_list_count(roster_a));
+    for (int32_t at = 0; at < urnet_message_member_list_count(roster_a); at += 1) {
+      char* row = urnet_message_member_list_info(roster_a, at);
+      REQUIRE(row != NULL, "A's roster row %d has no json", (int)at);
+      printf("      A sees %s\n", row);
+      CHECK(strstr(row, "\"leaf_index\":") != NULL, "a roster row carries no leaf_index: %s", row);
+      CHECK(strstr(row, "\"sender_handle\":\"") != NULL, "a roster row carries no sender_handle: %s", row);
+      urnet_free_string(row);
+    }
+    CHECK(urnet_message_member_list_info(roster_a, 2) == NULL, "index 2 of a 2 row roster answered json");
+    CHECK(urnet_message_member_list_info(roster_a, -1) == NULL, "index -1 answered json");
+    REQUIRE(roster_row(roster_a, true, a_role, sizeof(a_role), a_identity, sizeof(a_identity)),
+            "A's roster does not mark exactly one row as A's own");
+    REQUIRE(roster_row(roster_a, false, b_role, sizeof(b_role), b_identity, sizeof(b_identity)),
+            "A's roster does not hold exactly one row that is not A's own");
+    CHECK(strcmp(a_role, "owner") == 0, "A, the founder, reads its own role as %s, want owner", a_role);
+    CHECK(strcmp(b_role, "member") == 0, "A reads the unnamed B as %s, want member", b_role);
+    CHECK(strlen(b_identity) > 0 && strcmp(a_identity, b_identity) != 0,
+          "the two rows carry the same identity_pub %s", a_identity);
+    CHECK(urnet_release(roster_a), "releasing A's roster answered false");
+    CHECK(urnet_message_member_list_count(0) == 0, "the zero roster handle answered a count");
+    CHECK(urnet_message_member_list_info(0, 0) == NULL, "the zero roster handle answered json");
+
+    /* my_role, on both, is the same reading each roster gave */
+    err = NULL;
+    char* my_role_a = urnet_message_group_my_role(group_a, &err);
+    REQUIRE(my_role_a != NULL, "A answered no role for itself");
+    CHECK(strcmp(my_role_a, "owner") == 0, "A's my_role is %s, want owner", my_role_a);
+    urnet_free_string(my_role_a);
+    char* my_role_b = urnet_message_group_my_role(group_b, &err);
+    REQUIRE(my_role_b != NULL, "B answered no role for itself");
+    CHECK(strcmp(my_role_b, "member") == 0, "B's my_role is %s, want member", my_role_b);
+    urnet_free_string(my_role_b);
+    CHECK(urnet_message_group_my_role(0, &err) == NULL, "the zero handle answered a role");
+
+    /* THE MEMBER'S VERB OVER THE OWNER IS REFUSED BY KIND, AND NOTHING MOVES. B is a member;
+     * set_role is an admin's or the owner's verb whatever it asks for (ruling 15), so this is
+     * REFUSED before anything is built: B's epoch and submitted count do not move, A has nothing
+     * to fetch, and B's commit_refused_own moved by exactly one. */
+    uint64_t epoch_b_before = urnet_message_group_epoch(group_b);
+    int submitted_b_before = submitted_by(group_b);
+    int refused_b_before = counter_of(group_b, "commit_refused_own");
+    err = NULL;
+    int32_t kind = urnet_message_group_set_role(group_b, ctx, a_identity, "member", &err);
+    printf("      B's set_role over the owner answered kind %d: %s\n", (int)kind, err != NULL ? err : "(no error text)");
+    CHECK(kind == URNET_MESSAGE_COMMIT_REFUSED,
+          "B's set_role over the owner answered kind %d, want %d (REFUSED)", (int)kind, URNET_MESSAGE_COMMIT_REFUSED);
+    CHECK(err != NULL, "a REFUSED verb set no out_error");
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+    CHECK(urnet_message_group_epoch(group_b) == epoch_b_before,
+          "B's epoch moved from %llu to %llu over a refused verb", (unsigned long long)epoch_b_before,
+          (unsigned long long)urnet_message_group_epoch(group_b));
+    CHECK(submitted_by(group_b) == submitted_b_before,
+          "B submitted %d record(s) over a refused verb", submitted_by(group_b) - submitted_b_before);
+    CHECK(counter_of(group_b, "commit_refused_own") == refused_b_before + 1,
+          "B's commit_refused_own went %d -> %d over one refused verb, want one more",
+          refused_b_before, counter_of(group_b, "commit_refused_own"));
+    err = NULL;
+    uint64_t nothing_for_a = urnet_message_group_receive(group_a, ctx, &err);
+    CHECK(nothing_for_a == 0 && err == NULL,
+          "A fetched something after B's refused verb, so something was published");
+    if (nothing_for_a != 0) { urnet_release(nothing_for_a); }
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+    CHECK(urnet_message_group_epoch(group_a) == epoch_b_before,
+          "A's epoch is %llu after B's refused verb", (unsigned long long)urnet_message_group_epoch(group_a));
+
+    /* THREE INVALID REQUESTS, refused by name before any rule, and counted nowhere */
+    int refused_a_before = counter_of(group_a, "commit_refused_own");
+    err = NULL;
+    kind = urnet_message_group_set_role(group_a, ctx, b_identity, "owner", &err);
+    CHECK(kind == URNET_MESSAGE_COMMIT_INVALID && err != NULL,
+          "set_role to \"owner\" answered kind %d, want %d (INVALID) with out_error", (int)kind, URNET_MESSAGE_COMMIT_INVALID);
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+    kind = urnet_message_group_set_role(group_a, ctx, "not hex at all", "admin", &err);
+    CHECK(kind == URNET_MESSAGE_COMMIT_INVALID && err != NULL,
+          "set_role with a non-hex identity answered kind %d, want %d (INVALID) with out_error", (int)kind, URNET_MESSAGE_COMMIT_INVALID);
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+    kind = urnet_message_group_transfer_ownership(group_a, ctx, a_identity, &err);
+    CHECK(kind == URNET_MESSAGE_COMMIT_INVALID && err != NULL,
+          "a transfer to the current owner answered kind %d, want %d (INVALID) with out_error", (int)kind, URNET_MESSAGE_COMMIT_INVALID);
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+    CHECK(counter_of(group_a, "commit_refused_own") == refused_a_before,
+          "an INVALID request was counted as a role refusal");
+    /* and the zero handle is FAILED with out_error left NULL, which is this abi's convention */
+    kind = urnet_message_group_set_role(0, ctx, b_identity, "admin", &err);
+    CHECK(kind == URNET_MESSAGE_COMMIT_FAILED && err == NULL,
+          "set_role on handle 0 answered kind %d with out_error %s, want %d (FAILED) and NULL",
+          (int)kind, err != NULL ? err : "NULL", URNET_MESSAGE_COMMIT_FAILED);
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+    CHECK(urnet_message_group_epoch(group_a) == epoch_b_before, "an INVALID request moved A's epoch");
+
+    /* THE OWNER PROMOTES B: OK, the epoch moves, and B learns of it through a real receive */
+    err = NULL;
+    kind = urnet_message_group_set_role(group_a, ctx, b_identity, "admin", &err);
+    if (kind != URNET_MESSAGE_COMMIT_OK) {
+      show_error("A's promotion of B", err);
+      err = NULL;
+    }
+    REQUIRE(kind == URNET_MESSAGE_COMMIT_OK, "A's set_role promoting B answered kind %d", (int)kind);
+    CHECK(err == NULL, "an OK verb set an out_error");
+    CHECK(urnet_message_group_epoch(group_a) == epoch_b_before + 1,
+          "A is at epoch %llu after its promotion commit, want %llu",
+          (unsigned long long)urnet_message_group_epoch(group_a), (unsigned long long)(epoch_b_before + 1));
+    err = NULL;
+    uint64_t commit_only = urnet_message_group_receive(group_b, ctx, &err);
+    if (err != NULL) {
+      show_error("B's receive of the promotion", err);
+      err = NULL;
+    }
+    CHECK(commit_only == 0, "a page carrying only a commit delivered %d lines",
+          (int)urnet_message_list_count(commit_only));
+    if (commit_only != 0) { urnet_release(commit_only); }
+    CHECK(urnet_message_group_epoch(group_b) == epoch_b_before + 1,
+          "B did not follow the promotion: B is at epoch %llu, A at %llu",
+          (unsigned long long)urnet_message_group_epoch(group_b), (unsigned long long)urnet_message_group_epoch(group_a));
+    err = NULL;
+    my_role_b = urnet_message_group_my_role(group_b, &err);
+    REQUIRE(my_role_b != NULL, "B answered no role for itself after the promotion");
+    CHECK(strcmp(my_role_b, "admin") == 0, "B's my_role after the promotion is %s, want admin", my_role_b);
+    urnet_free_string(my_role_b);
+    uint64_t roster_b = urnet_message_group_members(group_b, &err);
+    REQUIRE(roster_b != 0, "B's group answered no roster after the promotion");
+    REQUIRE(roster_row(roster_b, true, b_role, sizeof(b_role), b_identity_at_b, sizeof(b_identity_at_b)),
+            "B's roster does not mark exactly one row as B's own");
+    REQUIRE(roster_row(roster_b, false, other_role, sizeof(other_role), other_identity, sizeof(other_identity)),
+            "B's roster does not hold exactly one row that is not B's own");
+    CHECK(strcmp(b_role, "admin") == 0, "B's own roster row says %s after the promotion, want admin", b_role);
+    /* THE IDENTITY A NAMED IS THE ONE B READS AS ITS OWN, which is what makes identity_pub a name
+     * a verb can be given: the promotion landed on the row B calls mine */
+    CHECK(strcmp(b_identity_at_b, b_identity) == 0,
+          "A promoted %s and B's own row is %s", b_identity, b_identity_at_b);
+    CHECK(strcmp(other_role, "owner") == 0, "B reads A as %s, want owner", other_role);
+    CHECK(strcmp(other_identity, a_identity) == 0,
+          "B's roster names A as %s and A's names itself %s", other_identity, a_identity);
+    CHECK(urnet_release(roster_b), "releasing B's roster answered false");
+    roster_a = urnet_message_group_members(group_a, &err);
+    REQUIRE(roster_a != 0, "A's group answered no roster after the promotion");
+    REQUIRE(roster_row(roster_a, false, other_role, sizeof(other_role), other_identity, sizeof(other_identity)),
+            "A's roster lost B's row");
+    CHECK(strcmp(other_role, "admin") == 0, "A reads B as %s after promoting it, want admin", other_role);
+    CHECK(urnet_release(roster_a), "releasing A's roster answered false");
+    printf("      A promoted B: both rosters read A owner / B admin at epoch %llu\n",
+           (unsigned long long)urnet_message_group_epoch(group_b));
+
+    /* THE SAME ROLE AGAIN IS OK AND MOVES NOTHING (ruling 15): no commit, no epoch, nothing to
+     * fetch */
+    err = NULL;
+    kind = urnet_message_group_set_role(group_a, ctx, b_identity, "admin", &err);
+    CHECK(kind == URNET_MESSAGE_COMMIT_OK && err == NULL,
+          "naming B admin again answered kind %d, want %d (OK) and no error", (int)kind, URNET_MESSAGE_COMMIT_OK);
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+    CHECK(urnet_message_group_epoch(group_a) == epoch_b_before + 1,
+          "a same-role set_role moved A's epoch to %llu", (unsigned long long)urnet_message_group_epoch(group_a));
+    uint64_t nothing_for_b = urnet_message_group_receive(group_b, ctx, &err);
+    CHECK(nothing_for_b == 0 && err == NULL, "B fetched something after a same-role set_role");
+    if (nothing_for_b != 0) { urnet_release(nothing_for_b); }
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+
+    /* AND AN ADMIN STILL MAY NOT TOUCH THE ADMIN SET: B demoting itself is REFUSED by the rule
+     * that names it, which is the predicate and not the caller check -- so the refusal kind
+     * covers both arms of the send-side decision. */
+    refused_b_before = counter_of(group_b, "commit_refused_own");
+    err = NULL;
+    kind = urnet_message_group_set_role(group_b, ctx, b_identity, "member", &err);
+    printf("      B's demotion of itself as an admin answered kind %d: %s\n", (int)kind, err != NULL ? err : "(no error text)");
+    CHECK(kind == URNET_MESSAGE_COMMIT_REFUSED && err != NULL,
+          "an admin's change to the admin set answered kind %d, want %d (REFUSED) with out_error", (int)kind, URNET_MESSAGE_COMMIT_REFUSED);
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+    CHECK(counter_of(group_b, "commit_refused_own") == refused_b_before + 1,
+          "B's commit_refused_own did not move over the refused demotion");
+    CHECK(urnet_message_group_epoch(group_b) == epoch_b_before + 1 &&
+          urnet_message_group_epoch(group_a) == epoch_b_before + 1,
+          "an epoch moved over B's refused demotion: A %llu, B %llu",
+          (unsigned long long)urnet_message_group_epoch(group_a), (unsigned long long)urnet_message_group_epoch(group_b));
   }
 
   step("A GAP IS NOT A MESSAGE WITH NO TEXT, which is the whole of ledger item 236");

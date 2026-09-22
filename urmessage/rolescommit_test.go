@@ -459,6 +459,11 @@ func TestTheVerbsRefuseAMalformedRequestByNameAndCountNothing(t *testing.T) {
 	if err := owner.group.TransferOwnership(ctx, owner.dev.identityPub); !errors.Is(err, ErrAlreadyOwner) {
 		t.Errorf("a transfer to the current owner answered %v, want ErrAlreadyOwner", err)
 	}
+	// the OWNER'S OWN ROLE is not SetRole's to set either -- any role for it leaves the group
+	// ownerless -- and it is refused by name rather than as the encoder's "no owner"
+	if err := owner.group.SetRole(ctx, owner.dev.identityPub, "admin"); !errors.Is(err, ErrRoleNotSettable) || errors.Is(err, mls.ErrNoOwner) {
+		t.Errorf("SetRole of the owner answered %v, want ErrRoleNotSettable by name", err)
+	}
 	stats := owner.group.Stats()
 	if stats.CommitRefusedOwn != 0 || stats.CommitRefused != 0 {
 		t.Errorf("a malformed request was counted as a refusal: %+v", stats)

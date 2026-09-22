@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/urnetwork/sdk/urmessage"
 )
@@ -706,5 +711,357 @@ func TestTheHeaderDocumentsExactlyTheStatsJsonKeys(t *testing.T) {
 	}
 	if !reflect.DeepEqual(documented, carried) {
 		t.Fatalf("the header documents the stats keys as\n  %v\nand the json carries\n  %v", documented, carried)
+	}
+}
+
+// ── the role model's surface: the kinds, the roster json, and the header that documents both ─
+
+// THE COMMIT-KIND PROJECTION TELLS THE THREE ANSWERS APART, and it does so through errors.Is over
+// the chain urmessage answers: a REFUSED verb is ErrCommitUnauthorized wrapping the rule, a LOST
+// one is ErrCommitLost wrapping ErrSubmitRefused, and the projection must not read the second as
+// FAILED because of what it wraps, nor a bare ErrSubmitRefused as LOST because of what wraps it
+// elsewhere. INVALID is the two by-name refusals and this file's own hex refusal; everything else
+// -- the transport, a group not yet open, a context cancelled -- is FAILED.
+//
+// WHAT WOULD GO RED: swap the order of the REFUSED and LOST arms (neither wraps the other, so
+// nothing); drop the errors.Is for a string compare; map ErrSubmitRefused to LOST.
+func TestTheCommitKindProjectionTellsTheThreeAnswersApart(t *testing.T) {
+	rule := fmt.Errorf("%w: %w", urmessage.ErrCommitUnauthorized, urmessage.ErrCommitAddByNonAdmin)
+	lost := fmt.Errorf("%w: %w: the server said COMMIT_LOST", urmessage.ErrCommitLost, urmessage.ErrSubmitRefused)
+	if !errors.Is(lost, urmessage.ErrSubmitRefused) {
+		t.Fatal("this case's LOST fixture does not wrap ErrSubmitRefused, so the ordering it measures is not exercised")
+	}
+	for _, one := range []struct {
+		name string
+		err  error
+		want int32
+	}{
+		{"nil", nil, messageCommitOk},
+		{"a rule under ErrCommitUnauthorized", rule, messageCommitRefused},
+		{"ErrCommitUnauthorized alone", urmessage.ErrCommitUnauthorized, messageCommitRefused},
+		{"a configured authorizer's cause under ErrCommitUnauthorized", fmt.Errorf("%w: %w", urmessage.ErrCommitUnauthorized, errors.New("the product says no")), messageCommitRefused},
+		{"ErrCommitLost wrapping ErrSubmitRefused", lost, messageCommitLost},
+		{"a wrapped ErrCommitLost", fmt.Errorf("SetRole: %w", lost), messageCommitLost},
+		{"ErrRoleNotSettable", fmt.Errorf("%w: %q", urmessage.ErrRoleNotSettable, "king"), messageCommitInvalid},
+		{"ErrAlreadyOwner", urmessage.ErrAlreadyOwner, messageCommitInvalid},
+		{"an identity that is not hex", fmt.Errorf("%w: odd length", errIdentityNotHex), messageCommitInvalid},
+		{"ErrSubmitRefused alone", urmessage.ErrSubmitRefused, messageCommitFailed},
+		{"ErrNotConnected", urmessage.ErrNotConnected, messageCommitFailed},
+		{"ErrGroupNotOpen", urmessage.ErrGroupNotOpen, messageCommitFailed},
+		{"ErrNotReconciled", urmessage.ErrNotReconciled, messageCommitFailed},
+		{"a cancelled context", context.Canceled, messageCommitFailed},
+		{"an unknown error", errors.New("something else"), messageCommitFailed},
+	} {
+		if got := messageCommitKindOf(one.err); got != one.want {
+			t.Errorf("%s projects to kind %d, want %d", one.name, got, one.want)
+		}
+	}
+	// and the four non-OK kinds are four different numbers, none of them OK
+	kinds := map[int32]bool{}
+	for _, kind := range []int32{messageCommitOk, messageCommitRefused, messageCommitLost, messageCommitInvalid, messageCommitFailed} {
+		kinds[kind] = true
+	}
+	if len(kinds) != 5 {
+		t.Errorf("the five kinds are %d distinct values", len(kinds))
+	}
+}
+
+// THE IDENTITY A VERB TAKES IS THE HEX A ROSTER ROW CARRIES, AND NOTHING ELSE. An empty string is
+// refused too rather than passed on as an empty identity: an empty identity holds no leaf and the
+// rules would answer a phantom, which is a sentence about roles for a missing argument.
+func TestAVerbsIdentityIsTheRosterRowsHexAndAnythingElseIsInvalid(t *testing.T) {
+	identity := bytes.Repeat([]byte{0xA5}, 32)
+	row := memberInfoOf(urmessage.Member{IdentityPub: identity})
+	decoded, err := messageIdentityOf(cString(row.IdentityPub))
+	if err != nil || !bytes.Equal(decoded, identity) {
+		t.Errorf("the roster row's identity_pub %q did not round-trip: %x, %v", row.IdentityPub, decoded, err)
+	}
+	for _, bad := range []string{"", "not hex", "abc", "zz"} {
+		decoded, err := messageIdentityOf(cString(bad))
+		if !errors.Is(err, errIdentityNotHex) || decoded != nil {
+			t.Errorf("identity_pub_hex %q answered %x, %v; want errIdentityNotHex", bad, decoded, err)
+		}
+		if messageCommitKindOf(err) != messageCommitInvalid {
+			t.Errorf("identity_pub_hex %q projects to kind %d, want INVALID", bad, messageCommitKindOf(err))
+		}
+	}
+	// NULL is the empty string, which is refused the same way
+	if _, err := messageIdentityOf(nil); !errors.Is(err, errIdentityNotHex) {
+		t.Errorf("a NULL identity_pub_hex answered %v, want errIdentityNotHex", err)
+	}
+}
+
+// EVERY FIELD urmessage.Member CARRIES REACHES A C CALLER, WITH A VALUE. The same gate
+// TestTheMessageInfoCarriesEveryFieldUrmessageKeeps is, over the roster row: memberInfo is a hand
+// projection and a field added to urmessage.Member arrives at a C caller as nothing at all unless
+// it is added here too. The fixture sets every field non-zero, and every projected field must come
+// out non-zero -- declaring one is not carrying it.
+//
+// WHAT WOULD GO RED: add a field to urmessage.Member and not to memberInfo; declare one in
+// memberInfo and forget to assign it in memberInfoOf.
+func TestTheMemberInfoCarriesEveryFieldUrmessageKeeps(t *testing.T) {
+	member := urmessage.Member{
+		LeafIndex:    3,
+		SenderHandle: bytes.Repeat([]byte{0x1F}, 16),
+		IdentityPub:  bytes.Repeat([]byte{0xE7}, 32),
+		Role:         "admin",
+		Mine:         true,
+	}
+	kept := reflect.TypeOf(urmessage.Member{})
+	fixture := reflect.ValueOf(member)
+	for at := 0; at < kept.NumField(); at += 1 {
+		if fixture.Field(at).IsZero() {
+			t.Fatalf("this case's fixture leaves urmessage.Member.%s at its zero value", kept.Field(at).Name)
+		}
+	}
+	info := memberInfoOf(member)
+	carried := reflect.TypeOf(memberInfo{})
+	projected := reflect.ValueOf(*info)
+	names := map[string]bool{}
+	for at := 0; at < carried.NumField(); at += 1 {
+		names[carried.Field(at).Name] = true
+		if projected.Field(at).IsZero() {
+			t.Errorf("memberInfo.%s (json %q) is declared and never assigned", carried.Field(at).Name, carried.Field(at).Tag.Get("json"))
+		}
+	}
+	for at := 0; at < kept.NumField(); at += 1 {
+		if name := kept.Field(at).Name; !names[name] {
+			t.Errorf("urmessage.Member keeps %s and urnet_message_member_list_info does not carry it", name)
+		}
+	}
+	if kept.NumField() != carried.NumField() {
+		t.Errorf("urmessage.Member has %d fields and the json carries %d", kept.NumField(), carried.NumField())
+	}
+	// and the two octet fields cross as lower case hex of the right width, which is what the
+	// header promises and what a verb decodes
+	if info.SenderHandle != strings.Repeat("1f", 16) || info.IdentityPub != strings.Repeat("e7", 32) {
+		t.Errorf("the octet fields crossed as %q and %q", info.SenderHandle, info.IdentityPub)
+	}
+}
+
+// headerJsonKeys reads the documented json shape that follows `phrase` in the comment block above
+// `declaration` in include/urnetwork_message.h: the `{"key":value,...}` object, its keys in order.
+// It fails the test rather than answering an empty list, which is the positive control that the
+// header still carries a shape at all.
+func headerJsonKeys(t *testing.T, declaration string, phrase string) []string {
+	t.Helper()
+	header, err := os.ReadFile("include/urnetwork_message.h")
+	if err != nil {
+		t.Fatalf("reading the header: %v", err)
+	}
+	text := strings.ReplaceAll(string(header), "\r\n", "\n")
+	at := strings.Index(text, declaration)
+	if at < 0 {
+		t.Fatalf("the header declares no %s", declaration)
+	}
+	comment := strings.LastIndex(text[:at], "/*")
+	if comment < 0 {
+		t.Fatalf("%s has no comment block above it", declaration)
+	}
+	block := text[comment:at]
+	start := strings.Index(block, phrase)
+	if start < 0 {
+		t.Fatalf("the comment above %s does not say %q", declaration, phrase)
+	}
+	rest := block[start+len(phrase):]
+	open := strings.Index(rest, "{")
+	end := strings.Index(rest, "}")
+	if open < 0 || end < open {
+		t.Fatalf("the comment above %s carries no {...} shape after %q", declaration, phrase)
+	}
+	keys := []string{}
+	for _, match := range regexp.MustCompile(`"([a-z_]+)":`).FindAllStringSubmatch(rest[open:end], -1) {
+		keys = append(keys, match[1])
+	}
+	if len(keys) < 2 {
+		t.Fatalf("the documented shape above %s has %d keys; the positive control is not met", declaration, len(keys))
+	}
+	return keys
+}
+
+// jsonKeysOf is the keys the marshalled value carries, in its order, walked with a decoder so
+// they are the output's and not a tag's.
+func jsonKeysOf(t *testing.T, value any) []string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	if open, err := decoder.Token(); err != nil || open != json.Delim('{') {
+		t.Fatalf("the json does not open an object: %v %v", open, err)
+	}
+	keys := []string{}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, isString := key.(string)
+		if !isString {
+			t.Fatalf("a key is %T, not a string", key)
+		}
+		keys = append(keys, name)
+		if _, err := decoder.Token(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return keys
+}
+
+// THE HEADER'S DOCUMENTED MEMBER JSON IS THE JSON'S OWN, KEY FOR KEY AND IN ORDER -- the stats
+// header gate, over the roster row. The stats list drifted by four counters before its gate
+// existed; this one is born with its shape.
+//
+// WHAT WOULD GO RED: add a field to memberInfo and not to the header's shape, or the reverse, or
+// reorder either.
+func TestTheHeaderDocumentsExactlyTheMemberJsonKeys(t *testing.T) {
+	documented := headerJsonKeys(t, "int32_t urnet_message_member_list_count(", "one member as json:")
+	carried := jsonKeysOf(t, &memberInfo{})
+	if !reflect.DeepEqual(documented, carried) {
+		t.Fatalf("the header documents the member keys as\n  %v\nand the json carries\n  %v", documented, carried)
+	}
+}
+
+// THE HEADER'S URNET_MESSAGE_COMMIT_* DEFINES ARE THE LIBRARY'S KINDS, BY NAME AND BY VALUE. A C
+// caller branches on the defines and the library answers the constants; a define renumbered on
+// one side is a UI that tells a user "the network failed" for a role refusal. The defines are
+// READ OFF THE HEADER FILE and held equal to the go constants, both ways: every define has a
+// constant and every constant has a define.
+//
+// WHAT WOULD GO RED: renumber either side, add a kind to one side, misspell a define.
+func TestTheHeaderDefinesExactlyTheCommitKinds(t *testing.T) {
+	header, err := os.ReadFile("include/urnetwork_message.h")
+	if err != nil {
+		t.Fatalf("reading the header: %v", err)
+	}
+	defined := map[string]int32{}
+	for _, match := range regexp.MustCompile(`(?m)^#define URNET_MESSAGE_COMMIT_([A-Z]+)\s+(\d+)`).FindAllStringSubmatch(string(header), -1) {
+		value, err := strconv.ParseInt(match[2], 10, 32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defined[match[1]] = int32(value)
+	}
+	constants := map[string]int32{
+		"OK":      messageCommitOk,
+		"REFUSED": messageCommitRefused,
+		"LOST":    messageCommitLost,
+		"INVALID": messageCommitInvalid,
+		"FAILED":  messageCommitFailed,
+	}
+	if len(defined) < 2 {
+		t.Fatalf("the header defines %d URNET_MESSAGE_COMMIT_* kinds; the positive control is not met", len(defined))
+	}
+	if !reflect.DeepEqual(defined, constants) {
+		t.Fatalf("the header defines the commit kinds as %v and the library's constants are %v", defined, constants)
+	}
+}
+
+// goStringAt reads a NUL-terminated C string an export handed back, without naming a C type.
+func goStringAt(p unsafe.Pointer) string {
+	if p == nil {
+		return ""
+	}
+	out := []byte{}
+	for at := uintptr(0); ; at += 1 {
+		c := *(*byte)(unsafe.Pointer(uintptr(p) + at))
+		if c == 0 {
+			break
+		}
+		out = append(out, c)
+	}
+	return string(out)
+}
+
+// callExportNil is callExport with two more spellings: a nil argument is the zero value of the
+// parameter's own type, which is how a NULL out_error or a NULL char* is passed from here, and an
+// unsafe.Pointer argument becomes a typed pointer at that address through reflect.NewAt, which
+// is how a char* an export handed back is passed to another export without naming C.char.
+func callExportNil(t *testing.T, fn any, args ...any) []reflect.Value {
+	t.Helper()
+	value := reflect.ValueOf(fn)
+	shape := value.Type()
+	if shape.NumIn() != len(args) {
+		t.Fatalf("the export takes %d arguments and %d were passed", shape.NumIn(), len(args))
+	}
+	in := make([]reflect.Value, 0, len(args))
+	for at, arg := range args {
+		if arg == nil {
+			in = append(in, reflect.Zero(shape.In(at)))
+			continue
+		}
+		if p, isPointer := arg.(unsafe.Pointer); isPointer {
+			in = append(in, reflect.NewAt(shape.In(at).Elem(), p))
+			continue
+		}
+		in = append(in, reflect.ValueOf(arg).Convert(shape.In(at)))
+	}
+	return value.Call(in)
+}
+
+// THE ROSTER AND THE VERBS OVER A HANDLE THAT DOES NOT RESOLVE, WHICH C CANNOT TELL FROM A
+// REFUSAL: the zero handle and an unknown one answer 0 / NULL / FAILED with out_error left NULL,
+// the verbs answer FAILED for an unknown ctx too, and the member list accessors bound their index.
+// The conversation itself -- a real owner promoting a real member, a real member refused -- is
+// ctest/message_abi_test.c's, over a real server; what is here is the half that test cannot see,
+// because cgoGuard recovers a panic into the same false.
+func TestTheRosterAndTheVerbsRefuseAHandleThatDoesNotResolve(t *testing.T) {
+	const unknown = uint64(1) << 62
+	for _, handle := range []uint64{0, unknown} {
+		if got := callExportNil(t, urnet_message_group_members, handle, nil)[0].Uint(); got != 0 {
+			t.Errorf("members on handle %d answered %d", handle, got)
+		}
+		if got := callExportNil(t, urnet_message_group_my_role, handle, nil)[0]; !got.IsNil() {
+			t.Errorf("my_role on handle %d answered something", handle)
+		}
+		if got := callExportNil(t, urnet_message_group_set_role, handle, uint64(0), cString("ab"), cString("admin"), nil)[0].Int(); int32(got) != messageCommitFailed {
+			t.Errorf("set_role on handle %d answered kind %d, want FAILED", handle, got)
+		}
+		if got := callExportNil(t, urnet_message_group_transfer_ownership, handle, uint64(0), cString("ab"), nil)[0].Int(); int32(got) != messageCommitFailed {
+			t.Errorf("transfer_ownership on handle %d answered kind %d, want FAILED", handle, got)
+		}
+		if got := callExport(t, urnet_message_member_list_count, handle)[0].Int(); got != 0 {
+			t.Errorf("member_list_count on handle %d answered %d", handle, got)
+		}
+		if got := callExport(t, urnet_message_member_list_info, handle, 0)[0]; !got.IsNil() {
+			t.Errorf("member_list_info on handle %d answered something", handle)
+		}
+	}
+	// an unknown ctx over a handle that IS a group: still FAILED, still no out_error, because a
+	// call that cannot be cancelled while its caller believes it can is the failure the ctx
+	// handle exists to prevent -- and the group is never asked
+	group := newHandle(&memberList{})
+	defer handleRelease(group)
+	if got := callExportNil(t, urnet_message_group_set_role, group, unknown, cString("ab"), cString("admin"), nil)[0].Int(); int32(got) != messageCommitFailed {
+		t.Errorf("set_role with an unknown ctx answered kind %d, want FAILED", got)
+	}
+
+	// the member list handle bounds its index and answers the row's json in between
+	list := newHandle(&memberList{members: []urmessage.Member{
+		{LeafIndex: 0, SenderHandle: bytes.Repeat([]byte{1}, 16), IdentityPub: bytes.Repeat([]byte{2}, 32), Role: "owner", Mine: true},
+		{LeafIndex: 1, SenderHandle: bytes.Repeat([]byte{3}, 16), IdentityPub: bytes.Repeat([]byte{4}, 32), Role: "member"},
+	}})
+	defer handleRelease(list)
+	if got := callExport(t, urnet_message_member_list_count, list)[0].Int(); got != 2 {
+		t.Errorf("a two member list counts %d", got)
+	}
+	for _, index := range []int{-1, 2, 7} {
+		if got := callExport(t, urnet_message_member_list_info, list, index)[0]; !got.IsNil() {
+			t.Errorf("index %d of a two member list answered json", index)
+		}
+	}
+	row := callExport(t, urnet_message_member_list_info, list, 1)[0]
+	if row.IsNil() {
+		t.Fatal("index 1 of a two member list answered NULL")
+	}
+	text := goStringAt(row.UnsafePointer())
+	callExportNil(t, urnet_free_string, row.UnsafePointer())
+	var decoded memberInfo
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		t.Fatalf("row 1 is not json: %q: %v", text, err)
+	}
+	if decoded.LeafIndex != 1 || decoded.Role != "member" || decoded.Mine || decoded.IdentityPub != strings.Repeat("04", 32) {
+		t.Errorf("row 1 crossed as %+v", decoded)
 	}
 }

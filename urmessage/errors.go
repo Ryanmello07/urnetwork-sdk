@@ -59,7 +59,7 @@ var (
 	// produce, and ruling 15's caller check in [Group.SetRole]). The rule that refused it is
 	// carried, as one of the sentinels below, mls's own, or the cause a configured
 	// [CommitAuthorizer] returned -- so a caller can errors.Is this AND the rule.
-	ErrCommitUnauthorized = errors.New("urmessage: the role model refused this commit: on receipt, this device would not follow it; on send, this device's role does not permit it and nothing was built")
+	ErrCommitUnauthorized = errors.New("urmessage: the role model refused this commit: not built on the send side, not followed on receipt")
 
 	// ── the role model's rules, MASTER §11 and ledger item 242 (roles.go) ──────────────────
 	//
@@ -137,12 +137,13 @@ var (
 	// wrapping the rule above, the receivers' own sentence, because the send side judges by the
 	// same predicate. These two name a REQUEST that is malformed before any rule is reached.
 
-	// [Group.SetRole] was asked for "owner", or for a name this profile does not define.
-	// Ownership moves through [Group.TransferOwnership] and nothing else, because a transfer is
-	// two role changes in one commit (the new owner up, the old owner to ADMIN, ruling 4) and a
-	// SetRole to owner would leave two owners for R0a to refuse or none for a member to be judged
-	// against.
-	ErrRoleNotSettable = errors.New("urmessage: SetRole takes admin, member or observer; ownership moves through TransferOwnership")
+	// [Group.SetRole] was asked for "owner", for a name this profile does not define, or to
+	// set the role of the identity that OWNS the group. Ownership moves through
+	// [Group.TransferOwnership] and nothing else, because a transfer is two role changes in one
+	// commit (the new owner up, the old owner to ADMIN, ruling 4): a SetRole to owner would
+	// leave two owners for R0a to refuse, and a SetRole of the owner would leave none for a
+	// member to be judged against.
+	ErrRoleNotSettable = errors.New("urmessage: SetRole takes admin, member or observer, and never the owner's own role; ownership moves through TransferOwnership")
 
 	// [Group.TransferOwnership] named the identity that already owns the group. It is refused by
 	// name rather than built, because the policy it would build -- the same identity set to owner

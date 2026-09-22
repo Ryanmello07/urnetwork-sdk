@@ -11,6 +11,7 @@ import "C"
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 	"unsafe"
@@ -64,6 +65,13 @@ import (
 // grammar it was read rather than what it contains. There is still no receipt, no edit and no
 // media, not as a stub and not as an export that answers a plausible empty result, because
 // urmessage does not carry them.
+//
+// AND THE ROLE MODEL'S SURFACE CROSSES (MASTER §11, ledger item 242's R3): the roster with each
+// member's role, this device's own role, and the two policy verbs -- set_role and
+// transfer_ownership -- with the commit's outcome projected as a KIND a caller can branch on, so
+// that "your role does not permit this", "somebody else's commit landed first, fetch and retry"
+// and "the network failed" are three different sentences on the far side of the wall rather than
+// one malloc'd string. See the roster section below.
 //
 // ── DECISION: BLOCKING, ON THE CALLER'S OWN THREAD, WITH A CANCEL HANDLE ─────────────────────
 //
@@ -1044,10 +1052,232 @@ func urnet_message_group_close(self C.uint64_t, outError **C.char) C.bool {
 	return C.bool(true)
 }
 
-// ── the two list handles ────────────────────────────────────────────────────────────────────
+// ── the roster and the two role verbs (MASTER §11, ledger item 242's R3) ────────────────────
 //
-// A []*Group and a []*Message cross as ONE handle with indexed accessors rather than as N
-// handles or as one json blob. N handles would make a 600 message page 600 things for a caller
+// THE ROLE MODEL IS LIVE UNDERNEATH THIS and until these exports a C caller could see none of it:
+// urmessage judges every commit it ingests and every commit it is asked to build against §11's
+// rules, keeps a roster with a role per member, and has two policy verbs -- and the Windows roster
+// (Spec C screens 15 and 16) had nothing to read and nothing to call. What crosses here is the
+// read surface and the two verbs, in this abi's own shapes: the roster is a list handle with
+// count and info(index) json, exactly as a page of messages is, and the role is a string.
+//
+// ── DECISION: A COMMIT VERB ANSWERS A KIND, NOT A bool ──────────────────────────────────────
+//
+// Every other verb in this file answers true/false or a handle/NULL, with out_error carrying a
+// sentence. A policy commit has THREE failures a caller has to act on differently, and a sentence
+// cannot be branched on:
+//
+//   REFUSED   this device's role does not permit the change. Nothing was built, nothing moved for
+//             anybody, commit_refused_own moved by one. A UI says "you cannot do this" and does not
+//             retry -- retrying answers the same. It is urmessage's ErrCommitUnauthorized, which
+//             wraps the §11 rule that refused it, and the rule's own sentence is in out_error.
+//   LOST      another member's commit closed this epoch first (MASTER §9.3's race). The staged
+//             epoch was erased and the group is exactly where it was; the caller owes a
+//             urnet_message_group_receive to follow the winner, then the same verb again. It is
+//             urmessage's ErrCommitLost. A UI that showed this as an error would be wrong twice: the
+//             change may still be right, and the way to make it is to try again.
+//   INVALID   the request was malformed and refused by name before any rule was reached: a role
+//             that is not admin/member/observer (ownership moves through transfer_ownership),
+//             a transfer to the identity that already owns the group, an identity that is not
+//             hex. Nothing counted. It is a caller bug and the sentence says which.
+//   FAILED    everything else: the transport, a group that is not open or not yet reconciled,
+//             a closed handle. out_error says what.
+//
+// So the two verbs answer an int32_t of URNET_MESSAGE_COMMIT_OK / _REFUSED / _LOST / _INVALID /
+// _FAILED, with out_error set on everything but OK. An unknown self or ctx handle answers FAILED
+// with out_error left NULL, which is this abi's convention for a handle that does not resolve
+// (logged by name, not an out_error). The mapping is messageCommitKindOf, and a test holds the
+// header's defines equal to the go constants by name and value.
+//
+// A SAME-ROLE set_role IS OK AND MOVES NOTHING (ruling 15): urmessage answers nil without building
+// a commit, so the epoch does not change and there is nothing to fetch.
+
+// The kinds. THE HEADER'S URNET_MESSAGE_COMMIT_* DEFINES ARE THESE, by name and by value, and
+// TestTheHeaderDefinesExactlyTheCommitKinds holds them equal.
+const (
+	messageCommitOk      int32 = 0
+	messageCommitRefused int32 = 1
+	messageCommitLost    int32 = 2
+	messageCommitInvalid int32 = 3
+	messageCommitFailed  int32 = 4
+)
+
+// messageCommitKindOf is the projection of a policy verb's error onto the kinds above. The order
+// matters only where two sentinels could both match, and none do: ErrCommitLost wraps
+// ErrSubmitRefused and not ErrCommitUnauthorized; the two INVALID sentinels wrap nothing of the
+// others.
+func messageCommitKindOf(err error) int32 {
+	switch {
+	case err == nil:
+		return messageCommitOk
+	case errors.Is(err, urmessage.ErrCommitUnauthorized):
+		return messageCommitRefused
+	case errors.Is(err, urmessage.ErrCommitLost):
+		return messageCommitLost
+	case errors.Is(err, urmessage.ErrRoleNotSettable), errors.Is(err, urmessage.ErrAlreadyOwner), errors.Is(err, errIdentityNotHex):
+		return messageCommitInvalid
+	}
+	return messageCommitFailed
+}
+
+// errIdentityNotHex is the INVALID refusal for an identity_pub_hex that does not decode. It is
+// this file's own rather than urmessage's because the hex is this abi's encoding: urmessage takes
+// octets.
+var errIdentityNotHex = errors.New("urnet_message: identity_pub_hex is not the lower case hex of a member's identity_pub as urnet_message_member_list_info carries it")
+
+// messageIdentityOf decodes the identity a verb names. An empty string is refused too: an empty
+// identity holds no leaf and would be answered as a phantom by the rules, which is a sentence
+// about roles for what is a missing argument.
+func messageIdentityOf(identityPubHex *C.char) ([]byte, error) {
+	text := goString(identityPubHex)
+	if text == "" {
+		return nil, fmt.Errorf("%w: it is empty", errIdentityNotHex)
+	}
+	identity, err := hex.DecodeString(text)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errIdentityNotHex, err)
+	}
+	return identity, nil
+}
+
+// memberInfo is one member of the roster as json. THE FIELD SET IS urmessage.Member's, held by
+// TestTheMemberInfoCarriesEveryFieldUrmessageKeeps the way messageInfo is held to
+// urmessage.Message: a field added there and not here reaches a C caller as nothing at all.
+type memberInfo struct {
+	// The member's leaf in the ratchet tree, which is what a role is read at and what
+	// "sender leaf index" in a message info refers to.
+	LeafIndex uint32 `json:"leaf_index"`
+	// The 16 octets this member's records carry, lower case hex: the same value as a message
+	// info's sender_handle, so a caller joins a line to a roster row on this field.
+	SenderHandle string `json:"sender_handle"`
+	// The credential identity the leaf carries -- the Ed25519 identity public key -- as lower
+	// case hex. IT IS THE VALUE THE TWO VERBS TAKE: pass it back as identity_pub_hex. One
+	// identity may hold several leaves (its devices) and then appears once per leaf, with the
+	// same role on each.
+	IdentityPub string `json:"identity_pub"`
+	// "owner", "admin", "member" or "observer": the role the live policy gives the identity. An
+	// identity the policy does not name is "member" (MASTER §11, ruling 8).
+	Role string `json:"role"`
+	// True on this device's own leaf.
+	Mine bool `json:"mine"`
+}
+
+func memberInfoOf(member urmessage.Member) *memberInfo {
+	return &memberInfo{
+		LeafIndex:    member.LeafIndex,
+		SenderHandle: hex.EncodeToString(member.SenderHandle),
+		IdentityPub:  hex.EncodeToString(member.IdentityPub),
+		Role:         member.Role,
+		Mine:         member.Mine,
+	}
+}
+
+// memberList is the roster at one instant, in leaf order. urmessage.Members already answers a
+// copy, so nothing here can move under a caller.
+type memberList struct {
+	members []urmessage.Member
+}
+
+// urnet_message_group_members is the roster: every member of this group at its current epoch, in
+// leaf order, each with the role the live policy gives it, as a member list handle. It is what a
+// UI shows, and it is exactly what this device would be judged by were it to commit now. 0 with
+// out_error set when the roster cannot be read (a closed group); 0 with no error for an unknown
+// handle. A group always has at least its own leaf, so a non-zero handle is never empty.
+//
+//export urnet_message_group_members
+func urnet_message_group_members(self C.uint64_t, outError **C.char) C.uint64_t {
+	defer cgoGuard("urnet_message_group_members")
+	self_, ok := resolveHandle[*urmessage.Group](uint64(self), "urnet_message_group_members")
+	if !ok || self_ == nil {
+		return 0
+	}
+	members, err := self_.Members()
+	if err != nil {
+		setErrorOut(outError, err)
+		return 0
+	}
+	if len(members) == 0 {
+		return 0
+	}
+	return C.uint64_t(newHandle(&memberList{members: members}))
+}
+
+// urnet_message_group_my_role is the role the live policy gives this device's own identity:
+// "owner", "admin", "member" or "observer". It is what this device may commit, read at its own
+// leaf, which is the reading every receiver takes of a commit this device makes. NULL with
+// out_error set when it cannot be read. Free with urnet_free_string.
+//
+//export urnet_message_group_my_role
+func urnet_message_group_my_role(self C.uint64_t, outError **C.char) *C.char {
+	defer cgoGuard("urnet_message_group_my_role")
+	self_, ok := resolveHandle[*urmessage.Group](uint64(self), "urnet_message_group_my_role")
+	if !ok || self_ == nil {
+		return nil
+	}
+	role, err := self_.MyRole()
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	return cString(role)
+}
+
+// urnet_message_group_set_role makes one identity an "admin", a "member" or an "observer" in one
+// commit, and BLOCKS on its submit. It answers a URNET_MESSAGE_COMMIT_* kind; see the decision
+// above. identity_pub_hex is the identity_pub a member info carries. "owner" is INVALID here:
+// ownership moves through urnet_message_group_transfer_ownership. Who may set what is §11's
+// table -- the owner the admin set, an admin member/observer -- and a caller that may not is
+// REFUSED with the rule's sentence; a caller that is neither admin nor owner is REFUSED whatever
+// it asked for (ruling 15). Naming the role the identity already holds is OK and moves nothing.
+//
+//export urnet_message_group_set_role
+func urnet_message_group_set_role(self C.uint64_t, ctx C.uint64_t, identityPubHex *C.char, role *C.char, outError **C.char) C.int32_t {
+	defer cgoGuard("urnet_message_group_set_role")
+	self_, ok := resolveHandle[*urmessage.Group](uint64(self), "urnet_message_group_set_role")
+	if !ok || self_ == nil {
+		return C.int32_t(messageCommitFailed)
+	}
+	ctx_, ok := messageCtx(ctx, "urnet_message_group_set_role")
+	if !ok {
+		return C.int32_t(messageCommitFailed)
+	}
+	identity, err := messageIdentityOf(identityPubHex)
+	if err == nil {
+		err = self_.SetRole(ctx_, identity, goString(role))
+	}
+	setErrorOut(outError, err)
+	return C.int32_t(messageCommitKindOf(err))
+}
+
+// urnet_message_group_transfer_ownership makes one identity the OWNER and this device's identity
+// -- the outgoing owner -- an ADMIN, in one commit (§11: "the outgoing owner becomes an ADMIN"),
+// and BLOCKS on its submit. It answers a URNET_MESSAGE_COMMIT_* kind. The new owner must already
+// hold a leaf: a stranger is REFUSED as a phantom (R0c), and naming the identity that already
+// owns the group is INVALID. Anybody but the owner is REFUSED (R5).
+//
+//export urnet_message_group_transfer_ownership
+func urnet_message_group_transfer_ownership(self C.uint64_t, ctx C.uint64_t, identityPubHex *C.char, outError **C.char) C.int32_t {
+	defer cgoGuard("urnet_message_group_transfer_ownership")
+	self_, ok := resolveHandle[*urmessage.Group](uint64(self), "urnet_message_group_transfer_ownership")
+	if !ok || self_ == nil {
+		return C.int32_t(messageCommitFailed)
+	}
+	ctx_, ok := messageCtx(ctx, "urnet_message_group_transfer_ownership")
+	if !ok {
+		return C.int32_t(messageCommitFailed)
+	}
+	identity, err := messageIdentityOf(identityPubHex)
+	if err == nil {
+		err = self_.TransferOwnership(ctx_, identity)
+	}
+	setErrorOut(outError, err)
+	return C.int32_t(messageCommitKindOf(err))
+}
+
+// ── the list handles ────────────────────────────────────────────────────────────────────────
+//
+// A []*Group, a []*Message and a []Member cross as ONE handle with indexed accessors rather than
+// as N handles or as one json blob. N handles would make a 600 message page 600 things for a caller
 // to release; one json blob cannot carry a body (see the body decision). An EMPTY slice is
 // handle 0, so the ordinary "nothing new" poll costs the caller no release at all, and every
 // accessor answers 0/NULL/false on handle 0 rather than failing.
@@ -1316,8 +1546,9 @@ type messageGroupStats struct {
 	CommitRefused uint64 `json:"commit_refused"`
 	// Commits THIS DEVICE was asked to make and refused before building them: the committing arm
 	// of the same rules (item 242's R2). The go verbs that ask -- AddMemberAndPublish, SetRole,
-	// TransferOwnership; their exports over this abi are R3's -- answer the refusal as their error,
-	// and this is the number that persists past the call. Nothing moved for anybody, the commit was
+	// TransferOwnership -- answer the refusal as their error, and over this abi
+	// urnet_message_group_set_role and _transfer_ownership answer URNET_MESSAGE_COMMIT_REFUSED;
+	// this is the number that persists past the call. Nothing moved for anybody, the commit was
 	// never built, so it is a request this device's role did not permit and not a halt.
 	CommitRefusedOwn uint64 `json:"commit_refused_own"`
 	FailedOpen       uint64 `json:"failed_open"`
@@ -1457,4 +1688,39 @@ func reactionInfoOf(reaction urmessage.Reaction) *messageReactionInfo {
 		Emoji:        reaction.Emoji,
 		Mine:         reaction.Mine,
 	}
+}
+
+// ── the member list handle ──────────────────────────────────────────────────────────────────
+//
+// The collection shape this abi has for a page of messages, over the roster: a count and an info
+// json at an index. A roster is bounded (1,000 leaves, ruling 7) and carries no body, so a single
+// json array would have been safe -- it is a list handle anyway so that the C consumer that tests
+// this abi, which reads json with strstr, can address the k-th member, and so that a roster and a
+// page of messages are read by one loop shape.
+
+//export urnet_message_member_list_count
+func urnet_message_member_list_count(self C.uint64_t) C.int32_t {
+	defer cgoGuard("urnet_message_member_list_count")
+	self_, ok := resolveHandle[*memberList](uint64(self), "urnet_message_member_list_count")
+	if !ok || self_ == nil {
+		return 0
+	}
+	return C.int32_t(len(self_.members))
+}
+
+// urnet_message_member_list_info is one member as json:
+// {"leaf_index":u32,"sender_handle":"<32 hex>","identity_pub":"<hex>","role":"owner","mine":bool}.
+// NULL for an index out of range. Free with urnet_free_string.
+//
+//export urnet_message_member_list_info
+func urnet_message_member_list_info(self C.uint64_t, index C.int32_t) *C.char {
+	defer cgoGuard("urnet_message_member_list_info")
+	self_, ok := resolveHandle[*memberList](uint64(self), "urnet_message_member_list_info")
+	if !ok || self_ == nil {
+		return nil
+	}
+	if index < 0 || int(index) >= len(self_.members) {
+		return nil
+	}
+	return cJson(memberInfoOf(self_.members[index]), "urnet_message_member_list_info")
 }

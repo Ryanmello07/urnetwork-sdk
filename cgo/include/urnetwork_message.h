@@ -30,11 +30,12 @@
  * abi does not make it, because the content envelope is not ruled.
  *
  * THESE CALLS BLOCK AND YOU SHOULD NOT BE ON A UI THREAD. urnet_message_device_connect,
- * _group_open, _group_send, _group_receive, _device_restore and _device_create_group/_join all
- * wait on the network. connect's budget DEFAULTS TO 90 SECONDS, because a reconnecting client is
- * not routed to by the operator for about sixty (measured). run them on a thread of your own and
- * pass a urnet_message_context handle so you can cancel them: urnet_message_context_cancel wakes
- * every call holding that context, from any thread. pass ctx 0 for an uncancellable call.
+ * _group_open, _group_send, _group_receive, _group_set_role, _group_transfer_ownership,
+ * _device_restore and _device_create_group/_join all wait on the network. connect's budget
+ * DEFAULTS TO 90 SECONDS, because a reconnecting client is not routed to by the operator for
+ * about sixty (measured). run them on a thread of your own and pass a urnet_message_context
+ * handle so you can cancel them: urnet_message_context_cancel wakes every call holding that
+ * context, from any thread. pass ctx 0 for an uncancellable call.
  *
  * THERE IS NO RECEIVE PUSH. urnet_message_group_receive is a poll and that is what the transport
  * is. nothing arrives on its own.
@@ -59,8 +60,17 @@
  * crosses as json and a buffer-out call for 32 octets a renderer reads once per row would be a
  * second call per message.
  *
- * WHAT IS STILL NOT HERE: receipts, edit, media, group names, contact discovery, a third member.
- * they are not built underneath this and they are not stubbed here.
+ * THE ROLE MODEL CROSSES TOO (MASTER section 11). every member has a role -- owner, admin, member
+ * or observer -- and the library refuses, on both sides, a commit the committer's role does not
+ * permit: urnet_message_group_members is the roster with a role per row, _group_my_role is what
+ * THIS device may do, and _group_set_role and _group_transfer_ownership are the two policy verbs.
+ * a verb answers a URNET_MESSAGE_COMMIT_* KIND rather than a bool, because "your role does not
+ * permit this", "somebody else's commit landed first, fetch and retry" and "the network failed"
+ * are three different things for a caller to do next. see the roster section.
+ *
+ * WHAT IS STILL NOT HERE: receipts, edit, media, group names, contact discovery, removing a
+ * member, and adding a member to a group that is already open (the go verb exists; its export
+ * does not). they are not built underneath this or not exported here, and they are not stubbed.
  *
  * SPDX-License-Identifier: MPL-2.0 */
 #ifndef URNETWORK_MESSAGE_H
@@ -110,6 +120,31 @@ extern "C" {
  * either accuses a correct sender or sends a user after an upgrade that cannot help. */
 #define URNET_MESSAGE_GAP_MALFORMED   "malformed"
 #define URNET_MESSAGE_GAP_UNSUPPORTED "unsupported"
+
+/* what urnet_message_group_set_role and urnet_message_group_transfer_ownership answer. out_error is
+ * set on everything but OK. BRANCH ON THE KIND AND SHOW THE TEXT: the kind is what to do next and
+ * the text is why.
+ *
+ * REFUSED: this device's role does not permit the change (MASTER section 11). nothing was built,
+ * nothing moved for anybody, the stats' commit_refused_own moved by one, and retrying answers the
+ * same. out_error carries the rule's own sentence.
+ * LOST: another member's commit closed this epoch first. the group is exactly where it was; call
+ * urnet_message_group_receive to follow the winner, then the same verb again. it is not an error
+ * to show: the change may still be right.
+ * INVALID: the request was malformed and refused by name before any rule was reached -- a role
+ * that is not "admin", "member" or "observer", a set_role naming the owner's own identity (both
+ * because ownership moves through transfer_ownership), a transfer to the identity that already
+ * owns the group, an identity_pub_hex that is not hex. nothing counted. it is a caller bug.
+ * FAILED: everything else -- the transport, a group that is not open or not yet reconciled, a
+ * closed handle. FAILED with out_error left NULL is an unknown self or ctx handle, which this abi
+ * logs by name rather than reporting.
+ *
+ * a go test holds these equal, by name and value, to the library's own constants. */
+#define URNET_MESSAGE_COMMIT_OK      0
+#define URNET_MESSAGE_COMMIT_REFUSED 1
+#define URNET_MESSAGE_COMMIT_LOST    2
+#define URNET_MESSAGE_COMMIT_INVALID 3
+#define URNET_MESSAGE_COMMIT_FAILED  4
 
 /* ----- callback types ----- */
 
@@ -333,6 +368,34 @@ bool urnet_message_group_is_open(uint64_t self);
 char* urnet_message_group_stats(uint64_t self);
 bool urnet_message_group_close(uint64_t self, char** out_error);
 
+/* ----- the roster and the two role verbs (MASTER section 11) ----- */
+
+/* the roster: every member of this group at its current epoch, in leaf order, each with the role
+ * the live policy gives it, as a member list handle (urnet_message_member_list_count / _info). it
+ * is what a roster screen shows, and it is exactly what this device would be judged by were it to
+ * commit now. 0 with out_error set when it cannot be read (a closed group); 0 with no error for an
+ * unknown handle. a group always holds at least this device's own leaf, so a non-zero handle is
+ * never empty. re-read it after every urnet_message_group_receive that moved the epoch: a commit
+ * from another member may have changed a role. */
+uint64_t urnet_message_group_members(uint64_t self, char** out_error);
+/* "owner", "admin", "member" or "observer": what THIS device may do, read at its own leaf. an
+ * identity the policy does not name is "member". NULL with out_error set when it cannot be read.
+ * free with urnet_free_string. */
+char* urnet_message_group_my_role(uint64_t self, char** out_error);
+/* make one identity an "admin", a "member" or an "observer", in one commit. BLOCKS on the submit
+ * and takes a cancel handle. identity_pub_hex is the identity_pub a member info carries, passed
+ * back as is. answers a URNET_MESSAGE_COMMIT_* kind: who may set what is section 11's table --
+ * the owner may change who is an admin, an admin may set member/observer -- and a caller that is
+ * neither admin nor owner is REFUSED whatever it asked for. "owner" is INVALID here: ownership
+ * moves through the call below. naming the role the identity already holds is OK and moves
+ * nothing, so there is nothing to fetch afterwards. */
+int32_t urnet_message_group_set_role(uint64_t self, uint64_t ctx, const char* identity_pub_hex, const char* role, char** out_error);
+/* make one identity the OWNER; this device, the outgoing owner, becomes an ADMIN in the same
+ * commit. BLOCKS on the submit and takes a cancel handle. the new owner must already be a member:
+ * a stranger is REFUSED, the current owner is INVALID, and anybody but the owner calling this is
+ * REFUSED. answers a URNET_MESSAGE_COMMIT_* kind. */
+int32_t urnet_message_group_transfer_ownership(uint64_t self, uint64_t ctx, const char* identity_pub_hex, char** out_error);
+
 /* ----- the list handles ----- */
 
 /* a list of groups or messages is ONE handle with indexed accessors, not N handles and not one
@@ -398,6 +461,21 @@ bool urnet_message_list_body(uint64_t self, int32_t index, uint8_t* out, int32_t
  * reaction_info answers NULL for either index out of range; free it with urnet_free_string. */
 int32_t urnet_message_list_reaction_count(uint64_t self, int32_t index);
 char* urnet_message_list_reaction_info(uint64_t self, int32_t index, int32_t reaction_index);
+
+/* the roster's list handle, from urnet_message_group_members: the message list's shape over
+ * members. one member as json:
+ *   {"leaf_index":u32,"sender_handle":"<32 hex>","identity_pub":"<hex>","role":"owner","mine":bool}
+ * leaf_index is the member's leaf in the ratchet tree. sender_handle is the same value a message
+ * info carries, so a line joins to its roster row on it. identity_pub is the member's identity
+ * public key, lower case hex, and IS THE VALUE THE TWO VERBS TAKE as identity_pub_hex; one
+ * identity with several devices appears once per leaf with the same role on each. role is one of
+ * "owner", "admin", "member", "observer", and a member the policy does not name is "member". mine
+ * is true on this device's own leaf, and on exactly one row.
+ *
+ * THE KEY LIST ABOVE IS THE JSON'S OWN, IN ITS ORDER, and a go test in this directory holds it so.
+ * _info answers NULL for an index out of range; free it with urnet_free_string. */
+int32_t urnet_message_member_list_count(uint64_t self);
+char* urnet_message_member_list_info(uint64_t self, int32_t index);
 
 #ifdef __cplusplus
 }
