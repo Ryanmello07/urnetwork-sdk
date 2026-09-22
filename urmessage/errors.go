@@ -106,6 +106,12 @@ var (
 	// or server id change, by a committer who is neither ADMIN nor OWNER.
 	ErrCommitPolicyChangeByNonAdmin = errors.New("urmessage: only an admin or the owner may change a member's role or the group's policy")
 
+	// R7: a commit by a MEMBER or an OBSERVER that is not exactly its own device leaves -- an
+	// empty commit, an Update of another leaf carried by reference, a group context extension
+	// list other than the one the group had -- since §11's table gives "commit epochs" to ADMIN
+	// and OWNER and ruling 5 gives an OBSERVER "its own device add / remove and nothing else".
+	ErrCommitBeyondOwnDevices = errors.New("urmessage: a member or an observer may commit its own device leaves and nothing else")
+
 	// A role name on a [CommitAuthorization] that is not one of the four this profile defines.
 	// The ingest path never builds one; it is here so the pure rule function refuses rather
 	// than guesses when handed a value it did not build.

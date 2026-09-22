@@ -575,6 +575,99 @@ func TestTheOwnerAddingItsOwnSecondDeviceIsAllowed(t *testing.T) {
 	}
 }
 
+// A MEMBER OR AN OBSERVER MAY COMMIT ITS OWN DEVICE LEAVES AND NOTHING ELSE (R7): §11's table
+// gives "commit epochs" to ADMIN and OWNER, and ruling 5 gives the OBSERVER "its own device add /
+// remove and nothing else". Three commits the seam builds and mls accepts, each refused by every
+// honest receiver, after the positive control -- a member's own second device, which the same
+// rule allows and every receiver ingests. The Update by reference is the one that carries no
+// membership change at all: the owner's own key rotation, committed by an observer, moves every
+// honest receiver an epoch under a committer whose role does not commit epochs.
+func TestAMemberOrAnObserverMayCommitOnlyItsOwnDeviceLeaves(t *testing.T) {
+	t.Run("a member's own second device is ingested and its bare commit is refused", func(t *testing.T) {
+		world := newRoleWorld(t, "owner", "bob", "carol")
+		owner, bob, carol := world.member("owner"), world.member("bob"), world.member("carol")
+
+		// epoch 1 -> 2: the positive control, through the real seam
+		laptop := claimingKeyPackage(t, filepath.Join(world.root, "bob-laptop"), bob.dev.identityPub)
+		record := world.commitAndPublish(bob, "CommitAdd of its own second device", func() ([]byte, []byte, []byte, error) {
+			return bob.handle.CommitAdd([][]byte{laptop})
+		})
+		for _, honest := range []*roleMember{owner, carol} {
+			world.ingest(honest, bob, record)
+		}
+
+		// epoch 2 -> refused: the same member's commit that changes no device leaf
+		record = world.commitAndPublish(bob, "Commit(nil)", func() ([]byte, []byte, []byte, error) {
+			return bob.handle.Commit(nil)
+		})
+		for _, honest := range []*roleMember{owner, carol} {
+			world.refuse(honest, record, ErrCommitBeyondOwnDevices)
+			if honest.group.Epoch() != 2 {
+				t.Errorf("%s is at epoch %d, want 2", honest.name, honest.group.Epoch())
+			}
+		}
+	})
+
+	t.Run("an observer's bare commit is refused", func(t *testing.T) {
+		world := newRoleWorld(t, "owner", "olive", "carol")
+		owner, olive, carol := world.member("owner"), world.member("olive"), world.member("carol")
+		world.demoteToObserver(owner, olive, carol)
+
+		record := world.commitAndPublish(olive, "Commit(nil)", func() ([]byte, []byte, []byte, error) {
+			return olive.handle.Commit(nil)
+		})
+		for _, honest := range []*roleMember{owner, carol} {
+			world.refuse(honest, record, ErrCommitBeyondOwnDevices)
+		}
+	})
+
+	t.Run("an observer committing the owner's update by reference is refused", func(t *testing.T) {
+		world := newRoleWorld(t, "owner", "olive", "carol")
+		owner, olive, carol := world.member("owner"), world.member("olive"), world.member("carol")
+		world.demoteToObserver(owner, olive, carol)
+
+		// the owner's own key rotation, cached at every member as a proposal record would leave it
+		proposal, err := owner.handle.ProposeUpdate()
+		if err != nil {
+			t.Fatalf("the owner's ProposeUpdate: %v", err)
+		}
+		for _, receiver := range []*roleMember{olive, carol} {
+			processed, err := receiver.handle.Process(proposal)
+			if err != nil {
+				t.Fatalf("%s processing the owner's update proposal: %v", receiver.name, err)
+			}
+			if processed.Kind != messagegroup.EngineProcessedProposal {
+				t.Fatalf("%s processed the owner's update as kind %d, want a proposal", receiver.name, processed.Kind)
+			}
+		}
+		// Commit(nil) folds in every cached proposal: the commit carries the owner's Update by
+		// reference and nothing else
+		record := world.commitAndPublish(olive, "Commit(nil) over the owner's cached update", func() ([]byte, []byte, []byte, error) {
+			return olive.handle.Commit(nil)
+		})
+		for _, honest := range []*roleMember{owner, carol} {
+			world.refuse(honest, record, ErrCommitBeyondOwnDevices)
+		}
+	})
+}
+
+// demoteToObserver has the owner commit a policy making one member an OBSERVER, and every member
+// ingest it -- R4's "set MEMBER/OBSERVER" arm, which the owner holds.
+func (self *roleWorld) demoteToObserver(owner *roleMember, who *roleMember, others ...*roleMember) {
+	self.t.Helper()
+	demotion := self.policyOf(owner)
+	demotion.SetRole(who.dev.identityPub, mls.RoleObserver)
+	record := self.commitAndPublish(owner, "CommitPolicy demoting "+who.name, func() ([]byte, []byte, []byte, error) {
+		return owner.handle.CommitPolicy(self.policyBody(demotion))
+	})
+	for _, receiver := range append([]*roleMember{who}, others...) {
+		self.ingest(receiver, owner, record)
+	}
+	if role, _ := self.policyOf(who).RoleOf(who.dev.identityPub); role != mls.RoleObserver {
+		self.t.Fatalf("%s reads itself as %s after the demotion, want observer", who.name, role)
+	}
+}
+
 // A CONFIGURED AUTHORIZER THAT ALLOWS CANNOT ALLOW WHAT THE RULES REFUSE, and one that refuses
 // refuses what the rules allow: the two compose, the rules first.
 func TestAConfiguredAuthorizerComposesWithTheRulesAndCannotLoosenThem(t *testing.T) {

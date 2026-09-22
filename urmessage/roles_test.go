@@ -254,10 +254,10 @@ func TestEveryRuleOfTheRoleModelOverOneTable(t *testing.T) {
 		want     []error // every one must errors.Is; empty means allowed
 	}{
 		// ── allowed shapes, so a refusal below is a rule and not the builder ─────────────
-		{"an empty commit by a member is allowed", roleScenario{
-			committer: "member", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles}, nil},
-		{"an empty commit by an observer is allowed", roleScenario{
-			committer: "observer", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles}, nil},
+		{"an empty commit by the owner is allowed", roleScenario{
+			committer: "owner", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles}, nil},
+		{"an empty commit by an admin is allowed", roleScenario{
+			committer: "admin", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles}, nil},
 
 		// ── R0a: the policy after ────────────────────────────────────────────────────────
 		{"R0a a commit that drops 0xF001 is refused with mls's absence", roleScenario{
@@ -323,8 +323,8 @@ func TestEveryRuleOfTheRoleModelOverOneTable(t *testing.T) {
 		{"an add landing in the leaf a removal blanked is allowed", roleScenario{
 			committer: "owner", before: roleBaseline, after: leavesWith(roleLeaf{4, "stranger"}),
 			removed: []uint32{4}, added: []uint32{4}, rolesBefore: roleBaselineRoles}, nil},
-		{"an update that keeps a leaf's identity is allowed", roleScenario{
-			committer: "member", before: roleBaseline, after: roleBaseline, updated: []uint32{2},
+		{"an update that keeps a leaf's identity, committed by an admin, is allowed", roleScenario{
+			committer: "admin", before: roleBaseline, after: roleBaseline, updated: []uint32{2},
 			rolesBefore: roleBaselineRoles}, nil},
 
 		// ── R1: who may add ──────────────────────────────────────────────────────────────
@@ -459,6 +459,30 @@ func TestEveryRuleOfTheRoleModelOverOneTable(t *testing.T) {
 			committer: "admin", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
 			retentionAfter: longer}, nil},
 
+		// ── R7: a member's or an observer's commit is its own device leaves and nothing else ──
+		{"R7 an empty commit by a member is refused", roleScenario{
+			committer: "member", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles},
+			[]error{ErrCommitBeyondOwnDevices}},
+		{"R7 an empty commit by an observer is refused (ruling 5)", roleScenario{
+			committer: "observer", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles},
+			[]error{ErrCommitBeyondOwnDevices}},
+		{"R7 a member committing another member's update by reference is refused", roleScenario{
+			committer: "member", before: roleBaseline, after: roleBaseline, updated: []uint32{4},
+			rolesBefore: roleBaselineRoles}, []error{ErrCommitBeyondOwnDevices}},
+		{"R7 an observer committing the owner's update by reference is refused", roleScenario{
+			committer: "observer", before: roleBaseline, after: roleBaseline, updated: []uint32{0},
+			rolesBefore: roleBaselineRoles}, []error{ErrCommitBeyondOwnDevices}},
+		{"R7 a member's own device add that also carries another member's update by reference is refused", roleScenario{
+			committer: "member", before: roleBaseline, after: leavesWith(roleLeaf{5, "member"}), added: []uint32{5}, updated: []uint32{4},
+			rolesBefore: roleBaselineRoles}, []error{ErrCommitBeyondOwnDevices}},
+		{"R7 a member's own device add that also rewrites the policy without changing a role is refused", roleScenario{
+			committer: "member", before: roleBaseline, after: leavesWith(roleLeaf{5, "member"}), added: []uint32{5},
+			rolesBefore: roleBaselineRoles, rolesAfter: rolesWith(map[string]*mls.Role{"member-2": rolePtr(mls.RoleMember)})},
+			[]error{ErrCommitBeyondOwnDevices}},
+		{"the owner rewriting the policy without changing a role is allowed", roleScenario{
+			committer: "owner", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
+			rolesAfter: rolesWith(map[string]*mls.Role{"member-2": rolePtr(mls.RoleMember)})}, nil},
+
 		// ── a role name this profile does not define ─────────────────────────────────────
 		{"a committer role name outside the four is refused, not defaulted", roleScenario{
 			committer: "owner", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
@@ -499,6 +523,57 @@ func TestAnUnnamedIdentityReadsAsMemberOnBothSidesOfACommit(t *testing.T) {
 	}
 	if roleNameIn(nil, roleIdentity("anyone")) != mls.RoleMember.String() {
 		t.Error("a nil policy reads an identity as something other than member")
+	}
+}
+
+// R7 JUDGES THE ADDS AND REMOVES ON ITS OWN TERMS, called directly: through [authorizeCommit] a
+// member's Add of a stranger or Remove of another member is R1's or R2's refusal before R7 is
+// reached, so the two loops in ruleOwnDevicesOnly are a statement of what the rule allows that
+// no table row above can turn red. This holds them, so that "its own device leaves" is decided by
+// the rule that says it and not by the order the rules happen to run in.
+func TestR7JudgesTheAddsAndRemovesOnItsOwnTerms(t *testing.T) {
+	rows := []struct {
+		name     string
+		scenario roleScenario
+		refused  bool
+	}{
+		{"a member's add of a stranger", roleScenario{
+			committer: "member", before: roleBaseline, after: leavesWith(roleLeaf{5, "stranger"}), added: []uint32{5},
+			rolesBefore: roleBaselineRoles}, true},
+		{"a member's add of a leaf claiming the admin", roleScenario{
+			committer: "member", before: roleBaseline, after: leavesWith(roleLeaf{5, "admin"}), added: []uint32{5},
+			rolesBefore: roleBaselineRoles}, true},
+		{"a member's remove of another member", roleScenario{
+			committer: "member", before: roleBaseline, after: leavesWith(roleLeaf{4, ""}), removed: []uint32{4},
+			rolesBefore: roleBaselineRoles}, true},
+		{"an observer's remove of the owner", roleScenario{
+			committer: "observer", before: roleBaseline, after: leavesWith(roleLeaf{0, ""}), removed: []uint32{0},
+			rolesBefore: roleBaselineRoles}, true},
+		{"a member's add of its own device", roleScenario{
+			committer: "member", before: roleBaseline, after: leavesWith(roleLeaf{5, "member"}), added: []uint32{5},
+			rolesBefore: roleBaselineRoles}, false},
+		{"a member's remove of its own device", roleScenario{
+			committer: "member", before: leavesWith(roleLeaf{5, "member"}), after: roleBaseline, removed: []uint32{5},
+			rolesBefore: roleBaselineRoles}, false},
+		{"an observer's add of one device and remove of another, in one commit", roleScenario{
+			committer: "observer", before: leavesWith(roleLeaf{5, "observer"}), after: leavesWith(roleLeaf{5, ""}, roleLeaf{6, "observer"}),
+			removed: []uint32{5}, added: []uint32{6}, rolesBefore: roleBaselineRoles}, false},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			decision := row.scenario.authorization(t)
+			committer, err := roleNamed(decision.CommitterRole)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = ruleOwnDevicesOnly(decision, committer, leavesOf(decision.Members), leavesOf(decision.MembersAfter))
+			if row.refused && !errors.Is(err, ErrCommitBeyondOwnDevices) {
+				t.Fatalf("R7 alone answered %v, want ErrCommitBeyondOwnDevices", err)
+			}
+			if !row.refused && err != nil {
+				t.Fatalf("R7 alone refused a member's own device change: %v", err)
+			}
+		})
 	}
 }
 

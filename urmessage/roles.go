@@ -31,6 +31,7 @@
 //	R0c  the post-commit policy names no identity without a leaf
 //	R5   an ownership transfer is the owner's, to a current member, and the old owner is ADMIN
 //	R4   admin-set changes need the OWNER; MEMBER/OBSERVER and policy-body changes need ADMIN
+//	R7   a MEMBER's or an OBSERVER's commit is its own device leaves and nothing else
 //	caps 500 identities, 1,000 leaves, 10 leaves per identity
 //
 // R0c RUNS AFTER THE REMOVAL RULES AND NOT WITH THE OTHER STRUCTURAL ONES, and the reason is what
@@ -40,6 +41,14 @@
 // name -- "a commit in which a non-owner removes an admin is invalid" -- would never be the
 // answer. So who may remove whom is decided first, and a policy left naming the departed is
 // refused after, for the commits that had the authority.
+//
+// R7 RUNS AFTER EVERY RULE THAT NAMES A PARTICULAR AUTHORITY, for the same reason turned around:
+// a MEMBER's Add of a stranger, Remove of the owner or promotion of itself is refused by R1, R3
+// and R5 with the sentence §11 wrote for it, and R7 judged first would answer each with the
+// general one. What R7 catches is the commit none of them names -- the bare epoch bump, the
+// Update of another leaf carried by reference, a policy rewrite that changes no role R4 can see --
+// and it checks the adds and removes again on its own terms, so that what it allows is stated in
+// one place and does not depend on which rules ran before it.
 package urmessage
 
 import (
@@ -82,6 +91,7 @@ func authorizeCommit(a *CommitAuthorization) error {
 		func() error { return ruleNoPhantomEntries(a, after) },
 		func() error { return ruleOwnerTransfer(a, committer, after) },
 		func() error { return ruleRoleChanges(a, committer) },
+		func() error { return ruleOwnDevicesOnly(a, committer, before, after) },
 		func() error { return ruleCaps(a) },
 	}
 	for _, rule := range rules {
@@ -438,6 +448,56 @@ func ruleRoleChanges(a *CommitAuthorization, committer mls.Role) error {
 	return nil
 }
 
+// ── R7: what a MEMBER or an OBSERVER may commit at all ───────────────────────────────────────
+
+// ruleOwnDevicesOnly is R7. §11's table gives "commit epochs" to ADMIN and OWNER and gives MEMBER
+// "send, read" and OBSERVER "read only"; the one commit either may make is §11's self-service one
+// -- "a member may add or remove their own device leaves and commit that change" -- and ruling 5
+// says it of the OBSERVER in so many words: "its own device add / remove and nothing else". So a
+// commit by either is exactly its own device leaves: every added leaf carries the committer's
+// identity, every removed leaf carried it, at least one leaf is added or removed, no other leaf
+// is updated, and the group context extension list is the one the group had, 0xF001 included.
+//
+// "NOTHING ELSE" IS WHY THE EMPTY COMMIT IS REFUSED. A bare commit changes no membership and
+// rotates the committer's own keys, and it is still a commit of an epoch, which the table does
+// not give a MEMBER; a member whose leaf keys need rotating is served by an admin's commit, as
+// every other member's Update is. And it is why an Update by reference is refused: the proposal is
+// its proposer's own key rotation, but the commit is the committer's (ruling 3), and committing
+// another leaf's Update is committing an epoch for the group.
+//
+// An ADMIN or the OWNER is not judged here; the rules before this one already said what each
+// may carry.
+func ruleOwnDevicesOnly(a *CommitAuthorization, committer mls.Role, before map[uint32][]byte, after map[uint32][]byte) error {
+	if isAdminOrOwner(committer) {
+		return nil
+	}
+	if len(a.UpdatedLeaves) != 0 {
+		return fmt.Errorf("%w: a %s committed an update of leaf %d, which is not its own device change",
+			ErrCommitBeyondOwnDevices, committer, a.UpdatedLeaves[0])
+	}
+	if !extensionsEqual(a.ExtensionsBefore, a.ExtensionsAfter) {
+		return fmt.Errorf("%w: a %s committed a group context extension list other than the one the group had",
+			ErrCommitBeyondOwnDevices, committer)
+	}
+	for _, leaf := range a.AddedLeaves {
+		if !bytes.Equal(after[leaf], a.CommitterIdentity) {
+			return fmt.Errorf("%w: a %s added leaf %d (%x), which is not its own device",
+				ErrCommitBeyondOwnDevices, committer, leaf, after[leaf])
+		}
+	}
+	for _, leaf := range a.RemovedLeaves {
+		if !bytes.Equal(before[leaf], a.CommitterIdentity) {
+			return fmt.Errorf("%w: a %s removed leaf %d (%x), which is not its own device",
+				ErrCommitBeyondOwnDevices, committer, leaf, before[leaf])
+		}
+	}
+	if len(a.AddedLeaves)+len(a.RemovedLeaves) == 0 {
+		return fmt.Errorf("%w: a %s committed an epoch that adds or removes none of its own devices",
+			ErrCommitBeyondOwnDevices, committer)
+	}
+	return nil
+}
+
 // ── the caps ─────────────────────────────────────────────────────────────────────────────────
 
 // ruleCaps is ruling 7 and §11's "An identity may hold at most ten device leaves, and a group at
@@ -518,4 +578,18 @@ func extensionsExceptPolicy(extensions []messagegroup.ExtensionBytes) []messageg
 		out = append(out, extension)
 	}
 	return out
+}
+
+// extensionsEqual is whether two extension lists are the same entries, in the same order, with
+// the same octets -- the whole list, 0xF001 included, where R0b reads everything but it.
+func extensionsEqual(before []messagegroup.ExtensionBytes, after []messagegroup.ExtensionBytes) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	for at := range before {
+		if before[at].Type != after[at].Type || !bytes.Equal(before[at].Data, after[at].Data) {
+			return false
+		}
+	}
+	return true
 }
