@@ -25,13 +25,15 @@
 //	R0b  every extension but 0xF001 is byte identical before and after
 //	R6a  an Add claiming an identity already in the group is that identity's own
 //	R6c  no leaf changes identity; the leaf sets agree with the declared adds and removes
+//	R6d  every leaf of the post-commit tree carries urmessage_leaf_keys (0xF002)
 //	R1   an Add of a new identity needs ADMIN or OWNER
 //	R2   a Remove of a MEMBER or OBSERVER, not one's own, needs ADMIN or OWNER
 //	R3   a Remove of an ADMIN or the OWNER, not one's own, needs the OWNER
 //	R0c  the post-commit policy names no identity without a leaf
-//	R5   an ownership transfer is the owner's, to a current member, and the old owner is ADMIN
-//	R4   admin-set changes need the OWNER; MEMBER/OBSERVER and policy-body changes need ADMIN
-//	R7   a MEMBER's or an OBSERVER's commit is its own device leaves and nothing else
+//	R5   an ownership transfer is the owner's, to a PRE-commit member, and the old owner is ADMIN
+//	R4   admin-set changes and the server id need the OWNER; MEMBER/OBSERVER, retention and
+//	     disappearing bucket changes need ADMIN
+//	R7   a MEMBER's or an OBSERVER's commit is its own device leaves, or nothing, and no more
 //	caps 500 identities, 1,000 leaves, 10 leaves per identity
 //
 // R0c RUNS AFTER THE REMOVAL RULES AND NOT WITH THE OTHER STRUCTURAL ONES, and the reason is what
@@ -45,10 +47,11 @@
 // R7 RUNS AFTER EVERY RULE THAT NAMES A PARTICULAR AUTHORITY, for the same reason turned around:
 // a MEMBER's Add of a stranger, Remove of the owner or promotion of itself is refused by R1, R3
 // and R5 with the sentence §11 wrote for it, and R7 judged first would answer each with the
-// general one. What R7 catches is the commit none of them names -- the bare epoch bump, the
-// Update of another leaf carried by reference, a policy rewrite that changes no role R4 can see --
-// and it checks the adds and removes again on its own terms, so that what it allows is stated in
-// one place and does not depend on which rules ran before it.
+// general one. What R7 catches is the commit none of them names -- the Update of another leaf
+// carried by reference, a policy rewrite that changes no role R4 can see -- and it checks the
+// adds and removes again on its own terms, so that what it allows is stated in one place and
+// does not depend on which rules ran before it. The bare commit is NOT among what it catches
+// since ruling 12: a path-only commit is the PCS self-heal and every role may make one.
 package urmessage
 
 import (
@@ -85,11 +88,12 @@ func authorizeCommit(a *CommitAuthorization) error {
 		func() error { return ruleOtherExtensionsUnchanged(a) },
 		func() error { return ruleClaimedIdentityIsOwn(a, before, after) },
 		func() error { return ruleIdentityContinuity(a, before, after) },
+		func() error { return ruleLeafKeysPresent(a) },
 		func() error { return ruleAddByAdmin(a, committer, before, after) },
 		func() error { return ruleRemoveByAdmin(a, committer, before) },
 		func() error { return ruleAdminRemovedByOwner(a, committer, before) },
 		func() error { return ruleNoPhantomEntries(a, after) },
-		func() error { return ruleOwnerTransfer(a, committer, after) },
+		func() error { return ruleOwnerTransfer(a, committer, before, after) },
 		func() error { return ruleRoleChanges(a, committer) },
 		func() error { return ruleOwnDevicesOnly(a, committer, before, after) },
 		func() error { return ruleCaps(a) },
@@ -269,6 +273,27 @@ func ruleIdentityContinuity(a *CommitAuthorization, before map[uint32][]byte, af
 	return nil
 }
 
+// ruleLeafKeysPresent is R6d, the hardening R1 carried into this pass (item 242): every leaf of
+// the tree the commit ENTERS carries a urmessage_leaf_keys extension (0xF002) this profile can
+// wrap to. Both send doors refuse a key package without one, mls's list rules require an added
+// leaf to LIST the type and never to carry one, and a hostile mls build walks neither door -- so
+// a keyless leaf admitted past them is a member every epoch wrap silently skips, whose first
+// symptom is MemberAt refusing that ordinal one commit later and whose second is that member
+// reading nothing. The fact is the seam's [messagegroup.ProcessedMember.HasLeafKeys], read off
+// the staged tree by the same call the send doors refuse with, and it is judged over EVERY leaf
+// rather than the added ones alone so that an Update or the committer's own path dropping the
+// extension is the same refusal. The pre-commit membership needs no twin: MemberAt already
+// refuses a keyless leaf, and a group that holds one cannot build its authorization at all.
+func ruleLeafKeysPresent(a *CommitAuthorization) error {
+	for _, member := range a.MembersAfter {
+		if !member.HasLeafKeys {
+			return fmt.Errorf("%w: leaf %d (%x) carries no urmessage_leaf_keys after the commit",
+				ErrCommitLeafWithoutKeys, member.Leaf, member.IdentityPub)
+		}
+	}
+	return nil
+}
+
 // ── R1, R2, R3: who may add and who may remove ──────────────────────────────────────────────
 
 // ruleAddByAdmin is R1. "An Add is an ADMIN's or the OWNER's to commit" (§11's table; ruling 1,
@@ -366,7 +391,14 @@ func removedMembers(a *CommitAuthorization, before map[uint32][]byte) []CommitMe
 // -- a group with no policy at all -- makes every commit that installs one a transfer by a
 // committer who is unnamed, and so refused; a group in that state is halted, which is the honest
 // outcome of having lost the value every later commit is judged against.
-func ruleOwnerTransfer(a *CommitAuthorization, committer mls.Role, after map[uint32][]byte) error {
+//
+// "A CURRENT MEMBER" IS THE PRE-COMMIT MEMBERSHIP (ruling 10, §11's literal reading): the new
+// owner held a leaf before the commit, so an owner may not add a stranger and crown it in the
+// same commit -- the first cut of this rule read the post-commit tree and allowed exactly that.
+// The new owner must still hold a leaf AFTER the commit, which R0c refuses as a phantom before
+// this rule is reached and which is held here as well, so that what this rule allows is stated
+// in one place.
+func ruleOwnerTransfer(a *CommitAuthorization, committer mls.Role, before map[uint32][]byte, after map[uint32][]byte) error {
 	ownerAfter, named := a.PolicyAfter.OwnerId()
 	if !named {
 		// unreachable past R0a, which validated exactly one owner
@@ -382,6 +414,10 @@ func ruleOwnerTransfer(a *CommitAuthorization, committer mls.Role, after map[uin
 	}
 	if committer != mls.RoleOwner {
 		return fmt.Errorf("%w: ownership moved to %x in a commit by a %s", ErrCommitOwnerTransfer, ownerAfter, committer)
+	}
+	if !identitySetOf(before)[string(ownerAfter)] {
+		return fmt.Errorf("%w: the new owner %x held no leaf before the commit, and ownership transfers only to a current member",
+			ErrCommitOwnerTransfer, ownerAfter)
 	}
 	present := identitySetOf(after)
 	if !present[string(ownerAfter)] {
@@ -399,11 +435,20 @@ func ruleOwnerTransfer(a *CommitAuthorization, committer mls.Role, after map[uin
 // ruleRoleChanges is R4, over every identity present after the commit. §11's table: the OWNER
 // holds "sole authority for ... admin-set changes", so any role to ADMIN and ADMIN to MEMBER or
 // OBSERVER need the owner; an ADMIN may "set MEMBER/OBSERVER" and change the "retention policy,
-// group metadata", so MEMBER to OBSERVER and back, and the retention pair, the disappearing
-// buckets and the server id, need an admin or the owner. A transition to or from OWNER is R5's
-// and is not judged twice here. An identity that left the group has no role after it and is
-// R0c's; an identity that arrived is unnamed before, so naming it ADMIN in the commit that adds
-// it is an admin-set change and the owner's.
+// group metadata", so MEMBER to OBSERVER and back, the retention pair and the disappearing
+// buckets (§12.2's EPH class, "admin-settable for groups") need an admin or the owner. A
+// transition to or from OWNER is R5's and is not judged twice here. An identity that left the
+// group has no role after it and is R0c's; an identity that arrived is unnamed before, so naming
+// it ADMIN in the commit that adds it is an admin-set change and the owner's.
+//
+// THE SERVER ID IS THE OWNER'S ALONE, and it is not "group metadata". MASTER §6 names it as the
+// message server the group lives on -- the one that stores its ciphertext and orders its records
+// -- and mls's own doc for the field says it is "a v2 field retained in v1, where it is always
+// the one server". A change to it is MASTER §2's "group migration between hosts", deferred to
+// V2+ with no code implementing it: it moves where the group EXISTS, which is the weight of an
+// ownership transfer and not of a retention number. No v1 client makes the change, so the
+// narrowest authority is the safe default, and a V2 design that wants an admin to migrate a
+// group widens it with a ruling rather than inherits it from a clause that never named it.
 //
 // The DM's joint policy -- either party may shorten and neither may lengthen alone -- is a later
 // step (plan R5) and is not here: a two-member group is judged by these rules until it lands.
@@ -437,12 +482,22 @@ func ruleRoleChanges(a *CommitAuthorization, committer mls.Role) error {
 				ErrCommitPolicyChangeByNonAdmin, member.IdentityPub, was, now, committer)
 		}
 	}
-	if a.PolicyBefore.RetentionPolicy != a.PolicyAfter.RetentionPolicy ||
-		!bytes.Equal(a.PolicyBefore.DisappearingBuckets, a.PolicyAfter.DisappearingBuckets) ||
-		!bytes.Equal(a.PolicyBefore.ServerId, a.PolicyAfter.ServerId) {
+	if a.PolicyBefore.RetentionPolicy != a.PolicyAfter.RetentionPolicy {
 		if !isAdminOrOwner(committer) {
-			return fmt.Errorf("%w: the retention, disappearing buckets or server id changed in a commit by a %s",
+			return fmt.Errorf("%w: the retention policy changed in a commit by a %s",
 				ErrCommitPolicyChangeByNonAdmin, committer)
+		}
+	}
+	if !bytes.Equal(a.PolicyBefore.DisappearingBuckets, a.PolicyAfter.DisappearingBuckets) {
+		if !isAdminOrOwner(committer) {
+			return fmt.Errorf("%w: the disappearing buckets changed in a commit by a %s",
+				ErrCommitPolicyChangeByNonAdmin, committer)
+		}
+	}
+	if !bytes.Equal(a.PolicyBefore.ServerId, a.PolicyAfter.ServerId) {
+		if committer != mls.RoleOwner {
+			return fmt.Errorf("%w: the server id moved from %x to %x in a commit by a %s",
+				ErrCommitServerIdChangeByNonOwner, a.PolicyBefore.ServerId, a.PolicyAfter.ServerId, committer)
 		}
 	}
 	return nil
@@ -451,19 +506,26 @@ func ruleRoleChanges(a *CommitAuthorization, committer mls.Role) error {
 // ── R7: what a MEMBER or an OBSERVER may commit at all ───────────────────────────────────────
 
 // ruleOwnDevicesOnly is R7. §11's table gives "commit epochs" to ADMIN and OWNER and gives MEMBER
-// "send, read" and OBSERVER "read only"; the one commit either may make is §11's self-service one
-// -- "a member may add or remove their own device leaves and commit that change" -- and ruling 5
-// says it of the OBSERVER in so many words: "its own device add / remove and nothing else". So a
-// commit by either is exactly its own device leaves: every added leaf carries the committer's
-// identity, every removed leaf carried it, at least one leaf is added or removed, no other leaf
-// is updated, and the group context extension list is the one the group had, 0xF001 included.
+// "send, read" and OBSERVER "read only"; the one membership commit either may make is §11's
+// self-service one -- "a member may add or remove their own device leaves and commit that
+// change" -- and ruling 5 says it of the OBSERVER in so many words: "its own device add / remove
+// and nothing else". So a commit by either carries its own device leaves and no more: every
+// added leaf carries the committer's identity, every removed leaf carried it, no other leaf is
+// updated, and the group context extension list is the one the group had, 0xF001 included.
 //
-// "NOTHING ELSE" IS WHY THE EMPTY COMMIT IS REFUSED. A bare commit changes no membership and
-// rotates the committer's own keys, and it is still a commit of an epoch, which the table does
-// not give a MEMBER; a member whose leaf keys need rotating is served by an admin's commit, as
-// every other member's Update is. And it is why an Update by reference is refused: the proposal is
-// its proposer's own key rotation, but the commit is the committer's (ruling 3), and committing
-// another leaf's Update is committing an epoch for the group.
+// THE PATH-ONLY COMMIT IS ALLOWED FOR EVERY ROLE, OBSERVER INCLUDED (ruling 12). RFC 9420 §12.4
+// forbids a committer carrying its own Update, so a member's ONLY way to refresh its own leaf
+// keys -- the PCS self-heal -- is a commit whose path does it: no proposals, an extension list
+// byte identical to the group's. "Commit epochs" in §11's table means commits that change
+// membership or policy, and a bare commit changes neither. The first build of this rule refused
+// it as "an epoch bump", and that reading left a compromised member's leaf unhealable by that
+// member. Halting-by-spam is not an argument against this: any garbage commit halts a group
+// already (item 242's cost paragraph), and the defence against that is not a rule here.
+//
+// AN UPDATE BY REFERENCE IS STILL REFUSED: the proposal is its proposer's own key rotation, but
+// the commit is the committer's (ruling 3), and committing another leaf's Update is committing
+// a change to a leaf that is not the committer's own. And any extension change is still refused,
+// a policy rewrite that changes no role R4 can see included.
 //
 // An ADMIN or the OWNER is not judged here; the rules before this one already said what each
 // may carry.
@@ -490,10 +552,6 @@ func ruleOwnDevicesOnly(a *CommitAuthorization, committer mls.Role, before map[u
 			return fmt.Errorf("%w: a %s removed leaf %d (%x), which is not its own device",
 				ErrCommitBeyondOwnDevices, committer, leaf, before[leaf])
 		}
-	}
-	if len(a.AddedLeaves)+len(a.RemovedLeaves) == 0 {
-		return fmt.Errorf("%w: a %s committed an epoch that adds or removes none of its own devices",
-			ErrCommitBeyondOwnDevices, committer)
 	}
 	return nil
 }

@@ -87,6 +87,11 @@ var (
 	// what the commit says it added and removed.
 	ErrCommitIdentityChanged = errors.New("urmessage: a leaf's identity changed across the commit, or the membership change is not the one the commit declares")
 
+	// R6d: a leaf of the post-commit tree carries no urmessage_leaf_keys extension (0xF002), so
+	// no epoch wrap could reach it. Both send doors refuse such a key package; this is the
+	// receiving side's twin of that refusal, over the seam's HasLeafKeys.
+	ErrCommitLeafWithoutKeys = errors.New("urmessage: a leaf of the post-commit tree carries no urmessage_leaf_keys, so no epoch wrap could reach it")
+
 	// R1: an Add of a NEW identity by a committer who is neither ADMIN nor OWNER (ruling 1).
 	ErrCommitAddByNonAdmin = errors.New("urmessage: only an admin or the owner may add a new identity to the group")
 
@@ -94,22 +99,29 @@ var (
 	// committer who is neither ADMIN nor OWNER.
 	ErrCommitRemoveByNonAdmin = errors.New("urmessage: only an admin or the owner may remove another member")
 
-	// R5: the owner changed and the committer is not the owner, the new owner holds no leaf, or
-	// the outgoing owner is still present and is not an ADMIN afterwards (ruling 4).
+	// R5: the owner changed and the committer is not the owner, the new owner held no leaf
+	// before the commit (ruling 10) or holds none after it, or the outgoing owner is still
+	// present and is not an ADMIN afterwards (ruling 4).
 	ErrCommitOwnerTransfer = errors.New("urmessage: ownership may only be transferred by the owner, to a current member, and the outgoing owner becomes an admin")
 
 	// R4: a change to the admin set -- any role to ADMIN, or ADMIN to MEMBER or OBSERVER -- by a
 	// committer who is not the owner.
 	ErrCommitRoleChangeByNonOwner = errors.New("urmessage: only the owner may change who is an admin")
 
-	// R4: a MEMBER to OBSERVER or OBSERVER to MEMBER change, or a retention, disappearing bucket
-	// or server id change, by a committer who is neither ADMIN nor OWNER.
+	// R4: a MEMBER to OBSERVER or OBSERVER to MEMBER change, or a retention or disappearing
+	// bucket change, by a committer who is neither ADMIN nor OWNER.
 	ErrCommitPolicyChangeByNonAdmin = errors.New("urmessage: only an admin or the owner may change a member's role or the group's policy")
 
-	// R7: a commit by a MEMBER or an OBSERVER that is not exactly its own device leaves -- an
-	// empty commit, an Update of another leaf carried by reference, a group context extension
-	// list other than the one the group had -- since §11's table gives "commit epochs" to ADMIN
-	// and OWNER and ruling 5 gives an OBSERVER "its own device add / remove and nothing else".
+	// R4: a change to the policy's server_id -- the message server the group lives on (MASTER
+	// §6), whose change is V2's group migration between hosts -- by a committer who is not the
+	// owner. Its own value rather than the admin-set one so a refusal names what moved.
+	ErrCommitServerIdChangeByNonOwner = errors.New("urmessage: only the owner may change the server the group lives on")
+
+	// R7: a commit by a MEMBER or an OBSERVER that carries more than its own device leaves -- an
+	// Update of another leaf carried by reference, a group context extension list other than the
+	// one the group had -- since §11's table gives "commit epochs" to ADMIN and OWNER and ruling 5
+	// gives an OBSERVER "its own device add / remove and nothing else". A bare, path-only commit
+	// is NOT this: ruling 12 makes it the PCS self-heal every role may make.
 	ErrCommitBeyondOwnDevices = errors.New("urmessage: a member or an observer may commit its own device leaves and nothing else")
 
 	// A role name on a [CommitAuthorization] that is not one of the four this profile defines.

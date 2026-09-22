@@ -3,16 +3,16 @@ package urmessage
 import (
 	"crypto/rand"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/urnetwork/connect/message"
 	"github.com/urnetwork/connect/messagegroup"
 	"github.com/urnetwork/connect/mls"
+	"github.com/urnetwork/connect/mls/syntax"
 	"github.com/urnetwork/connect/protocol"
 )
 
@@ -23,12 +23,14 @@ import (
 // receiver is a [Group] built the way newKindWalk builds one, driving [Group.openPageLocked] and
 // [Group.commitWalkLocked] over a page of records exactly as [Group.Receive] does below the fetch.
 // The HOSTILE committer is a real device too: it builds its commit through the seam's by-value
-// arms (CommitRemove, CommitPolicy, CommitContextExtensions, CommitAdd), merges it, and seals the
-// commit record through its session the way [Group.AddMemberAndPublish] seals one -- it has no
-// send-side check, which is R2, so nothing stops it from committing what its role does not permit.
-// What is NOT here is the server, which is the cp3b module's; the server accepts every commit
-// anyway, so what a refusal costs (the receiver stays at n, the server has moved on) is the same
-// with or without it.
+// arms (CommitRemove, CommitPolicy, CommitContextExtensions, CommitAdd), by reference through
+// Propose* and Commit(nil) where no by-value arm carries the shape, or -- for the one shape both
+// send doors refuse -- on the live *mls.Group behind its handle, as a hostile mls build would;
+// merges it; and seals the commit record through its session the way [Group.AddMemberAndPublish]
+// seals one -- it has no send-side check, which is R2, so nothing stops it from committing what
+// its role does not permit. What is NOT here is the server, which is the cp3b module's; the
+// server accepts every commit anyway, so what a refusal costs (the receiver stays at n, the
+// server has moved on) is the same with or without it.
 
 // roleMember is one member of the role world: its device, handle, session and receiving group.
 type roleMember struct {
@@ -574,15 +576,17 @@ func TestTheOwnerAddingItsOwnSecondDeviceIsAllowed(t *testing.T) {
 	}
 }
 
-// A MEMBER OR AN OBSERVER MAY COMMIT ITS OWN DEVICE LEAVES AND NOTHING ELSE (R7): §11's table
-// gives "commit epochs" to ADMIN and OWNER, and ruling 5 gives the OBSERVER "its own device add /
-// remove and nothing else". Three commits the seam builds and mls accepts, each refused by every
-// honest receiver, after the positive control -- a member's own second device, which the same
-// rule allows and every receiver ingests. The Update by reference is the one that carries no
-// membership change at all: the owner's own key rotation, committed by an observer, moves every
-// honest receiver an epoch under a committer whose role does not commit epochs.
+// A MEMBER OR AN OBSERVER MAY COMMIT ITS OWN DEVICE LEAVES, OR NOTHING, AND NO MORE (R7): §11's
+// table gives "commit epochs" to ADMIN and OWNER, and ruling 5 gives the OBSERVER "its own device
+// add / remove and nothing else" -- and ruling 12 makes the PATH-ONLY commit every role's, since
+// RFC 9420 §12.4 forbids a committer carrying its own Update and a bare commit is a member's only
+// way to refresh its own leaf keys. So two commits the seam builds are INGESTED by every honest
+// receiver, with every exporter agreeing at the new epoch: a member's own second device, and a
+// member's or an observer's Commit(nil), which carries no proposal and the group's own extension
+// list. And the Update by reference is still refused: the owner's own key rotation, committed by
+// an observer, is a change to a leaf that is not the committer's own.
 func TestAMemberOrAnObserverMayCommitOnlyItsOwnDeviceLeaves(t *testing.T) {
-	t.Run("a member's own second device is ingested and its bare commit is refused", func(t *testing.T) {
+	t.Run("a member's own second device and its bare commit are both ingested", func(t *testing.T) {
 		world := newRoleWorld(t, "owner", "bob", "carol")
 		owner, bob, carol := world.member("owner"), world.member("bob"), world.member("carol")
 
@@ -595,19 +599,21 @@ func TestAMemberOrAnObserverMayCommitOnlyItsOwnDeviceLeaves(t *testing.T) {
 			world.ingest(honest, bob, record)
 		}
 
-		// epoch 2 -> refused: the same member's commit that changes no device leaf
+		// epoch 2 -> 3: the same member's path-only commit, ruling 12. THE POSITIVE CONTROL that
+		// it is bare: the staged value at a receiver declares no add, remove or update.
 		record = world.commitAndPublish(bob, "Commit(nil)", func() ([]byte, []byte, []byte, error) {
 			return bob.handle.Commit(nil)
 		})
+		world.ingestBare(carol, bob, record)
+		world.ingest(owner, bob, record)
 		for _, honest := range []*roleMember{owner, carol} {
-			world.refuse(honest, record, ErrCommitBeyondOwnDevices)
-			if honest.group.Epoch() != 2 {
-				t.Errorf("%s is at epoch %d, want 2", honest.name, honest.group.Epoch())
+			if honest.group.Epoch() != 3 {
+				t.Errorf("%s is at epoch %d after the member's bare commit, want 3", honest.name, honest.group.Epoch())
 			}
 		}
 	})
 
-	t.Run("an observer's bare commit is refused", func(t *testing.T) {
+	t.Run("an observer's bare commit is ingested (ruling 12)", func(t *testing.T) {
 		world := newRoleWorld(t, "owner", "olive", "carol")
 		owner, olive, carol := world.member("owner"), world.member("olive"), world.member("carol")
 		world.demoteToObserver(owner, olive, carol)
@@ -615,8 +621,10 @@ func TestAMemberOrAnObserverMayCommitOnlyItsOwnDeviceLeaves(t *testing.T) {
 		record := world.commitAndPublish(olive, "Commit(nil)", func() ([]byte, []byte, []byte, error) {
 			return olive.handle.Commit(nil)
 		})
-		for _, honest := range []*roleMember{owner, carol} {
-			world.refuse(honest, record, ErrCommitBeyondOwnDevices)
+		world.ingestBare(carol, olive, record)
+		world.ingest(owner, olive, record)
+		if role, _ := world.policyOf(carol).RoleOf(olive.dev.identityPub); role != mls.RoleObserver {
+			t.Errorf("carol reads olive as %s after olive's bare commit, want observer: the commit changed a policy", role)
 		}
 	})
 
@@ -648,6 +656,38 @@ func TestAMemberOrAnObserverMayCommitOnlyItsOwnDeviceLeaves(t *testing.T) {
 			world.refuse(honest, record, ErrCommitBeyondOwnDevices)
 		}
 	})
+}
+
+// ingestBare is [roleWorld.ingest] with the positive control that the commit IS the path-only
+// one ruling 12 names: the receiver's configured authorizer sees a decision declaring no added,
+// removed or updated leaf, the same membership on both sides, and an extension list byte
+// identical before and after. Without it, a "bare" commit that quietly carried a cached
+// proposal would pass as the self-heal.
+func (self *roleWorld) ingestBare(receiver *roleMember, committer *roleMember, record *sealed) {
+	self.t.Helper()
+	var seen *CommitAuthorization
+	receiver.group.device.commitAuthorizer = func(decision *CommitAuthorization) error {
+		seen = decision
+		return nil
+	}
+	defer func() { receiver.group.device.commitAuthorizer = nil }()
+	self.ingest(receiver, committer, record)
+	if seen == nil {
+		self.t.Fatalf("%s's authorizer was never asked about %s's bare commit", receiver.name, committer.name)
+	}
+	if len(seen.AddedLeaves)+len(seen.RemovedLeaves)+len(seen.UpdatedLeaves) != 0 {
+		self.t.Fatalf("%s's bare commit declares added %v removed %v updated %v: it is not path-only",
+			committer.name, seen.AddedLeaves, seen.RemovedLeaves, seen.UpdatedLeaves)
+	}
+	if len(seen.Members) != len(seen.MembersAfter) {
+		self.t.Fatalf("%s's bare commit moves the membership from %d to %d leaves", committer.name, len(seen.Members), len(seen.MembersAfter))
+	}
+	if !extensionsEqual(seen.ExtensionsBefore, seen.ExtensionsAfter) {
+		self.t.Fatalf("%s's bare commit changes the group context extension list", committer.name)
+	}
+	if string(seen.CommitterIdentity) != string(committer.dev.identityPub) {
+		self.t.Fatalf("the bare commit's committer is %x, want %s's %x", seen.CommitterIdentity, committer.name, committer.dev.identityPub)
+	}
 }
 
 // demoteToObserver has the owner commit a policy making one member an OBSERVER, and every member
@@ -727,121 +767,394 @@ func TestAConfiguredAuthorizerComposesWithTheRulesAndCannotLoosenThem(t *testing
 	}
 }
 
-// THE INGEST PATH ERASES THE STAGED EPOCH ON EVERY EXIT, read off the source: a refused commit is
-// a fully derived second epoch that nothing else would erase, and the seam's door for it is
-// DiscardProcessed. The pin is that [Group.ingestCommitLocked] defers that call, so no return
-// between Process and ApplyCommit -- the refusal's included -- can leave it out.
-//
-// WHAT "DEFERS" HAS TO MEAN for the pin to track the property rather than the spelling. A defer
-// erases only the exits taken AFTER it is registered, so a DiscardProcessed defer that exists but
-// sits below the authorization check leaves every refused commit's staged epoch in the heap with
-// the defer still in the file. The first form of this pin asked only whether the defer existed and
-// stayed green under exactly that move (the connect erase gate scans ../messagegroup, not this
-// module, so nothing else would have seen it). This form reads positions instead: the staged
-// epoch is born at the Process call; the statement after it is Process's own error check, whose
-// returns stage nothing; between that check and the defer NO return may lie; the defer is a
-// top-level statement of the body rather than one nested under a condition; and it precedes both
-// named landmarks, the authorizeCommitLocked call and the ApplyCommit call, which are the exits
-// the property is about. Each landmark must be found -- a pin whose needle has been renamed passes
-// for nothing.
-func TestTheIngestPathDefersTheDiscardOfTheStagedEpoch(t *testing.T) {
-	fileSet := token.NewFileSet()
-	parsed, err := parser.ParseFile(fileSet, "group.go", nil, 0)
+// THE OWNER ADDING A STRANGER AND CROWNING IT IN ONE COMMIT IS REFUSED (R5, ruling 10): "a
+// current member" is the PRE-commit membership, so the new owner must have held a leaf before the
+// commit. No by-value arm of the seam carries an Add and a policy together, so the commit is built
+// by reference through the seam's own doors -- ProposeAdd, ProposeGroupPolicy, each processed at
+// every receiver as a proposal record would leave it, then Commit(nil) folding both in -- which is
+// exactly the fold ruling 13 keeps out of production and the receiving arm must still judge. The
+// refusal is R5's and not R0c's: dave holds a leaf after the commit, so the policy names no
+// phantom. THE CONTROL is the same transfer in two commits, both allowed: the owner adds dave,
+// dave joins, and the owner crowns dave in the next commit; every receiver reads dave as owner
+// and the old owner as admin afterwards.
+func TestTheOwnerAddingAStrangerAndCrowningItInOneCommitIsRefused(t *testing.T) {
+	world := newRoleWorld(t, "owner", "bob", "carol")
+	owner, bob, carol := world.member("owner"), world.member("bob"), world.member("carol")
+
+	dave := world.device("dave")
+	daveKeyPackage, err := dave.engine.NewKeyPackage()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var function *ast.FuncDecl
-	for _, declaration := range parsed.Decls {
-		if candidate, isFunction := declaration.(*ast.FuncDecl); isFunction && candidate.Name.Name == "ingestCommitLocked" {
-			function = candidate
-		}
+	crown := world.policyOf(owner)
+	crown.SetRole(dave.identityPub, mls.RoleOwner)
+	crown.SetRole(owner.dev.identityPub, mls.RoleAdmin)
+
+	// the one commit: the add and the transfer, by reference, cached at every member
+	addProposal, err := owner.handle.ProposeAdd(daveKeyPackage)
+	if err != nil {
+		t.Fatalf("the owner's ProposeAdd of dave: %v", err)
 	}
-	if function == nil {
-		t.Fatal("group.go declares no ingestCommitLocked")
+	crownProposal, err := owner.handle.ProposeGroupPolicy(world.policyBody(crown))
+	if err != nil {
+		t.Fatalf("the owner's ProposeGroupPolicy crowning dave: %v", err)
 	}
-	at := func(node ast.Node) string { return fileSet.Position(node.Pos()).String() }
-	// callsSelector answers whether node contains a call whose method selector is exactly name.
-	callsSelector := func(node ast.Node, name string) bool {
-		found := false
-		ast.Inspect(node, func(inner ast.Node) bool {
-			if call, isCall := inner.(*ast.CallExpr); isCall {
-				if selector, isSelector := call.Fun.(*ast.SelectorExpr); isSelector && selector.Sel.Name == name {
-					found = true
-				}
+	for _, receiver := range []*roleMember{bob, carol} {
+		for _, proposal := range [][]byte{addProposal, crownProposal} {
+			processed, err := receiver.handle.Process(proposal)
+			if err != nil {
+				t.Fatalf("%s processing the owner's proposal: %v", receiver.name, err)
 			}
-			return !found
-		})
-		return found
-	}
-	// the landmarks, each the FIRST top-level statement of the body that reaches it
-	body := function.Body.List
-	processIndex, deferIndex, authorizeIndex, applyIndex := -1, -1, -1, -1
-	for index, statement := range body {
-		if processIndex < 0 && callsSelector(statement, "Process") {
-			processIndex = index
-		}
-		if deferIndex < 0 {
-			if deferral, isDefer := statement.(*ast.DeferStmt); isDefer && callsSelector(deferral.Call, "DiscardProcessed") {
-				deferIndex = index
+			if processed.Kind != messagegroup.EngineProcessedProposal {
+				t.Fatalf("%s processed the owner's proposal as kind %d, want a proposal", receiver.name, processed.Kind)
 			}
 		}
-		if authorizeIndex < 0 && callsSelector(statement, "authorizeCommitLocked") {
-			authorizeIndex = index
+	}
+	record := world.commitAndPublish(owner, "Commit(nil) over the cached add and crowning", func() ([]byte, []byte, []byte, error) {
+		return owner.handle.Commit(nil)
+	})
+	for _, honest := range []*roleMember{bob, carol} {
+		err := world.refuse(honest, record, ErrCommitOwnerTransfer)
+		if errors.Is(err, ErrCommitPolicyPhantom) {
+			t.Errorf("%s's refusal is R0c's phantom and not R5's: %v", honest.name, err)
 		}
-		if applyIndex < 0 && callsSelector(statement, "ApplyCommit") {
-			applyIndex = index
+	}
+	if owner.group.Epoch() != 2 {
+		t.Fatalf("the owner is at epoch %d after its own merge, want 2", owner.group.Epoch())
+	}
+
+	// THE CONTROL, on a fresh world: the add and the transfer as two commits
+	world = newRoleWorld(t, "owner", "bob", "carol")
+	owner, bob, carol = world.member("owner"), world.member("bob"), world.member("carol")
+	dave = world.device("dave")
+	daveKeyPackage, err = dave.engine.NewKeyPackage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, welcome, ratchetTree, err := owner.handle.CommitAdd([][]byte{daveKeyPackage})
+	if err != nil {
+		t.Fatalf("the owner's CommitAdd of dave: %v", err)
+	}
+	if err := owner.handle.MergePendingCommit(); err != nil {
+		t.Fatalf("the owner's MergePendingCommit: %v", err)
+	}
+	record = world.publish(owner, commit)
+	for _, honest := range []*roleMember{bob, carol} {
+		world.ingest(honest, owner, record)
+	}
+	daveHandle, err := dave.engine.JoinFromWelcome(welcome, ratchetTree)
+	if err != nil {
+		t.Fatalf("dave's JoinFromWelcome: %v", err)
+	}
+	t.Cleanup(func() { daveHandle.Close() })
+	daveMember := world.enroll("dave", dave, daveHandle)
+
+	crown = world.policyOf(owner)
+	crown.SetRole(dave.identityPub, mls.RoleOwner)
+	crown.SetRole(owner.dev.identityPub, mls.RoleAdmin)
+	record = world.commitAndPublish(owner, "CommitPolicy crowning dave", func() ([]byte, []byte, []byte, error) {
+		return owner.handle.CommitPolicy(world.policyBody(crown))
+	})
+	for _, honest := range []*roleMember{bob, carol, daveMember} {
+		world.ingest(honest, owner, record)
+		policy := world.policyOf(honest)
+		if role, _ := policy.RoleOf(dave.identityPub); role != mls.RoleOwner {
+			t.Errorf("%s reads dave as %s after the transfer, want owner", honest.name, role)
+		}
+		if role, _ := policy.RoleOf(owner.dev.identityPub); role != mls.RoleAdmin {
+			t.Errorf("%s reads the old owner as %s after the transfer, want admin", honest.name, role)
 		}
 	}
-	if processIndex < 0 {
-		t.Fatal("ingestCommitLocked calls no Process: the staged epoch this pin follows is born nowhere")
+}
+
+// keylessKeyPackage is a key package that LISTS urmessage_leaf_keys among its capabilities, as
+// ValSem106 requires, and does not CARRY the extension: what a hostile mls build hands a group,
+// and what both of the seam's send doors refuse. It is connect/messagegroup's own
+// commitAddKeyPackageWithoutLeafKeys spelled from this module: mls.NewKeyPackageWithSigner over the
+// device's signer and credential, with the engine's capability list and no extensions.
+func keylessKeyPackage(t *testing.T, dev *crossProcessDevice) []byte {
+	t.Helper()
+	capabilities := mls.Capabilities{
+		Versions:     []mls.ProtocolVersion{mls.ProtocolVersionMls10},
+		CipherSuites: mls.Suites(),
+		Extensions: []mls.ExtensionType{
+			mls.ExtensionTypeUrmessageGroupPolicy,
+			mls.ExtensionTypeUrmessageLeafKeys,
+		},
+		Proposals:   []mls.ProposalType{},
+		Credentials: []mls.CredentialType{mls.CredentialTypeBasic},
 	}
-	if deferIndex < 0 {
-		// a nested defer is the second way to have the spelling without the property: it runs only
-		// on the exits below the condition it is under
-		ast.Inspect(function.Body, func(node ast.Node) bool {
-			if deferral, isDefer := node.(*ast.DeferStmt); isDefer && callsSelector(deferral.Call, "DiscardProcessed") {
-				t.Fatalf("ingestCommitLocked's DiscardProcessed defer at %s is nested under a condition, not a statement of the body: the exits outside it leave the staged epoch in the heap", at(deferral))
-			}
-			return true
-		})
-		t.Fatal("ingestCommitLocked defers no DiscardProcessed: a refused commit's staged epoch is left in the heap")
+	keyPackage, initPrivate, encryptPrivate, err := mls.NewKeyPackageWithSigner(dev.crypto, dev.crypto.Suite(),
+		dev.signer, mls.BasicCredential(dev.identityPub), capabilities, nil)
+	if err != nil {
+		t.Fatalf("a key package with no leaf keys: %v", err)
 	}
-	if deferIndex <= processIndex {
-		t.Fatalf("the DiscardProcessed defer at %s precedes the Process call at %s that stages the epoch it erases", at(body[deferIndex]), at(body[processIndex]))
+	defer keyPackage.Zeroize()
+	defer clear(initPrivate)
+	defer clear(encryptPrivate)
+	encoded, err := syntax.Marshal(keyPackage)
+	if err != nil {
+		t.Fatalf("encoding the keyless key package: %v", err)
 	}
-	// the statement after Process is its own error check -- `err != nil`, where nothing is staged
-	// -- and it is the only statement before the defer that may return
-	errorCheck, isIf := body[processIndex+1].(*ast.IfStmt)
-	if !isIf {
-		t.Fatalf("the statement after the Process call at %s is not its error check but %T at %s", at(body[processIndex]), body[processIndex+1], at(body[processIndex+1]))
+	return encoded
+}
+
+// liveGroupOf is the *mls.Group behind a handle of connect/messagegroup's adapter, reached through
+// the field that package keeps unexported, so that a case can build the one commit R6d exists for:
+// an Add of a key package with no urmessage_leaf_keys, which both of the seam's send doors refuse
+// and a hostile mls build would not. It is connect's own liveTreeOf technique one module out --
+// unsafe IN A TEST AND NOWHERE ELSE, the field found by name and checked by type, so a rename or
+// a retype in connect fails here with a sentence rather than reading past the end of the struct.
+func liveGroupOf(t *testing.T, handle messagegroup.GroupHandle) *mls.Group {
+	t.Helper()
+	value := reflect.ValueOf(handle)
+	if value.Kind() != reflect.Pointer || value.Type().String() != "*messagegroup.connectMlsHandle" {
+		t.Fatalf("the handle is a %s, not connect/messagegroup's adapter over a live *mls.Group", value.Type())
 	}
-	condition, isBinary := errorCheck.Cond.(*ast.BinaryExpr)
-	if !isBinary || condition.Op != token.NEQ {
-		t.Fatalf("the statement after the Process call at %s is an if, but not `err != nil`", at(errorCheck))
+	field, found := value.Type().Elem().FieldByName("group")
+	if !found {
+		t.Fatal("connect/messagegroup's adapter declares no field named group; the keyless fixture reaches the live *mls.Group through it, and this is the line to move")
 	}
-	if subject, isIdent := condition.X.(*ast.Ident); !isIdent || subject.Name != "err" {
-		t.Fatalf("the statement after the Process call at %s is an if, but not on `err`", at(errorCheck))
+	if field.Type != reflect.TypeOf((*mls.Group)(nil)) {
+		t.Fatalf("the adapter's group field is a %s, want *mls.Group; the keyless fixture is written over the wrong storage", field.Type)
 	}
-	for _, statement := range body[processIndex+2 : deferIndex] {
-		ast.Inspect(statement, func(node ast.Node) bool {
-			if exit, isReturn := node.(*ast.ReturnStmt); isReturn {
-				t.Errorf("a return at %s lies between the Process call at %s and the DiscardProcessed defer at %s: a commit that exits there leaves its staged epoch in the heap",
-					at(exit), at(body[processIndex]), at(body[deferIndex]))
-			}
-			return true
-		})
+	group := *(**mls.Group)(unsafe.Add(value.UnsafePointer(), field.Offset))
+	if group == nil {
+		t.Fatal("the adapter holds no live group")
 	}
-	// and the named landmarks, each found and each below the defer
-	for _, landmark := range []struct {
-		name  string
-		index int
-	}{{"authorizeCommitLocked", authorizeIndex}, {"ApplyCommit", applyIndex}} {
-		if landmark.index < 0 {
-			t.Fatalf("ingestCommitLocked calls no %s: the landmark this pin orders the defer against is gone", landmark.name)
+	return group
+}
+
+// A COMMIT ADMITTING A LEAF WITHOUT LEAF KEYS IS REFUSED BY EVERY HONEST RECEIVER (R6d): the
+// hardening R1 carried into this pass. Both send doors refuse the key package -- the control that
+// it is keyless for the reason this case names, and the reason the commit is built past them, on
+// the owner's live *mls.Group as a hostile build would build it. mls accepts it at Process (connect
+// pins that acceptance in TestTheStagedTreeAnswersWhetherEachLeafCarriesLeafKeysAndMlsAdmitsALeafWithout)
+// and the seam reports the leaf with HasLeafKeys == false, which is what the rule reads. The
+// committer is the OWNER, so no authority rule names this commit: the refusal is R6d's alone.
+func TestACommitAdmittingALeafWithoutLeafKeysIsRefusedByEveryHonestReceiver(t *testing.T) {
+	world := newRoleWorld(t, "owner", "bob", "carol")
+	owner, bob, carol := world.member("owner"), world.member("bob"), world.member("carol")
+
+	stranger := world.device("keyless")
+	encoded := keylessKeyPackage(t, stranger)
+	if _, _, _, err := owner.handle.CommitAdd([][]byte{encoded}); !errors.Is(err, messagegroup.ErrEngineCommitAddKeyPackage) {
+		t.Fatalf("CommitAdd over the keyless package answered %v, want ErrEngineCommitAddKeyPackage: the send door has stopped asking", err)
+	}
+	if _, err := owner.handle.ProposeAdd(encoded); !errors.Is(err, mls.ErrMalformedExtension) {
+		t.Fatalf("ProposeAdd over the keyless package answered %v, want mls.ErrMalformedExtension: the send door has stopped asking", err)
+	}
+	var keyless mls.KeyPackage
+	if err := syntax.Unmarshal(encoded, &keyless); err != nil {
+		t.Fatalf("decoding the keyless package: %v", err)
+	}
+	result, err := liveGroupOf(t, owner.handle).CreateCommit([][]byte{}, []mls.Proposal{{
+		ProposalType: mls.ProposalTypeAdd,
+		Add:          &mls.Add{KeyPackage: keyless},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("mls's CreateCommit over a by-value Add of the keyless package: %v; mls has grown a send-side leaf keys rule, and this case is the line to move", err)
+	}
+	if err := owner.handle.MergePendingCommit(); err != nil {
+		t.Fatalf("the owner's MergePendingCommit: %v", err)
+	}
+	record := world.publish(owner, result.Commit)
+
+	for _, honest := range []*roleMember{bob, carol} {
+		// the seam's own reading, which is what the rule was handed: one keyless leaf, the
+		// stranger's, and every other leaf keyed
+		var seen *CommitAuthorization
+		honest.group.device.commitAuthorizer = func(decision *CommitAuthorization) error {
+			seen = decision
+			return nil
 		}
-		if landmark.index < deferIndex {
-			t.Errorf("the %s call at %s precedes the DiscardProcessed defer at %s: a commit refused or failed there leaves its staged epoch in the heap",
-				landmark.name, at(body[landmark.index]), at(body[deferIndex]))
+		world.refuse(honest, record, ErrCommitLeafWithoutKeys)
+		if seen != nil {
+			t.Fatalf("%s's configured authorizer was asked about a commit the rules refused", honest.name)
 		}
+		if honest.group.Epoch() != 1 {
+			t.Errorf("%s is at epoch %d, want 1", honest.name, honest.group.Epoch())
+		}
+	}
+}
+
+// ── the staged epoch is erased through the seam, held at runtime ────────────────────────────
+
+// handleCall is one call the ingest path made on the seam that touches a staged value.
+type handleCall struct {
+	method    string
+	processed *messagegroup.EngineProcessed
+	answered  error
+}
+
+// countingHandle is the seam's own GroupHandle with the three doors a staged epoch passes through
+// counted: Process, where it is born; ApplyCommit, where it is installed; and DiscardProcessed,
+// where it is erased. Every other method is the real handle's. It can fail one ApplyCommit
+// without asking the real handle, and it can answer one DiscardProcessed with an injected error
+// AFTER the real erase ran, so the group underneath stays consistent with what the test observes.
+type countingHandle struct {
+	messagegroup.GroupHandle
+	calls       []handleCall
+	applyOnce   error
+	discardOnce error
+}
+
+func (self *countingHandle) Process(message []byte) (*messagegroup.EngineProcessed, error) {
+	processed, err := self.GroupHandle.Process(message)
+	self.calls = append(self.calls, handleCall{"Process", processed, err})
+	return processed, err
+}
+
+func (self *countingHandle) ApplyCommit(processed *messagegroup.EngineProcessed) error {
+	if self.applyOnce != nil {
+		err := self.applyOnce
+		self.applyOnce = nil
+		self.calls = append(self.calls, handleCall{"ApplyCommit", processed, err})
+		return err
+	}
+	err := self.GroupHandle.ApplyCommit(processed)
+	self.calls = append(self.calls, handleCall{"ApplyCommit", processed, err})
+	return err
+}
+
+func (self *countingHandle) DiscardProcessed(processed *messagegroup.EngineProcessed) error {
+	err := self.GroupHandle.DiscardProcessed(processed)
+	self.calls = append(self.calls, handleCall{"DiscardProcessed", processed, err})
+	if self.discardOnce != nil {
+		injected := self.discardOnce
+		self.discardOnce = nil
+		return injected
+	}
+	return err
+}
+
+// take answers the calls since the last take.
+func (self *countingHandle) take() []handleCall {
+	calls := self.calls
+	self.calls = nil
+	return calls
+}
+
+// expectCalls holds that one ingest made exactly these calls, in this order, every one over the
+// value Process answered.
+func expectCalls(t *testing.T, what string, calls []handleCall, methods ...string) {
+	t.Helper()
+	names := []string{}
+	for _, call := range calls {
+		names = append(names, call.method)
+	}
+	if len(calls) != len(methods) {
+		t.Fatalf("%s made the seam calls %v, want %v", what, names, methods)
+	}
+	for at, method := range methods {
+		if calls[at].method != method {
+			t.Fatalf("%s made the seam calls %v, want %v", what, names, methods)
+		}
+	}
+	for _, call := range calls[1:] {
+		if call.processed != calls[0].processed {
+			t.Fatalf("%s's %s was over a value other than the one its Process answered", what, call.method)
+		}
+	}
+}
+
+// THE INGEST PATH ERASES EVERY STAGED EPOCH IT DOES NOT INSTALL, THROUGH THE SEAM'S OWN DOOR, AND
+// SURFACES A FAILED ERASE -- held at RUNTIME, over real devices and the real ingest path, with the
+// seam's three doors counted. A processed commit is a fully derived second epoch that nothing
+// else would erase; the seam's door for it is DiscardProcessed, and the property is what the path
+// DOES with it on each of its exits, not where a defer sits in the source:
+//
+//   - a REFUSED commit sees exactly one DiscardProcessed after its Process, and no ApplyCommit;
+//   - an ALLOWED commit sees ApplyCommit and then a DiscardProcessed that finds nothing and answers
+//     nil (the seam releases the staged half on the install);
+//   - a DiscardProcessed error is SURFACED through Receive, not swallowed;
+//   - an ApplyCommit that FAILS sees the same erase, and the erase is real: the value it erased is
+//     no longer installable through the real handle.
+//
+// This replaced a source pin over ingestCommitLocked's statement positions. That pin passed a
+// mutant that put a return in the ELSE branch of the Process error check -- an exit after a
+// successful Process and before the defer, which the pin's position reading never inspected --
+// and every refused commit's staged epoch then stayed in the heap with the pin green. Here that
+// mutant is the first case going red: the refused commit's calls are [Process] and no erase.
+func TestEveryStagedEpochTheIngestPathDoesNotInstallIsErasedThroughTheSeam(t *testing.T) {
+	world := newRoleWorld(t, "owner", "mallory", "carol")
+	owner, mallory, carol := world.member("owner"), world.member("mallory"), world.member("carol")
+	counting := &countingHandle{GroupHandle: carol.handle}
+	carol.group.handle = counting
+
+	// (1) a refused commit: Process, then one erase of that value, and no install
+	record := world.commitAndPublish(mallory, "CommitRemove of the owner", func() ([]byte, []byte, []byte, error) {
+		return mallory.handle.CommitRemove([]uint32{owner.leaf})
+	})
+	world.refuse(carol, record, mls.ErrAdminRemovedByNonOwner)
+	calls := counting.take()
+	expectCalls(t, "the refused commit", calls, "Process", "DiscardProcessed")
+	if calls[1].answered != nil {
+		t.Errorf("erasing the refused commit's staged epoch answered %v", calls[1].answered)
+	}
+
+	// (2) an allowed commit: Process, the install, then the erase that finds nothing
+	promotion := world.policyOf(owner)
+	promotion.SetRole(carol.dev.identityPub, mls.RoleAdmin)
+	record = world.commitAndPublish(owner, "CommitPolicy promoting carol", func() ([]byte, []byte, []byte, error) {
+		return owner.handle.CommitPolicy(world.policyBody(promotion))
+	})
+	world.ingest(carol, owner, record)
+	calls = counting.take()
+	expectCalls(t, "the allowed commit", calls, "Process", "ApplyCommit", "DiscardProcessed")
+	if calls[1].answered != nil || calls[2].answered != nil {
+		t.Errorf("the allowed commit's install answered %v and its erase %v, want nil and nil", calls[1].answered, calls[2].answered)
+	}
+
+	// (3) an erase that fails is reported by the walk, beside the install that preceded it
+	failedErase := errors.New("the seam refused to erase")
+	counting.discardOnce = failedErase
+	retention := world.policyOf(owner)
+	retention.RetentionPolicy.DurableMs += 1
+	record = world.commitAndPublish(owner, "CommitPolicy changing retention", func() ([]byte, []byte, []byte, error) {
+		return owner.handle.CommitPolicy(world.policyBody(retention))
+	})
+	epoch := carol.group.Epoch()
+	err := world.deliver(carol, record)
+	if !errors.Is(err, failedErase) || !errors.Is(err, ErrCommitIngest) {
+		t.Fatalf("the walk over a commit whose erase failed answered %v, want ErrCommitIngest wrapping the erase's own error", err)
+	}
+	expectCalls(t, "the commit whose erase failed", counting.take(), "Process", "ApplyCommit", "DiscardProcessed")
+	if carol.group.Epoch() != epoch+1 || carol.handle.Epoch() != epoch+1 {
+		t.Errorf("carol is at epoch %d (handle %d) after the install that preceded the failed erase, want %d", carol.group.Epoch(), carol.handle.Epoch(), epoch+1)
+	}
+
+	// (4) an install that fails: the same erase, and a real one
+	failedInstall := errors.New("the seam refused to install")
+	counting.applyOnce = failedInstall
+	retention.RetentionPolicy.DurableMs += 1
+	record = world.commitAndPublish(owner, "CommitPolicy changing retention again", func() ([]byte, []byte, []byte, error) {
+		return owner.handle.CommitPolicy(world.policyBody(retention))
+	})
+	epoch = carol.group.Epoch()
+	before := carol.group.Stats()
+	err = world.deliver(carol, record)
+	if !errors.Is(err, failedInstall) || !errors.Is(err, ErrCommitIngest) || errors.Is(err, ErrCommitUnauthorized) {
+		t.Fatalf("the walk over a commit whose install failed answered %v, want ErrCommitIngest wrapping the install's own error and no refusal", err)
+	}
+	calls = counting.take()
+	expectCalls(t, "the commit whose install failed", calls, "Process", "ApplyCommit", "DiscardProcessed")
+	if calls[2].answered != nil {
+		t.Errorf("erasing the uninstalled commit's staged epoch answered %v", calls[2].answered)
+	}
+	if carol.group.Epoch() != epoch || carol.handle.Epoch() != epoch {
+		t.Errorf("carol moved to epoch %d (handle %d) over a commit that did not install, want %d", carol.group.Epoch(), carol.handle.Epoch(), epoch)
+	}
+	if after := carol.group.Stats(); after.CommitRefused != before.CommitRefused || after.Ingested != before.Ingested {
+		t.Errorf("an install failure was counted as a refusal or an ingest: refused %d -> %d, ingested %d -> %d",
+			before.CommitRefused, after.CommitRefused, before.Ingested, after.Ingested)
+	}
+	// THE ERASE WAS REAL: the real handle refuses to install the value the path discarded, and
+	// the group stays where it was
+	if err := carol.handle.ApplyCommit(calls[0].processed); err == nil {
+		t.Fatal("the staged epoch the ingest path discarded was still installable through the real handle: the erase did not happen")
+	}
+	if carol.handle.Epoch() != epoch {
+		t.Errorf("the real handle moved to epoch %d over an erased value", carol.handle.Epoch())
 	}
 }

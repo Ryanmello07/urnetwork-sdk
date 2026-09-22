@@ -2873,6 +2873,14 @@ type CommitMember struct {
 	// not name is "member" (MASTER §11, ruling 8). For [CommitAuthorization.Members] it is read off
 	// the PRE-commit policy; for [CommitAuthorization.MembersAfter] off the post-commit one.
 	Role string
+
+	// HasLeafKeys is whether this leaf carries a urmessage_leaf_keys extension (0xF002) an epoch
+	// wrap can reach. For [CommitAuthorization.MembersAfter] it is the seam's own reading off the
+	// staged tree ([messagegroup.ProcessedMember.HasLeafKeys]); for [CommitAuthorization.Members]
+	// it is always true, because the membership door that builds that side, MemberAt, refuses a
+	// keyless leaf outright rather than reporting it. R6d refuses a commit whose post-commit tree
+	// holds a leaf with false here.
+	HasLeafKeys bool
 }
 
 // CommitAuthorization is everything a receiving client's authorization decision is handed about one
@@ -3011,7 +3019,10 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 	// no-op that answers nil (the seam detaches the staged half on the install), which is what
 	// lets this be one deferred call rather than a discard on each of the exits. Its own error is
 	// surfaced only when nothing else is: a refusal is the sentence a caller needs, and the erase
-	// is what it costs.
+	// is what it costs. Held at RUNTIME, with the seam's three doors counted over real devices,
+	// by TestEveryStagedEpochTheIngestPathDoesNotInstallIsErasedThroughTheSeam -- a source pin
+	// over this function's statement positions stood here before it and passed a return placed
+	// in the else branch of the Process check above.
 	defer func() {
 		if discardErr := self.handle.DiscardProcessed(processed); discardErr != nil && err == nil {
 			err = fmt.Errorf("%w: erasing the staged epoch: %w", ErrCommitIngest, discardErr)
@@ -3111,7 +3122,7 @@ func (self *Group) commitAuthorizationLocked(processed *messagegroup.EngineProce
 	}
 	membersAfter := make([]CommitMember, 0, len(processed.MembersAfter))
 	for _, member := range processed.MembersAfter {
-		membersAfter = append(membersAfter, self.commitMemberLocked(member.Leaf, member.Identity, policyAfter))
+		membersAfter = append(membersAfter, self.commitMemberLocked(member.Leaf, member.Identity, member.HasLeafKeys, policyAfter))
 	}
 	return &CommitAuthorization{
 		GroupId:           append([]byte(nil), self.id...),
@@ -3141,24 +3152,27 @@ func (self *Group) commitAuthorizationLocked(processed *messagegroup.EngineProce
 func (self *Group) membershipLocked(policy *mls.GroupPolicyExtension) ([]CommitMember, error) {
 	members := make([]CommitMember, 0, self.handle.MemberCount())
 	for at := 0; at < self.handle.MemberCount(); at += 1 {
+		// MemberAt refuses a member whose leaf carries no urmessage_leaf_keys, so every member it
+		// answers has them: the pre-commit side reads true by the door it came through
 		leaf, identity, _, err := self.handle.MemberAt(at)
 		if err != nil {
 			return nil, fmt.Errorf("urmessage: the group's member %d: %w", at, err)
 		}
-		members = append(members, self.commitMemberLocked(leaf, identity, policy))
+		members = append(members, self.commitMemberLocked(leaf, identity, true, policy))
 	}
 	return members, nil
 }
 
 // commitMemberLocked is one [CommitMember]: the leaf, its derived sender_handle, a copy of its
-// identity, and the role the policy gives that identity.
-func (self *Group) commitMemberLocked(leaf uint32, identity []byte, policy *mls.GroupPolicyExtension) CommitMember {
+// identity, whether the leaf carries leaf keys, and the role the policy gives that identity.
+func (self *Group) commitMemberLocked(leaf uint32, identity []byte, hasLeafKeys bool, policy *mls.GroupPolicyExtension) CommitMember {
 	handle := messagegroup.SenderHandle(self.groupHandleKey, leaf)
 	return CommitMember{
 		Leaf:         leaf,
 		SenderHandle: append([]byte(nil), handle[:]...),
 		IdentityPub:  append([]byte(nil), identity...),
 		Role:         roleNameIn(policy, identity),
+		HasLeafKeys:  hasLeafKeys,
 	}
 }
 

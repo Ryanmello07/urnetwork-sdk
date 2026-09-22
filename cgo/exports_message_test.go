@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -622,5 +623,88 @@ func TestTheStatsJsonCarriesEveryCounterUrmessageKeeps(t *testing.T) {
 	}
 	if kept.NumField() != carried.NumField() {
 		t.Errorf("urmessage.Stats has %d counters and the json carries %d", kept.NumField(), carried.NumField())
+	}
+}
+
+// THE HEADER'S DOCUMENTED STATS KEY LIST IS THE JSON'S OWN, IN ITS ORDER.
+//
+// include/urnetwork_message.h documents urnet_message_group_stats's keys in the comment above its
+// declaration, and that list is what a C caller reads before it reads anything else; the case
+// above holds the json against urmessage.Stats and nothing held the header against the json. It
+// drifted: four counters (gap_out_of_window, opened_past_epoch, ingested, commit_refused) reached
+// the json with every test green and the header never named them. So the list is READ OFF THE
+// HEADER FILE -- the text after "as json:" up to its full stop, split on commas -- and held equal,
+// entry for entry and in order, to the keys the json actually carries: the marshalled
+// messageGroupStats, walked with a decoder so the keys are the output's and not a tag's.
+//
+// THE POSITIVE CONTROL is that the header's list is found and non-trivial: a header that lost
+// the "as json:" phrase, or whose list came back empty, fails here rather than passing on two
+// empty lists.
+//
+// WHAT WOULD GO RED: add a counter to messageGroupStats and not to the header's list, drop one
+// from the header, misspell one, or reorder the header against the struct.
+func TestTheHeaderDocumentsExactlyTheStatsJsonKeys(t *testing.T) {
+	header, err := os.ReadFile("include/urnetwork_message.h")
+	if err != nil {
+		t.Fatalf("reading the header: %v", err)
+	}
+	text := strings.ReplaceAll(string(header), "\r\n", "\n")
+	declaration := "char* urnet_message_group_stats("
+	at := strings.Index(text, declaration)
+	if at < 0 {
+		t.Fatalf("the header declares no %s", declaration)
+	}
+	comment := strings.LastIndex(text[:at], "/*")
+	if comment < 0 {
+		t.Fatal("the stats declaration has no comment block above it")
+	}
+	block := text[comment:at]
+	phrase := "as json:"
+	start := strings.Index(block, phrase)
+	if start < 0 {
+		t.Fatalf("the stats comment does not say %q; the documented key list is found by that phrase", phrase)
+	}
+	rest := block[start+len(phrase):]
+	end := strings.Index(rest, ".")
+	if end < 0 {
+		t.Fatal("the documented key list has no full stop ending it")
+	}
+	documented := []string{}
+	for _, entry := range strings.Split(rest[:end], ",") {
+		entry = strings.TrimSpace(entry)
+		entry = strings.TrimSpace(strings.TrimPrefix(entry, "*"))
+		if entry != "" {
+			documented = append(documented, entry)
+		}
+	}
+	if len(documented) < 2 {
+		t.Fatalf("the documented key list is %v; the positive control that the header carries a list is not met", documented)
+	}
+
+	encoded, err := json.Marshal(&messageGroupStats{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	carried := []string{}
+	if open, err := decoder.Token(); err != nil || open != json.Delim('{') {
+		t.Fatalf("the stats json does not open an object: %v %v", open, err)
+	}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, isString := key.(string)
+		if !isString {
+			t.Fatalf("a key of the stats json is %T, not a string", key)
+		}
+		carried = append(carried, name)
+		if _, err := decoder.Token(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !reflect.DeepEqual(documented, carried) {
+		t.Fatalf("the header documents the stats keys as\n  %v\nand the json carries\n  %v", documented, carried)
 	}
 }

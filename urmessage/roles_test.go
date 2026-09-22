@@ -48,22 +48,33 @@ type roleScenario struct {
 
 	retentionBefore mls.RetentionPolicy
 	retentionAfter  *mls.RetentionPolicy
+	bucketsBefore   []uint8
+	bucketsAfter    []uint8 // nil means unchanged
+	serverIdBefore  []byte
+	serverIdAfter   []byte // nil means unchanged
 
 	// the shapes only a hostile committer produces
 	policyAfterBody       []byte // replaces the encoded post-commit policy body
 	dropPolicyAfter       bool
 	dropCapabilitiesAfter bool
-	capabilitiesAfter     []byte // replaces the 0x0003 body
-	committerRole         string // overrides the derived role name
+	capabilitiesAfter     []byte   // replaces the 0x0003 body
+	committerRole         string   // overrides the derived role name
+	keylessAfter          []uint32 // leaves of the post-commit tree that carry no 0xF002
 }
 
 // roleCapabilities is a stand-in required_capabilities body: the rules compare octets and never
 // read it.
 var roleCapabilities = []byte{0x00, 0x02, 0x00, 0x03, 0x00}
 
-func rolePolicyOf(t *testing.T, roles map[string]mls.Role, retention mls.RetentionPolicy) *mls.GroupPolicyExtension {
+func rolePolicyOf(t *testing.T, roles map[string]mls.Role, retention mls.RetentionPolicy,
+	buckets []uint8, serverId []byte) *mls.GroupPolicyExtension {
+
 	t.Helper()
-	policy := &mls.GroupPolicyExtension{RetentionPolicy: retention}
+	policy := &mls.GroupPolicyExtension{
+		RetentionPolicy:     retention,
+		DisappearingBuckets: append([]uint8(nil), buckets...),
+		ServerId:            append([]byte(nil), serverId...),
+	}
 	for who, role := range roles {
 		policy.Roles = append(policy.Roles, mls.RoleEntry{MemberId: roleIdentity(who), Role: role})
 	}
@@ -85,7 +96,10 @@ func roleExtensionsOf(t *testing.T, policy *mls.GroupPolicyExtension, capabiliti
 	}
 }
 
-func roleMembersOf(leaves []roleLeaf, policy *mls.GroupPolicyExtension) []CommitMember {
+// roleMembersOf is one membership as the ingest path would hand it over: every leaf carries its
+// leaf keys, as MemberAt's refusal makes true of the pre-commit side, except the ones a scenario
+// names keyless, which is the post-commit reading a hostile Add produces.
+func roleMembersOf(leaves []roleLeaf, policy *mls.GroupPolicyExtension, keyless []uint32) []CommitMember {
 	out := []CommitMember{}
 	for _, one := range leaves {
 		identity := roleIdentity(one.who)
@@ -96,6 +110,7 @@ func roleMembersOf(leaves []roleLeaf, policy *mls.GroupPolicyExtension) []Commit
 			SenderHandle: handle,
 			IdentityPub:  identity,
 			Role:         roleNameIn(policy, identity),
+			HasLeafKeys:  !leafSetOf(keyless)[one.leaf],
 		})
 	}
 	return out
@@ -104,7 +119,7 @@ func roleMembersOf(leaves []roleLeaf, policy *mls.GroupPolicyExtension) []Commit
 // authorization builds the value the ingest path would hand [authorizeCommit] for this scenario.
 func (self roleScenario) authorization(t *testing.T) *CommitAuthorization {
 	t.Helper()
-	policyBefore := rolePolicyOf(t, self.rolesBefore, self.retentionBefore)
+	policyBefore := rolePolicyOf(t, self.rolesBefore, self.retentionBefore, self.bucketsBefore, self.serverIdBefore)
 	extensionsBefore := roleExtensionsOf(t, policyBefore, roleCapabilities)
 
 	rolesAfter := self.rolesAfter
@@ -115,11 +130,19 @@ func (self roleScenario) authorization(t *testing.T) *CommitAuthorization {
 	if self.retentionAfter != nil {
 		retentionAfter = *self.retentionAfter
 	}
+	bucketsAfter := self.bucketsBefore
+	if self.bucketsAfter != nil {
+		bucketsAfter = self.bucketsAfter
+	}
+	serverIdAfter := self.serverIdBefore
+	if self.serverIdAfter != nil {
+		serverIdAfter = self.serverIdAfter
+	}
 	capabilitiesAfter := roleCapabilities
 	if self.capabilitiesAfter != nil {
 		capabilitiesAfter = self.capabilitiesAfter
 	}
-	extensionsAfter := roleExtensionsOf(t, rolePolicyOf(t, rolesAfter, retentionAfter), capabilitiesAfter)
+	extensionsAfter := roleExtensionsOf(t, rolePolicyOf(t, rolesAfter, retentionAfter, bucketsAfter, serverIdAfter), capabilitiesAfter)
 	if self.policyAfterBody != nil {
 		extensionsAfter[1].Data = self.policyAfterBody
 	}
@@ -133,7 +156,7 @@ func (self roleScenario) authorization(t *testing.T) *CommitAuthorization {
 	// THE SAME DERIVATION THE INGEST PATH RUNS
 	decodedBefore, errBefore := mls.GroupPolicyOf(mlsExtensionsOf(extensionsBefore))
 	decodedAfter, errAfter := mls.GroupPolicyOf(mlsExtensionsOf(extensionsAfter))
-	members := roleMembersOf(self.before, decodedBefore)
+	members := roleMembersOf(self.before, decodedBefore, nil)
 	var committerLeaf uint32
 	var committerIdentity []byte
 	found := false
@@ -162,7 +185,7 @@ func (self roleScenario) authorization(t *testing.T) *CommitAuthorization {
 		RemovedLeaves:     self.removed,
 		UpdatedLeaves:     self.updated,
 		Members:           members,
-		MembersAfter:      roleMembersOf(self.after, decodedAfter),
+		MembersAfter:      roleMembersOf(self.after, decodedAfter, self.keylessAfter),
 		PolicyBefore:      decodedBefore,
 		PolicyAfter:       decodedAfter,
 		PolicyBeforeErr:   errBefore,
@@ -254,10 +277,14 @@ func TestEveryRuleOfTheRoleModelOverOneTable(t *testing.T) {
 		want     []error // every one must errors.Is; empty means allowed
 	}{
 		// ── allowed shapes, so a refusal below is a rule and not the builder ─────────────
-		{"an empty commit by the owner is allowed", roleScenario{
+		{"a path-only commit by the owner is allowed", roleScenario{
 			committer: "owner", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles}, nil},
-		{"an empty commit by an admin is allowed", roleScenario{
+		{"a path-only commit by an admin is allowed", roleScenario{
 			committer: "admin", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles}, nil},
+		{"a path-only commit by a member is allowed (ruling 12)", roleScenario{
+			committer: "member", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles}, nil},
+		{"a path-only commit by an observer is allowed (ruling 12)", roleScenario{
+			committer: "observer", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles}, nil},
 
 		// ── R0a: the policy after ────────────────────────────────────────────────────────
 		{"R0a a commit that drops 0xF001 is refused with mls's absence", roleScenario{
@@ -326,6 +353,23 @@ func TestEveryRuleOfTheRoleModelOverOneTable(t *testing.T) {
 		{"an update that keeps a leaf's identity, committed by an admin, is allowed", roleScenario{
 			committer: "admin", before: roleBaseline, after: roleBaseline, updated: []uint32{2},
 			rolesBefore: roleBaselineRoles}, nil},
+
+		// ── R6d: every post-commit leaf carries urmessage_leaf_keys ─────────────────────
+		{"R6d an admin adding a leaf without leaf keys is refused", roleScenario{
+			committer: "admin", before: roleBaseline, after: leavesWith(roleLeaf{5, "stranger"}), added: []uint32{5},
+			rolesBefore: roleBaselineRoles, keylessAfter: []uint32{5}}, []error{ErrCommitLeafWithoutKeys}},
+		{"R6d the owner adding a leaf without leaf keys is refused", roleScenario{
+			committer: "owner", before: roleBaseline, after: leavesWith(roleLeaf{5, "stranger"}), added: []uint32{5},
+			rolesBefore: roleBaselineRoles, keylessAfter: []uint32{5}}, []error{ErrCommitLeafWithoutKeys}},
+		{"R6d a member adding its own device without leaf keys is refused", roleScenario{
+			committer: "member", before: roleBaseline, after: leavesWith(roleLeaf{5, "member"}), added: []uint32{5},
+			rolesBefore: roleBaselineRoles, keylessAfter: []uint32{5}}, []error{ErrCommitLeafWithoutKeys}},
+		{"R6d an update that drops a leaf's leaf keys is refused", roleScenario{
+			committer: "admin", before: roleBaseline, after: roleBaseline, updated: []uint32{2},
+			rolesBefore: roleBaselineRoles, keylessAfter: []uint32{2}}, []error{ErrCommitLeafWithoutKeys}},
+		{"R6d the committer's own path dropping its leaf keys is refused", roleScenario{
+			committer: "owner", before: roleBaseline, after: roleBaseline,
+			rolesBefore: roleBaselineRoles, keylessAfter: []uint32{0}}, []error{ErrCommitLeafWithoutKeys}},
 
 		// ── R1: who may add ──────────────────────────────────────────────────────────────
 		{"R1 a member adding a new identity is refused (ruling 1)", roleScenario{
@@ -398,6 +442,15 @@ func TestEveryRuleOfTheRoleModelOverOneTable(t *testing.T) {
 		{"the owner handing over to a member and becoming an admin is allowed", roleScenario{
 			committer: "owner", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
 			rolesAfter: rolesWith(map[string]*mls.Role{"member": rolePtr(mls.RoleOwner), "owner": rolePtr(mls.RoleAdmin)})}, nil},
+		{"R5 the owner adding a stranger and crowning it in one commit is refused (ruling 10)", roleScenario{
+			committer: "owner", before: roleBaseline, after: leavesWith(roleLeaf{5, "stranger"}), added: []uint32{5},
+			rolesBefore: roleBaselineRoles,
+			rolesAfter:  rolesWith(map[string]*mls.Role{"stranger": rolePtr(mls.RoleOwner), "owner": rolePtr(mls.RoleAdmin)})},
+			[]error{ErrCommitOwnerTransfer}},
+		{"the owner crowning a member it added in an earlier commit is allowed (ruling 10's other arm)", roleScenario{
+			committer: "owner", before: leavesWith(roleLeaf{5, "stranger"}), after: leavesWith(roleLeaf{5, "stranger"}),
+			rolesBefore: roleBaselineRoles,
+			rolesAfter:  rolesWith(map[string]*mls.Role{"stranger": rolePtr(mls.RoleOwner), "owner": rolePtr(mls.RoleAdmin)})}, nil},
 		{"the owner handing over and dropping its other device in one commit is allowed (ruling 4)", roleScenario{
 			committer: "owner", before: leavesWith(roleLeaf{5, "owner"}), after: roleBaseline, removed: []uint32{5},
 			rolesBefore: roleBaselineRoles,
@@ -458,13 +511,39 @@ func TestEveryRuleOfTheRoleModelOverOneTable(t *testing.T) {
 		{"an admin changing retention is allowed", roleScenario{
 			committer: "admin", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
 			retentionAfter: longer}, nil},
+		{"R4 a member changing the disappearing buckets is refused", roleScenario{
+			committer: "member", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
+			bucketsBefore: []uint8{1, 2}, bucketsAfter: []uint8{1, 2, 3}}, []error{ErrCommitPolicyChangeByNonAdmin}},
+		{"R4 an observer changing the disappearing buckets is refused", roleScenario{
+			committer: "observer", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
+			bucketsBefore: []uint8{1, 2}, bucketsAfter: []uint8{1}}, []error{ErrCommitPolicyChangeByNonAdmin}},
+		{"an admin changing the disappearing buckets is allowed", roleScenario{
+			committer: "admin", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
+			bucketsBefore: []uint8{1, 2}, bucketsAfter: []uint8{1, 2, 3}}, nil},
+		{"the owner changing the disappearing buckets is allowed", roleScenario{
+			committer: "owner", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
+			bucketsBefore: []uint8{1, 2}, bucketsAfter: []uint8{3}}, nil},
+		{"R4 a member changing the server id is refused", roleScenario{
+			committer: "member", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
+			serverIdBefore: []byte("server-a"), serverIdAfter: []byte("server-b")}, []error{ErrCommitServerIdChangeByNonOwner}},
+		{"R4 an admin changing the server id is refused: a migration is the owner's", roleScenario{
+			committer: "admin", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
+			serverIdBefore: []byte("server-a"), serverIdAfter: []byte("server-b")}, []error{ErrCommitServerIdChangeByNonOwner}},
+		{"the owner changing the server id is allowed", roleScenario{
+			committer: "owner", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
+			serverIdBefore: []byte("server-a"), serverIdAfter: []byte("server-b")}, nil},
+		{"an admin's retention change that keeps the server id is allowed with a server id set", roleScenario{
+			committer: "admin", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
+			serverIdBefore: []byte("server-a"), retentionAfter: longer}, nil},
 
-		// ── R7: a member's or an observer's commit is its own device leaves and nothing else ──
-		{"R7 an empty commit by a member is refused", roleScenario{
-			committer: "member", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles},
+		// ── R7: a member's or an observer's commit is its own device leaves, or nothing, and no more ──
+		{"R7 a member's path-only commit that also rewrites the policy without changing a role is refused", roleScenario{
+			committer: "member", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
+			rolesAfter: rolesWith(map[string]*mls.Role{"member-2": rolePtr(mls.RoleMember)})},
 			[]error{ErrCommitBeyondOwnDevices}},
-		{"R7 an empty commit by an observer is refused (ruling 5)", roleScenario{
-			committer: "observer", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles},
+		{"R7 an observer's path-only commit that also rewrites the policy without changing a role is refused", roleScenario{
+			committer: "observer", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles,
+			rolesAfter: rolesWith(map[string]*mls.Role{"member-2": rolePtr(mls.RoleMember)})},
 			[]error{ErrCommitBeyondOwnDevices}},
 		{"R7 a member committing another member's update by reference is refused", roleScenario{
 			committer: "member", before: roleBaseline, after: roleBaseline, updated: []uint32{4},
@@ -558,6 +637,12 @@ func TestR7JudgesTheAddsAndRemovesOnItsOwnTerms(t *testing.T) {
 		{"an observer's add of one device and remove of another, in one commit", roleScenario{
 			committer: "observer", before: leavesWith(roleLeaf{5, "observer"}), after: leavesWith(roleLeaf{5, ""}, roleLeaf{6, "observer"}),
 			removed: []uint32{5}, added: []uint32{6}, rolesBefore: roleBaselineRoles}, false},
+		{"a member's path-only commit (ruling 12)", roleScenario{
+			committer: "member", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles}, false},
+		{"an observer's path-only commit (ruling 12)", roleScenario{
+			committer: "observer", before: roleBaseline, after: roleBaseline, rolesBefore: roleBaselineRoles}, false},
+		{"an observer's path-only commit carrying a foreign update by reference", roleScenario{
+			committer: "observer", before: roleBaseline, after: roleBaseline, updated: []uint32{2}, rolesBefore: roleBaselineRoles}, true},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
