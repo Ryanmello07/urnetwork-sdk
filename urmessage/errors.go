@@ -148,6 +148,23 @@ var (
 	// policy rather than a pointless request.
 	ErrAlreadyOwner = errors.New("urmessage: that identity already owns this group")
 
+	// A commit this device built and submitted LOST THE EPOCH RACE: the server answered
+	// REASON_COMMIT_LOST or REASON_EPOCH_STALE to it, which is MASTER §9.3's delivery service
+	// saying another commit closed this epoch first. Both reasons are answered only after
+	// write_auth verified (spec B §4.5), so neither is a nonce fact and S2-2's recovery is not
+	// spent on them.
+	//
+	// THE GROUP IS WHERE IT WAS. The staged epoch is erased through the seam's ClearPendingCommit,
+	// the handle, the session and [Group.Epoch] all still stand at the epoch the commit was built
+	// against, and [Group.Members] reads the policy that is live rather than the one that did not
+	// land. What the caller owes is §9.3's other half: [Group.Receive] to follow the winner into the
+	// next epoch, then the verb again, which re-derives against the winner. Before 2026-09-22 the
+	// commit was merged BEFORE it was submitted, and the loser was left at a private epoch nobody
+	// else entered -- unable to open the winner's commit or to seal a record the server would
+	// take -- until the app restarted. It wraps [ErrSubmitRefused] too, so a caller reading "did
+	// it land" sees the answer it always saw.
+	ErrCommitLost = errors.New("urmessage: another commit closed this epoch first, so this one was not built on the group's current state; Receive to follow the winner, then retry")
+
 	// The head this package writes, read back as something else.
 	ErrHeadFormat = errors.New("urmessage: this record's head is not one this build wrote")
 

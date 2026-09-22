@@ -307,7 +307,8 @@ func seamExtensionsOf(extensions []mls.Extension) []messagegroup.ExtensionBytes 
 // SetRole makes one identity an "admin", a "member" or an "observer" in one commit, and publishes
 // the epoch it opens: the live policy with that one entry set, canonicalized, committed by value
 // through the seam's CommitPolicy so that 0x0003 required_capabilities and every other entry
-// survive (item 242's P4), merged, and published down the road [Group.AddMemberAndPublish] walks.
+// survive (item 242's P4), and published down the road [Group.AddMemberAndPublish] walks -- merged
+// only once the server has taken it, so a lost epoch race answers [ErrCommitLost] and moves nothing.
 //
 // WHO MAY, is the predicate's to say and not this method's: §11's table gives the OWNER the admin
 // set and an ADMIN "set MEMBER/OBSERVER", so any role to admin or admin to anything is the
@@ -406,9 +407,13 @@ func policyBodyOf(policy *mls.GroupPolicyExtension) ([]byte, error) {
 }
 
 // commitPolicyAndPublishLocked is the one road both policy verbs take: the send-side decision
-// over the policy the commit would install, then the seam's by-value CommitPolicy, the local
-// merge, and [Group.publishCommitLocked]. The order is [Group.AddMemberAndPublish]'s: the decision
-// before the connection is consulted, the rebind before anything is sealed.
+// over the policy the commit would install, then the seam's by-value CommitPolicy, which STAGES
+// the commit, and [Group.publishCommitLocked], which submits it and merges it only on the server's
+// REASON_OK. The order is [Group.AddMemberAndPublish]'s: the decision before the connection is
+// consulted, the rebind before anything is sealed, and the merge after the server has answered --
+// so a policy commit that loses MASTER §9.3's race is answered [ErrCommitLost] with the group
+// exactly where it was, the live policy still the one every receiver holds, and the verb ready to
+// be asked again after [Group.Receive] has followed the winner.
 func (self *Group) commitPolicyAndPublishLocked(ctx context.Context, policy []byte) error {
 	if err := self.authorizeOutgoingLocked(&outgoingCommit{policy: policy}); err != nil {
 		return err
@@ -419,9 +424,6 @@ func (self *Group) commitPolicyAndPublishLocked(ctx context.Context, policy []by
 	commit, _, _, err := self.handle.CommitPolicy(policy)
 	if err != nil {
 		return fmt.Errorf("urmessage: CommitPolicy: %w", err)
-	}
-	if err := self.handle.MergePendingCommit(); err != nil {
-		return fmt.Errorf("urmessage: MergePendingCommit: %w", err)
 	}
 	return self.publishCommitLocked(ctx, commit)
 }

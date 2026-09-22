@@ -1117,16 +1117,19 @@ func (self *Group) Open(ctx context.Context) error {
 //
 // THE COMMIT RECORD IS SEALED AT THE OLD EPOCH AND ANNOUNCES THE NEW ONE, which is the one subtlety.
 // The server takes a commit iff its header names the current epoch and its attachment opens the
-// next, so [Group.session] -- still at the old epoch after [messagegroup.GroupHandle.MergePendingCommit]
-// moves the handle, for the reason [Group.AddMember]'s own comment gives -- seals the record, while a
-// session freshly built at the NEW epoch supplies the write and read keys the attachment carries.
-// That new session then becomes this group's, in the same block as A4's re-track and A3's persist.
+// next, so [Group.session] -- at the old epoch, which is where the handle still stands too, because
+// the commit is STAGED and not merged until the server has taken it -- seals the record, while the
+// write and read keys the attachment carries are derived off the staged epoch's exporter through
+// the seam's PendingExport. The merge, the session's advance, A4's re-track and A3's persist all
+// follow the server's REASON_OK, in [Group.publishCommitLocked]; a refusal erases the staged epoch
+// and leaves this group exactly where it was, and the race's two reasons come back as
+// [ErrCommitLost]. Until 2026-09-22 the merge came FIRST and a lost race forked this device.
 //
 // TWO WRITERS OF EPOCH STATE, IN ORDER. mls persists the new epoch's MLS state inside
-// MergePendingCommit; [Group.enterEpochLocked] persists this package's record after the whole
-// ceremony -- and nothing is a third writer. A restored group is refused ([ErrNotReconciled]) until
-// it has received once, because a committer that has not checked its own stream against the server
-// must not seal.
+// MergePendingCommit, after the server's answer; [Group.enterEpochLocked] persists this package's
+// record after the whole ceremony -- and nothing is a third writer. A restored group is refused
+// ([ErrNotReconciled]) until it has received once, because a committer that has not checked its
+// own stream against the server must not seal.
 //
 // AND IT IS REFUSED BEFORE IT IS BUILT WHEN THIS DEVICE'S ROLE DOES NOT PERMIT IT, which is the
 // committing arm of MASTER §11 (ledger item 242's R2, ruling 1): an Add of a new identity is an
@@ -1152,18 +1155,17 @@ func (self *Group) AddMemberAndPublish(ctx context.Context, keyPackage []byte) (
 		return nil, err
 	}
 
-	// (1) build the commit that admits the new member, BY VALUE, and merge it locally -- which is
-	// where mls persists the new epoch's state. The handle moves to the new epoch; self.session
-	// does NOT, and seals the commit record in publishCommitLocked at the epoch that is closing.
+	// (1) build the commit that admits the new member, BY VALUE. It is STAGED behind the seam and
+	// not merged: the handle and self.session both stay at the epoch that is closing, and the
+	// Welcome and the ratchet tree it answers are the joiner's whether or not the commit lands.
 	commit, welcome, ratchetTree, err := self.handle.CommitAdd([][]byte{keyPackage})
 	if err != nil {
 		return nil, fmt.Errorf("urmessage: CommitAdd: %w", err)
 	}
-	if err := self.handle.MergePendingCommit(); err != nil {
-		return nil, fmt.Errorf("urmessage: MergePendingCommit: %w", err)
-	}
 
-	// (2)-(5) announce, submit, enter and fan out the epoch the merge opened.
+	// (2)-(5) announce, submit, and -- once the server has taken it -- merge, enter and fan out
+	// the epoch the commit opens. A refusal erases the staged epoch and answers here with nothing
+	// moved; the key package is the joiner's and a retry after Receive may offer it again.
 	if err := self.publishCommitLocked(ctx, commit); err != nil {
 		return nil, err
 	}
@@ -1201,32 +1203,62 @@ func (self *Group) committableLocked() error {
 	return nil
 }
 
-// publishCommitLocked publishes the epoch a commit this device has ALREADY BUILT AND MERGED opens:
-// steps (2) to (5) of [Group.AddMemberAndPublish], which is where they stood until the role model's
-// committing arm (ledger item 242's R2) gave a policy commit the same road. THE HANDLE HAS MOVED AND
-// self.session HAS NOT when this is entered, for the reason [Group.AddMember] gives, and that is what
-// lets the commit record be sealed at the epoch that is closing while the attachment announces the
-// one the handle is at.
+// publishCommitLocked publishes the epoch a commit this device has BUILT AND STAGED opens: steps
+// (2) to (5) of [Group.AddMemberAndPublish], which is where they stood until the role model's
+// committing arm (ledger item 242's R2) gave a policy commit the same road. THE HANDLE HAS NOT
+// MOVED when this is entered -- the commit is staged behind the seam and nothing has been merged --
+// and it is this method that decides whether it ever does: the server's answer to the commit
+// record is what merges it or erases it.
+//
+// SUBMIT FIRST, MERGE SECOND, which is MASTER §9.3's order and the seam's own: the delivery service
+// accepts at most one commit per (group, epoch), a loser "re-derives against the winner and
+// retries", and [messagegroup.GroupHandle.Commit]'s contract stages rather than merges because "a
+// committer that merged optimistically would fork itself off the group". Until 2026-09-22 this
+// method was entered AFTER the merge all the same, because the record that announces an epoch
+// carries facts of that epoch and the live handle after the merge was the only door onto them.
+// Measured: an owner whose transfer lost the race to an admin's role change, within one fetch
+// interval, was left with a handle at a private n+1 while the group stood at n -- Receive refused
+// the winner's commit ("message does not decrypt"), Send was answered EPOCH_STALE, and Members()
+// showed the policy that never landed -- dead until the app restarted. The seam's
+// [messagegroup.GroupHandle.PendingEpoch] and [messagegroup.GroupHandle.PendingExport] are the
+// facts read off the STAGED value instead, so the announcement is built, sealed and submitted
+// with the group still at n, and the merge waits for REASON_OK.
+//
+// ON ANY OTHER ANSWER THE STAGED EPOCH IS ERASED AND THE GROUP STAYS WHERE IT WAS. A refusal is
+// spec B §6.2's "any rejection of a commit submission", whose first step is to discard the
+// provisional epoch, and the two reasons that name the race -- COMMIT_LOST and EPOCH_STALE, read by
+// [epochRaceRefusal] before S2-2's recovery is spent on them -- come back as [ErrCommitLost], which
+// tells the caller what it owes: Receive, then the verb again. A transport error is treated the
+// same way, and that is a choice with a cost, stated: the answer was lost, so this device cannot
+// know whether the server stored the record, and if it did, this device cannot follow its own
+// commit through Receive (a committer cannot open its own update path) -- the same dead end a
+// restart met under the old order. The other reading, merge on a guess, is the fork the old order
+// produced on every refusal; between a rare dead end and a routine fork, the routine one goes.
+// What closes the rare one is §6.3's idempotent resubmission of the SAME record under §6.2 step
+// 7's backoff, and neither is built.
 //
 // THERE IS NO WELCOME HERE AND NOTHING HERE WANTS ONE: a Welcome is the joiner's, handed over out of
 // band in an [Invite], and the server never sees it. A policy commit produces none and an Add
 // produces one, and the ceremony record -- the commit body under an epoch attachment, the wrap set,
-// the marker -- is the same three records either way. expected_wrap_count and the wrap fan-out are
-// computed off the handle AFTER the merge, exactly as the add computes them: for a policy commit
-// the membership is unchanged and the count is the count it was.
+// the marker -- is the same three records either way. expected_wrap_count is the STAGED tree's
+// member count, and the fan-out after the merge wraps to the live tree's members: they are one
+// tree, and the seam's own test holds the two readings equal across a merge.
 func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error {
-	newEpoch := self.handle.Epoch()
-
-	// (2) the NEW epoch's write and read keys, which the commit's attachment announces so the
-	// server can key the epoch it opens. They are derived STRAIGHT OFF the handle's new exporter --
-	// the same three steps installEpochOnLoop takes inside a session -- rather than off a second
-	// GroupSession, because a GroupSession's Close closes the handle it shares with this group, so
-	// a transient session over this handle could not be closed without breaking the one that stays.
-	// A [messagegroup.GroupSession.AdvanceEpoch] on this group's OWN session below is what actually
-	// moves it, with no second goroutine to leak. write_key and read_key travel to the server in
-	// the clear in the attachment, so nothing here is a new secret; the intermediates are erased.
-	newMlsSecret, err := self.handle.Export(storageExporterLabel, nil, storageExporterBytes)
+	// (2) the facts of the epoch the staged commit opens, off the staged value: the epoch, the
+	// member count the fan-out will wrap to, the group context the server keys the epoch under,
+	// and the NEW epoch's write and read keys, derived STRAIGHT OFF the staged exporter -- the
+	// same three steps installEpochOnLoop takes inside a session -- rather than off a second
+	// GroupSession, because a GroupSession's Close closes the handle it shares with this group.
+	// write_key and read_key travel to the server in the clear in the attachment, so nothing here
+	// is a new secret; the intermediates are erased.
+	pending, err := self.handle.PendingEpoch()
 	if err != nil {
+		return fmt.Errorf("urmessage: the epoch the staged commit opens: %w", err)
+	}
+	newEpoch := pending.Epoch
+	newMlsSecret, err := self.handle.PendingExport(storageExporterLabel, nil, storageExporterBytes)
+	if err != nil {
+		self.handle.ClearPendingCommit()
 		return fmt.Errorf("urmessage: the new epoch's exporter: %w", err)
 	}
 	newRoot := messagegroup.StorageRoot(newMlsSecret, self.pqSecret)
@@ -1234,14 +1266,11 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 	readKey := message.ReadKey(newRoot)
 	zeroizeState(newMlsSecret)
 	zeroizeState(newRoot)
-	groupContext, err := self.handle.GroupContextBytes()
-	if err != nil {
-		return fmt.Errorf("urmessage: the group context: %w", err)
-	}
-	contextHash := sha256.Sum256(groupContext)
-	memberCount := self.handle.MemberCount()
+	contextHash := sha256.Sum256(pending.GroupContext)
 
-	// (3) the commit record, sealed at the OLD epoch by self.session, announcing the new epoch.
+	// (3) the commit record, sealed at the OLD epoch by self.session -- which is the epoch the
+	// handle is still at -- announcing the new epoch. The server takes it iff its header names
+	// the current epoch and its attachment opens the next.
 	commitRecord, err := self.session.SealRecord(message.RetentionPermanent, 0, true,
 		encodeHead(self.device.nowMs()), commit, 0, &message.ServerAttachment{
 			Kind: message.AttachmentEpoch,
@@ -1251,22 +1280,33 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 				WriteKey:          writeKey,
 				ReadKey:           readKey,
 				GroupContextHash:  contextHash[:],
-				ExpectedWrapCount: uint32(memberCount),
+				ExpectedWrapCount: uint32(pending.MemberCount),
 			},
 		})
 	if err != nil {
+		self.handle.ClearPendingCommit()
 		return fmt.Errorf("urmessage: sealing the epoch commit: %w", err)
 	}
 	if _, err := self.submitLocked(ctx, self.session, commitRecord, "an epoch commit"); err != nil {
+		// THE STAGED EPOCH IS ERASED ON EVERY ANSWER BUT REASON_OK, through the seam's own door,
+		// and the group is exactly where it was: handle, session and epoch all at the epoch the
+		// commit was built against, nothing persisted, nothing announced. The error says which
+		// kind of answer it was -- ErrCommitLost for the race, the submit's own otherwise.
+		self.handle.ClearPendingCommit()
 		return err
 	}
 
-	// (4) the epoch is open on the server. Advance this group's OWN session onto it -- reusing the
-	// lifetime pq_secret (item 243), the same value AdvanceEpoch re-extracts the new root from --
-	// then carry the ladder bookkeeping across (A4) and persist through the one door (A3). Session
-	// and epoch move together, so a persist failure leaves the disk behind and never leaves the two
+	// (4) the epoch is open on the server, and ONLY NOW does this device enter it: the merge is
+	// where mls persists the new epoch's state, the first of the two writers of epoch state.
+	// Then advance this group's OWN session onto it -- reusing the lifetime pq_secret (item 243),
+	// the same value AdvanceEpoch re-extracts the new root from -- carry the ladder bookkeeping
+	// across (A4) and persist through the one door (A3), the second writer. Session and epoch
+	// move together, so a persist failure leaves the disk behind and never leaves the two
 	// disagreeing. AdvanceEpoch is the committer's install, as ApplyCommit's AdvanceEpoch is the
 	// receiver's; either way self.session is the one session, never a second one.
+	if err := self.handle.MergePendingCommit(); err != nil {
+		return fmt.Errorf("urmessage: the server accepted the commit that opens epoch %d and this device could not merge it: %w", newEpoch, err)
+	}
 	if err := self.session.AdvanceEpoch(self.pqSecret); err != nil {
 		return fmt.Errorf("urmessage: advancing the session to epoch %d: %w", newEpoch, err)
 	}
@@ -1780,6 +1820,9 @@ func (self *Group) sendSealedLocked(ctx context.Context, session *messagegroup.G
 	if refusal := self.cloneRefusalLocked(reason, record, what); refusal != nil {
 		return 0, refusal
 	}
+	if lost := epochRaceRefusal(reason, record, what); lost != nil {
+		return 0, lost
+	}
 
 	// S2-2: one Hello, one rebind, one re-MAC, one resubmission.
 	helloReason, hello, err := self.device.transport.Hello(ctx)
@@ -1809,6 +1852,9 @@ func (self *Group) sendSealedLocked(ctx context.Context, session *messagegroup.G
 	if refusal := self.cloneRefusalLocked(retryReason, record, what); refusal != nil {
 		return 0, refusal
 	}
+	if lost := epochRaceRefusal(retryReason, record, what); lost != nil {
+		return 0, lost
+	}
 	if retryReason != protocol.Reason_REASON_OK {
 		return 0, fmt.Errorf("%w: %s was answered %v, and %v again after a fresh Hello and a re-MAC",
 			ErrSubmitRefused, what, reason, retryReason)
@@ -1816,6 +1862,41 @@ func (self *Group) sendSealedLocked(ctx context.Context, session *messagegroup.G
 	self.stats.Submitted += 1
 	self.stats.Rebound += 1
 	return retryRecordId, nil
+}
+
+// epochRaceRefusal is the epoch race ON THE SEAL PATH, for a COMMIT record: REASON_COMMIT_LOST and
+// REASON_EPOCH_STALE, read as the finding they are rather than pasted into an error string.
+//
+// WHAT THE TWO REASONS MEAN, READ OUT OF THE SERVER'S SOURCE. The commit-aware epoch gate runs
+// under the group's row lock AFTER write_auth verified (spec B §4.5: both "are only ever returned
+// after a write_auth verified"): a commit whose epoch already has an accepted commit is answered
+// COMMIT_LOST, and a record whose epoch is not the current one is answered EPOCH_STALE (msgrepo
+// `store/memory.go` gate, `store/pgx.go` likewise). For a commit either one is the same sentence --
+// THE EPOCH THIS COMMIT CLOSES HAS ALREADY BEEN CLOSED BY SOMEBODY ELSE -- which is MASTER §9.3's
+// delivery service doing its one job, and the re-derivation §9.3 asks of the loser is
+// [Group.Receive] and the verb again.
+//
+// IT IS TAKEN BEFORE S2-2'S RECOVERY AND NOT AFTER, for [Group.cloneRefusalLocked]'s reason: the
+// recovery repairs a NONCE, and a reason answered only after write_auth verified is not a nonce
+// fact, so a Hello, a rebind and a re-MAC of the same record cannot change the answer -- measured,
+// before this arm, as "REASON_COMMIT_LOST, and REASON_COMMIT_LOST again after a fresh Hello and a
+// re-MAC" on every lost race. It is taken at both sites the clone check is, because a first
+// refusal that IS a nonce fact can be followed by a retry that meets the race.
+//
+// ONLY FOR A COMMIT. An application record answered EPOCH_STALE is a device that has not fetched
+// since the group moved, and what it owes is the same Receive -- but that record is a legal gap
+// and nothing of it is staged, so the plain [ErrSubmitRefused] it has always been answered stands.
+// [Group.publishCommitLocked] is the one caller that acts on this: it erases the staged epoch and
+// answers [ErrCommitLost], which wraps [ErrSubmitRefused] so the old reading still holds.
+func epochRaceRefusal(reason protocol.Reason, record *message.Record, what string) error {
+	if !record.Header.IsCommit {
+		return nil
+	}
+	if reason != protocol.Reason_REASON_COMMIT_LOST && reason != protocol.Reason_REASON_EPOCH_STALE {
+		return nil
+	}
+	return fmt.Errorf("%w: %w: %s at epoch %d was answered %v",
+		ErrCommitLost, ErrSubmitRefused, what, record.Header.Epoch, reason)
 }
 
 // cloneRefusalLocked is the clone check ON THE SEAL PATH: §4.5's REASON_STREAM_INDEX_REUSED, read
