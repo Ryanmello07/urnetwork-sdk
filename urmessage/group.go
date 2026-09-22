@@ -403,6 +403,18 @@ type Stats struct {
 	// Process as an ingest failure. One refusal moves this once.
 	CommitRefused uint64
 
+	// Commits THIS DEVICE was asked to make and REFUSED before building them: the committing
+	// arm of MASTER §11, ledger item 242's R2. [Group.AddMemberAndPublish], [Group.SetRole] and
+	// [Group.TransferOwnership] each judge the commit they are about to build against the same
+	// rules every receiver judges an ingested one by ([authorizeCommit]), over the value the
+	// commit WOULD produce, and a refusal here is a commit that was never built, never merged
+	// and never published -- so nothing moved: not this device's epoch, not the server's, not
+	// anybody else's. The counterpart of [Stats.CommitRefused] on the other arm; where that
+	// number is a halted group, this one is a request this device's role did not permit, answered
+	// at once and at no cost to the group. The call answers [ErrCommitUnauthorized] wrapping the
+	// rule, exactly as a receiver would.
+	CommitRefusedOwn uint64
+
 	// ATTEMPTS to open a record from a member of this group that did not open -- one per
 	// fetch, so a record retried [maxRecordAttempts] times moves this three times. It counts
 	// attempts and not records because that is what it can honestly count: the retry is what
@@ -1115,23 +1127,26 @@ func (self *Group) Open(ctx context.Context) error {
 // ceremony -- and nothing is a third writer. A restored group is refused ([ErrNotReconciled]) until
 // it has received once, because a committer that has not checked its own stream against the server
 // must not seal.
+//
+// AND IT IS REFUSED BEFORE IT IS BUILT WHEN THIS DEVICE'S ROLE DOES NOT PERMIT IT, which is the
+// committing arm of MASTER §11 (ledger item 242's R2, ruling 1): an Add of a new identity is an
+// ADMIN's or the OWNER's, and an identity's own second device is its own to add at any role. The
+// decision is [authorizeCommit] -- the one predicate every receiver judges the commit by -- over the
+// value the commit WOULD produce ([Group.authorizeOutgoingLocked]), so a MEMBER's add is answered
+// here with the receivers' own sentence, [ErrCommitUnauthorized] wrapping [ErrCommitAddByNonAdmin],
+// and nothing is built, merged or published. Before R2 the non-founder alone moved to n+1 and the
+// group halted for everyone else.
 func (self *Group) AddMemberAndPublish(ctx context.Context, keyPackage []byte) (*Invite, error) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
-	if self.closed {
-		return nil, fmt.Errorf("urmessage: this group is closed")
+	if err := self.committableLocked(); err != nil {
+		return nil, err
 	}
-	if !self.opened {
-		return nil, ErrGroupNotOpen
-	}
-	if self.session == nil {
-		return nil, ErrNoMemberAdded
-	}
-	if self.identityInUse != nil {
-		return nil, self.identityInUse
-	}
-	if !self.reconciled {
-		return nil, fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
+	// (0) THE SEND-SIDE AUTHORIZATION, before the connection is consulted and before anything is
+	// built: a refusal is a fact about this group and this device's role, and it costs no round
+	// trip and touches no session.
+	if err := self.authorizeOutgoingLocked(&outgoingCommit{addKeyPackages: [][]byte{keyPackage}}); err != nil {
+		return nil, err
 	}
 	if err := self.rebindLocked(); err != nil {
 		return nil, err
@@ -1139,7 +1154,7 @@ func (self *Group) AddMemberAndPublish(ctx context.Context, keyPackage []byte) (
 
 	// (1) build the commit that admits the new member, BY VALUE, and merge it locally -- which is
 	// where mls persists the new epoch's state. The handle moves to the new epoch; self.session
-	// does NOT, and seals the commit record below at the epoch that is closing.
+	// does NOT, and seals the commit record in publishCommitLocked at the epoch that is closing.
 	commit, welcome, ratchetTree, err := self.handle.CommitAdd([][]byte{keyPackage})
 	if err != nil {
 		return nil, fmt.Errorf("urmessage: CommitAdd: %w", err)
@@ -1147,6 +1162,59 @@ func (self *Group) AddMemberAndPublish(ctx context.Context, keyPackage []byte) (
 	if err := self.handle.MergePendingCommit(); err != nil {
 		return nil, fmt.Errorf("urmessage: MergePendingCommit: %w", err)
 	}
+
+	// (2)-(5) announce, submit, enter and fan out the epoch the merge opened.
+	if err := self.publishCommitLocked(ctx, commit); err != nil {
+		return nil, err
+	}
+
+	return &Invite{
+		GroupId:        append([]byte(nil), self.id...),
+		Welcome:        append([]byte(nil), welcome...),
+		RatchetTree:    append([]byte(nil), ratchetTree...),
+		PqSecret:       append([]byte(nil), self.pqSecret...),
+		GroupHandleKey: append([]byte(nil), self.groupHandleKey...),
+	}, nil
+}
+
+// committableLocked is every refusal a commit to an ALREADY-OPEN group owes before it looks at
+// what is being committed: the guard block [Group.AddMemberAndPublish] carried alone until
+// [Group.SetRole] and [Group.TransferOwnership] came to owe the same five, in the same order.
+// It is [Group.sendableLocked] with the open check ahead of the session check, because a group
+// that is not open answers ErrGroupNotOpen to a commit whatever else it lacks.
+func (self *Group) committableLocked() error {
+	if self.closed {
+		return fmt.Errorf("urmessage: this group is closed")
+	}
+	if !self.opened {
+		return ErrGroupNotOpen
+	}
+	if self.session == nil {
+		return ErrNoMemberAdded
+	}
+	if self.identityInUse != nil {
+		return self.identityInUse
+	}
+	if !self.reconciled {
+		return fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
+	}
+	return nil
+}
+
+// publishCommitLocked publishes the epoch a commit this device has ALREADY BUILT AND MERGED opens:
+// steps (2) to (5) of [Group.AddMemberAndPublish], which is where they stood until the role model's
+// committing arm (ledger item 242's R2) gave a policy commit the same road. THE HANDLE HAS MOVED AND
+// self.session HAS NOT when this is entered, for the reason [Group.AddMember] gives, and that is what
+// lets the commit record be sealed at the epoch that is closing while the attachment announces the
+// one the handle is at.
+//
+// THERE IS NO WELCOME HERE AND NOTHING HERE WANTS ONE: a Welcome is the joiner's, handed over out of
+// band in an [Invite], and the server never sees it. A policy commit produces none and an Add
+// produces one, and the ceremony record -- the commit body under an epoch attachment, the wrap set,
+// the marker -- is the same three records either way. expected_wrap_count and the wrap fan-out are
+// computed off the handle AFTER the merge, exactly as the add computes them: for a policy commit
+// the membership is unchanged and the count is the count it was.
+func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error {
 	newEpoch := self.handle.Epoch()
 
 	// (2) the NEW epoch's write and read keys, which the commit's attachment announces so the
@@ -1159,7 +1227,7 @@ func (self *Group) AddMemberAndPublish(ctx context.Context, keyPackage []byte) (
 	// the clear in the attachment, so nothing here is a new secret; the intermediates are erased.
 	newMlsSecret, err := self.handle.Export(storageExporterLabel, nil, storageExporterBytes)
 	if err != nil {
-		return nil, fmt.Errorf("urmessage: the new epoch's exporter: %w", err)
+		return fmt.Errorf("urmessage: the new epoch's exporter: %w", err)
 	}
 	newRoot := messagegroup.StorageRoot(newMlsSecret, self.pqSecret)
 	writeKey := message.WriteKey(newRoot)
@@ -1168,7 +1236,7 @@ func (self *Group) AddMemberAndPublish(ctx context.Context, keyPackage []byte) (
 	zeroizeState(newRoot)
 	groupContext, err := self.handle.GroupContextBytes()
 	if err != nil {
-		return nil, fmt.Errorf("urmessage: the group context: %w", err)
+		return fmt.Errorf("urmessage: the group context: %w", err)
 	}
 	contextHash := sha256.Sum256(groupContext)
 	memberCount := self.handle.MemberCount()
@@ -1187,10 +1255,10 @@ func (self *Group) AddMemberAndPublish(ctx context.Context, keyPackage []byte) (
 			},
 		})
 	if err != nil {
-		return nil, fmt.Errorf("urmessage: sealing the epoch commit: %w", err)
+		return fmt.Errorf("urmessage: sealing the epoch commit: %w", err)
 	}
 	if _, err := self.submitLocked(ctx, self.session, commitRecord, "an epoch commit"); err != nil {
-		return nil, err
+		return err
 	}
 
 	// (4) the epoch is open on the server. Advance this group's OWN session onto it -- reusing the
@@ -1200,33 +1268,23 @@ func (self *Group) AddMemberAndPublish(ctx context.Context, keyPackage []byte) (
 	// disagreeing. AdvanceEpoch is the committer's install, as ApplyCommit's AdvanceEpoch is the
 	// receiver's; either way self.session is the one session, never a second one.
 	if err := self.session.AdvanceEpoch(self.pqSecret); err != nil {
-		return nil, fmt.Errorf("urmessage: advancing the session to epoch %d: %w", newEpoch, err)
+		return fmt.Errorf("urmessage: advancing the session to epoch %d: %w", newEpoch, err)
 	}
 	self.commit = append([]byte(nil), commit...)
 	if err := self.crossEpochLadderLocked(newEpoch); err != nil {
-		return nil, err
+		return err
 	}
 	if err := self.enterEpochLocked(); err != nil {
-		return nil, err
+		return err
 	}
 
 	// (5) the wrap fan-out and the marker that makes the new epoch writable.
-	if err := self.publishEpochFanoutLocked(ctx); err != nil {
-		return nil, err
-	}
-
-	return &Invite{
-		GroupId:        append([]byte(nil), self.id...),
-		Welcome:        append([]byte(nil), welcome...),
-		RatchetTree:    append([]byte(nil), ratchetTree...),
-		PqSecret:       append([]byte(nil), self.pqSecret...),
-		GroupHandleKey: append([]byte(nil), self.groupHandleKey...),
-	}, nil
+	return self.publishEpochFanoutLocked(ctx)
 }
 
 // publishEpochFanoutLocked seals and submits §6.1 step (2)'s wrap set and the marker that closes
 // it, at this group's CURRENT epoch. It is the half of [Group.Open] that is not the founding
-// commit, and [Group.AddMemberAndPublish] runs it after the group has entered the new epoch.
+// commit, and [Group.publishCommitLocked] runs it after the group has entered the new epoch.
 func (self *Group) publishEpochFanoutLocked(ctx context.Context) error {
 	wrapTargets, err := self.wrapTargetsLocked()
 	if err != nil {

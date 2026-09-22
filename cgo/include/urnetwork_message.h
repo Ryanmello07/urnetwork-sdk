@@ -305,8 +305,8 @@ uint64_t urnet_message_group_epoch(uint64_t self);
 bool urnet_message_group_is_open(uint64_t self);
 /* what this group has SEEN, as json: fetched, opened, skipped_ceremony, skipped_own, opened_own,
  * own_without_copy, skipped_seen, unopened, omitted, skipped_class, gap_malformed, gap_unsupported,
- * gap_out_of_window, opened_past_epoch, ingested, commit_refused, failed_open, submitted, rebound,
- * pages, unattested.
+ * gap_out_of_window, opened_past_epoch, ingested, commit_refused, commit_refused_own, failed_open,
+ * submitted, rebound, pages, unattested.
  *
  * THE LIST ABOVE IS THE JSON'S OWN KEY LIST, IN ITS ORDER, and a go test in this directory reads it
  * off this file and holds it equal to the keys the json carries -- it went stale once, omitting
@@ -316,7 +316,10 @@ bool urnet_message_group_is_open(uint64_t self);
  * this device was a member then. ingested counts membership-change commits this device followed
  * into the next epoch; commit_refused counts the ones its receiving-side role check refused --
  * a number there is a member that committed what its role does not permit, and a group this
- * device can no longer write to until it is re-founded.
+ * device can no longer write to until it is re-founded. commit_refused_own counts the commits
+ * THIS device was asked to make and refused before building them, by the same rules: nothing
+ * moved for anybody, and the go verb that asked answered the refusal as its error (the exports
+ * over those verbs are a later step).
  *
  * gap_malformed AND gap_unsupported ARE THE TWO YOU WATCH FOR A RECORD THAT COULD NOT BE READ, and
  * they are counters rather than an error because a permanent post-open refusal no longer fails:

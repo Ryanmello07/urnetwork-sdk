@@ -21,16 +21,16 @@ import (
 //  1. THE MEMBERS WHO WERE THERE OPEN EVERYTHING; THE JOINER OPENS NOTHING FROM BEFORE. Alice, the
 //     committer, opens Bob's epoch-one lines she had not fetched when she added Carol; Bob, the
 //     follower, opens Alice's; Carol drains every pre-admission record as a gap and opens none. Then
-//     Alice commits again (adds Dave) with Bob's epoch-two lines unfetched, and opens them at epoch
-//     three -- two prior epochs opened live by the committer, and the follower's prior-epoch open
-//     is the restart below. THE COMMITTER IS ALICE BOTH TIMES because she is the OWNER: under
-//     MASTER §11 and ledger item 242's ruling 1 an Add is an ADMIN's or the OWNER's to commit, and
-//     Bob, an unnamed non-founder, is a MEMBER whose Add every honest receiver refuses
-//     (urmessage.ErrCommitAddByNonAdmin). A non-founder committer here waits for R2's promotion
-//     verb; the property under test -- the committer opens prior-epoch lines it had not fetched --
-//     does not need one. Restore `header.Epoch != self.epoch` in connect's openRecordOnLoop:
-//     Alice's assertions go red with ErrRecordOpen. Route a joiner's pre-admission records to the
-//     CURRENT handle when the prior epoch's state is missing: Carol's gap count goes red.
+//     Alice PROMOTES Bob to admin -- one policy commit through SetRole, ledger item 242's R2, since
+//     under MASTER §11 and ruling 1 an Add is an ADMIN's or the OWNER's to commit and Bob, an
+//     unnamed non-founder, is a MEMBER whose Add every honest receiver would refuse
+//     (urmessage.ErrCommitAddByNonAdmin) and whose own client now refuses to build -- and BOB
+//     commits (adds Dave) with Alice's epoch-three lines unfetched, and opens them at epoch four,
+//     so BOTH members that were there have exercised the prior-epoch open live, not only the
+//     founder. Restore `header.Epoch != self.epoch` in connect's openRecordOnLoop: Alice's and
+//     Bob's assertions go red with ErrRecordOpen. Route a joiner's pre-admission records to the
+//     CURRENT handle when the prior epoch's state is missing: Carol's gap count goes red. Remove
+//     the promotion: Bob's add is refused on the send side and the case stops there.
 //  2. THE RESTART, with the >1024 discriminator at a PRIOR epoch and the window edge, is the
 //     second case below.
 //  3. THE WINDOW, exactly, is the same case's last stage.
@@ -119,73 +119,98 @@ func TestHistorySurvivesAMembershipChangeForTheMembersWhoWereThereAndNotForTheJo
 		t.Errorf("carol's pre-admission records failed to open %d time(s); they must be gaps, not failures", carolStats.FailedOpen)
 	}
 
-	// ── epoch two: bob sends two lines; ALICE commits (adds dave) without fetching them ─────────
+	// ── epoch three: alice promotes bob to ADMIN, the role model's committing arm (R2) ──────────
 	//
-	// Alice is the committer again because she is the OWNER (ruling 1, see the header); the
-	// property is the same one the first commit exercised, one epoch further on, with the
-	// unfetched lines now sealed at epoch two rather than epoch one.
-	bobEpochTwo := hsLines("bob at epoch two", 2)
-	hsSendAll(t, ctx, "bob", bobGroup, bobEpochTwo)
-	daveGroup := hsAddAndJoin(t, ctx, aliceGroup, dave)
-	if aliceGroup.Epoch() != 3 || daveGroup.Epoch() != 3 {
-		t.Fatalf("after alice's add alice is at %d and dave at %d, want 3 and 3", aliceGroup.Epoch(), daveGroup.Epoch())
+	// One policy commit through the verb, with nothing unfetched at alice: what it exercises is
+	// that a promotion made through SetRole is ingested by every member and read back the same at
+	// every one, which is what lets bob be the next committer under ruling 1.
+	bobId := rolesIdentityOf(t, bobGroup)
+	if err := aliceGroup.SetRole(ctx, bobId, "admin"); err != nil {
+		t.Fatalf("alice's SetRole promoting bob: %v", err)
 	}
-	// ALICE, THE COMMITTER AGAIN, OPENS BOB'S EPOCH-TWO LINES AT EPOCH THREE: her second prior
-	// epoch opened live, under epoch two's schedule this time.
-	got, err = aliceGroup.Receive(ctx)
+	if aliceGroup.Epoch() != 3 {
+		t.Fatalf("alice is at epoch %d after the promotion commit, want 3", aliceGroup.Epoch())
+	}
+	for _, who := range []struct {
+		name  string
+		group *urmessage.Group
+	}{{"bob", bobGroup}, {"carol", carolGroup}} {
+		if _, err := who.group.Receive(ctx); err != nil {
+			t.Fatalf("%s's Receive that follows the promotion: %v", who.name, err)
+		}
+		if who.group.Epoch() != 3 {
+			t.Fatalf("%s is at epoch %d after ingesting the promotion, want 3", who.name, who.group.Epoch())
+		}
+	}
+	rolesAssertRoster(t, 3, map[string]*urmessage.Group{"alice": aliceGroup, "bob": bobGroup, "carol": carolGroup},
+		map[string][]byte{"alice": rolesIdentityOf(t, aliceGroup), "bob": bobId, "carol": rolesIdentityOf(t, carolGroup)},
+		map[string]string{"alice": "owner", "bob": "admin", "carol": "member"})
+	if role, err := bobGroup.MyRole(); err != nil || role != "admin" {
+		t.Fatalf("bob's MyRole after the promotion is %q, %v; want admin", role, err)
+	}
+
+	// ── epoch three: alice sends two lines; BOB, now an admin, commits (adds dave) without fetching them ──
+	aliceEpochThree := hsLines("alice at epoch three", 2)
+	hsSendAll(t, ctx, "alice", aliceGroup, aliceEpochThree)
+	daveGroup := hsAddAndJoin(t, ctx, bobGroup, dave)
+	if bobGroup.Epoch() != 4 || daveGroup.Epoch() != 4 {
+		t.Fatalf("after bob's add bob is at %d and dave at %d, want 4 and 4", bobGroup.Epoch(), daveGroup.Epoch())
+	}
+	// BOB, NOW THE COMMITTER, OPENS ALICE'S EPOCH-THREE LINES AT EPOCH FOUR: the non-founder's
+	// prior-epoch open, live, under epoch three's schedule.
+	got, err = bobGroup.Receive(ctx)
 	if err != nil {
-		t.Fatalf("alice's Receive at epoch three: %v", err)
+		t.Fatalf("bob's Receive at epoch four: %v", err)
 	}
-	hsAssertOpened(t, "alice at epoch three", got, bobEpochTwo)
-	aliceStats = aliceGroup.Stats()
-	if aliceStats.GapOutOfWindow != 0 {
-		t.Errorf("alice has %d out_of_window gap(s) after her second commit", aliceStats.GapOutOfWindow)
-	}
-	if aliceStats.OpenedPastEpoch != 5 {
-		t.Errorf("alice opened %d record(s) under prior epochs' schedules, want 5 (bob's three at epoch one and two at epoch two)", aliceStats.OpenedPastEpoch)
-	}
-	// bob and carol follow alice's commit; neither gap count moves, because the lines they meet
-	// now are from an epoch they were in.
-	if _, err := bobGroup.Receive(ctx); err != nil {
-		t.Fatalf("bob's Receive that follows alice's second commit: %v", err)
-	}
-	if bobGroup.Epoch() != 3 {
-		t.Fatalf("bob is at epoch %d after ingesting the second commit, want 3", bobGroup.Epoch())
-	}
+	hsAssertOpened(t, "bob at epoch four", got, aliceEpochThree)
 	bobStats := bobGroup.Stats()
 	if bobStats.GapOutOfWindow != 0 {
-		t.Errorf("bob has %d out_of_window gap(s) after following the second commit", bobStats.GapOutOfWindow)
+		t.Errorf("bob has %d out_of_window gap(s) after his own commit", bobStats.GapOutOfWindow)
+	}
+	if bobStats.OpenedPastEpoch != 2 {
+		t.Errorf("bob opened %d record(s) under a prior epoch's schedule, want 2 (alice's epoch-three lines)", bobStats.OpenedPastEpoch)
+	}
+	// alice and carol follow bob's commit; carol's gap count does NOT move, because the lines she
+	// meets now are from an epoch she was in.
+	if _, err := aliceGroup.Receive(ctx); err != nil {
+		t.Fatalf("alice's Receive that follows bob's commit: %v", err)
+	}
+	if aliceGroup.Epoch() != 4 {
+		t.Fatalf("alice is at epoch %d after ingesting bob's commit, want 4", aliceGroup.Epoch())
+	}
+	aliceStats = aliceGroup.Stats()
+	if aliceStats.GapOutOfWindow != 0 {
+		t.Errorf("alice has %d out_of_window gap(s) after following bob's commit", aliceStats.GapOutOfWindow)
 	}
 	got, err = carolGroup.Receive(ctx)
 	if err != nil {
-		t.Fatalf("carol's Receive that follows alice's second commit: %v", err)
+		t.Fatalf("carol's Receive that follows bob's commit: %v", err)
 	}
-	hsAssertOpened(t, "carol at epoch two", got, bobEpochTwo)
+	hsAssertOpened(t, "carol at epoch three", got, aliceEpochThree)
 	if gaps := carolGroup.Stats().GapOutOfWindow; gaps != preAdmission {
 		t.Errorf("carol's gap count moved from %d to %d over records from an epoch she was in", preAdmission, gaps)
 	}
-	// dave, admitted at epoch three, drains all eight earlier lines as gaps.
+	// dave, admitted at epoch four, drains all eight earlier lines as gaps.
 	if _, err := daveGroup.Receive(ctx); err != nil {
 		t.Fatalf("dave's draining Receive: %v", err)
 	}
 	if gaps, opened := daveGroup.Stats().GapOutOfWindow, daveGroup.Stats().Opened; gaps != 8 || opened != 0 {
-		t.Errorf("dave, admitted at epoch three, has %d gap(s) and opened %d, want 8 and 0", gaps, opened)
+		t.Errorf("dave, admitted at epoch four, has %d gap(s) and opened %d, want 8 and 0", gaps, opened)
 	}
 	for _, who := range []struct {
 		name  string
 		group *urmessage.Group
 	}{{"alice", aliceGroup}, {"bob", bobGroup}, {"carol", carolGroup}, {"dave", daveGroup}} {
-		assertNothingFailedToOpen(t, who.name+" at epoch three", who.group)
+		assertNothingFailedToOpen(t, who.name+" at epoch four", who.group)
 	}
 
-	// ── the plain restart: bob re-walks his whole history at epoch three and opens all of it ────
+	// ── the plain restart: bob re-walks his whole history at epoch four and opens all of it ─────
 	//
-	// Every line he ever read comes back: alice's epoch-one lines under epoch one's schedule, his
-	// own five from his copies. Zero gaps. This is the FOLLOWER's prior-epoch open: bob's live walk
-	// met every line at the epoch it was sealed in and never needed a prior epoch's schedule, and
-	// the restart is the first time he does. The head persistence is not what makes THIS restart
-	// pass -- every epoch is inside the window and every record re-opens from the first, so the
-	// ladders walk from zero -- and the case that needs it is the next test.
+	// Every line he ever read comes back: alice's epoch-one lines under epoch one's schedule,
+	// alice's epoch-three lines under epoch three's, his own three from his copies. Zero gaps. The
+	// head persistence is not what makes THIS restart pass -- every epoch is inside the window and
+	// every record re-opens from the first, so the ladders walk from zero -- and the case that
+	// needs it is the next test.
 	bob = world.restart(t, bob)
 	if err := bob.device.Connect(ctx); err != nil {
 		t.Fatalf("the restarted bob's Connect: %v", err)
@@ -202,17 +227,17 @@ func TestHistorySurvivesAMembershipChangeForTheMembersWhoWereThereAndNotForTheJo
 	if err != nil {
 		t.Fatalf("the restarted bob's Receive: %v", err)
 	}
-	hsAssertOpened(t, "the restarted bob", got, aliceEpochOne)
-	hsAssertOpened(t, "the restarted bob, from his copies", got, append(append([]string{}, bobEpochOne...), bobEpochTwo...))
+	hsAssertOpened(t, "the restarted bob", got, append(append([]string{}, aliceEpochOne...), aliceEpochThree...))
+	hsAssertOpened(t, "the restarted bob, from his copies", got, bobEpochOne)
 	restoredStats := bobRestored.Stats()
 	if restoredStats.GapOutOfWindow != 0 {
 		t.Errorf("the restarted bob has %d out_of_window gap(s); the milestone counted 2 here and item 241 makes it 0", restoredStats.GapOutOfWindow)
 	}
-	if restoredStats.OpenedPastEpoch != 3 {
-		t.Errorf("the restarted bob opened %d record(s) under a prior epoch's schedule, want 3 (alice's three at epoch one; his own five are his copies)", restoredStats.OpenedPastEpoch)
+	if restoredStats.OpenedPastEpoch != 5 {
+		t.Errorf("the restarted bob opened %d record(s) under prior epochs' schedules, want 5 (alice's three at epoch one and two at epoch three)", restoredStats.OpenedPastEpoch)
 	}
 	assertNothingFailedToOpen(t, "the restarted bob", bobRestored)
-	t.Logf("A7: alice, the committer, opened %d record(s) under prior epochs live and bob, the follower, %d; the restarted bob %d; carol's and dave's pre-admission gaps stayed at %d and %d",
+	t.Logf("A7: alice opened %d and bob %d record(s) under prior epochs live, the restarted bob %d; carol's and dave's pre-admission gaps stayed at %d and %d",
 		aliceStats.OpenedPastEpoch, bobStats.OpenedPastEpoch, restoredStats.OpenedPastEpoch,
 		carolGroup.Stats().GapOutOfWindow, daveGroup.Stats().GapOutOfWindow)
 }

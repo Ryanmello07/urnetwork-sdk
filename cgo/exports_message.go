@@ -1005,27 +1005,28 @@ func urnet_message_group_stats(self C.uint64_t) *C.char {
 	}
 	stats := self_.Stats()
 	return cJson(&messageGroupStats{
-		Fetched:         stats.Fetched,
-		Opened:          stats.Opened,
-		SkippedCeremony: stats.SkippedCeremony,
-		SkippedOwn:      stats.SkippedOwn,
-		OpenedOwn:       stats.OpenedOwn,
-		OwnWithoutCopy:  stats.OwnWithoutCopy,
-		SkippedSeen:     stats.SkippedSeen,
-		Unopened:        stats.Unopened,
-		Omitted:         stats.Omitted,
-		SkippedClass:    stats.SkippedClass,
-		GapMalformed:    stats.GapMalformed,
-		GapUnsupported:  stats.GapUnsupported,
-		GapOutOfWindow:  stats.GapOutOfWindow,
-		OpenedPastEpoch: stats.OpenedPastEpoch,
-		Ingested:        stats.Ingested,
-		CommitRefused:   stats.CommitRefused,
-		FailedOpen:      stats.FailedOpen,
-		Submitted:       stats.Submitted,
-		Rebound:         stats.Rebound,
-		Pages:           stats.Pages,
-		Unattested:      stats.Unattested,
+		Fetched:          stats.Fetched,
+		Opened:           stats.Opened,
+		SkippedCeremony:  stats.SkippedCeremony,
+		SkippedOwn:       stats.SkippedOwn,
+		OpenedOwn:        stats.OpenedOwn,
+		OwnWithoutCopy:   stats.OwnWithoutCopy,
+		SkippedSeen:      stats.SkippedSeen,
+		Unopened:         stats.Unopened,
+		Omitted:          stats.Omitted,
+		SkippedClass:     stats.SkippedClass,
+		GapMalformed:     stats.GapMalformed,
+		GapUnsupported:   stats.GapUnsupported,
+		GapOutOfWindow:   stats.GapOutOfWindow,
+		OpenedPastEpoch:  stats.OpenedPastEpoch,
+		Ingested:         stats.Ingested,
+		CommitRefused:    stats.CommitRefused,
+		CommitRefusedOwn: stats.CommitRefusedOwn,
+		FailedOpen:       stats.FailedOpen,
+		Submitted:        stats.Submitted,
+		Rebound:          stats.Rebound,
+		Pages:            stats.Pages,
+		Unattested:       stats.Unattested,
 	}, "urnet_message_group_stats")
 }
 
@@ -1313,11 +1314,17 @@ type messageGroupStats struct {
 	// the epoch it was at. A number here is a member that committed what its role does not
 	// permit, and a group this device can no longer write to until it is re-founded.
 	CommitRefused uint64 `json:"commit_refused"`
-	FailedOpen    uint64 `json:"failed_open"`
-	Submitted     uint64 `json:"submitted"`
-	Rebound       uint64 `json:"rebound"`
-	Pages         uint64 `json:"pages"`
-	Unattested    uint64 `json:"unattested"`
+	// Commits THIS DEVICE was asked to make and refused before building them: the committing arm
+	// of the same rules (item 242's R2). The go verbs that ask -- AddMemberAndPublish, SetRole,
+	// TransferOwnership; their exports over this abi are R3's -- answer the refusal as their error,
+	// and this is the number that persists past the call. Nothing moved for anybody, the commit was
+	// never built, so it is a request this device's role did not permit and not a halt.
+	CommitRefusedOwn uint64 `json:"commit_refused_own"`
+	FailedOpen       uint64 `json:"failed_open"`
+	Submitted        uint64 `json:"submitted"`
+	Rebound          uint64 `json:"rebound"`
+	Pages            uint64 `json:"pages"`
+	Unattested       uint64 `json:"unattested"`
 }
 
 func messageInfoOf(entry messageEntry) *messageInfo {

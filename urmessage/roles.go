@@ -4,9 +4,11 @@
 // ONE PURE FUNCTION, [authorizeCommit], over one value, [CommitAuthorization]. It reads nothing
 // but its argument and it holds no state, which is what lets the same predicate serve both arms
 // §11 names -- "refused by the committing client, and rejected by every receiving client on
-// validation" -- once R2 adds the send-side call, and what lets every rule be tested as a table
-// rather than through a device. The receiving-side call is [Group.authorizeCommitLocked], on
-// every commit, before ApplyCommit, and nothing configured on a device can skip it.
+// validation" -- and what lets every rule be tested as a table rather than through a device. The
+// receiving-side call is [Group.authorizeCommitLocked], on every commit, before ApplyCommit, and
+// nothing configured on a device can skip it. The committing-side call is
+// [Group.authorizeOutgoingLocked] (rolescommit.go, R2), over the value the commit WOULD produce,
+// before the seam builds it.
 //
 // EVERY PROPOSAL IS THE COMMITTER'S. A commit carries proposals by value or by reference, and
 // this file never asks who proposed one: each is judged against the AUTHENTICATED committer's

@@ -26,9 +26,10 @@ import (
 // arms (CommitRemove, CommitPolicy, CommitContextExtensions, CommitAdd), by reference through
 // Propose* and Commit(nil) where no by-value arm carries the shape, or -- for the one shape both
 // send doors refuse -- on the live *mls.Group behind its handle, as a hostile mls build would;
-// merges it; and seals the commit record through its session the way [Group.AddMemberAndPublish]
-// seals one -- it has no send-side check, which is R2, so nothing stops it from committing what
-// its role does not permit. What is NOT here is the server, which is the cp3b module's; the
+// merges it; and seals the commit record through its session the way [Group.publishCommitLocked]
+// seals one -- it drives the seam directly and never a verb, so R2's send-side check (rolescommit.go)
+// is not in its way and nothing stops it from committing what its role does not permit. What is NOT
+// here is the server, which is the cp3b module's; the
 // server accepts every commit anyway, so what a refusal costs (the receiver stays at n, the
 // server has moved on) is the same with or without it.
 

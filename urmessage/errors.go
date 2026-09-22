@@ -129,6 +129,25 @@ var (
 	// than guesses when handed a value it did not build.
 	ErrCommitRoleUnknown = errors.New("urmessage: a role name on the commit authorization is not one this profile defines")
 
+	// ── the committing arm's own refusals (R2, rolescommit.go) ─────────────────────────────
+	//
+	// A role refusal on the send side is NEVER one of these: it is [ErrCommitUnauthorized]
+	// wrapping the rule above, the receivers' own sentence, because the send side judges by the
+	// same predicate. These two name a REQUEST that is malformed before any rule is reached.
+
+	// [Group.SetRole] was asked for "owner", or for a name this profile does not define.
+	// Ownership moves through [Group.TransferOwnership] and nothing else, because a transfer is
+	// two role changes in one commit (the new owner up, the old owner to ADMIN, ruling 4) and a
+	// SetRole to owner would leave two owners for R0a to refuse or none for a member to be judged
+	// against.
+	ErrRoleNotSettable = errors.New("urmessage: SetRole takes admin, member or observer; ownership moves through TransferOwnership")
+
+	// [Group.TransferOwnership] named the identity that already owns the group. It is refused by
+	// name rather than built, because the policy it would build -- the same identity set to owner
+	// and then to admin -- has no owner at all, and R0a's answer to that describes a broken
+	// policy rather than a pointless request.
+	ErrAlreadyOwner = errors.New("urmessage: that identity already owns this group")
+
 	// The head this package writes, read back as something else.
 	ErrHeadFormat = errors.New("urmessage: this record's head is not one this build wrote")
 
