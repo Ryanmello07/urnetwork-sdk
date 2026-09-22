@@ -6,13 +6,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"unicode"
 	"unsafe"
 
 	"github.com/urnetwork/sdk/urmessage"
@@ -946,7 +952,8 @@ func TestTheHeaderDocumentsExactlyTheMemberJsonKeys(t *testing.T) {
 	}
 }
 
-// THE HEADER'S URNET_MESSAGE_GAP_* DEFINES ARE THE GapReason VALUES THIS BUILD PRODUCES.
+// THE HEADER'S URNET_MESSAGE_GAP_* DEFINES ARE THE GapReason VALUES THIS BUILD PRODUCES, AND THE
+// PRODUCED SET IS DERIVED FROM urmessage's OWN SOURCE.
 //
 // IT WENT STALE THE WAY THE STATS LIST WENT STALE. The header declared two and said "THIS BUILD
 // PRODUCES TWO" while urmessage had been producing three since ledger item 241: out_of_window is
@@ -954,16 +961,48 @@ func TestTheHeaderDocumentsExactlyTheMemberJsonKeys(t *testing.T) {
 // a C caller branching on the defines read it as an unrecognised string. R4 made it visible
 // because out_of_window is the one reason for which sender_role_at_send is "".
 //
-// ITS LIMIT IS THE COMMIT-KIND GATE'S AND IS STATED RATHER THAN HIDDEN: the go side is a list
-// written here, because GapReason is a string type whose constants reflection cannot enumerate. So
-// this catches a define that no constant matches, a value that drifted, and a constant this list
-// knows about that the header forgot -- and it does NOT catch a brand new GapReason that nobody
-// adds to either. The producers are three and each is named in [urmessage.GapReason]'s own
-// comment, which is where the next one is declared.
+// AND THE FIRST REPAIR DID NOT TRACK ITS OWN PROPERTY, WHICH IS WHY THIS IS THE SECOND. It held the
+// header against a HAND-WRITTEN three-entry map and said so in its own comment: "it does NOT catch
+// a brand new GapReason that nobody adds to either". A fourth constant declared in urmessage with
+// no define here left this gate green, which is the shape the stats list had before it was read off
+// the file -- a gate that measures the two things somebody remembered to write down. So the
+// produced set is now READ OFF ../urmessage's source: every constant of type GapReason in the
+// package, by name and by value, wherever it is declared, with its define name derived from its go
+// name (GapOutOfWindow -> OUT_OF_WINDOW). A constant with no define now goes red on its own.
 //
-// WHAT WOULD GO RED: drop a define, misspell one, change a string on either side, add a define
-// with no constant behind it.
+// AN UNTYPED CONSTANT IN A GapReason BLOCK IS REFUSED RATHER THAN SKIPPED. `GapExpired = "expired"`
+// beside the typed ones is NOT of type GapReason in go -- only a spec with no value at all repeats
+// the one above it -- so a type filter alone would read it as somebody else's constant and narrow
+// it away silently. That is the same invisibility the hand-written map had, one level down, so the
+// walk names it and fails.
+//
+// THE COMPLEMENT IS PRINTED ON EVERY RUN: the constants the type filter REMOVED. An empty
+// complement means "of type GapReason" is narrowing nothing today, and a run that read no constants
+// at all, or a header that defines none, is a FATAL rather than an agreement between two empty sets.
+//
+// WHAT WOULD GO RED: drop a define, misspell one, change a string on either side, add a define with
+// no constant behind it, ADD A CONSTANT WITH NO DEFINE, or declare one in the block without its
+// type.
 func TestTheHeaderDefinesExactlyTheGapReasonsThisBuildProduces(t *testing.T) {
+	// ---- step 1: the produced set, off the package's own source ----
+	produced, sites, complement, files, specs := gapReasonsInSource(t)
+	t.Logf("step 1 -- %d go file(s) of ../urmessage walked, %d constant spec(s) read", files, specs)
+	if specs == 0 {
+		t.Fatal("no constant declaration was read from ../urmessage at all, so the produced set is derived from nothing and every comparison below would be an agreement between two empty maps")
+	}
+	if len(produced) == 0 {
+		t.Fatal("no constant of type GapReason was found in ../urmessage; the positive control that the derivation can SEE the set it narrows is not met")
+	}
+	for _, at := range sites {
+		t.Logf("step 1 -- %s", at)
+	}
+	// THE COMPLEMENT: what "of type GapReason" removed.
+	t.Logf("complement -- the %d constant(s) of ../urmessage this filter removed: %v", len(complement), complement)
+	if len(complement) == 0 {
+		t.Error("the complement is EMPTY: every constant in ../urmessage is a GapReason, so the type filter narrows nothing today and a constant of another type would be indistinguishable from one this walk read and dismissed")
+	}
+
+	// ---- step 2: the header's defines ----
 	header, err := os.ReadFile("include/urnetwork_message.h")
 	if err != nil {
 		t.Fatalf("reading the header: %v", err)
@@ -973,14 +1012,23 @@ func TestTheHeaderDefinesExactlyTheGapReasonsThisBuildProduces(t *testing.T) {
 		FindAllStringSubmatch(string(header), -1) {
 		defined[match[1]] = match[2]
 	}
-	produced := map[string]string{
-		"MALFORMED":     string(urmessage.GapMalformed),
-		"UNSUPPORTED":   string(urmessage.GapUnsupported),
-		"OUT_OF_WINDOW": string(urmessage.GapOutOfWindow),
-	}
+	t.Logf("step 2 -- the header defines %d URNET_MESSAGE_GAP_* reason(s): %v", len(defined), defined)
 	if len(defined) < 2 {
 		t.Fatalf("the header defines %d URNET_MESSAGE_GAP_* reasons; the positive control is not met", len(defined))
 	}
+	// AND THE TWO MUST MEET SOMEWHERE. Two non-empty sets that share no key would fail the
+	// comparison below on every entry, which reads as drift; it is more likely that one side was
+	// read wrongly, and this says which.
+	shared := 0
+	for name := range produced {
+		if _, both := defined[name]; both {
+			shared += 1
+		}
+	}
+	if shared == 0 {
+		t.Fatalf("the derivation found %v and the header defines %v, and they share NO name: one of the two was read wrongly rather than having drifted", produced, defined)
+	}
+
 	if !reflect.DeepEqual(defined, produced) {
 		t.Fatalf("the header defines the gap reasons as %v and this build produces %v", defined, produced)
 	}
@@ -991,6 +1039,123 @@ func TestTheHeaderDefinesExactlyTheGapReasonsThisBuildProduces(t *testing.T) {
 			t.Errorf("%s is the empty string, which is the answer for a message that is NOT a gap", name)
 		}
 	}
+}
+
+// gapReasonsInSource reads every GapReason constant urmessage declares, by define name and wire
+// value, out of the package's source. It answers the produced set, one line per site for the log,
+// the constants the type filter removed, and how much it read.
+//
+// IT PARSES RATHER THAN GREPS because the property is "a constant of this TYPE", which a regexp
+// over lines cannot state: the const block carries paragraphs of prose holding the same words, and
+// a future declaration may sit in another file of the package entirely. The walk is the whole
+// package's production source for that reason -- a gate that read group.go alone would be a gate
+// with a directory-shaped blind spot.
+func gapReasonsInSource(t *testing.T) (map[string]string, []string, []string, int, int) {
+	t.Helper()
+	const pkg = "../urmessage"
+	entries, err := os.ReadDir(pkg)
+	if err != nil {
+		t.Fatalf("reading %s: %v; the produced set is derived from that package's source", pkg, err)
+	}
+	produced := map[string]string{}
+	sites := []string{}
+	complement := []string{}
+	files, specs := 0, 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		files += 1
+		fileSet := token.NewFileSet()
+		parsed, err := parser.ParseFile(fileSet, filepath.Join(pkg, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		for _, decl := range parsed.Decls {
+			general, isGeneral := decl.(*ast.GenDecl)
+			if !isGeneral || general.Tok != token.CONST {
+				continue
+			}
+			// IS THIS A BLOCK THAT DECLARES GapReasons AT ALL? An untyped spec is refused only
+			// inside one, because every other const block in the package is somebody else's.
+			gapBlock := false
+			for _, spec := range general.Specs {
+				if value, isValue := spec.(*ast.ValueSpec); isValue && isGapReason(value.Type) {
+					gapBlock = true
+				}
+			}
+			for _, spec := range general.Specs {
+				value, isValue := spec.(*ast.ValueSpec)
+				if !isValue {
+					continue
+				}
+				specs += 1
+				at := fileSet.Position(value.Pos())
+				if !isGapReason(value.Type) {
+					for _, declared := range value.Names {
+						complement = append(complement, fmt.Sprintf("%s (%s:%d)", declared.Name, name, at.Line))
+						if gapBlock {
+							t.Errorf("%s:%d: %s is declared in the GapReason const block WITHOUT the type, so it is an untyped constant in go and this walk would narrow it away in silence. A spec in that block is REFUSED rather than skipped: write `%s GapReason = \"...\"`",
+								name, at.Line, declared.Name, declared.Name)
+						}
+					}
+					continue
+				}
+				for index, declared := range value.Names {
+					if index >= len(value.Values) {
+						t.Errorf("%s:%d: %s is typed GapReason and has no value of its own", name, at.Line, declared.Name)
+						continue
+					}
+					literal, isLiteral := value.Values[index].(*ast.BasicLit)
+					if !isLiteral || literal.Kind != token.STRING {
+						t.Errorf("%s:%d: %s is typed GapReason and its value is not a string literal, which is the one form this walk can read",
+							name, at.Line, declared.Name)
+						continue
+					}
+					text, err := strconv.Unquote(literal.Value)
+					if err != nil {
+						t.Errorf("%s:%d: %s's value %s does not unquote: %v", name, at.Line, declared.Name, literal.Value, err)
+						continue
+					}
+					if !strings.HasPrefix(declared.Name, "Gap") {
+						t.Errorf("%s:%d: %s is typed GapReason and is not named Gap<Something>, so no URNET_MESSAGE_GAP_* name can be derived for it",
+							name, at.Line, declared.Name)
+						continue
+					}
+					suffix := defineSuffixOf(declared.Name)
+					if held, twice := produced[suffix]; twice {
+						t.Errorf("two GapReason constants derive the define name %s (%q and %q)", suffix, held, text)
+					}
+					produced[suffix] = text
+					sites = append(sites, fmt.Sprintf("%s:%d %s = %q -> URNET_MESSAGE_GAP_%s", name, at.Line, declared.Name, text, suffix))
+				}
+			}
+		}
+	}
+	slices.Sort(sites)
+	slices.Sort(complement)
+	return produced, sites, complement, files, specs
+}
+
+// isGapReason reports whether a spec's declared type is urmessage's GapReason, written from inside
+// that package as the bare identifier it is there.
+func isGapReason(of ast.Expr) bool {
+	name, isName := of.(*ast.Ident)
+	return isName && name.Name == "GapReason"
+}
+
+// defineSuffixOf is the header name a GapReason constant's go name derives: GapOutOfWindow becomes
+// OUT_OF_WINDOW. It is a derivation and not a table for the same reason the set is.
+func defineSuffixOf(name string) string {
+	out := []rune{}
+	for at, letter := range strings.TrimPrefix(name, "Gap") {
+		if unicode.IsUpper(letter) && at > 0 {
+			out = append(out, '_')
+		}
+		out = append(out, unicode.ToUpper(letter))
+	}
+	return string(out)
 }
 
 // THE HEADER'S URNET_MESSAGE_COMMIT_* DEFINES ARE THE LIBRARY'S KINDS, BY NAME AND BY VALUE. A C

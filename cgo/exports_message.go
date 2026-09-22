@@ -1028,8 +1028,9 @@ func urnet_message_group_stats(self C.uint64_t) *C.char {
 		GapOutOfWindow:  stats.GapOutOfWindow,
 		OpenedPastEpoch: stats.OpenedPastEpoch,
 
-		HiddenObserver:     stats.HiddenObserver,
-		RoleUndeterminable: stats.RoleUndeterminable,
+		HiddenObserver:          stats.HiddenObserver,
+		ObserverReactionRefused: stats.ObserverReactionRefused,
+		RoleUndeterminable:      stats.RoleUndeterminable,
 
 		Ingested:         stats.Ingested,
 		CommitRefused:    stats.CommitRefused,
@@ -1561,6 +1562,14 @@ type messageGroupStats struct {
 	// so this is the number of times this build had to HIDE one rather than stop it. The records
 	// are in the log with their bodies intact; sender_role_at_send is which ones.
 	HiddenObserver uint64 `json:"hidden_observer"`
+	// Reaction records REFUSED because their sender was an OBSERVER at the epoch it sealed them
+	// (item 242's ruling 25). The reaction is not applied at any honest receiver, so it never
+	// reaches a message's reactions array and there is nothing for a caller to draw: a message is
+	// KEPT and collapsed because dropping it would hide that something was said, and a reaction
+	// that is not applied hides nothing, since the message it names is right there whole. This is
+	// one per RECORD and not per application. An observer's TOMBSTONE is a different answer and is
+	// deliberately NOT counted here: it only ever retracts the observer's own message (ruling 26).
+	ObserverReactionRefused uint64 `json:"observer_reaction_refused"`
 	// Records that OPENED and whose sender's role at the sending epoch could not be read, so their
 	// sender_role_at_send is empty on a row that is otherwise whole. IT MUST STAY ZERO: the role is
 	// read off the same handle the open read. It is NOT gap_out_of_window's counterpart -- a record

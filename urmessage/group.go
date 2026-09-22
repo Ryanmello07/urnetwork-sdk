@@ -428,12 +428,39 @@ type Stats struct {
 	// URmessage cannot stop it at the server -- it can only hide the result" -- and this counter is
 	// how often it had to.
 	//
-	// AN OBSERVER'S REACTION OR TOMBSTONE IS NOT COUNTED HERE AND IS NOT HIDDEN, and that is a
-	// stated limit rather than an oversight. Ruling 19 refuses all four sendable kinds on the send
-	// side and says of the receiving side that "hiding a reaction has no design": a reaction is a
-	// change to another message and not a line, so there is no row to collapse. What keeps one off
-	// the wire is [Group.sendableLocked], which every honest client runs.
+	// AN OBSERVER'S REACTION IS NOT COUNTED HERE, because it never becomes a line: it is counted
+	// by [Stats.ObserverReactionRefused] and it is not applied at all (ruling 25). An observer's
+	// TOMBSTONE is not counted here either and IS applied (ruling 26). The two counters are apart
+	// because they answer two different questions and neither can answer the other's: this one is
+	// how many ROWS a UI is being asked to collapse, and every one of them is in the log with a
+	// position and a body to expand; that one is how many records produced NO row and NO change
+	// anywhere, and there is nothing for a UI to draw. One number over both would be a number no
+	// caller could use.
 	HiddenObserver uint64
+
+	// Reaction records REFUSED because their sender was an OBSERVER at the epoch it sealed them:
+	// item 242's ruling 25, the receiving half of "read only".
+	//
+	// THE ASYMMETRY WITH [Stats.HiddenObserver] IS THE RULING AND IT IS ONE SENTENCE. A message is
+	// KEPT because dropping it would hide that something was said, and this package's whole gap
+	// design exists because silent omission is the one thing a messenger may not do -- but a
+	// reaction that is not applied hides nothing, because the message it names is right there,
+	// whole. No position in the conversation goes blank. So the reaction never reaches
+	// [Message.Reactions] at any honest receiver, which is "read only" failing in the most visible
+	// way this product has: on another member's line, where a chip a UI has no way to attribute to
+	// an observer would otherwise stand.
+	//
+	// IT COUNTS RECORDS AND NOT APPLICATIONS, which is why it moves in [Group.noteEffectLocked]
+	// and the refusal itself is in [Group.reapplyLocked]. An effect is applied once per REBUILD of
+	// its target and a target is rebuilt every time another effect lands on it, so a counter at
+	// the refusal would count a number about this device's walk order rather than about the group.
+	// One record is one effect ([Group.noteEffectLocked]'s own rule, which a re-delivery after a
+	// failed open goes through), so this is one per record, however many rebuilds refuse it and
+	// whether or not its target ever arrives.
+	//
+	// A TOMBSTONE IS NOT COUNTED HERE BECAUSE IT IS NOT REFUSED (ruling 26): see
+	// [contentEffect.isObserverReaction] for why an observer may still retract its own words.
+	ObserverReactionRefused uint64
 
 	// Records that OPENED and whose sender's role at the sending epoch could NOT be read, so
 	// [Message.SenderRoleAtSend] is empty on a record that is otherwise whole.
@@ -1667,9 +1694,12 @@ func (self *Group) Delete(ctx context.Context, target []byte) (*Message, error) 
 // entire askable set (COVER has zero call sites, the whole TRANSIENT range including READ_THROUGH
 // needs an EPH(0) channel that does not exist, and ATTACHMENT and EDIT have no bodies), and because
 // the refusal has to be sayable in one sentence: "You can read this group but not send to it." A
-// reaction exception fails that test, and hiding a reaction has no design (see
-// [Stats.HiddenObserver]). So the rule is one clause and one sentence -- and the day a kind IS
+// reaction exception fails that test. So the rule is one clause and one sentence -- and the day a kind IS
 // excepted, this map is where it goes and nothing else moves.
+//
+// WHAT THE RECEIVING SIDE DOES WITH THE ONE THAT GETS THROUGH ANYWAY IS RULING 25's AND IT IS NO
+// LONGER "no design". "Hiding a reaction has no design" is true of a ROW -- there is none to
+// collapse -- and NOT APPLYING one needs no design at all: see [contentEffect.isObserverReaction].
 var kindsAnObserverMaySend = map[ContentKind]bool{}
 
 // sendableLocked is every refusal a send owes BEFORE it looks at what is being sent, and it answers
@@ -3753,8 +3783,9 @@ func (self *Group) deliverLocked(received *Message, entry *Content) bool {
 	// IT IS COUNTED WHERE IT IS DECIDED, which is why the clause is here and not at the capture:
 	// this is the one place a record becomes a LINE, and only a line has a row to collapse. An
 	// observer's reaction or tombstone has already answered false above -- it is an effect, not an
-	// entry -- and is neither counted nor hidden; see [Stats.HiddenObserver] for why that is a
-	// stated limit rather than an oversight.
+	// entry -- and neither is hidden or counted HERE. What happens to those two is
+	// [contentEffect.isObserverReaction]'s: the reaction is refused and counted by
+	// [Stats.ObserverReactionRefused] (ruling 25), and the tombstone is applied (ruling 26).
 	if received.SenderRoleAtSend == mls.RoleObserver.String() {
 		self.stats.HiddenObserver += 1
 	}
@@ -3783,6 +3814,17 @@ type contentEffect struct {
 	senderHandle []byte
 	mine         bool
 
+	// THE ROLE THAT SENDER HELD AT THE EPOCH IT SEALED THIS RECORD, carried across from
+	// [Message.SenderRoleAtSend] and never read again afterwards.
+	//
+	// IT IS COPIED RATHER THAN LOOKED UP FOR THE REASON RULING 21 GIVES FOR THE FIELD IT COPIES:
+	// the role belongs to the record's OWN epoch, an effect outlives that epoch in
+	// [Group.effectsOn] for as long as its target is missing, and an epoch aged past
+	// [messagegroup.PastEpochWindow] is one whose state mls has deleted. A lookup at apply time
+	// would be asking a question this device may no longer be able to answer, about an epoch that
+	// is not the one it would answer for.
+	senderRoleAtSend string
+
 	// The message it names.
 	target [MessageIdBytes]byte
 
@@ -3799,14 +3841,60 @@ func effectOf(received *Message, entry *Content) (*contentEffect, bool) {
 		return nil, false
 	}
 	return &contentEffect{
-		kind:         entry.Kind,
-		messageId:    messageKeyOf(received.MessageId),
-		recordId:     received.RecordId,
-		senderHandle: append([]byte(nil), received.SenderHandle...),
-		mine:         received.Mine,
-		target:       messageKeyOf(entry.Target),
-		emoji:        entry.Emoji,
+		kind:             entry.Kind,
+		messageId:        messageKeyOf(received.MessageId),
+		recordId:         received.RecordId,
+		senderHandle:     append([]byte(nil), received.SenderHandle...),
+		mine:             received.Mine,
+		senderRoleAtSend: received.SenderRoleAtSend,
+		target:           messageKeyOf(entry.Target),
+		emoji:            entry.Emoji,
 	}, true
+}
+
+// isObserverReaction reports whether this effect is a REACTION whose sender was an OBSERVER at the
+// epoch it sealed it -- the record item 242's ruling 25 refuses to apply, and the one
+// [Stats.ObserverReactionRefused] counts.
+//
+// RULING 25: AN OBSERVER'S REACTION IS NOT APPLIED. "Hiding a reaction has no design" (ruling 19)
+// is true of a ROW; NOT APPLYING one needs no design at all. The asymmetry with an observer's
+// MESSAGE is statable in one sentence and that is why it is the rule: a message is KEPT because
+// dropping it would hide that something was said, and this build's gap design exists because
+// silent omission is the one thing a messenger may not do -- but a reaction that is not applied
+// hides nothing, because the message it names is right there, whole. No position in the
+// conversation goes blank. And a reaction that DID land would be "read only" failing in the most
+// visible way this product has, on another member's line: [Message.Reactions] carries a
+// sender_handle and no role, so a UI drawing reaction chips has no way to know the reactor was an
+// observer and no way to collapse one the way §5.1 collapses a message.
+//
+// BOTH REACTION ARMS, AND THE REMOVE ARM IS NOT REDUNDANT. A REACTION_REMOVE cancels only the
+// (reactor, emoji) pair its own sender_handle names, so refusing it changes nothing TODAY -- an
+// observer's ADD was never applied, so its own REMOVE has nothing to cancel and it cannot reach
+// anybody else's row. It is refused anyway because the alternative makes this rule rest on
+// [contentEffect.applyTo]'s same-sender filter rather than on the sender's role, and that filter
+// is exactly what D7 is written to widen (see the REMOVE arm: "a second device of one person
+// cannot take back the first's reaction" -- until it is ruled). The day it widens, a rule that
+// refused only the ADD would hand an observer a way to take a member's reaction off a member's
+// line. The rule is about the RECORD CLASS and holds whatever applyTo does with it.
+//
+// RULING 26: AN OBSERVER'S TOMBSTONE IS APPLIED, AND THAT IS DELIBERATE. It is NOT an inconsistency
+// to be tidied away by the next reader, which is why the reason is written here rather than
+// inferred from the switch. A tombstone only ever removes the observer's OWN content --
+// [contentEffect.applyTo]'s T-b requires the tombstone to come from the target's own sender, and
+// T-a requires the target to be a stored CONTENT message -- so refusing one would keep VISIBLE
+// something its author asked to retract. The role model exists to stop an observer ADDING to the
+// group, not to trap its own words there. An observer's message is already hidden by ruling 16 and
+// a retraction of it is the observer removing itself further, which is the direction this model
+// wants.
+func (self *contentEffect) isObserverReaction() bool {
+	if self.senderRoleAtSend != mls.RoleObserver.String() {
+		return false
+	}
+	switch self.kind {
+	case KindReactionAdd, KindReactionRemove:
+		return true
+	}
+	return false
 }
 
 // noteEffectLocked holds one reaction or tombstone and applies everything standing on its target.
@@ -3830,6 +3918,16 @@ func (self *Group) noteEffectLocked(effect *contentEffect) {
 		// copy is updated in place rather than appended beside itself.
 		*held = *effect
 	} else {
+		// AND THE REFUSED ONES ARE COUNTED HERE, WHICH IS THE ONE PLACE A RECORD BECOMES AN
+		// EFFECT. Ruling 25's refusal itself is in [Group.reapplyLocked], where an effect becomes
+		// a CHANGE -- and that is a per-rebuild event, so a counter there would count this
+		// device's walk order. This branch is one record exactly once (the branch above is the
+		// same record re-delivered behind an earlier failure), so the number is a fact about the
+		// group: how many reaction records an observer sent that this build would not apply,
+		// whether or not their targets ever arrive.
+		if effect.isObserverReaction() {
+			self.stats.ObserverReactionRefused += 1
+		}
 		self.effects[effect.messageId] = effect
 		self.effectsOn[effect.target] = append(self.effectsOn[effect.target], effect)
 	}
@@ -3952,6 +4050,19 @@ func (self *Group) reapplyLocked(target [MessageIdBytes]byte) {
 	// set describing reactions that no longer exist.
 	seen := make(map[string]struct{}, len(effects))
 	for _, effect := range effects {
+		// RULING 25, AND IT IS HERE BECAUSE THIS IS WHERE AN EFFECT BECOMES A CHANGE. An
+		// observer's reaction is refused at every application and not only at the one that
+		// happens to be its first: an effect whose target had not arrived is HELD under
+		// [Group.effectsOn] and applies whenever the target is indexed, and a refusal that lived
+		// on the arrival path would let exactly those through -- which is the ordinary shape of a
+		// walk, since a record that fails to open is re-delivered behind ids above it. The skip
+		// costs the dedupe set nothing: a refused effect appends no row, so it adds no key, so an
+		// honest member's later ADD of the same emoji is not deduped against a reaction that was
+		// never applied. See [contentEffect.isObserverReaction] for the rule and for why a
+		// TOMBSTONE goes through (ruling 26).
+		if effect.isObserverReaction() {
+			continue
+		}
 		effect.applyTo(held, seen)
 	}
 	// AND IT IS PUBLISHED LAST, WHICH IS THE ONE LINE THAT MAKES THE COPY WORTH ANYTHING. Until

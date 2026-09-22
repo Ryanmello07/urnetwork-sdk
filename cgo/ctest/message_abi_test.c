@@ -841,11 +841,15 @@ int main(void) {
    * learn a line was missing. */
   CHECK(strstr(stats, "\"gap_malformed\":") != NULL, "the stats carry no gap_malformed counter");
   CHECK(strstr(stats, "\"gap_unsupported\":") != NULL, "the stats carry no gap_unsupported counter");
-  /* AND R4's TWO, which are the numbers behind sender_role_at_send: how many lines this build had
-   * to HIDE because their sender was an observer that sent anyway, and how many opened without a
-   * readable role -- the second must stay 0, here and everywhere. */
+  /* AND R4's THREE, which are the numbers behind sender_role_at_send: how many lines this build had
+   * to HIDE because their sender was an observer that sent anyway, how many of an observer's
+   * REACTIONS it refused to apply (ruling 25 -- not applying one hides nothing, because the message
+   * it names is right there), and how many records opened without a readable role -- the last must
+   * stay 0, here and everywhere. */
   CHECK(strstr(stats, "\"hidden_observer\":0") != NULL,
         "B has hidden an observer's message in a group that has none: %s", stats);
+  CHECK(strstr(stats, "\"observer_reaction_refused\":0") != NULL,
+        "B refused an observer's reaction in a group that has no observer: %s", stats);
   CHECK(strstr(stats, "\"role_undeterminable\":0") != NULL,
         "B opened a record whose sender's role it could not read: %s", stats);
   urnet_free_string(stats);

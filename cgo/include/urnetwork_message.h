@@ -349,7 +349,8 @@ uint64_t urnet_message_group_epoch(uint64_t self);
 bool urnet_message_group_is_open(uint64_t self);
 /* what this group has SEEN, as json: fetched, opened, skipped_ceremony, skipped_own, opened_own,
  * own_without_copy, skipped_seen, unopened, omitted, skipped_class, gap_malformed, gap_unsupported,
- * gap_out_of_window, opened_past_epoch, hidden_observer, role_undeterminable, ingested,
+ * gap_out_of_window, opened_past_epoch, hidden_observer, observer_reaction_refused,
+ * role_undeterminable, ingested,
  * commit_refused, commit_refused_own, failed_open, submitted, rebound, pages, unattested.
  *
  * THE LIST ABOVE IS THE JSON'S OWN KEY LIST, IN ITS ORDER, and a go test in this directory reads it
@@ -360,7 +361,13 @@ bool urnet_message_group_is_open(uint64_t self);
  * this device was a member then. hidden_observer counts lines whose sender was an OBSERVER at the
  * epoch it sealed them -- a member running a build that does not take the send refusal, since
  * OBSERVER is enforced in the client and not at the server -- and the rows are in the log with
- * their bodies intact, collapsed by sender_role_at_send rather than dropped. role_undeterminable
+ * their bodies intact, collapsed by sender_role_at_send rather than dropped.
+ * observer_reaction_refused counts the other answer, and the asymmetry is the rule: an observer's
+ * REACTION is NOT APPLIED at all, so it never appears in any message's reactions array and there is
+ * nothing to collapse -- a message is kept because dropping it would hide that something was said,
+ * and a reaction that is not applied hides nothing, since the message it names is right there whole.
+ * It is one per record. An observer's TOMBSTONE is applied and counted by neither: it only ever
+ * retracts that observer's own message. role_undeterminable
  * counts records that opened and whose sender's role could not be read: it MUST STAY ZERO, because
  * the role is read off the same handle the open read, and it is not gap_out_of_window's
  * counterpart -- a record no schedule reaches never opens and is never asked about.
