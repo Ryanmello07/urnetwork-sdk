@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/urnetwork/connect/messagegroup"
 	"github.com/urnetwork/connect/mls"
 )
 
@@ -28,10 +29,11 @@ import (
 // FILE PERMISSIONS AND NOTHING ELSE. Every octet this store writes is written in the CLEAR: the
 // MLS epoch state (which carries this member's leaf HPKE private key, its TreeKEM path-secret
 // ladder and the epoch's restore secret), the init and encryption private keys of every key
-// package this device published, this device's Ed25519 identity private key, and each group's
-// `pq_secret` and `group_handle_key`. There is no passphrase, no key derivation, no OS keychain
-// and no hardware. Anything that can read the directory can read every group this device is in,
-// past and future, and can speak as this device.
+// package this device published, this device's Ed25519 identity private key, the 32-octet X-Wing
+// seed whose public half this device's leaf publishes, and each group's `pq_secret` and
+// `group_handle_key`. There is no passphrase, no key derivation, no OS keychain and no hardware.
+// Anything that can read the directory can read every group this device is in, past and future,
+// and can speak as this device.
 //
 // The directory is created 0o700 and every file 0o600, and on a POSIX filesystem that is a real
 // bound: another user on the machine is refused. ON WINDOWS IT IS NOT A BOUND THIS CODE SETS.
@@ -135,15 +137,27 @@ var _ DeviceStore = (*DurableStateStore)(nil)
 // behaviour it had before this interface existed: a fresh identity every process, no restore.
 //
 // EVERYTHING ON IT IS SECRET IN FULL. The identity private key speaks as this device in every
-// group it is in; a [GroupRecord] carries two of the [Invite]'s four values, and whoever holds
-// those plus the MLS state this store keeps beside them is in the group.
+// group it is in; the wrap seed opens every X-Wing encapsulation addressed to this device's leaf;
+// a [GroupRecord] carries two of the [Invite]'s four values, and whoever holds those plus the MLS
+// state this store keeps beside them is in the group.
 type DeviceStore interface {
 	mls.StateStore
 
 	// GetDeviceIdentity answers what PutDeviceIdentity last wrote, or a refusal wrapping
-	// [ErrNoDeviceIdentity] when this store has never held one. It is never (nil, nil, nil, nil).
-	GetDeviceIdentity() (signerPub []byte, signerPriv []byte, leafKeys []byte, err error)
-	PutDeviceIdentity(signerPub []byte, signerPriv []byte, leafKeys []byte) error
+	// [ErrNoDeviceIdentity] when this store has never held one. It is never five nils.
+	//
+	// wrapSeed is the 32-octet X-Wing seed [messagegroup.XwingKeyGenFromSeed] expands into the
+	// decapsulation key for the public half that is INSIDE leafKeys. The two travel in one record
+	// and are written in one call precisely so they cannot come from two different mints: a seed
+	// that does not expand to the published key is a device that opens nothing and says nothing,
+	// which is strictly worse than the dropped key this field exists to stop.
+	//
+	// IT IS THE ONE VALUE HERE A STORE MAY NOT HOLD. A directory written before this field
+	// existed answers it EMPTY with a nil error -- the shape [DeviceStore.PeerHeads] already uses
+	// for a group persisted by a build with no head table. See
+	// [DurableStateStore.GetDeviceIdentity] for what such a device can and cannot do.
+	GetDeviceIdentity() (signerPub []byte, signerPriv []byte, leafKeys []byte, wrapSeed []byte, err error)
+	PutDeviceIdentity(signerPub []byte, signerPriv []byte, leafKeys []byte, wrapSeed []byte) error
 
 	// PutGroupRecord writes the urmessage-side half of one group: the values that are this
 	// package's rather than MLS's, and that a restore cannot be performed without.
@@ -1018,7 +1032,15 @@ func (self *DurableStateStore) TakeKeyPackage(ref []byte) ([]byte, []byte, []byt
 
 // ── DeviceStore ──────────────────────────────────────────────────────────────────────────────
 
-func (self *DurableStateStore) PutDeviceIdentity(signerPub []byte, signerPriv []byte, leafKeys []byte) error {
+// PutDeviceIdentity writes the four values a restart has to come back with, as ONE record.
+//
+// THE WRAP SEED IS REQUIRED AND ITS LENGTH IS CHECKED HERE. A write that omitted it would put the
+// directory back in the state this field was added to leave -- a leaf publishing an encapsulation
+// key whose private half nothing holds -- and would do it with a nil error, at the one moment the
+// value is still in the caller's hand. A seed of any other length is refused for the reason
+// [messagegroup.XwingKeyGenFromSeed] names its two sizes apart: 32 and 64 both expand into a well
+// formed key pair, and only one of them is the pair whose public half is in leafKeys.
+func (self *DurableStateStore) PutDeviceIdentity(signerPub []byte, signerPriv []byte, leafKeys []byte, wrapSeed []byte) error {
 	self.lock.Lock()
 	defer self.lock.Unlock()
 	if err := self.refuseIfClosed(); err != nil {
@@ -1028,26 +1050,57 @@ func (self *DurableStateStore) PutDeviceIdentity(signerPub []byte, signerPriv []
 		return fmt.Errorf("%w: a device identity is a signature key pair and a leaf keys body, and one of the three is empty",
 			ErrStateStoreFormat)
 	}
-	return self.writeRecord(self.identityPath(), stateKindDeviceIdentity, signerPub, signerPriv, leafKeys)
+	if len(wrapSeed) != messagegroup.XwingSeedSize {
+		return fmt.Errorf("%w: a device identity carries a %d octet x-wing seed and this one is %d; the public half is already inside the leaf keys body and a device that stores no seed for it can never open a wrap addressed to its own leaf",
+			ErrStateStoreFormat, messagegroup.XwingSeedSize, len(wrapSeed))
+	}
+	return self.writeRecord(self.identityPath(), stateKindDeviceIdentity, signerPub, signerPriv, leafKeys, wrapSeed)
 }
 
-func (self *DurableStateStore) GetDeviceIdentity() ([]byte, []byte, []byte, error) {
+// GetDeviceIdentity answers the identity record, and takes THREE parts as well as four.
+//
+// WHAT AN OLD STORE DOES, and it is the whole of the backward compatibility question. A directory
+// written before the wrap seed existed -- the deployed alpha's is one -- holds a three part
+// record. It is answered with a nil error and an EMPTY wrapSeed, because the alternative is a
+// device that can never start again: this store's ONE version lever is [stateRecordVersion], read
+// for every record in the directory, so spending it here would refuse the group states and the
+// key packages beside the identity as well. That is the same reasoning [SentRecord.Body] gives for
+// not spending it on a pre-kinds body, and the same shape [DeviceStore.PeerHeads] uses for a group
+// with no head table.
+//
+// WHAT THE EMPTY VALUE MEANS AND WHAT IT MUST NOT CAUSE. The leaf keys body in that record
+// publishes an X-Wing encapsulation key whose private half the build that minted it dropped;
+// nothing on this machine can reconstruct it. Such a device restores, runs, sends and reads
+// exactly as it does today, and refuses BY NAME ([ErrNoDeviceWrapKey]) the one thing it cannot do.
+// MINTING A REPLACEMENT HERE WOULD BE WORSE THAN THE ABSENCE: the leaf every group's ratchet tree
+// holds carries the OLD public half, so a fresh seed opens nothing either and turns a refusal that
+// names its cause into a decapsulation that silently answers the wrong secret.
+func (self *DurableStateStore) GetDeviceIdentity() ([]byte, []byte, []byte, []byte, error) {
 	self.lock.Lock()
 	defer self.lock.Unlock()
 	if err := self.refuseIfClosed(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	parts, err := self.readRecord(self.identityPath(), stateKindDeviceIdentity)
 	if err != nil {
 		if errors.Is(err, ErrStateNotFound) {
-			return nil, nil, nil, fmt.Errorf("%w: %s holds no device identity", ErrNoDeviceIdentity, self.dir)
+			return nil, nil, nil, nil, fmt.Errorf("%w: %s holds no device identity", ErrNoDeviceIdentity, self.dir)
 		}
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	if len(parts) != 3 {
-		return nil, nil, nil, fmt.Errorf("%w: a device identity carries %d parts, want 3", ErrStateStoreFormat, len(parts))
+	switch len(parts) {
+	case 3:
+		return parts[0], parts[1], parts[2], nil, nil
+	case 4:
+		if len(parts[3]) != messagegroup.XwingSeedSize {
+			return nil, nil, nil, nil, fmt.Errorf("%w: this device identity's x-wing seed is %d octets and a seed is %d",
+				ErrStateStoreFormat, len(parts[3]), messagegroup.XwingSeedSize)
+		}
+		return parts[0], parts[1], parts[2], parts[3], nil
+	default:
+		return nil, nil, nil, nil, fmt.Errorf("%w: a device identity carries %d parts, want 4 or the 3 a store written before the x-wing seed holds",
+			ErrStateStoreFormat, len(parts))
 	}
-	return parts[0], parts[1], parts[2], nil
 }
 
 func (self *DurableStateStore) PutGroupRecord(record *GroupRecord) error {

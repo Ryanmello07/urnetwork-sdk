@@ -261,6 +261,24 @@ var (
 	// directory and is what makes [NewDevice] mint one rather than refuse.
 	ErrNoDeviceIdentity = errors.New("urmessage: this state store holds no device identity")
 
+	// This device holds no X-Wing seed, so it cannot open an encapsulation addressed to the
+	// leaf it publishes. TWO CAUSES, ONE REFUSAL: a state store written before S2-26 retained
+	// the seed -- the deployed alpha's is one -- and a device that has been Closed, which
+	// erases it. NAMED rather than answered as a wrong secret, because 32 zero octets are a
+	// well formed X-Wing seed: decapsulating under them succeeds and returns 32 uniform
+	// looking octets that open nothing, with no error anywhere to point at.
+	ErrNoDeviceWrapKey = errors.New("urmessage: this device holds no x-wing seed for the leaf it publishes, so it cannot open an encapsulation addressed to that leaf")
+
+	// THERE IS NO SENTINEL FOR "THIS MEMBER PUBLISHES NO WRAP KEY", and its absence is a
+	// decision. [Group.MemberWrapKeys] refuses such a member rather than skipping it -- a
+	// fan-out that silently left a member out is ledger item 132's undercount -- but the seam
+	// it reads through already refuses a leaf with no urmessage_leaf_keys, and the body it
+	// hands back was produced by `mls.LeafKeysExtension.Encode`, which refuses a wrong alg_id
+	// and a wrong length. So a parse failure there is this build disagreeing with itself and
+	// not a condition a caller can be in, and this file's own rule -- every refusal here exists
+	// because its alternative is a silent zero -- does not admit a name for it. See
+	// [ErrRestore] for the sentinel this corpus removed for the same reason.
+
 	// ── restoring ─────────────────────────────────────────────────────────────────────────
 
 	// [Device.Restore] was called on a device whose state store cannot persist an identity or

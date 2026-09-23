@@ -65,7 +65,7 @@ func openRestoreDevice(t *testing.T, root string) *restoreDevice {
 	// THE IDENTITY PATH THE RESTORE DEPENDS ON: this mints and writes the first time and reads
 	// back the second, and mls.LoadGroup verifies the restored group's own leaf against whatever
 	// key comes out of it -- so a device that came back under a fresh signer is refused outright.
-	signer, signerPub, leafKeys, err := deviceIdentity(crypto, store, rand.Reader)
+	signer, signerPub, leafKeys, wrapSeed, err := deviceIdentity(crypto, store, rand.Reader)
 	if err != nil {
 		t.Fatalf("deviceIdentity: %v", err)
 	}
@@ -80,6 +80,7 @@ func openRestoreDevice(t *testing.T, root string) *restoreDevice {
 			crypto:      crypto,
 			engine:      engine,
 			leafKeys:    leafKeys,
+			wrapSeed:    wrapSeed,
 			stateStore:  store,
 			identityPub: append([]byte(nil), signerPub...),
 			nowMs:       func() int64 { return time.Now().UnixMilli() },

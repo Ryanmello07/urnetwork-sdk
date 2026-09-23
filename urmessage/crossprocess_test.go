@@ -440,6 +440,11 @@ type crossProcessDevice struct {
 	signer      mls.SignaturePrivateKey
 	identityPub mls.SignaturePublicKey
 	leafKeys    []byte
+
+	// the fourth value deviceIdentity answers: the X-Wing seed under the public half inside
+	// leafKeys. Held here for the same reason the signer is -- so a phase-B process can be
+	// asked whether the disk gave it back.
+	wrapSeed []byte
 }
 
 func openCrossProcessDevice(t *testing.T, root string) *crossProcessDevice {
@@ -459,7 +464,7 @@ func openCrossProcessDevice(t *testing.T, root string) *crossProcessDevice {
 	}
 	// THE IDENTITY PATH UNDER TEST. In phase A this mints and writes; in phase B, in a process
 	// that never saw the first, it reads back.
-	signer, signerPub, leafKeys, err := deviceIdentity(crypto, store, rand.Reader)
+	signer, signerPub, leafKeys, wrapSeed, err := deviceIdentity(crypto, store, rand.Reader)
 	if err != nil {
 		t.Fatalf("deviceIdentity: %v", err)
 	}
@@ -477,6 +482,7 @@ func openCrossProcessDevice(t *testing.T, root string) *crossProcessDevice {
 		signer:      append(mls.SignaturePrivateKey(nil), signer...),
 		identityPub: append(mls.SignaturePublicKey(nil), signerPub...),
 		leafKeys:    leafKeys,
+		wrapSeed:    wrapSeed,
 	}
 }
 

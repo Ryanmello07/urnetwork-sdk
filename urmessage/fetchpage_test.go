@@ -220,7 +220,7 @@ func TestEveryValueTheDurableStoreNamesWasFlushedFirst(t *testing.T) {
 		{"PutGroupState", func() error { return store.PutGroupState(testGroupId, 0, testState) }},
 		{"PutPrivateKey", func() error { return store.PutPrivateKey(testPub, testPriv) }},
 		{"PutKeyPackage", func() error { return store.PutKeyPackage(testRef, testKp, testInit, testEnc) }},
-		{"PutDeviceIdentity", func() error { return store.PutDeviceIdentity(testPub, testPriv, testKp) }},
+		{"PutDeviceIdentity", func() error { return store.PutDeviceIdentity(testPub, testPriv, testKp, testWrapSeed) }},
 		{"PutGroupRecord", func() error {
 			return store.PutGroupRecord(&GroupRecord{
 				GroupId: testGroupId, PqSecret: testPriv, GroupHandleKey: testPub, Epoch: 0,

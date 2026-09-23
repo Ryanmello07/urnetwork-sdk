@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/connect/messagegroup"
 )
 
 // The values every case below round-trips. They are spelled once so that a case comparing against
@@ -22,6 +24,11 @@ var (
 	testKp       = []byte("an encoded key package")
 	testInit     = []byte("the init private key")
 	testEnc      = []byte("the encryption private key")
+
+	// The device identity's fourth part. It is a REAL length -- messagegroup.XwingSeedSize --
+	// because PutDeviceIdentity refuses every other one, which is the whole of what that check
+	// is for.
+	testWrapSeed = bytes.Repeat([]byte{0x3D}, messagegroup.XwingSeedSize)
 )
 
 func openTestStore(t *testing.T, dir string) *DurableStateStore {
@@ -56,7 +63,7 @@ func TestEveryValueADurableStoreHoldsIsThereAfterItIsClosedAndReopened(t *testin
 	if err := first.PutKeyPackage(testRef, testKp, testInit, testEnc); err != nil {
 		t.Fatalf("PutKeyPackage: %v", err)
 	}
-	if err := first.PutDeviceIdentity(testPub, testPriv, []byte("a leaf keys body")); err != nil {
+	if err := first.PutDeviceIdentity(testPub, testPriv, []byte("a leaf keys body"), testWrapSeed); err != nil {
 		t.Fatalf("PutDeviceIdentity: %v", err)
 	}
 	if err := first.PutGroupRecord(&GroupRecord{
@@ -94,12 +101,15 @@ func TestEveryValueADurableStoreHoldsIsThereAfterItIsClosedAndReopened(t *testin
 	if !bytes.Equal(kp, testKp) || !bytes.Equal(init, testInit) || !bytes.Equal(enc, testEnc) {
 		t.Errorf("the key package came back as %q / %q / %q", kp, init, enc)
 	}
-	pub, signPriv, leafKeys, err := second.GetDeviceIdentity()
+	pub, signPriv, leafKeys, wrapSeed, err := second.GetDeviceIdentity()
 	if err != nil {
 		t.Fatalf("GetDeviceIdentity after a reopen: %v", err)
 	}
 	if !bytes.Equal(pub, testPub) || !bytes.Equal(signPriv, testPriv) || string(leafKeys) != "a leaf keys body" {
 		t.Errorf("the identity came back as %x / %q / %q", pub, signPriv, leafKeys)
+	}
+	if !bytes.Equal(wrapSeed, testWrapSeed) {
+		t.Errorf("the identity's x-wing seed came back as %x, want %x", wrapSeed, testWrapSeed)
 	}
 	records, err := second.GroupRecords()
 	if err != nil {
@@ -117,10 +127,10 @@ func TestEveryValueADurableStoreHoldsIsThereAfterItIsClosedAndReopened(t *testin
 //
 // [NewDevice] branches on exactly this value: [ErrNoDeviceIdentity] means mint, and anything else
 // means the disk would not answer and must not be replaced. A store that returned a nil error and
-// three nil slices would make every restart a silent new device.
+// four nil slices would make every restart a silent new device.
 func TestAFreshDirectoryHoldsNoIdentityAndNoGroups(t *testing.T) {
 	store := openTestStore(t, t.TempDir())
-	_, _, _, err := store.GetDeviceIdentity()
+	_, _, _, _, err := store.GetDeviceIdentity()
 	if !errors.Is(err, ErrNoDeviceIdentity) {
 		t.Errorf("a fresh store answered %v for its identity, want ErrNoDeviceIdentity", err)
 	}
@@ -514,8 +524,8 @@ func TestAClosedDurableStoreRefusesRatherThanAnsweringAnEmptyValue(t *testing.T)
 		{"DeletePrivateKey", func() error { return store.DeletePrivateKey(testPub) }},
 		{"PutKeyPackage", func() error { return store.PutKeyPackage(testRef, testKp, testInit, testEnc) }},
 		{"TakeKeyPackage", func() error { _, _, _, err := store.TakeKeyPackage(testRef); return err }},
-		{"GetDeviceIdentity", func() error { _, _, _, err := store.GetDeviceIdentity(); return err }},
-		{"PutDeviceIdentity", func() error { return store.PutDeviceIdentity(testPub, testPriv, testKp) }},
+		{"GetDeviceIdentity", func() error { _, _, _, _, err := store.GetDeviceIdentity(); return err }},
+		{"PutDeviceIdentity", func() error { return store.PutDeviceIdentity(testPub, testPriv, testKp, testWrapSeed) }},
 		{"GroupRecords", func() error { _, err := store.GroupRecords(); return err }},
 		{"PutGroupRecord", func() error { return store.PutGroupRecord(&GroupRecord{GroupId: testGroupId}) }},
 		{"DeleteGroupRecord", func() error { return store.DeleteGroupRecord(testGroupId) }},

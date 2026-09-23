@@ -4696,6 +4696,66 @@ func (self *Group) leavesLocked() (map[[16]byte]uint32, error) {
 	return leaves, nil
 }
 
+// MemberWrapKey is one member of this group at its current epoch: the leaf it occupies, and the
+// X-Wing encapsulation key that leaf publishes in its urmessage_leaf_keys extension.
+//
+// IT IS THE WIRE VALUE AND NOT A LOCAL ONE. [Group.MemberWrapKeys] reads it out of the ratchet
+// tree through the seam's MemberAt, so a member's key here is the key that member's KeyPackage
+// actually carried into this group and that every other member agrees on -- which is the only
+// form of it a wrap could be addressed to. A device's own row is therefore the round trip that
+// matters: the key in it must be the one [Device.DecapsulateToOwnLeaf] holds the seed for.
+type MemberWrapKey struct {
+	// The leaf index, which is what [messagegroup.WrapTargetHandle] and
+	// [messagegroup.SenderHandle] are derived over.
+	Leaf uint32
+
+	// The encapsulation key, [messagegroup.XwingPublicKeySize] octets, ready for
+	// [messagegroup.ParseXwingPublicKey]. A copy.
+	XwingPub []byte
+}
+
+// MemberWrapKeys is one [MemberWrapKey] per member of this group at its current epoch.
+//
+// WHY IT EXISTS NOW, ahead of the wrap it will be used by. S2-26's property -- a device can open
+// an encapsulation addressed to the leaf it publishes -- is only worth measuring against the key
+// that TRAVELLED. A test that encapsulated to the device's own local [Device.leafKeys] would pass
+// against a device whose published leaf carried something else entirely, which is the one failure
+// the property exists to exclude. This is the read side of that measurement and it is the same
+// read the epoch fan-out will make.
+//
+// A MEMBER WITH NO READABLE KEY IS A REFUSAL AND NOT A SKIPPED ROW, because a list that quietly
+// dropped a member is ledger item 132's undercount arriving as a shorter slice.
+//
+// THE PARSE IS A SECOND COPY OF A CHECK THE SEAM ALREADY MAKES, and saying so is the point: the
+// seam refuses a leaf carrying no urmessage_leaf_keys at all -- [Group.leavesLocked] and
+// [Group.wrapTargetsLocked] lean on exactly that -- and the body it hands back was produced by
+// `mls.LeafKeysExtension.Encode`, which refuses a wrong alg_id and a wrong length. So this parse
+// cannot fail against this build's engine, and it is here to NARROW the value rather than to
+// refuse one: what this method answers is a validated 1216-octet encapsulation key and not the
+// octets it came in. It gets no sentinel of its own for that reason; see [ErrRestore]'s
+// neighbours in errors.go.
+func (self *Group) MemberWrapKeys() ([]MemberWrapKey, error) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	keys := make([]MemberWrapKey, 0, self.handle.MemberCount())
+	for at := 0; at < self.handle.MemberCount(); at += 1 {
+		leaf, _, leafKeys, err := self.handle.MemberAt(at)
+		if err != nil {
+			return nil, fmt.Errorf("urmessage: the group's member %d: %w", at, err)
+		}
+		parsed, err := mls.ParseLeafKeysExtension(leafKeys)
+		if err != nil {
+			return nil, fmt.Errorf("urmessage: the group's member %d at leaf %d publishes a leaf keys body this build cannot read: %w",
+				at, leaf, err)
+		}
+		keys = append(keys, MemberWrapKey{
+			Leaf:     leaf,
+			XwingPub: append([]byte(nil), parsed.DeviceXwingPub...),
+		})
+	}
+	return keys, nil
+}
+
 // ── the rest of what a caller reads ──────────────────────────────────────────────────────────
 
 // Id is this group's 32 octet identifier. A copy.

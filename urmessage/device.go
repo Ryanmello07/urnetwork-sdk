@@ -227,8 +227,37 @@ type Device struct {
 	// The credential identity this device founds and joins under: its signer's public half. See
 	// [NewDevice] for why it is that value and not another.
 	identityPub []byte
-	nowMs       func() int64
-	random      io.Reader
+
+	// wrapSeed is the PRIVATE half of the X-Wing key pair whose public half is inside
+	// [Device.leafKeys], as the 32 octet seed [messagegroup.XwingKeyGenFromSeed] expands. It is
+	// what lets this device open an encapsulation addressed to the leaf it publishes -- S2-26,
+	// the first step of ledger item 243. EMPTY is a real and supported value: a store written
+	// before the seed was retained holds none, and [Device.DecapsulateToOwnLeaf] refuses by name
+	// rather than guessing. See [DurableStateStore.GetDeviceIdentity].
+	//
+	// IT IS THE SEED AND NOT A *messagegroup.XwingPrivateKey, and that is a decision with two
+	// reasons rather than a preference. The first is erasure: this package's one erase is
+	// [zeroizeState] over octets, `XwingPrivateKey` declares no erase of its own, and a field
+	// holding key material with no way to clear it is exactly what [Device.Close] must not leave
+	// behind. The second is that `connect/mls`'s erase gate excuses `XwingPrivateKey` from owing
+	// an erase on the written ground that *"no production declaration holds one in a field"* --
+	// a sentence that gate cannot check outside `connect`, and that holding the seed keeps true.
+	//
+	// IT IS GUARDED BY [Device.mutex] AND `identityPub` AND `leafKeys` BESIDE IT ARE NOT, because
+	// unlike them it is WRITTEN after construction: [Device.Close] erases it IN PLACE, over the
+	// same backing array a decapsulation reads. An unguarded read beside that write is a data
+	// race in the literal `-race` sense and a half-erased seed in the practical one, so both
+	// sides take the mutex and this is the only field of the three that has to.
+	//
+	// IT IS ALSO HELD RATHER THAN COPIED, where `identityPub` beside it is copied, and that is
+	// the erase talking again. Both of `deviceIdentity`'s arms hand back an array nothing else
+	// references -- `XwingPrivateKey.Seed` answers a copy, and the store re-reads its file on
+	// every call -- so holding it leaves ONE array for Close to clear, while copying would leave
+	// the original behind with nothing pointing at it.
+	wrapSeed []byte
+
+	nowMs  func() int64
+	random io.Reader
 
 	// connect is [DeviceConfig.Connect] with its defaults filled in ONCE, at construction. It
 	// is read without a lock and never written after, which is what lets [Device.Connect] be
@@ -258,15 +287,21 @@ type Device struct {
 //     every process, exactly as before this paragraph existed. A device that restarts is then a
 //     new device: it is not the leaf any group remembers, and it re-joins rather than resumes.
 //
-// THE X-WING LEAF PRIVATE KEY IS STILL DROPPED, on both paths, and that is not new and is not
-// fixed here. [messagegroup.XwingGenerateKey] draws a pair, the PUBLIC half is encoded into the
-// leaf keys extension, and the private half is unreferenced the moment it is drawn -- which was
-// already true before any store existed. Nothing in the alpha opens a device wrap (6.1's wraps
-// carry no key material; see [alphaWrapBody]), so nothing needs it today. What it means is
-// concrete and is worth writing down: this device can never open an X-Wing device wrap addressed
-// to the leaf it publishes, so the day 6.1's fan-out actually carries an epoch secret, persisting
-// the leaf keys body without the key under it leaves a device advertising a wrap target it cannot
-// read. FILED AS S2-26: the device X-Wing leaf key is drawn and dropped.
+// THE X-WING LEAF PRIVATE KEY IS KEPT, on both paths. S2-26, ledger item 243's first step.
+// [messagegroup.XwingGenerateKey] draws a pair, the PUBLIC half is encoded into the leaf keys
+// extension as before, and the 32 octet SEED under it is now held in [Device.wrapSeed] and
+// written into the same durable record as the leaf keys body it belongs to. Until this landed the
+// private half was unreferenced the moment it was drawn, so this device could never open an
+// X-Wing device wrap addressed to the leaf it publishes -- and it published that leaf anyway,
+// which is a device advertising a wrap target it cannot read. Nothing in the alpha opens a device
+// wrap yet (6.1's wraps carry no key material; see [alphaWrapBody]) and nothing in this change
+// makes one: what it buys is that [Device.DecapsulateToOwnLeaf] exists and can be measured, which
+// is what the rest of item 243 is built on.
+//
+// A STORE WRITTEN BEFORE THIS IS NOT REFUSED AND DOES NOT GET A NEW KEY. It restores with an
+// empty seed and every path but the decapsulation behaves exactly as it did;
+// [DurableStateStore.GetDeviceIdentity] carries the full reasoning, including why minting a
+// replacement here would be worse than the absence.
 func NewDevice(config DeviceConfig) (*Device, error) {
 	if config.Transport == nil {
 		return nil, ErrNoTransport
@@ -291,7 +326,7 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("urmessage: the mls crypto provider: %w", err)
 	}
-	signer, signerPub, leafKeys, err := deviceIdentity(crypto, stateStore, random)
+	signer, signerPub, leafKeys, wrapSeed, err := deviceIdentity(crypto, stateStore, random)
 	if err != nil {
 		return nil, err
 	}
@@ -316,6 +351,7 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 		leafKeys:         leafKeys,
 		stateStore:       stateStore,
 		identityPub:      append([]byte(nil), signerPub...),
+		wrapSeed:         wrapSeed,
 		nowMs:            nowMs,
 		random:           random,
 		commitAuthorizer: config.CommitAuthorizer,
@@ -323,8 +359,9 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 	}, nil
 }
 
-// deviceIdentity is the signature key pair and the leaf keys body this device runs under: read
-// back from a durable store when there is one, minted and written once when there is not.
+// deviceIdentity is the signature key pair, the leaf keys body and the X-Wing seed under it that
+// this device runs under: read back from a durable store when there is one, minted and written
+// once when there is not.
 //
 // THE MINT-AND-WRITE IS ONE STEP AND ITS FAILURE IS THE CALL'S. A device that minted an identity,
 // failed to write it and ran anyway would found groups under a key the next process cannot
@@ -335,42 +372,54 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 // [ErrNoDeviceIdentity] falls through to the mint; a disk that would not answer is returned,
 // because minting over it would silently replace an identity that is still on the disk and leave
 // every group this device is in unreachable.
+//
+// THE SEED AND THE LEAF KEYS BODY ARE ONE VALUE HERE AND ONE RECORD THERE. The public half this
+// function encodes and the seed it keeps come from a single [messagegroup.XwingGenerateKey] call
+// and are handed to [DeviceStore.PutDeviceIdentity] together, so there is no ordering in which a
+// crash leaves a stored public half beside a seed that does not expand to it. A store that held
+// no seed -- one written before this existed -- answers an empty fourth value and the mint is NOT
+// re-run over it: see [DurableStateStore.GetDeviceIdentity].
 func deviceIdentity(crypto mls.CryptoProvider, stateStore mls.StateStore, random io.Reader) (
-	mls.SignaturePrivateKey, mls.SignaturePublicKey, []byte, error) {
+	mls.SignaturePrivateKey, mls.SignaturePublicKey, []byte, []byte, error) {
 
 	store, durable := stateStore.(DeviceStore)
 	if durable {
-		pub, priv, leafKeys, err := store.GetDeviceIdentity()
+		pub, priv, leafKeys, wrapSeed, err := store.GetDeviceIdentity()
 		switch {
 		case err == nil:
-			return mls.SignaturePrivateKey(priv), mls.SignaturePublicKey(pub), leafKeys, nil
+			return mls.SignaturePrivateKey(priv), mls.SignaturePublicKey(pub), leafKeys, wrapSeed, nil
 		case errors.Is(err, ErrNoDeviceIdentity):
 			// the ordinary state of a fresh directory: fall through and mint.
 		default:
-			return nil, nil, nil, fmt.Errorf("urmessage: this device's persisted identity: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("urmessage: this device's persisted identity: %w", err)
 		}
 	}
 	signer, signerPub, err := crypto.SignatureKeyPair()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("urmessage: this device's signature key pair: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("urmessage: this device's signature key pair: %w", err)
 	}
 	xwing, err := messagegroup.XwingGenerateKey(random)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("urmessage: this device's x-wing key: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("urmessage: this device's x-wing key: %w", err)
 	}
+	// Seed answers a copy, so this array is this call's own and is what the device holds and
+	// erases. The copy INSIDE xwing is not reachable from here and is not erasable from here:
+	// `messagegroup.XwingPrivateKey` declares no erase and `connect` is not this step's to
+	// change. That is a real and stated limit on the erase below, not a claim it covers.
+	wrapSeed := xwing.Seed()
 	leafKeys, err := (&mls.LeafKeysExtension{
 		AlgId:          mls.AlgIdXwing,
 		DeviceXwingPub: xwing.Public().Bytes(),
 	}).Encode()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("urmessage: this device's leaf keys extension: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("urmessage: this device's leaf keys extension: %w", err)
 	}
 	if durable {
-		if err := store.PutDeviceIdentity(signerPub, signer, leafKeys.ExtensionData); err != nil {
-			return nil, nil, nil, fmt.Errorf("urmessage: this device's identity could not be persisted: %w", err)
+		if err := store.PutDeviceIdentity(signerPub, signer, leafKeys.ExtensionData, wrapSeed); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("urmessage: this device's identity could not be persisted: %w", err)
 		}
 	}
-	return signer, signerPub, leafKeys.ExtensionData, nil
+	return signer, signerPub, leafKeys.ExtensionData, wrapSeed, nil
 }
 
 // Connect performs 4.3.1's Hello and rebinds every live group onto the nonce it issued.
@@ -534,6 +583,46 @@ func (self *Device) KeyPackage() ([]byte, error) {
 	return keyPackage, nil
 }
 
+// DecapsulateToOwnLeaf opens an X-Wing encapsulation addressed to the leaf THIS device publishes
+// and answers the shared secret, [messagegroup.XwingSharedSize] octets.
+//
+// IT IS S2-26's WHOLE POINT AND IT IS DELIBERATELY NOT A WRAP. Ledger item 243 rotates
+// `pq_secret` per epoch and ruling 36 fixed the carrier as the X-Wing device wrap; the wrap
+// record, its body, its signature and the `env_key` under it are LATER steps and ruling 37 fixes
+// their shape. What was missing before this method is cruder than any of that: the public half
+// travels in every leaf's urmessage_leaf_keys extension and NO device held the private half, so
+// there was no answer to "can a device open what is addressed to it" at all. This is that answer
+// and nothing more.
+//
+// THE KEY IS RE-EXPANDED ON EVERY CALL, from the seed, and that is a choice. Caching the expanded
+// pair would mean a `*messagegroup.XwingPrivateKey` in a field -- unerasable from this package,
+// and the thing `connect/mls`'s erase gate excuses on the ground that nothing holds one. The cost
+// is one SHAKE-256 and one ML-KEM-768 key generation per call, against a fan-out that addresses
+// this leaf a small fixed number of times per epoch -- two records at one wrap_target_handle
+// under the 2026-09-13 device-wrap split, by design and in the normal case.
+//
+// A DEVICE WITH NO SEED REFUSES BY NAME. [ErrNoDeviceWrapKey] is a store written before the seed
+// was retained, or a device that has been Closed. It is never a zero-filled seed, which would
+// expand into a valid key pair and answer a wrong secret that looks exactly like a right one.
+func (self *Device) DecapsulateToOwnLeaf(ciphertext []byte) ([]byte, error) {
+	// HELD ACROSS THE EXPANSION rather than copied out of: [Device.Close] overwrites this array
+	// in place, and the alternative to the lock is a second copy of a private key to erase.
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if len(self.wrapSeed) == 0 {
+		return nil, ErrNoDeviceWrapKey
+	}
+	private, err := messagegroup.XwingKeyGenFromSeed(self.wrapSeed)
+	if err != nil {
+		return nil, fmt.Errorf("urmessage: this device's x-wing key: %w", err)
+	}
+	shared, err := messagegroup.XwingDecapsulate(private, ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("urmessage: this device's leaf could not open this encapsulation: %w", err)
+	}
+	return shared, nil
+}
+
 // Groups is every group this device holds, in no particular order.
 func (self *Device) Groups() []*Group {
 	self.mutex.Lock()
@@ -545,8 +634,20 @@ func (self *Device) Groups() []*Group {
 	return groups
 }
 
-// Close closes every group's session. The transport and the connect client under it are the
-// caller's and are not closed.
+// Close closes every group's session AND ERASES THIS DEVICE'S WRAP SEED. The transport and the
+// connect client under it are the caller's and are not closed.
+//
+// THE SEED IS ERASED HERE BECAUSE THIS IS WHERE THE DEVICE IS DROPPED. It is the only key
+// material this type holds in a field of its own -- the signer lives in the engine, every epoch
+// secret in the session -- and a field holding key material that no path clears is what
+// `connect/mls`'s erase gate refuses one package over. [zeroizeState] is this package's one
+// erase and its own header says what it can and cannot reach; what it reaches here is the ONE
+// array [NewDevice] held rather than copied.
+//
+// IT IS IDEMPOTENT AND IT IS NOT A RESET. The field is set to nil after the overwrite, so a
+// second Close erases nothing and a decapsulation after a Close refuses by name
+// ([ErrNoDeviceWrapKey]) instead of decapsulating under 32 zero octets -- which is a well formed
+// X-Wing seed and would answer a perfectly uniform-looking wrong secret.
 func (self *Device) Close() error {
 	self.mutex.Lock()
 	groups := make([]*Group, 0, len(self.groups))
@@ -554,6 +655,8 @@ func (self *Device) Close() error {
 		groups = append(groups, group)
 	}
 	self.groups = map[string]*Group{}
+	zeroizeState(self.wrapSeed)
+	self.wrapSeed = nil
 	self.mutex.Unlock()
 	var first error
 	for _, group := range groups {

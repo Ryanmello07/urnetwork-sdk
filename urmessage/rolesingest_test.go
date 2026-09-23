@@ -518,7 +518,7 @@ func claimingKeyPackage(t *testing.T, root string, claimed []byte) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer, _, leafKeys, err := deviceIdentity(crypto, store, rand.Reader)
+	signer, _, leafKeys, _, err := deviceIdentity(crypto, store, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
