@@ -1114,21 +1114,29 @@ func (self *Group) Open(ctx context.Context) error {
 
 	// (1) the founding commit, sealed at epoch zero and carrying the epoch it opens.
 	//
-	// ITS ATTACHMENT IS STILL KIND 0x0001 AND STILL CARRIES THE TWO KEYS IN THE CLEAR, which is
-	// item 244 unclosed at this site. [Group.publishCommitLocked] carries the measurement and the
-	// one edit that closes it; the short form is that `message.EncodeServerAttachment` refuses kind
-	// 0x0005 by name and it is the only encoder `messagegroup.GroupSession.SealRecord` runs.
+	// ITS ATTACHMENT IS KIND 0x0005 AND CARRIES NO KEY, which is item 244 CLOSED at this site.
+	// [Group.publishCommitLocked] carries the whole argument; the short form is that what the
+	// server serves back to every reader, for as long as the group exists, is
+	// `LP(H(epoch_keys))` -- a digest the server RECOMPUTES from the pair handed to it beside the
+	// record, on the request, under ruling 33. The pair reaches the server once, on a message no
+	// server→client type can carry, and is never in anything served.
+	group, err := epochDigestGroupId(self.id)
+	if err != nil {
+		return err
+	}
+	foundingDigest, err := message.NewEpochDigestAttachment(group, message.EpochDigestAttachment{
+		Epoch:             self.epoch,
+		AlgId:             epochAttachmentAlgId,
+		GroupContextHash:  contextHash[:],
+		ExpectedWrapCount: uint32(len(wrapTargets)),
+	}, writeKey, readKey)
+	if err != nil {
+		return fmt.Errorf("urmessage: the digest of the keys epoch %d opens with: %w", self.epoch, err)
+	}
 	founding, err := self.founding.SealRecord(message.RetentionPermanent, 0, true,
 		encodeHead(self.device.nowMs()), self.commit, 0, &message.ServerAttachment{
-			Kind: message.AttachmentEpoch,
-			Epoch: &message.EpochAttachment{
-				Epoch:             self.epoch,
-				AlgId:             epochAttachmentAlgId,
-				WriteKey:          writeKey,
-				ReadKey:           readKey,
-				GroupContextHash:  contextHash[:],
-				ExpectedWrapCount: uint32(len(wrapTargets)),
-			},
+			Kind:        message.AttachmentEpochDigest,
+			EpochDigest: foundingDigest,
 		})
 	if err != nil {
 		return fmt.Errorf("urmessage: sealing the founding commit: %w", err)
@@ -1136,7 +1144,10 @@ func (self *Group) Open(ctx context.Context) error {
 	// RULING 33's ROAD FOR EPOCH 1'S TWO KEYS, DECIDED OFF THE RECORD THAT WAS JUST SEALED.
 	// [epochKeysFor] answers a delivery for a kind 0x0005 commit and nil for a kind 0x0001 one,
 	// because under 0x0001 the keys are already inside the attachment and a delivery beside one is
-	// refused. §4.3.2's `epoch_keys` is SINGULAR -- this request carries exactly one record and it
+	// refused. The record above is 0x0005, so THIS ROAD IS THE ONE THE PAIR NOW TRAVELS, and the
+	// decision is still read off the sealed octets rather than off the literal a dozen lines up:
+	// the two sides of that question must not come from one expression, or the check cannot fail.
+	// §4.3.2's `epoch_keys` is SINGULAR -- this request carries exactly one record and it
 	// is always a commit -- so there is no alignment to compute here and no list to keep in step.
 	//
 	// AND THESE ARE EPOCH 1'S KEYS, NOT EPOCH 0'S. `bootstrap_write_key` below is write_key[0] and
@@ -1369,35 +1380,37 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 	// GroupSession, because a GroupSession's Close closes the handle it shares with this group.
 	//
 	// WHERE write_key AND read_key TRAVEL, AS OF RULING 33 AND AS THE TREE STANDS TODAY. The road
-	// ruling 33 built is the REQUEST, in `SubmitRequest.epoch_keys` aligned with the record, and it
-	// is built below -- but NOTHING TRAVELS ON IT YET, and the reason is not a switch. They travel
-	// inside the record instead, in the clear, in the kind 0x0001 `EpochAttachment`, because the
-	// substitution ruling 27 calls for
-	// -- kind 0x0005, carrying LP(H(epoch_keys)) instead of the pair -- CANNOT BE SEALED BY THIS
-	// PACKAGE TODAY. Measured, not assumed: `messagegroup.GroupSession.SealRecord` is the only seal
-	// door and it encodes through `message.EncodeServerAttachment`, whose
-	// `serverAttachmentKindServed` map excludes `AttachmentEpochDigest`, so kind 0x0005 is refused
-	// by name -- "a server attachment door was handed a kind it does not serve: kind 0x0005 at spec
-	// B section 5.1 check 3's door" -- with kind 0x0001 encoding at 136 octets as the control in
-	// the same call. `connect/messagegroup` names `AttachmentEpochDigest` nowhere in its production
-	// source (`AttachmentWrap`, one hit, is the control). So item 244 IS STILL OPEN at this site
-	// and this comment is not to be read as saying otherwise: the keys are in the served bytes
-	// until that door opens. The intermediates are erased either way.
+	// ruling 33 built is the REQUEST, in `SubmitRequest.epoch_keys` aligned with the record, and
+	// IT IS THE ROAD THEY TRAVEL. The record carries a kind 0x0005 `EpochDigestAttachment` --
+	// ruling 27's substitution -- which holds the six PUBLIC fields of the old `EpochAttachment`
+	// and `LP(H(epoch_keys))` where the pair used to be. So the two keys cross the wire exactly
+	// once, on a request message, and `protocol.Record` -- the server→client type in six places --
+	// is structurally unable to carry them. THAT IS ITEM 244 CLOSED AT THIS SITE.
 	//
-	// AND THE SERVER MAKES THE TWO A PACKAGE, WHICH IS WHY THE REQUEST IS EMPTY RATHER THAN BOTH
-	// ROADS BEING USED AT ONCE. §5.4's acceptance window is keyed on the attachment kind: a kind
-	// 0x0001 commit with a delivery beside it is REFUSED -- "a kind 0x0001 commit arrived with an
-	// epoch key delivery beside it" -- because under 0x0001 the server reads the keys out of the
-	// attachment and a delivery is a second copy it would not read. Measured through the real
-	// server: emitting one anyway answered REASON_REJECTED to every epoch commit, with the
-	// unmodified client as the control answering ok. So [epochKeysFor] asks the sealed record which
-	// kind it is and answers accordingly, which is the server's own rule and not a feature flag.
+	// WHAT THE SERVER DOES WITH THE DIGEST, because a digest that nothing checked would be
+	// decoration. §5.1 check 3 recomputes `H(epoch_keys)` over the keys the REQUEST carried and
+	// compares it against the attachment's field, constant time, in
+	// `message.CheckEpochKeysDigest`. The binding is free and needs no new authenticator:
+	// `LP(H(server_attachment))` is already inside the `write_auth` preimage, so the MAC covers
+	// the attachment, the attachment covers the digest, and the digest covers the keys. Bend
+	// either key and the recomputation fails; bend the digest and `write_auth` fails.
 	//
-	// WHAT CHANGES HERE WHEN THE DOOR OPENS is this literal and nothing else on this path: the
-	// attachment becomes `message.NewEpochDigestAttachment(groupId, public, writeKey, readKey)` --
-	// which reads the epoch once, out of the body it is building, so the digest cannot name an epoch
-	// the attachment disagrees with -- and the delivery below starts carrying the pair on its own,
-	// because it is keyed on that kind.
+	// AND THE SERVER MAKES THE TWO A PACKAGE, WHICH IS WHY EXACTLY ONE ROAD IS USED AND NOT BOTH.
+	// §5.4's acceptance window is keyed on the attachment kind: a kind 0x0001 commit with a
+	// delivery beside it is REFUSED -- "a kind 0x0001 commit arrived with an epoch key delivery
+	// beside it" -- because under 0x0001 the server reads the keys out of the attachment and a
+	// delivery is a second copy it would not read; and a kind 0x0005 commit WITHOUT one is refused
+	// the other way, as an epoch the server was never handed what opens. Both directions are
+	// measured through the real server in cp3b's `TestItem244`. So [epochKeysFor] asks the sealed
+	// record which kind it is and answers accordingly, which is the server's own rule read off the
+	// same octets, and not a feature flag.
+	//
+	// THE EPOCH IS READ ONCE, by `message.NewEpochDigestAttachment`, out of the body it is
+	// building. The digest's preimage carries `opens_epoch`, and there are THREE epochs live at
+	// this call site -- the record header's (the epoch the commit is sealed AT), the attachment's
+	// (the epoch it OPENS, one higher), and the server's own current_epoch + 1. A wrong choice
+	// among them type checks, so the constructor takes no epoch parameter and there is no second
+	// one here to disagree with the body.
 	pending, err := self.handle.PendingEpoch()
 	if err != nil {
 		// THE FIRST EXIT ERASES LIKE EVERY LATER ONE. A staged commit whose facts cannot be read
@@ -1423,17 +1436,25 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 	// (3) the commit record, sealed at the OLD epoch by self.session -- which is the epoch the
 	// handle is still at -- announcing the new epoch. The server takes it iff its header names
 	// the current epoch and its attachment opens the next.
+	group, err := epochDigestGroupId(self.id)
+	if err != nil {
+		self.handle.ClearPendingCommit()
+		return err
+	}
+	commitDigest, err := message.NewEpochDigestAttachment(group, message.EpochDigestAttachment{
+		Epoch:             newEpoch,
+		AlgId:             epochAttachmentAlgId,
+		GroupContextHash:  contextHash[:],
+		ExpectedWrapCount: uint32(pending.MemberCount),
+	}, writeKey, readKey)
+	if err != nil {
+		self.handle.ClearPendingCommit()
+		return fmt.Errorf("urmessage: the digest of the keys epoch %d opens with: %w", newEpoch, err)
+	}
 	commitRecord, err := self.session.SealRecord(message.RetentionPermanent, 0, true,
 		encodeHead(self.device.nowMs()), commit, 0, &message.ServerAttachment{
-			Kind: message.AttachmentEpoch,
-			Epoch: &message.EpochAttachment{
-				Epoch:             newEpoch,
-				AlgId:             epochAttachmentAlgId,
-				WriteKey:          writeKey,
-				ReadKey:           readKey,
-				GroupContextHash:  contextHash[:],
-				ExpectedWrapCount: uint32(pending.MemberCount),
-			},
+			Kind:        message.AttachmentEpochDigest,
+			EpochDigest: commitDigest,
 		})
 	if err != nil {
 		self.handle.ClearPendingCommit()
@@ -1441,10 +1462,12 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 	}
 	// (3a) ruling 33's road for those two keys: BESIDE the record, on the request that carries it,
 	// and never on `protocol.Record`. The decision is [epochKeysFor]'s and it is read off the
-	// attachment kind in the octets just sealed, which is how the server reads it -- so a kind
-	// 0x0001 commit, which is every commit this package can seal today, answers nil and rides
-	// alone, and a kind 0x0005 commit answers the pair the moment connect's seal door will encode
-	// one. The delivery COPIES, because the pair is also inside a sealer's hands here.
+	// attachment kind in the octets just sealed, which is how the server reads it -- so the kind
+	// 0x0005 commit above answers the pair, and a kind 0x0001 commit would answer nil and ride
+	// alone. The 0x0001 arm is not dead code: §5.4's acceptance window is dated and both kinds are
+	// accepted until it closes, so a client built from this source and pointed at a server -- or a
+	// record replayed out of a store -- can still meet one. The delivery COPIES, because the pair
+	// is also inside a sealer's hands here and `EpochKeys.Destroy` zeroizes the backing array.
 	delivery, err := epochKeysFor(commitRecord, writeKey, readKey)
 	if err != nil {
 		self.handle.ClearPendingCommit()

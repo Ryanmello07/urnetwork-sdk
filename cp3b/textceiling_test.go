@@ -8,7 +8,6 @@ import (
 
 	"github.com/urnetwork/connect/message"
 	"github.com/urnetwork/connect/messagegroup"
-	"github.com/urnetwork/message-server/store"
 	"github.com/urnetwork/sdk/urmessage"
 )
 
@@ -131,16 +130,14 @@ func TestTheTextCeilingRefusesBeforeItSpendsAnythingIrreversible(t *testing.T) {
 	if after := highWater(); after != spent+1 {
 		t.Errorf("the accepted text moved the high water from %d to %d, want %d", spent, after, spent+1)
 	}
-	result, err := world.store.Fetch(context.Background(), &store.FetchRequest{GroupId: groupId})
-	if err != nil {
-		t.Fatalf("reading the server's own rows: %v", err)
-	}
 	rung := message.SizeBucket(0xFF)
-	for _, row := range result.Records {
+	for _, row := range world.allRows(t, groupId) {
 		if row.RecordId == sent.RecordId {
 			rung = message.SizeBucket(row.SizeBucket)
 		}
 	}
+	// the sentinel above is the control: a row set that does not contain the record just sent
+	// leaves `rung` at 0xFF and the comparison below fails, rather than passing over nothing.
 	if rung != message.SizeBucket64K {
 		t.Errorf("the longest accepted text landed on rung %d, want the 64 KiB rung %d", rung, message.SizeBucket64K)
 	}

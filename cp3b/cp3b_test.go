@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/urnetwork/message-server/peer"
-	"github.com/urnetwork/message-server/store"
 	"github.com/urnetwork/sdk/urmessage"
 )
 
@@ -248,16 +247,13 @@ func assertServed(t *testing.T, after peer.Stats, before peer.Stats, want uint64
 // text beside it, fails here and passes every round trip above.
 func assertServerCannotRead(t *testing.T, world *world, groupId []byte, secrets ...string) {
 	t.Helper()
-	result, err := world.store.Fetch(context.Background(), &store.FetchRequest{GroupId: groupId})
-	if err != nil {
-		t.Fatalf("reading the server's own rows: %v", err)
-	}
-	if len(result.Records) == 0 {
+	records := world.allRows(t, groupId)
+	if len(records) == 0 {
 		t.Fatal("the server holds no rows for this group, so this control examined nothing")
 	}
-	t.Logf("the server holds %d rows for this group, and neither string is in any of them", len(result.Records))
+	t.Logf("the server holds %d rows for this group, and neither string is in any of them", len(records))
 	searched := 0
-	for _, row := range result.Records {
+	for _, row := range records {
 		columns := map[string][]byte{
 			"ct_head":           row.CtHead,
 			"ct_body":           row.CtBody,

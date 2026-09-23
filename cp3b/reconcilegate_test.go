@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/urnetwork/message-server/store"
 	"github.com/urnetwork/sdk/urmessage"
 )
 
@@ -115,16 +114,19 @@ func TestACopyIsNotReconciledOverAPageTheServerSaidWasShort(t *testing.T) {
 // about every sender rather than about one.
 func noIndexIsUsedTwice(t *testing.T, world *world, groupId []byte) {
 	t.Helper()
-	result, err := world.store.Fetch(context.Background(), &store.FetchRequest{GroupId: groupId})
-	if err != nil {
-		t.Fatalf("reading the server's own rows: %v", err)
+	records := world.allRows(t, groupId)
+	// THE CONTROL THIS CLAUSE DID NOT HAVE. It is an absence -- no (sender, index) pair appears
+	// twice -- and an absence over an empty row set is satisfied by every build there is. It ran
+	// for as long as F0 has been landed over the founding commit alone, one row, one pair.
+	if len(records) == 0 {
+		t.Fatal("the server holds no rows for this group, so 'no index is used twice' is vacuous")
 	}
 	type key struct {
 		sender string
 		index  uint64
 	}
 	seen := map[key]uint64{}
-	for _, row := range result.Records {
+	for _, row := range records {
 		at := key{sender: string(row.SenderHandle), index: row.StreamIndex}
 		if first, found := seen[at]; found {
 			t.Fatalf("sender %x used stream index %d twice, in records %d and %d",

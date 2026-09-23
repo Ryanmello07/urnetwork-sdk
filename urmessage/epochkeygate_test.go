@@ -123,16 +123,17 @@ var epochKeySinks = map[string]epochKeySink{
 		carries: []string{"founding", "readKey", "writeKey"},
 		why: "RULING 33's ROAD, and the DECISION that gates it. epochKeysFor " +
 			"reads the sealed record's attachment kind and answers the pair for a kind 0x0005 commit or " +
-			"nil for a kind 0x0001 one, then epochKeyDelivery copies. Every commit this package can seal " +
-			"today is 0x0001, so what actually travels this sink today is nil -- which is the shape the " +
-			"server accepts, and NOT a feature switch.",
+			"nil for a kind 0x0001 one, then epochKeyDelivery copies. The founding commit IS kind 0x0005, " +
+			"so what travels this sink is the pair, and this is the ONLY road it has. `founding` reaches " +
+			"here as the thing being ASKED, not as a key: it is tainted by the over-approximation below, " +
+			"and TestItem244sKeysAreInTheRequestAndNotInTheRecord measures that its octets hold neither.",
 	},
 	"publishCommitLocked|call epochKeysFor": {
 		carries: []string{"commitRecord", "readKey", "writeKey"},
 		why: "RULING 33's ROAD, the other commit path: the pair " +
 			"the staged commit opens its epoch with, through the same one decision. `commitRecord` " +
-			"reaches here too, and it is tainted because its kind 0x0001 attachment holds the pair IN " +
-			"THE CLEAR.",
+			"reaches here for the same reason `founding` does at the site above -- it is what the kind " +
+			"is read OFF -- and it is tainted by the over-approximation and not by holding a key.",
 	},
 
 	"Open|literal protocol.CreateGroupRequest.EpochKeys": {
@@ -146,10 +147,16 @@ var epochKeySinks = map[string]epochKeySink{
 		carries: []string{"commitRecord", "delivery"},
 		why: "TWO VALUES REACH THIS ONE CALL and they are there " +
 			"for opposite reasons. `delivery` is §4.3.3's REPEATED carrier, held against the record by " +
-			"alignedEpochKeys in both directions, and it is nil for as long as the attachment is kind " +
-			"0x0001. `commitRecord` is tainted because that attachment still holds the pair IN THE " +
-			"CLEAR -- item 244 open, see below -- and the day the attachment becomes a digest it stops " +
-			"being tainted and this entry has to lose that half.",
+			"alignedEpochKeys in both directions, and it holds the pair because the attachment is kind " +
+			"0x0005. `commitRecord` is the RECORD, and its attachment is the digest -- so of the two " +
+			"values at this call site, exactly one carries key material and it is the one that goes on " +
+			"the request rather than into the store. THE EARLIER VERSION OF THIS ENTRY PREDICTED THAT " +
+			"`commitRecord` WOULD STOP BEING TAINTED when the attachment became a digest. MEASURED " +
+			"FALSE the moment it did: the taint is an over-approximation -- `commitRecord` is bound " +
+			"from a call whose arguments mention the digest, which is bound from a call whose arguments " +
+			"mention the keys -- so it is tainted by DERIVATION and not by CONTENT, and no arrangement " +
+			"of this analysis will separate the two. That is the whole reason the sentence 'the record " +
+			"carries no key' is a MEASUREMENT over the sealed octets and not a clause of this gate.",
 	},
 
 	"Open|literal protocol.CreateGroupRequest.BootstrapWriteKey": {
@@ -197,33 +204,48 @@ var epochKeySinks = map[string]epochKeySink{
 			"taints -- so this site is weighed here, narrowed to these two values.",
 	},
 
-	"Open|literal message.EpochAttachment.WriteKey": {
-		carries: []string{"writeKey"},
-		why: "ITEM 244, STILL OPEN AT THIS SITE. " +
-			"Ruling 27 replaces these two fields with LP(H(epoch_keys)) under attachment kind 0x0005, and " +
-			"this package CANNOT EMIT ONE: messagegroup.GroupSession.SealRecord is the only seal door, it " +
-			"encodes through message.EncodeServerAttachment, and that encoder asks " +
-			"serverAttachmentKindServed, which excludes AttachmentEpochDigest. Measured: kind 0x0005 is " +
-			"refused by name while kind 0x0001 encodes at 136 octets in the same call. Owned by connect.",
+	// ── ITEM 244's FIX, AS FOUR SITES ────────────────────────────────────────────────────────
+	//
+	// These four replace the four `message.EpochAttachment.WriteKey`/`.ReadKey` entries that stood
+	// here until the seal door opened. THE TWO KEYS ARE STILL CONSUMED AT BOTH COMMIT SITES -- they
+	// have to be, because the digest is OVER them -- and the difference is what is left behind: a
+	// 32 octet SHA-256 output instead of 64 octets of live key. So the disposition does not shrink,
+	// it MOVES, and it moves to a pair of sites whose sentence is a measurable one.
+	"Open|call message.NewEpochDigestAttachment": {
+		carries: []string{"readKey", "writeKey"},
+		why: "RULING 27's SUBSTITUTION, at the founding commit. Both keys are handed to the " +
+			"constructor because H(epoch_keys) is taken over both; what it hands BACK is the digest. " +
+			"The epoch is read ONCE, out of the body being built, so the digest cannot name an epoch " +
+			"the attachment disagrees with -- there are three epochs live at this call site and a " +
+			"wrong choice among them type checks.",
 	},
-	"Open|literal message.EpochAttachment.ReadKey": {
-		carries: []string{"readKey"},
-		why:     "ITEM 244, STILL OPEN AT THIS SITE, for the reason above.",
+	"publishCommitLocked|call message.NewEpochDigestAttachment": {
+		carries: []string{"readKey", "writeKey"},
+		why:     "RULING 27's SUBSTITUTION, at the epoch commit, for the reason above.",
 	},
-	"publishCommitLocked|literal message.EpochAttachment.WriteKey": {
-		carries: []string{"writeKey"},
-		why:     "ITEM 244, STILL OPEN AT THIS SITE, for the reason above.",
+	"Open|literal message.ServerAttachment.EpochDigest": {
+		carries: []string{"foundingDigest"},
+		why: "THE VALUE THAT GOES INTO THE RECORD, and the one sentence in this file that this " +
+			"gate cannot check for itself. `foundingDigest` is tainted by DERIVATION -- it is bound " +
+			"from a call whose arguments mention both keys -- and the claim is that its CONTENT is a " +
+			"digest and nothing else. A taint analysis cannot tell those apart, so the claim is held " +
+			"by measurement instead: TestItem244sKeysAreInTheRequestAndNotInTheRecord searches the " +
+			"whole sealed record for both key values with the keys themselves as the inline positive " +
+			"control, and cp3b's TestItem244 does it again over a real publish through a real server.",
 	},
-	"publishCommitLocked|literal message.EpochAttachment.ReadKey": {
-		carries: []string{"readKey"},
-		why:     "ITEM 244, STILL OPEN AT THIS SITE, for the reason above.",
+	"publishCommitLocked|literal message.ServerAttachment.EpochDigest": {
+		carries: []string{"commitDigest"},
+		why:     "THE VALUE THAT GOES INTO THE RECORD, at the epoch commit, for the reason above.",
 	},
 	"Open|call self.sendSealedLocked": {
 		carries: []string{"founding"},
-		why: "the FOUNDING RECORD, tainted because the literal above put " +
-			"the pair inside it. It is the same item 244 fact one hop on, and it is the clause that " +
-			"reports the fix: when the attachment becomes a digest, this record stops being tainted and " +
-			"this entry becomes an entry nothing needs.",
+		why: "the FOUNDING RECORD, tainted because the constructor above was handed the keys and " +
+			"this record is derived from what it returned. THE ENTRY THAT STOOD HERE PREDICTED THIS " +
+			"SITE WOULD DISAPPEAR when the attachment became a digest; it did not, and that is " +
+			"measured rather than argued -- the over-approximation follows derivation, and a record " +
+			"built from a digest built from keys is derived from keys however little of them it " +
+			"holds. See publishCommitLocked|call self.submitLocked for the same correction at the " +
+			"other commit path.",
 	},
 }
 
@@ -238,11 +260,13 @@ var epochKeySinks = map[string]epochKeySink{
 var epochKeyCarrierLiterals = map[string]string{
 	"epochKeyDelivery|protocol.EpochKeyDelivery": "THE ONE CONSTRUCTOR of the request carrier, in " +
 		"record.go. A second one anywhere is a second place the copy could be forgotten.",
-	"Open|message.EpochAttachment": "ITEM 244, STILL OPEN. Kind 0x0001 with the pair in the clear, " +
-		"because connect's seal door will not encode kind 0x0005. When it will, this literal becomes " +
-		"a message.NewEpochDigestAttachment call, this census loses the site, and this entry must go " +
-		"in the same commit.",
-	"publishCommitLocked|message.EpochAttachment": "ITEM 244, STILL OPEN, for the reason above.",
+	"Open|message.EpochDigestAttachment": "ITEM 244's FIX, at the founding commit: ruling 27's six " +
+		"PUBLIC fields, with LP(H(epoch_keys)) where the pair used to be. `message.EpochAttachment` " +
+		"is STILL IN THE NET ABOVE and has no entry here, which is the point -- a commit site that " +
+		"went back to kind 0x0001 would be censused and refused for having no disposition, rather " +
+		"than passing quietly because the net had been narrowed to what the tree now does.",
+	"publishCommitLocked|message.EpochDigestAttachment": "ITEM 244's FIX, at the epoch commit, for " +
+		"the reason above.",
 }
 
 // The literal types the clause above looks for. The net again, not a disposition.

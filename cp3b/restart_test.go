@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urnetwork/message-server/store"
 	"github.com/urnetwork/sdk/urmessage"
 )
 
@@ -524,12 +523,8 @@ func senderHandleOf(t *testing.T, group *urmessage.Group) []byte {
 // visible at all.
 func streamIndicesOf(t *testing.T, world *world, groupId []byte, senderHandle []byte) []uint64 {
 	t.Helper()
-	result, err := world.store.Fetch(context.Background(), &store.FetchRequest{GroupId: groupId})
-	if err != nil {
-		t.Fatalf("reading the server's own rows: %v", err)
-	}
 	indices := []uint64{}
-	for _, row := range result.Records {
+	for _, row := range world.allRows(t, groupId) {
 		if bytes.Equal(row.SenderHandle, senderHandle) {
 			indices = append(indices, row.StreamIndex)
 		}

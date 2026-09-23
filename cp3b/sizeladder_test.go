@@ -47,12 +47,8 @@ func TestEveryRecordTypeUrmessageSealsLandsOnTheRungItsBodyNeeds(t *testing.T) {
 
 	rows := func() map[uint64]*store.Record {
 		t.Helper()
-		result, err := world.store.Fetch(context.Background(), &store.FetchRequest{GroupId: groupId})
-		if err != nil {
-			t.Fatalf("reading the server's own rows: %v", err)
-		}
 		byId := map[uint64]*store.Record{}
-		for _, row := range result.Records {
+		for _, row := range world.allRows(t, groupId) {
 			byId[row.RecordId] = row
 		}
 		return byId

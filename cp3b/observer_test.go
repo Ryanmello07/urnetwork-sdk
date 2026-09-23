@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/urnetwork/message-server/store"
 	"github.com/urnetwork/sdk/urmessage"
 )
 
@@ -95,11 +94,7 @@ func TestAnObserverMayNotSendOverTheServerAndGoesOnReading(t *testing.T) {
 	// refusal that sealed and submitted and then threw the answer away would still be a record on
 	// the server, and no client-side counter would say so.
 	rows := func() int {
-		result, err := world.store.Fetch(ctx, &store.FetchRequest{GroupId: groupId})
-		if err != nil {
-			t.Fatalf("reading the server's own rows: %v", err)
-		}
-		return len(result.Records)
+		return len(world.allRows(t, groupId))
 	}
 	before := rows()
 	if before == 0 {

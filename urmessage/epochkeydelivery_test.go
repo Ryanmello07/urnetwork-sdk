@@ -25,13 +25,12 @@ func testEpochKeyPair() ([]byte, []byte) {
 // The three attachment shapes the alignment rule tells apart, built as OCTETS through
 // connect/message's own two doors and hung on a record header the way a sealer would.
 //
-// THE KIND 0x0005 RECORD IS BUILT HERE AND CANNOT BE SEALED, and the difference between those two
-// is the whole of what this commit could not do. message.EncodeEpochDigestAttachment encodes the
-// sixth kind happily -- 100 octets -- so the CODEC is ready; what refuses is
-// message.EncodeServerAttachment, which is the only encoder messagegroup.GroupSession.SealRecord
-// runs, because serverAttachmentKindServed excludes AttachmentEpochDigest. So every clause below
-// that names 0x0005 is a clause about the shape this client will emit the day connect opens that
-// door, driven against the real octets, and NOT a claim that it emits one today.
+// THE KIND 0x0005 RECORD IS THE SHAPE THIS CLIENT NOW SEALS. Both doors encode the sixth kind --
+// message.EncodeEpochDigestAttachment, the typed one, and message.EncodeServerAttachment, the one
+// messagegroup.GroupSession.SealRecord runs -- and connect holds them byte-identical. So every
+// clause below that names 0x0005 is a clause about a shape [Group.Open] and
+// [Group.publishCommitLocked] really emit, and cp3b's TestItem244 drives that same shape through a
+// real server rather than inferring it from these octets.
 func testEpochDigestAttachmentBytes(t *testing.T, groupId [32]byte, opensEpoch uint64,
 	writeKey []byte, readKey []byte) ([]byte, *message.EpochDigestAttachment) {
 
@@ -80,14 +79,40 @@ func testRecord(isCommit bool, attachment []byte) *message.Record {
 	}}
 }
 
-// THE SEAL DOOR WILL NOT ENCODE KIND 0x0005, WHICH IS WHY NOTHING BELOW CLAIMS THIS CLIENT EMITS
-// ONE. Measured here rather than recalled, with the kind 0x0001 attachment as the inline control in
-// the same case, because every other clause in this file is shaped by it.
-func TestTheSealDoorThisPackageUsesWillNotEncodeTheSixthKind(t *testing.T) {
+// ITEM 244, AT THE OCTETS: THE KEYS ARE IN THE REQUEST AND THEY ARE NOT IN THE ATTACHMENT.
+//
+// THIS REPLACES TestTheSealDoorThisPackageUsesWillNotEncodeTheSixthKind, WHICH ASSERTED THE
+// BLOCKER RATHER THAN THE PROPERTY. That case held one clause -- `message.EncodeServerAttachment`
+// refuses kind 0x0005 -- and it existed to fire the day connect's door opened, which it did, by
+// name, carrying the edit to make in its own failure message. What replaces it has to be STRONGER
+// and not merely different, so it holds four clauses where that one held one:
+//
+//   - the door the SEALER runs serves kind 0x0005 (the old clause, inverted: this is still the
+//     tripwire, and it fires by name if connect ever narrows that map again);
+//   - the octets it produces contain NEITHER key;
+//   - the same search over the kind 0x0001 encoding of the same six facts FINDS BOTH, which is the
+//     inline positive control -- without it, "not found" is a search that read nothing;
+//   - and the request carrier this package builds DOES contain both, which is the other half of
+//     the sentence: the keys did not vanish, they moved.
+//
+// WHAT IT MEASURES IS THE ATTACHMENT AND NOT THE WHOLE RECORD, and the distinction is stated
+// rather than blurred. `EncodeRecord` writes `WriteOpaqueLP(header.ServerAttachment)` -- the
+// attachment's octets go into the record VERBATIM -- and the rest of a record is `ct_head`,
+// `ct_body` and a MAC. So the attachment is the only part of a record that has ever held a key in
+// the clear, and this case holds it at the narrowest place the claim is true of. THE WHOLE-RECORD
+// CLAIM IS HELD IN cp3b's TestItem244, over bytes a real server stored and served back, because a
+// record valid enough to encode is a record a sealer built and this package cannot build one
+// without a session.
+func TestItem244sKeysAreInTheRequestAndNotInTheRecord(t *testing.T) {
 	var groupId [32]byte
+	for at := range groupId {
+		groupId[at] = byte(0x11 + at)
+	}
 	writeKey, readKey := testEpochKeyPair()
+	const opensEpoch = 4
+
 	digestBody, err := message.NewEpochDigestAttachment(groupId, message.EpochDigestAttachment{
-		Epoch:             4,
+		Epoch:             opensEpoch,
 		AlgId:             epochAttachmentAlgId,
 		GroupContextHash:  bytes.Repeat([]byte{0x33}, 32),
 		ExpectedWrapCount: 2,
@@ -95,30 +120,75 @@ func TestTheSealDoorThisPackageUsesWillNotEncodeTheSixthKind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEpochDigestAttachment: %v", err)
 	}
-	// the sixth kind's OWN door encodes it, so the codec is not what is missing
-	own, err := message.EncodeEpochDigestAttachment(digestBody)
-	if err != nil || len(own) == 0 {
-		t.Fatalf("EncodeEpochDigestAttachment answered %d octets, %v; the codec half is supposed to work",
-			len(own), err)
-	}
-	// and the door the sealer runs refuses it, with kind 0x0001 in the same call as the control
-	_, digestErr := message.EncodeServerAttachment(&message.ServerAttachment{
+
+	// (1) THE TRIPWIRE, INVERTED. This is the door `messagegroup.GroupSession.SealRecord` runs --
+	// not the sixth kind's own typed door -- and it is the one that refused this kind until ruling
+	// 33 moved `serverAttachmentKindServed`. Both commit sites in group.go reach exactly here.
+	served, err := message.EncodeServerAttachment(&message.ServerAttachment{
 		Kind:        message.AttachmentEpochDigest,
 		EpochDigest: digestBody,
 	})
-	control := testEpochAttachmentBytes(t, 4, writeKey, readKey)
-	if len(control) == 0 {
-		t.Fatal("the kind 0x0001 control did not encode, so this case is measuring nothing")
+	if err != nil {
+		t.Fatalf("message.EncodeServerAttachment refuses kind 0x0005: %v.\n"+
+			"connect's seal door has CLOSED again. [Group.Open] and [Group.publishCommitLocked] "+
+			"build their attachment through message.NewEpochDigestAttachment and seal it through "+
+			"this encoder, so every commit this package makes is refused until that map serves "+
+			"AttachmentEpochDigest again -- and item 244 cannot be re-closed by this repository alone.",
+			err)
 	}
-	if digestErr == nil {
-		t.Fatalf("message.EncodeServerAttachment now encodes kind 0x0005. connect's seal door is " +
-			"OPEN, so [Group.Open] and [Group.publishCommitLocked] must stop building a kind 0x0001 " +
-			"message.EpochAttachment and build message.NewEpochDigestAttachment instead -- which is " +
-			"the one edit item 244 is waiting on, and epochKeysFor will start carrying the keys with " +
-			"no further change.")
+
+	pair := []struct {
+		name string
+		key  []byte
+	}{{"write_key", writeKey}, {"read_key", readKey}}
+
+	// (2) AND THE OCTETS CARRY NEITHER KEY.
+	for _, one := range pair {
+		if bytes.Contains(served, one.key) {
+			t.Errorf("the kind 0x0005 attachment's %d octets contain %s. Item 244 is that a "+
+				"removed member is served the next epoch's keys forever, and the whole of ruling "+
+				"27 is that what the server serves back is LP(H(epoch_keys)) and not the pair.",
+				len(served), one.name)
+		}
 	}
-	t.Logf("the sixth kind's own door: %d octets. the seal door: %v. the kind 0x0001 control: %d octets.",
-		len(own), digestErr, len(control))
+
+	// (3) THE INLINE POSITIVE CONTROL, in the same run and through the same encoder: the same six
+	// facts under kind 0x0001, which is what this package sealed until this commit. Both keys MUST
+	// be found. A search that cannot find a key that IS there says nothing about a key that is
+	// not, so this is a t.Fatal and not a t.Error: every clause above is vacuous without it.
+	control := testEpochAttachmentBytes(t, opensEpoch, writeKey, readKey)
+	for _, one := range pair {
+		if !bytes.Contains(control, one.key) {
+			t.Fatalf("the kind 0x0001 control's %d octets do NOT contain %s, so this case's search "+
+				"cannot find a key in an attachment and its refusals above are vacuous",
+				len(control), one.name)
+		}
+	}
+
+	// (4) AND THE KEYS DID NOT VANISH, THEY MOVED. The request carrier this package builds holds
+	// both -- marshalled and read back as octets, because a field set on a message and then
+	// discarded looks identical in a struct assertion.
+	delivery, err := epochKeyDelivery(writeKey, readKey)
+	if err != nil {
+		t.Fatalf("epochKeyDelivery: %v", err)
+	}
+	onTheRequest, err := proto.Marshal(&protocol.SubmitRequest{
+		EpochKeys: []*protocol.EpochKeyDelivery{delivery},
+	})
+	if err != nil {
+		t.Fatalf("marshalling the request carrier: %v", err)
+	}
+	for _, one := range pair {
+		if !bytes.Contains(onTheRequest, one.key) {
+			t.Errorf("SubmitRequest.epoch_keys does not carry %s. Ruling 33 makes the request the "+
+				"ONLY road these two keys have, so a commit whose attachment is a digest and whose "+
+				"request is empty is an epoch the server can never open.", one.name)
+		}
+	}
+
+	t.Logf("kind 0x0005: %d octets, neither key present. kind 0x0001 control: %d octets, both "+
+		"present. SubmitRequest.epoch_keys: %d octets, both present.",
+		len(served), len(control), len(onTheRequest))
 }
 
 // §4.3.3's ALIGNMENT, HELD OVER ITS WHOLE TRUTH TABLE.
@@ -403,11 +473,13 @@ func TestTheEpochKeysOnTheRequestAreTheOnesTheDigestWouldBeOver(t *testing.T) {
 // what is held HERE is the half that is this package's: the projection THIS client builds and
 // submits declares no field an epoch key could ride in.
 //
-// WHAT THIS CASE DOES NOT CLAIM, and the distinction is the honest one. It is about the `Record`
-// MESSAGE's own fields, not about `record_bytes`. Today `record_bytes` DOES carry write_key[n+1]
-// and read_key[n+1] for a commit, inside the kind 0x0001 attachment, and will until connect's seal
-// door will encode kind 0x0005 — see [Group.publishCommitLocked]. So "a record's served bytes carry
-// no key material" is FALSE at this commit for a commit record and is not asserted anywhere below.
+// WHAT THIS CASE DOES NOT CLAIM, and the distinction is still the honest one. It is about the
+// `Record` MESSAGE's own fields, not about `record_bytes`. That `record_bytes` carries no key
+// either is now TRUE — the attachment is kind 0x0005 — but it is a different property with a
+// different proof, and it is not asserted anywhere below: it is held at the octets by
+// [TestItem244sKeysAreInTheRequestAndNotInTheRecord] and end to end by cp3b's TestItem244. A
+// descriptor walk cannot see the contents of an opaque field, and a case that claimed both would
+// be one of them resting on the other's evidence.
 func TestTheSubmittedRecordDeclaresNoFieldAnEpochKeyCouldRideIn(t *testing.T) {
 	fields := (&protocol.Record{}).ProtoReflect().Descriptor().Fields()
 	names := []string{}

@@ -94,6 +94,28 @@ func epochKeyDelivery(writeKey []byte, readKey []byte) (*protocol.EpochKeyDelive
 	}, nil
 }
 
+// epochDigestGroupId is the group ruling 34 frames into H(epoch_keys), at the fixed width
+// [message.EpochKeysDigest] frames it in.
+//
+// IT IS CHECKED RATHER THAN CONVERTED BLIND, and the check is the same one the server makes for
+// the same reason. `api/epochkeys.go`'s checkEpochKeysDigest refuses a group id of another width
+// before its own conversion, calls that arm unreachable from Submit and CreateGroup, and keeps it
+// because "a short group id would be silently zero-padded into a different group's preimage". Go's
+// slice-to-array conversion panics rather than padding, so what is at stake on this side is a
+// panic in [Group.Open] rather than a silent cross-group digest -- better, and still not what a
+// library should hand its caller. Both constructors of a [Group] already refuse another width
+// ([Device.CreateGroup] by hand, [Device.Join] through Invite.check), so this is a third copy of a
+// check that has never failed; it is here because the two sides of this digest are computed in two
+// different repositories and this is the only one of them that can see a [Group].
+func epochDigestGroupId(groupId []byte) ([GroupIdBytes]byte, error) {
+	if len(groupId) != GroupIdBytes {
+		return [GroupIdBytes]byte{}, fmt.Errorf(
+			"%w: a group id is %d octets and this one is %d, and ruling 34 frames it into H(epoch_keys)",
+			ErrEpochKeyDelivery, GroupIdBytes, len(groupId))
+	}
+	return [GroupIdBytes]byte(groupId), nil
+}
+
 // commitCarriesItsKeys says whether a sealed record is a commit whose epoch keys travel BESIDE it
 // rather than inside it, which is the one question both epoch key sites turn on.
 //
@@ -120,21 +142,17 @@ func commitCarriesItsKeys(record *message.Record) bool {
 
 // epochKeysFor is the delivery a sealed record owes, or nil for a record that owes none.
 //
-// IT ANSWERS nil FOR EVERY RECORD THIS PACKAGE CAN SEAL TODAY, AND THAT IS NOT A DISABLED FEATURE.
-// A delivery is owed by a kind 0x0005 commit and by nothing else, and this package cannot seal one:
-// messagegroup.GroupSession.SealRecord is the only seal door, it encodes through
-// message.EncodeServerAttachment, and that encoder asks serverAttachmentKindServed, which excludes
-// AttachmentEpochDigest. Measured, with the control in the same call: kind 0x0005 is refused by
-// name -- "a server attachment door was handed a kind it does not serve: kind 0x0005 at spec B
-// section 5.1 check 3's door" -- while kind 0x0001 encodes at 136 octets. So today every commit
-// this client seals carries its keys INSIDE the attachment, item 244 is open at those two sites,
-// and the carrier below stays empty of its own accord.
+// IT ANSWERS A DELIVERY FOR EVERY COMMIT THIS PACKAGE SEALS, which is item 244 closed rather than
+// a feature switched on. Both commit sites -- [Group.Open]'s founding commit and
+// [Group.publishCommitLocked]'s epoch commit -- build their attachment through
+// message.NewEpochDigestAttachment, so the kind in the sealed octets is 0x0005, the served bytes
+// carry LP(H(epoch_keys)) and no key, and this carrier is the ONLY road the pair has.
 //
-// THE DAY connect's DOOR OPENS, NOTHING HERE CHANGES AND THE KEYS START RIDING. The two commit
-// sites swap their message.EpochAttachment literal for message.NewEpochDigestAttachment, the kind
-// in the sealed octets becomes 0x0005, this function starts answering a delivery, and both requests
-// start carrying one. That is why the decision is keyed on the record rather than on a flag: a flag
-// would be a second place to remember, and this has none.
+// NOTHING HERE CHANGED WHEN connect's DOOR OPENED, and that was the design. The decision is keyed
+// on the sealed record rather than on a flag, so the edit that closed item 244 was two attachment
+// literals in group.go and not one line in this file: a flag would have been a second place to
+// remember. The kind 0x0001 arm below is still live and is not dead code -- §5.4's acceptance
+// window is dated and admits both kinds until it closes.
 //
 // AND EMITTING ONE UNCONDITIONALLY IS NOT THE SAFE SHAPE, measured rather than reasoned: a delivery
 // beside a kind 0x0001 commit is REFUSED -- "a kind 0x0001 commit arrived with an epoch key

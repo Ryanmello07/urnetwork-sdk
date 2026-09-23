@@ -308,12 +308,41 @@ func rolesIdentityOf(t *testing.T, group *urmessage.Group) []byte {
 	return nil
 }
 
-// rolesReceiveAll fetches on every group, failing on any refusal.
+// rolesReceiveAll fetches on every group until it has caught up, failing on any refusal.
+//
+// IT DRAINS RATHER THAN RECEIVING ONCE, AND THAT IS F0's EPOCH CEILING AND NOT A RETRY LOOP.
+//
+// Under item 246's ceiling a fetch is bounded by the `read_epoch` its own `req_auth` was computed
+// under, so a device two commits behind is served the FIRST of them and nothing above it: it walks
+// forward ONE EPOCH PER ROUND TRIP, by design, which msgrepo holds end to end in
+// `TestAMemberSeveralEpochsBehindWalksForwardOneEpochPerRoundTrip`. This helper called Receive once
+// per group, which was enough before the ceiling landed and is not enough after it -- and what
+// that produces is not "a record was lost" but "carol is at epoch 6, want 7": a whole epoch
+// behind, with a nil error, which reads like a product defect and is a helper that stopped early.
+//
+// THE LOOP IS BOUNDED AND THE BOUND IS A FAILURE, not a break. A group that will not settle is a
+// real defect and must not be smoothed over by a drain that gives up quietly, so the cap is a
+// t.Fatalf naming the group and the epoch it stalled at.
 func rolesReceiveAll(t *testing.T, ctx context.Context, groups map[string]*urmessage.Group) {
 	t.Helper()
+	// one more than the deepest epoch walk in this file: every case here advances a handful of
+	// epochs, and a group needing more than this has stopped converging.
+	const rounds = 16
 	for name, group := range groups {
-		if _, err := group.Receive(ctx); err != nil {
-			t.Fatalf("%s's Receive: %v", name, err)
+		settled := false
+		for at := 0; at < rounds && !settled; at += 1 {
+			before := group.Epoch()
+			got, err := group.Receive(ctx)
+			if err != nil {
+				t.Fatalf("%s's Receive: %v", name, err)
+			}
+			// nothing new and no epoch crossed: this device is at its ceiling's head, which
+			// under F0 is the only "caught up" a reader can observe for itself.
+			settled = len(got) == 0 && group.Epoch() == before
+		}
+		if !settled {
+			t.Fatalf("%s did not settle after %d Receive rounds, stalled at epoch %d",
+				name, rounds, group.Epoch())
 		}
 	}
 }

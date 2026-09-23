@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -43,6 +44,10 @@ type world struct {
 	// WHICH record is bent and for how long, which is not something worldOptions can carry: the
 	// record ids do not exist until the group has been founded through this very server.
 	shaped *shapedStore
+
+	// the tap in front of the HANDLER, when this world has one: every §4.3 request that reached
+	// the api layer and every response that came back. See [wireTap].
+	wire *wireTap
 }
 
 const worldProtocolVersion = 1
@@ -65,6 +70,17 @@ type worldOptions struct {
 	// server. See [shapedStore]: the group is still founded, opened and written through the
 	// real §6.1 transaction.
 	fetchShape fetchShape
+
+	// Keep every request the api layer was handed and every response it gave back, on
+	// [world.wire]. It bends NOTHING -- see [wireTap] -- and it is off by default only so that
+	// a suite of long cases does not retain every frame it ever sent.
+	recordWire bool
+
+	// Clear `epoch_keys` off every request on its way IN to the api layer, which is the one
+	// thing [wireTap] does that is not passive. Requires recordWire. See item244_test.go's
+	// clause 5 for why the alternative -- replaying a recorded request -- measures the front's
+	// replay refusal instead of §5.4's acceptance window.
+	stripEpochKeys bool
 }
 
 func newWorld(t *testing.T) *world {
@@ -106,9 +122,17 @@ func newWorldWith(t *testing.T, options worldOptions) *world {
 		cancel()
 		t.Fatalf("api.New: %v", err)
 	}
+	var dispatched peer.Handler = handler
+	var wire *wireTap
+	if options.recordWire {
+		wire = &wireTap{Handler: handler, strip: options.stripEpochKeys}
+		dispatched = wire
+	} else if options.stripEpochKeys {
+		t.Fatal("worldOptions.stripEpochKeys needs recordWire: the tap is what strips")
+	}
 	served, err := peer.New(peer.Config{
 		Client:      serverClient,
-		Handler:     handler,
+		Handler:     dispatched,
 		Connections: connections,
 		Checks:      checks,
 		Capabilities: &protocol.Capabilities{
@@ -132,6 +156,7 @@ func newWorldWith(t *testing.T, options worldOptions) *world {
 		peer:         served,
 		handler:      handler,
 		shaped:       shaped,
+		wire:         wire,
 	}
 	t.Cleanup(func() {
 		served.Close()
@@ -212,6 +237,51 @@ func (self *world) device(t *testing.T, name string) (*urmessage.Device, *connec
 	}
 	t.Cleanup(func() { device.Close() })
 	return device, client, transport
+}
+
+// ── reading the server's own rows ────────────────────────────────────────────────────────────
+
+// allRows is EVERY row the server holds for a group, read off `store.MemoryStore` rather than off
+// the wire, at a ceiling above every epoch that will ever exist.
+//
+// IT EXISTS BECAUSE SIX CALL SITES ASKED FOR "EVERY ROW" AND WERE ANSWERED "EVERY ROW AT EPOCH
+// ZERO", SILENTLY, FOR AS LONG AS F0 HAS BEEN LANDED. `store.FetchRequest.ReadEpoch` is item 246's
+// epoch ceiling and store.go states the rule in one line: a row is served only when
+// `record.Epoch <= ReadEpoch`. It is REQUIRED and 0 is not a spare value meaning "unbounded" --
+// epoch 0 is a real epoch, the founding commit sits at it -- and store.go says so in as many
+// words. Every one of the six sites was a `&store.FetchRequest{GroupId: groupId}` written before
+// that field existed, so each was a ceiling of 0 and each was served the founding commit and
+// nothing else.
+//
+// WHAT THAT COST, AND WHY IT IS WORTH A HELPER RATHER THAN SIX EDITS. Four of the six are ABSENCE
+// assertions -- the server cannot read a plaintext, no stream index is used twice, the row count
+// did not move, the size bucket is the rung expected -- and an absence asserted over a silently
+// narrowed row set is the failure mode this corpus has a standing rule about. `assertServerCannotRead`
+// is the one that matters: it is the clause that makes "encrypted" a measurement, and it was
+// searching a row set that contained no message at all. Its own control (`len(result.Records) == 0`
+// is a t.Fatal) did not fire, because the founding commit IS at epoch 0, so there was always
+// exactly one row to search and the case reported success by looking in the wrong place.
+//
+// THE TWO THAT DID FAIL are the two that read a value back rather than asserting an absence --
+// `streamIndicesOf` indexing `[len-1]` of an empty slice -- which is the general shape: a
+// narrowing is found by whatever reads a value, never by whatever asserts a nothing.
+//
+// [TestEveryReadOfTheServersRowsNamesItsEpochCeiling] is what stops the seventh site being written
+// the old way.
+func (self *world) allRows(t *testing.T, groupId []byte) []*store.Record {
+	t.Helper()
+	result, err := self.store.Fetch(context.Background(), &store.FetchRequest{
+		GroupId: groupId,
+		// above every epoch a group can reach, which is what "every row" means through a
+		// request whose ceiling is required. It is not a magic number standing in for
+		// "unbounded": `record.Epoch <= ReadEpoch` is a comparison, and this is the top of
+		// the type the comparison is over.
+		ReadEpoch: math.MaxUint64,
+	})
+	if err != nil {
+		t.Fatalf("reading the server's own rows: %v", err)
+	}
+	return result.Records
 }
 
 // newGroupId is 32 octets of CSPRNG, which is what the server keys its rows by.
