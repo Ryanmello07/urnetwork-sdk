@@ -26,26 +26,42 @@ import (
 // carrying over: a nested type carrying the two keys under the field names `wk` and `rk` walked
 // through every check green, because every check -- and every mutant in that commit's table -- was
 // keyed on the strings "write_key" and "read_key". So this gate never reads a field name to decide
-// whether something is a key. It starts at the four call sites that PRODUCE one, follows the value
-// through assignment, and censuses every place the value lands. `BlobId: writeKey` is caught by the
-// same clause `WriteKey: writeKey` is, and the mutation table below drives exactly that.
+// whether something is a key. It starts at the six sites that PRODUCE one, follows the value
+// through every binding form the language has, and censuses every place the value lands.
+// `BlobId: writeKey` is caught by the same clause `WriteKey: writeKey` is, and the mutation table
+// below drives exactly that.
 //
-// THE NARROWING IS ASSERTED IN BOTH DIRECTIONS AND IS NOT MERELY PRINTED. A site with no entry in
-// the disposition is a failure, and an entry no site needs is a failure. Printing alone is what
-// connect's step-3 repair did, and item 244's own shape rode back in green underneath it: a printed
-// complement tells a reader what was narrowed away, and only an assertion tells the NEXT COMMIT
-// that it may not narrow further.
+// AND THE VERSION THAT SENTENCE FIRST SHIPPED IN WAS DEFEATED THE SAME WAY, ONE LEVEL UP. At
+// 4fde7ad the disposition was asserted in both directions and the CENSUS THAT FED IT could not see
+// the site: every clause asked its landing place for an *ast.Ident, so `x = writeKey` was censused
+// and `x = writeKey[:]` was not censused at all -- not refused, not printed, absent. Measured on
+// that commit: `request.ReqAuth = readKey[:]`, between authorizeFetch and transport.Call, left
+// this gate at `ok 0.099s` and the whole package at `ok 7.070s`, with the epoch read key riding
+// out on FetchRequest.req_auth on every page that left the device. `var leaked = writeKey` did the
+// same, because the taint fixpoint read *ast.AssignStmt and nothing else. The table that missed
+// both had two rows for "a key onto X" and both VARIED THE DESTINATION and spelled the key as a
+// bare identifier -- a table varying one attribute cannot see a change of mechanism, which is the
+// sentence that commit itself wrote about connect's step-3 gate. The table below varies the
+// SPELLING against one fixed destination, and mutates the gate's own clauses besides.
+//
+// THE NARROWING IS ASSERTED IN BOTH DIRECTIONS AND IS NOT MERELY PRINTED, AND IT IS ASSERTED TWICE
+// OVER: a site with no entry in the disposition is a failure, an entry no site needs is a failure,
+// a value arriving at a site its entry does not list is a failure, and a value an entry lists that
+// no longer arrives is a failure. Printing alone is what connect's step-3 repair did, and item
+// 244's own shape rode back in green underneath it: a printed complement tells a reader what was
+// narrowed away, and only an assertion tells the NEXT COMMIT that it may not narrow further.
 
-// The names a call has to carry for its result to be an epoch key. This is the SEARCH NET rather
-// than a disposition: a name here that no site uses costs nothing and widens the net, while a
-// producer spelled some other way is a blindness this gate cannot see -- which is what
-// epochKeyProducerSites is held both ways for.
+// The names a CALL OR A FIELD READ has to carry for its value to be an epoch key. This is the
+// SEARCH NET rather than a disposition: a name here that no site uses costs nothing and widens the
+// net, while a producer spelled some other way is a blindness this gate cannot see -- which is
+// what epochKeyProducerSites is held both ways for.
 //
 // `WriteKey` and `ReadKey` cover both spellings this package uses: the method on
 // messagegroup.EpochKeys, which hands back an epoch's own pair, and the package function
 // message.WriteKey/message.ReadKey, which derives one off a storage root. `GetWriteKey` and
 // `GetReadKey` cover a key read back OFF a protobuf, which is how one would re-enter this package
-// from a message it had already been put on.
+// from a message it had already been put on -- and the BARE FIELD, `delivery.WriteKey`, is read by
+// the same net, because the generated struct offers both and the field is the shorter of the two.
 var epochKeyProducerSelectors = map[string]bool{
 	"WriteKey":    true,
 	"ReadKey":     true,
@@ -58,10 +74,18 @@ var epochKeyProducerSelectors = map[string]bool{
 //
 // IT IS HELD BOTH WAYS, and the direction that matters most is the one that looks pedantic: an
 // entry no site needs is a FAILURE, because that is how this gate reports that its own search has
-// gone blind. Spell `message.WriteKey` through a local alias and the site disappears from the
-// census; the sink clauses below would then be searching a value nothing tainted, would find
-// nothing, and would pass. A gate that can go quiet by being avoided is not a gate, so the day the
-// census stops finding one of these, this map says so in a FAILURE.
+// gone blind. Move a derivation into a helper -- `func deriveForMutant(root []byte) []byte { return
+// message.WriteKey(root) }`, called from publishCommitLocked -- and this site moves to the helper's
+// name: measured, four failures, two of them this map's own directions and two of them sinks that
+// stopped carrying `writeKey`. A gate that can go quiet by being avoided is not a gate, so the day
+// the census stops finding one of these, this map says so in a FAILURE.
+//
+// A LOCAL ALIAS, `derive := message.WriteKey`, DOES NOT MOVE A SITE AND DOES NOT BLIND THIS GATE,
+// and that is worth writing down because the commit before this one recorded the opposite. The
+// bare selector is read by the same net, so the site is still found -- printed with a `field` note
+// beside its line -- and `derive` is tainted, so `writeKey` is tainted, so both of its sinks still
+// carry it. Measured: green, with the census printing `publishCommitLocked|message.WriteKey`, the
+// EpochAttachment.WriteKey literal and the epochKeysFor call, all three unchanged.
 var epochKeyProducerSites = map[string]string{
 	"Open|keys.WriteKey":                   "epoch 1's write key, off the session the founding commit opens",
 	"Open|keys.ReadKey":                    "epoch 1's read key, the same",
@@ -71,7 +95,22 @@ var epochKeyProducerSites = map[string]string{
 	"Receive|next.ReadKey":                 "the read key §4.3.8's req_auth is computed under, re-derived when the walk crosses an epoch",
 }
 
-// Every place an epoch key VALUE lands, as "<enclosing function>|<site>" -> why it is allowed.
+// epochKeySink is one entry in the disposition below: WHICH VALUES a site may receive, and why.
+//
+// THE `carries` LIST IS THE SECOND NARROWING AND IT IS WHY THIS IS A STRUCT RATHER THAN A STRING.
+// A disposition keyed on the site alone excuses the site FOREVER, whatever turns up there later:
+// `Open|call fmt.Errorf` is a real site -- the over-approximation reaches it, see its entry -- and
+// a bare entry for it would have excused `fmt.Errorf("%x", writeKey)`, an epoch key in an error
+// string, in every log that error ever reaches. So each entry names the exact value spellings it
+// weighed, and it is held BOTH WAYS like everything else here: a value this site carries that the
+// entry does not list is a refusal, and a value the entry lists that the census does not find
+// there is a refusal. The second direction is the one that reports a rename or a deletion.
+type epochKeySink struct {
+	carries []string
+	why     string
+}
+
+// Every place an epoch key VALUE lands, as "<enclosing function>|<site>" -> what may land and why.
 //
 // THREE OF THESE ENTRIES SAY "ITEM 244 IS STILL OPEN HERE", AND THAT IS WHAT A DISPOSITION IS FOR.
 // A gate that refused the tree it is committed beside would be deleted within the week; a gate that
@@ -79,53 +118,113 @@ var epochKeyProducerSites = map[string]string{
 // literals and the two sealed records that carry them are written down, by name, with the
 // measurement that says why they cannot move yet -- and because the map is held BOTH ways, the day
 // they do move this file goes red until somebody deletes the entry and the sentence with it.
-var epochKeySinks = map[string]string{
-	"Open|call epochKeysFor": "RULING 33's ROAD, and the DECISION that gates it. epochKeysFor " +
-		"reads the sealed record's attachment kind and answers the pair for a kind 0x0005 commit or " +
-		"nil for a kind 0x0001 one, then epochKeyDelivery copies. Every commit this package can seal " +
-		"today is 0x0001, so what actually travels this sink today is nil -- which is the shape the " +
-		"server accepts, and NOT a feature switch.",
-	"publishCommitLocked|call epochKeysFor": "RULING 33's ROAD, the other commit path: the pair " +
-		"the staged commit opens its epoch with, through the same one decision. `commitRecord` " +
-		"reaches here too, and it is tainted because its kind 0x0001 attachment holds the pair IN " +
-		"THE CLEAR.",
+var epochKeySinks = map[string]epochKeySink{
+	"Open|call epochKeysFor": {
+		carries: []string{"founding", "readKey", "writeKey"},
+		why: "RULING 33's ROAD, and the DECISION that gates it. epochKeysFor " +
+			"reads the sealed record's attachment kind and answers the pair for a kind 0x0005 commit or " +
+			"nil for a kind 0x0001 one, then epochKeyDelivery copies. Every commit this package can seal " +
+			"today is 0x0001, so what actually travels this sink today is nil -- which is the shape the " +
+			"server accepts, and NOT a feature switch.",
+	},
+	"publishCommitLocked|call epochKeysFor": {
+		carries: []string{"commitRecord", "readKey", "writeKey"},
+		why: "RULING 33's ROAD, the other commit path: the pair " +
+			"the staged commit opens its epoch with, through the same one decision. `commitRecord` " +
+			"reaches here too, and it is tainted because its kind 0x0001 attachment holds the pair IN " +
+			"THE CLEAR.",
+	},
 
-	"Open|literal protocol.CreateGroupRequest.EpochKeys": "§4.3.2's SINGULAR carrier. The request " +
-		"holds exactly one record and it is always a commit, so there is no alignment to compute and " +
-		"no list to keep in step. Present iff the initial commit is kind 0x0005, which is §5.4's " +
-		"acceptance window and is the server's own rule read off the same octets.",
-	"publishCommitLocked|call self.submitLocked": "TWO VALUES REACH THIS ONE CALL and they are there " +
-		"for opposite reasons. `delivery` is §4.3.3's REPEATED carrier, held against the record by " +
-		"alignedEpochKeys in both directions, and it is nil for as long as the attachment is kind " +
-		"0x0001. `commitRecord` is tainted because that attachment still holds the pair IN THE " +
-		"CLEAR -- item 244 open, see below -- and the day the attachment becomes a digest it stops " +
-		"being tainted and this entry has to lose that half.",
+	"Open|literal protocol.CreateGroupRequest.EpochKeys": {
+		carries: []string{"delivery"},
+		why: "§4.3.2's SINGULAR carrier. The request " +
+			"holds exactly one record and it is always a commit, so there is no alignment to compute and " +
+			"no list to keep in step. Present iff the initial commit is kind 0x0005, which is §5.4's " +
+			"acceptance window and is the server's own rule read off the same octets.",
+	},
+	"publishCommitLocked|call self.submitLocked": {
+		carries: []string{"commitRecord", "delivery"},
+		why: "TWO VALUES REACH THIS ONE CALL and they are there " +
+			"for opposite reasons. `delivery` is §4.3.3's REPEATED carrier, held against the record by " +
+			"alignedEpochKeys in both directions, and it is nil for as long as the attachment is kind " +
+			"0x0001. `commitRecord` is tainted because that attachment still holds the pair IN THE " +
+			"CLEAR -- item 244 open, see below -- and the day the attachment becomes a digest it stops " +
+			"being tainted and this entry has to lose that half.",
+	},
 
-	"Open|literal protocol.CreateGroupRequest.BootstrapWriteKey": "write_key[0], and it is NOT what " +
-		"the commit opens. §4.3.2 declares it and calls it self-certification: the server verifies " +
-		"the founding commit's write_auth under it and nothing but a 20/day rate limit protects it. " +
-		"It is a RULED field, it is epoch zero's, and item 244 is about the chained NEXT epoch.",
-	"Open|call append": "the copy of that bootstrap key. messagegroup.EpochKeys.WriteKey hands back " +
-		"the session's own backing array and Destroy zeroizes it, so the request would carry an " +
-		"erased key without this.",
+	"Open|literal protocol.CreateGroupRequest.BootstrapWriteKey": {
+		carries: []string{"created"},
+		why: "write_key[0], and it is NOT what " +
+			"the commit opens. §4.3.2 declares it and calls it self-certification: the server verifies " +
+			"the founding commit's write_auth under it and nothing but a 20/day rate limit protects it. " +
+			"It is a RULED field, it is epoch zero's, and item 244 is about the chained NEXT epoch.",
+	},
+	"Open|call append": {
+		carries: []string{"bootstrapWriteKey"},
+		why: "the copy of that bootstrap key. messagegroup.EpochKeys.WriteKey hands back " +
+			"the session's own backing array and Destroy zeroizes it, so the request would carry an " +
+			"erased key without this.",
+	},
 
-	"Receive|call authorizeFetch": "the READ key into §4.3.8's req_auth, which is a mac COMPUTED " +
-		"under the key. Nothing of the key reaches the wire: what does is ComputeRequestAuth's " +
-		"output. This is the one sink in this package that consumes a key rather than carrying it.",
+	"Receive|call authorizeFetch": {
+		carries: []string{"readKey"},
+		why: "the READ key into §4.3.8's req_auth, which is a mac COMPUTED " +
+			"under the key. Nothing of the key reaches the wire: what does is ComputeRequestAuth's " +
+			"output. This is the one sink in this package that consumes a key rather than carrying it.",
+	},
 
-	"Open|literal message.EpochAttachment.WriteKey": "ITEM 244, STILL OPEN AT THIS SITE. " +
-		"Ruling 27 replaces these two fields with LP(H(epoch_keys)) under attachment kind 0x0005, and " +
-		"this package CANNOT EMIT ONE: messagegroup.GroupSession.SealRecord is the only seal door, it " +
-		"encodes through message.EncodeServerAttachment, and that encoder asks " +
-		"serverAttachmentKindServed, which excludes AttachmentEpochDigest. Measured: kind 0x0005 is " +
-		"refused by name while kind 0x0001 encodes at 136 octets in the same call. Owned by connect.",
-	"Open|literal message.EpochAttachment.ReadKey":                 "ITEM 244, STILL OPEN AT THIS SITE, for the reason above.",
-	"publishCommitLocked|literal message.EpochAttachment.WriteKey": "ITEM 244, STILL OPEN AT THIS SITE, for the reason above.",
-	"publishCommitLocked|literal message.EpochAttachment.ReadKey":  "ITEM 244, STILL OPEN AT THIS SITE, for the reason above.",
-	"Open|call self.sendSealedLocked": "the FOUNDING RECORD, tainted because the literal above put " +
-		"the pair inside it. It is the same item 244 fact one hop on, and it is the clause that " +
-		"reports the fix: when the attachment becomes a digest, this record stops being tainted and " +
-		"this entry becomes an entry nothing needs.",
+	// THE OVER-APPROXIMATION, PRINTING ITSELF, AND NARROWED TO THE ONE VALUE IT REACHES. The taint
+	// treats anything a key-bearing call hands back as key-bearing -- which is what makes a sealed
+	// record carrying the pair in the clear a tainted value -- and `transport.Call` was handed the
+	// CreateGroupRequest, so its `response` is tainted and so is the `body` read off it. What
+	// actually lands here is `body.GetCurrentEpoch()`, a uint64 the SERVER chose, formatted into an
+	// error string. The `carries` list is doing the work in this entry: it excuses `body` and
+	// nothing else, so an epoch key formatted into an error -- a leak into every log that error
+	// reaches -- is still a refusal at this same site.
+	"Open|call fmt.Errorf": {
+		carries: []string{"body"},
+		why: "the RESPONSE side of the create exchange, not the request side. `response` is " +
+			"tainted because the request that produced it carried `created` and `delivery`, `body` " +
+			"is tainted off `response`, and what this call formats is body.GetCurrentEpoch(), a " +
+			"uint64. No key reaches it, and the carries list above is what says so.",
+	},
+	"Open|return": {
+		carries: []string{"body", "response"},
+		why: "the three returns of the create closure, which are the same response-side " +
+			"over-approximation: `response.GetReason()` is an enum, `body.GetRecordId()` is a " +
+			"uint64 and the third is the error above. A key returned to a caller leaves this " +
+			"package by a door no other clause watches -- the caller binds it off a call nothing " +
+			"taints -- so this site is weighed here, narrowed to these two values.",
+	},
+
+	"Open|literal message.EpochAttachment.WriteKey": {
+		carries: []string{"writeKey"},
+		why: "ITEM 244, STILL OPEN AT THIS SITE. " +
+			"Ruling 27 replaces these two fields with LP(H(epoch_keys)) under attachment kind 0x0005, and " +
+			"this package CANNOT EMIT ONE: messagegroup.GroupSession.SealRecord is the only seal door, it " +
+			"encodes through message.EncodeServerAttachment, and that encoder asks " +
+			"serverAttachmentKindServed, which excludes AttachmentEpochDigest. Measured: kind 0x0005 is " +
+			"refused by name while kind 0x0001 encodes at 136 octets in the same call. Owned by connect.",
+	},
+	"Open|literal message.EpochAttachment.ReadKey": {
+		carries: []string{"readKey"},
+		why:     "ITEM 244, STILL OPEN AT THIS SITE, for the reason above.",
+	},
+	"publishCommitLocked|literal message.EpochAttachment.WriteKey": {
+		carries: []string{"writeKey"},
+		why:     "ITEM 244, STILL OPEN AT THIS SITE, for the reason above.",
+	},
+	"publishCommitLocked|literal message.EpochAttachment.ReadKey": {
+		carries: []string{"readKey"},
+		why:     "ITEM 244, STILL OPEN AT THIS SITE, for the reason above.",
+	},
+	"Open|call self.sendSealedLocked": {
+		carries: []string{"founding"},
+		why: "the FOUNDING RECORD, tainted because the literal above put " +
+			"the pair inside it. It is the same item 244 fact one hop on, and it is the clause that " +
+			"reports the fix: when the attachment becomes a digest, this record stops being tainted and " +
+			"this entry becomes an entry nothing needs.",
+	},
 }
 
 // The types in this package's production source that are built AROUND an epoch key, as
@@ -156,6 +255,7 @@ var epochKeyCarrierTypes = map[string]bool{
 func TestEveryEpochKeyInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.T) {
 	producers := map[string][]string{}
 	sinks := map[string][]string{}
+	carried := map[string]map[string]bool{}
 	carriers := map[string][]string{}
 	unspent := map[string][]string{}
 
@@ -177,6 +277,55 @@ func TestEveryEpochKeyInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 			}
 			where := function.Name.Name
 
+			// THE NAMES THIS FUNCTION DECLARED, which is what makes a bare name on the left of an
+			// assignment a rebinding rather than a sink. `stash = writeKey` where `stash` is a
+			// package level var parks a key for the lifetime of the process, and calling that a
+			// rebinding because it is spelled with one identifier is the same mistake as calling
+			// `writeKey[:]` not-a-key because it is spelled with three tokens. A name this
+			// function did not declare outlives it, so it is a sink; `_` is neither.
+			local := map[string]bool{"_": true}
+			declare := func(fields *ast.FieldList) {
+				if fields == nil {
+					return
+				}
+				for _, field := range fields.List {
+					for _, target := range field.Names {
+						local[target.Name] = true
+					}
+				}
+			}
+			declare(function.Recv)
+			declare(function.Type.Params)
+			declare(function.Type.Results)
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				switch shape := node.(type) {
+				case *ast.AssignStmt:
+					if shape.Tok == token.DEFINE {
+						for _, target := range shape.Lhs {
+							if identifier, ok := target.(*ast.Ident); ok {
+								local[identifier.Name] = true
+							}
+						}
+					}
+				case *ast.ValueSpec:
+					for _, target := range shape.Names {
+						local[target.Name] = true
+					}
+				case *ast.RangeStmt:
+					if shape.Tok == token.DEFINE {
+						for _, target := range []ast.Expr{shape.Key, shape.Value} {
+							if identifier, ok := target.(*ast.Ident); ok {
+								local[identifier.Name] = true
+							}
+						}
+					}
+				case *ast.FuncLit:
+					declare(shape.Type.Params)
+					declare(shape.Type.Results)
+				}
+				return true
+			})
+
 			// the carrier clause, which is independent of the taint: a literal of one of the
 			// key-carrying types is a site whatever its fields are built from.
 			ast.Inspect(function.Body, func(node ast.Node) bool {
@@ -192,8 +341,15 @@ func TestEveryEpochKeyInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 				return true
 			})
 
-			// the producers, and the taint they seed
+			// the producers, and the taint they seed. TWO SPELLINGS PRODUCE A KEY, not one: a
+			// CALL (`keys.WriteKey()`, `message.WriteKey(root)`, `msg.GetWriteKey()`) and a bare
+			// FIELD READ off a protobuf (`delivery.WriteKey`), which is the generated struct's
+			// own spelling and the shorter of the two. A net that asked only for the call shape
+			// would be the same blindness as the sink census's, one clause up. The callee of a
+			// producer call is not counted a second time as a field read -- `callee` holds the
+			// selectors already spent that way -- so the two passes cannot double-report a site.
 			tainted := map[string]bool{}
+			callee := map[ast.Node]bool{}
 			ast.Inspect(function.Body, func(node ast.Node) bool {
 				call, ok := node.(*ast.CallExpr)
 				if !ok {
@@ -203,26 +359,41 @@ func TestEveryEpochKeyInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 				if !ok || !epochKeyProducerSelectors[selector.Sel.Name] {
 					return true
 				}
+				callee[selector] = true
 				site := where + "|" + epochKeyExpr(selector)
 				producers[site] = append(producers[site],
 					fmt.Sprintf("%s:%d", name, fileSet.Position(call.Pos()).Line))
+				return true
+			})
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				selector, ok := node.(*ast.SelectorExpr)
+				if !ok || callee[selector] || !epochKeyProducerSelectors[selector.Sel.Name] {
+					return true
+				}
+				site := where + "|" + epochKeyExpr(selector)
+				producers[site] = append(producers[site],
+					fmt.Sprintf("%s:%d field", name, fileSet.Position(selector.Pos()).Line))
 				return true
 			})
 			// the fixpoint: a binding whose right hand side mentions a producer call or an
 			// already-tainted identifier binds a key. It runs to a fixpoint rather than once
 			// because a key reaches its sink through as many hops as the source cares to take,
 			// and an analysis that followed one hop would be defeated by writing two.
+			//
+			// IT FOLLOWS EVERY BINDING FORM THE LANGUAGE HAS AND NOT ONLY `:=`. This loop used to
+			// inspect *ast.AssignStmt alone, and `var leaked = writeKey` -- the same key, the same
+			// function, the same one hop, spelled with the other keyword -- bound nothing, so
+			// `leaked` was not tainted, so every sink clause below searched a value nothing
+			// tainted and passed by finding nothing. Measured at 4fde7ad: that spelling put the
+			// write key on `commitRecord.Header.BlobId` with this gate and the whole ./urmessage
+			// suite green. `var` (*ast.ValueSpec) and `range` (*ast.RangeStmt) bind here now.
 			for spin := 0; spin < 16; spin += 1 {
 				grew := false
-				ast.Inspect(function.Body, func(node ast.Node) bool {
-					assign, ok := node.(*ast.AssignStmt)
-					if !ok {
-						return true
+				bind := func(targets []ast.Expr, values []ast.Expr) {
+					if !epochKeyRhsCarriesAKey(values, tainted) {
+						return
 					}
-					if !epochKeyRhsCarriesAKey(assign.Rhs, tainted) {
-						return true
-					}
-					for _, target := range assign.Lhs {
+					for _, target := range targets {
 						identifier, ok := target.(*ast.Ident)
 						if !ok || identifier.Name == "_" || identifier.Name == "err" {
 							continue
@@ -231,6 +402,27 @@ func TestEveryEpochKeyInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 							tainted[identifier.Name] = true
 							grew = true
 						}
+					}
+				}
+				ast.Inspect(function.Body, func(node ast.Node) bool {
+					switch shape := node.(type) {
+					case *ast.AssignStmt:
+						bind(shape.Lhs, shape.Rhs)
+					case *ast.ValueSpec:
+						// `var x = writeKey`, and `var x, y = f()`. A spec with no values --
+						// `var readKey []byte`, which Receive really writes -- carries nothing
+						// and binds nothing, which is the same answer it gave before.
+						declared := []ast.Expr{}
+						for _, target := range shape.Names {
+							declared = append(declared, target)
+						}
+						bind(declared, shape.Values)
+					case *ast.RangeStmt:
+						// `for _, b := range writeKey` hands the loop variable the key's own
+						// octets. Over-approximate on purpose, like every other clause here: a
+						// gate that called an octet of a key not-a-key would be arguing with
+						// itself about how much of a key is a key.
+						bind([]ast.Expr{shape.Key, shape.Value}, []ast.Expr{shape.X})
 					}
 					return true
 				})
@@ -245,51 +437,113 @@ func TestEveryEpochKeyInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 			// the sinks, and the complement: a tainted identifier that reaches no sink at all is
 			// printed rather than asserted, because it is the part of the census that is NOT the
 			// property -- a value that goes nowhere is a value that leaked nowhere.
+			//
+			// EVERY CLAUSE HERE ASKS AN EXPRESSION AND NOT A NODE CLASS. Each of the three used to
+			// ask its landing place for an *ast.Ident and drop anything else without a word, so
+			// `x = writeKey` was a site and `x = writeKey[:]` -- one character, the same key, the
+			// same octets -- was censused nowhere: the disposition had nothing to refuse and the
+			// gate reported success by not looking. Measured at 4fde7ad, the version this repairs:
+			// `request.ReqAuth = readKey[:]` between authorizeFetch and transport.Call left this
+			// gate at `ok 0.099s` and `go test ./urmessage -run '.*'` at `ok 7.070s`, with the
+			// epoch read key riding out on FetchRequest.req_auth on every page that left the
+			// device. That is this file's own subject defeated one abstraction level up: the
+			// disposition was asserted in both directions and the census that fed it could not see
+			// the site. So the one question asked is [epochKeyBorneBy]'s -- does this EXPRESSION
+			// bear a key, however it is spelled -- and `writeKey[:]`, `(writeKey)`, `keys[0]`,
+			// `[]byte(writeKey)` and `any(writeKey).([]byte)` are one site rather than five holes.
 			landed := map[string]bool{}
+			record := func(site string, pos token.Pos, expression ast.Expr, borne []string) {
+				sinks[site] = append(sinks[site], fmt.Sprintf("%s:%d %s", name,
+					fileSet.Position(pos).Line, epochKeyExpr(expression)))
+				if carried[site] == nil {
+					carried[site] = map[string]bool{}
+				}
+				for _, spelled := range borne {
+					carried[site][spelled] = true
+					if tainted[spelled] {
+						landed[spelled] = true
+					}
+				}
+			}
 			ast.Inspect(function.Body, func(node ast.Node) bool {
 				switch shape := node.(type) {
 				case *ast.CompositeLit:
 					spelled := epochKeyExpr(shape.Type)
-					for _, element := range shape.Elts {
-						pair, ok := element.(*ast.KeyValueExpr)
-						if !ok {
+					for at, element := range shape.Elts {
+						// a positional element is a landing place too: `[][]byte{writeKey}` puts
+						// the key exactly where `{WriteKey: writeKey}` does and names no field.
+						value := element
+						field := fmt.Sprintf("element %d", at)
+						if pair, ok := element.(*ast.KeyValueExpr); ok {
+							value = pair.Value
+							field = epochKeyExpr(pair.Key)
+						}
+						borne := epochKeyBorneBy(value, tainted, false)
+						if len(borne) == 0 {
 							continue
 						}
-						identifier, ok := pair.Value.(*ast.Ident)
-						if !ok || !tainted[identifier.Name] {
-							continue
-						}
-						field := epochKeyExpr(pair.Key)
-						site := fmt.Sprintf("%s|literal %s.%s", where, spelled, field)
-						sinks[site] = append(sinks[site],
-							fmt.Sprintf("%s:%d %s", name, fileSet.Position(pair.Pos()).Line, identifier.Name))
-						landed[identifier.Name] = true
+						record(fmt.Sprintf("%s|literal %s.%s", where, spelled, field),
+							element.Pos(), value, borne)
 					}
 				case *ast.CallExpr:
 					for _, argument := range shape.Args {
-						identifier, ok := argument.(*ast.Ident)
-						if !ok || !tainted[identifier.Name] {
+						borne := epochKeyBorneBy(argument, tainted, false)
+						if len(borne) == 0 {
 							continue
 						}
-						site := fmt.Sprintf("%s|call %s", where, epochKeyExpr(shape.Fun))
-						sinks[site] = append(sinks[site],
-							fmt.Sprintf("%s:%d %s", name, fileSet.Position(shape.Pos()).Line, identifier.Name))
-						landed[identifier.Name] = true
+						record(fmt.Sprintf("%s|call %s", where, epochKeyExpr(shape.Fun)),
+							shape.Pos(), argument, borne)
 					}
 				case *ast.AssignStmt:
 					for at, target := range shape.Lhs {
-						selector, ok := target.(*ast.SelectorExpr)
-						if !ok || at >= len(shape.Rhs) {
+						// A BARE NAME THIS FUNCTION DECLARED IS A REBINDING AND NOT A SINK -- the
+						// fixpoint above already taints it and follows it onward. ANYTHING ELSE
+						// stores into something that outlives this call, and it is a site
+						// whatever its shape: a field (`request.ReqAuth`), a map entry (`m[k]`),
+						// a pointee (`*p`), a package level var (`stash`). Only the SelectorExpr
+						// case was asked for before, which is the same blindness as the right
+						// hand side's, one side of the equals sign over.
+						if identifier, bare := target.(*ast.Ident); bare && local[identifier.Name] {
 							continue
 						}
-						identifier, ok := shape.Rhs[at].(*ast.Ident)
-						if !ok || !tainted[identifier.Name] {
+						var source ast.Expr
+						switch {
+						case len(shape.Lhs) == len(shape.Rhs):
+							source = shape.Rhs[at]
+						case len(shape.Rhs) == 1:
+							// `a, b = f()`: the one right hand side feeds every target.
+							source = shape.Rhs[0]
+						default:
 							continue
 						}
-						site := fmt.Sprintf("%s|assign %s", where, epochKeyExpr(selector))
-						sinks[site] = append(sinks[site],
-							fmt.Sprintf("%s:%d %s", name, fileSet.Position(shape.Pos()).Line, identifier.Name))
-						landed[identifier.Name] = true
+						borne := epochKeyBorneBy(source, tainted, false)
+						if len(borne) == 0 {
+							continue
+						}
+						record(fmt.Sprintf("%s|assign %s", where, epochKeyExpr(target)),
+							shape.Pos(), source, borne)
+					}
+				case *ast.ReturnStmt:
+					// A KEY HANDED BACK TO THE CALLER LEAVES THIS FUNCTION AS SURELY AS ONE
+					// ASSIGNED TO A FIELD, and it is the one exit the three clauses above cannot
+					// see: the caller binds it from a call this gate has no reason to taint. It
+					// is the clause that refuses `func (self *Group) EpochWriteKey() []byte`.
+					// What it finds today is `Open|return`, and that is the over-approximation
+					// reaching the create closure's three returns rather than a key -- the
+					// disposition entry names the two values and the measurement.
+					for _, result := range shape.Results {
+						borne := epochKeyBorneBy(result, tainted, false)
+						if len(borne) == 0 {
+							continue
+						}
+						record(where+"|return", shape.Pos(), result, borne)
+					}
+				case *ast.SendStmt:
+					// and the other exit a statement can be: `ch <- writeKey`.
+					borne := epochKeyBorneBy(shape.Value, tainted, false)
+					if 0 < len(borne) {
+						record(fmt.Sprintf("%s|send %s", where, epochKeyExpr(shape.Chan)),
+							shape.Pos(), shape.Value, borne)
 					}
 				}
 				return true
@@ -312,9 +566,10 @@ func TestEveryEpochKeyInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 	for _, site := range epochKeySortedMap(producers) {
 		t.Logf("    %s  at %v", site, producers[site])
 	}
-	t.Logf("sink sites found (%d):", len(sinks))
+	t.Logf("sink sites found (%d), each with THE VALUES IT CARRIES, which is what the disposition "+
+		"is held against a second time:", len(sinks))
 	for _, site := range epochKeySortedMap(sinks) {
-		t.Logf("    %s  at %v", site, sinks[site])
+		t.Logf("    %s  carries %v  at %v", site, epochKeySortedKeys(carried[site]), sinks[site])
 	}
 	t.Logf("carrier literals found (%d):", len(carriers))
 	for _, site := range epochKeySortedMap(carriers) {
@@ -329,12 +584,49 @@ func TestEveryEpochKeyInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 			"entry is a key derived somewhere nobody weighed; an entry with no site is this gate "+
 			"having gone BLIND -- the producer was respelled and the sink clauses below are now "+
 			"searching a value nothing tainted, which passes by finding nothing.")
-	epochKeyHold(t, "sink site", sinks, epochKeySinks,
-		"This is ruling 33 held on the value rather than on the field name: the epoch keys travel on "+
-			"the REQUEST carrier and nowhere else. A site with no entry is a key landing somewhere "+
-			"this package has not weighed -- `BlobId: writeKey` fails here exactly as "+
-			"`WriteKey: writeKey` does, which is the defeat connect's step-3 gate took three times. "+
-			"An entry with no site is a disposition that has stopped describing the code.")
+	sinkWhy := map[string]string{}
+	for site, entry := range epochKeySinks {
+		sinkWhy[site] = entry.why
+	}
+	sinkNarrowing := "This is ruling 33 held on the value rather than on the field name: the epoch " +
+		"keys travel on the REQUEST carrier and nowhere else. A site with no entry is a key landing " +
+		"somewhere this package has not weighed -- `BlobId: writeKey` fails here exactly as " +
+		"`WriteKey: writeKey` does, which is the defeat connect's step-3 gate took three times, and " +
+		"`BlobId: writeKey[:]` fails exactly as both, which is the defeat THIS file took at 4fde7ad. " +
+		"An entry with no site is a disposition that has stopped describing the code."
+	epochKeyHold(t, "sink site", sinks, sinkWhy, sinkNarrowing)
+
+	// ── AND THE SECOND NARROWING: NOT ONLY WHERE, BUT WHICH VALUE ─────────────────────────────
+	//
+	// An entry excuses the values it names and no others. Without this loop `Open|call fmt.Errorf`
+	// -- which the over-approximation reaches honestly, carrying a uint64 off the server's own
+	// response -- would be a standing permit to format an epoch key into an error string at that
+	// same call. It is held both ways like everything else: an unlisted value that lands is a
+	// refusal, and a listed value that no longer lands is a refusal.
+	for _, site := range epochKeySortedMap(sinks) {
+		entry, dispositioned := epochKeySinks[site]
+		if !dispositioned {
+			continue // already refused above, by name
+		}
+		allowed := map[string]bool{}
+		for _, spelled := range entry.carries {
+			allowed[spelled] = true
+		}
+		for _, spelled := range epochKeySortedKeys(carried[site]) {
+			if !allowed[spelled] {
+				t.Errorf("sink site %q carries %q and its disposition entry does not list it "+
+					"(it lists %v).\n%s", site, spelled, entry.carries, sinkNarrowing)
+			}
+		}
+		for _, spelled := range entry.carries {
+			if !carried[site][spelled] {
+				t.Errorf("the disposition says sink site %q carries %q and the census finds only "+
+					"%v there. A value that has stopped arriving is either a fix nobody deleted "+
+					"the entry for or a rename this gate is now blind to.\n%s",
+					site, spelled, epochKeySortedKeys(carried[site]), sinkNarrowing)
+			}
+		}
+	}
 	epochKeyHold(t, "carrier literal", carriers, epochKeyCarrierLiterals,
 		"A structure built AROUND an epoch key is a site whatever its fields are built from, which "+
 			"is the clause that survives the keys being moved one function away from the literal. "+
@@ -370,33 +662,109 @@ func epochKeyHold(t *testing.T, what string, found map[string][]string, disposit
 	}
 }
 
-// epochKeyRhsCarriesAKey is the taint step: a right hand side mentioning a producer call or an
-// already-tainted identifier binds a key.
+// epochKeyBorneBy is THE ONE QUESTION this gate asks of an expression: which epoch keys does it
+// bear? It answers the tainted identifiers and the producer calls anywhere inside the expression,
+// spelled the way the source spells them, and both the taint step and all three sink clauses run
+// it. One predicate, asked in every position, is the point: the defect this repairs was two
+// positions asking a DIFFERENT and narrower question than the taint step did.
+//
+// IT MATCHES THE VALUE AND NOT THE NODE CLASS. `writeKey` is an *ast.Ident, `writeKey[:]` is an
+// *ast.SliceExpr, `(writeKey)` is an *ast.ParenExpr, `keys[0]` is an *ast.IndexExpr,
+// `[]byte(writeKey)` is an *ast.CallExpr and `any(writeKey).([]byte)` is an *ast.TypeAssertExpr --
+// six spellings of one key, and a census that asked for the first shape by name saw one of them.
+// [epochKeyExpr] in this same file already had cases for four of those shapes, so the file knew
+// they occur in this source and the census did not ask; that gap is the whole finding.
 //
 // IT IS OVER-APPROXIMATE ON PURPOSE. A sealer handed a key returns a record that CONTAINS it, so
 // the record is tainted too, and the submit that carries that record is a sink. That is the correct
 // answer for as long as the attachment carries the pair in the clear, and it is the clause that
 // will report the change when it stops: the record stops being tainted, the submit stops being a
 // sink, and the disposition entry for it becomes an entry nothing needs.
-func epochKeyRhsCarriesAKey(right []ast.Expr, tainted map[string]bool) bool {
-	carries := false
-	for _, expression := range right {
-		ast.Inspect(expression, func(node ast.Node) bool {
-			switch shape := node.(type) {
-			case *ast.CallExpr:
-				if selector, ok := shape.Fun.(*ast.SelectorExpr); ok &&
-					epochKeyProducerSelectors[selector.Sel.Name] {
-					carries = true
-				}
-			case *ast.Ident:
-				if tainted[shape.Name] {
-					carries = true
-				}
-			}
-			return true
-		})
+// A NAME IN A NAME POSITION IS NOT A VALUE, and it walks accordingly. `self.founding` is the
+// group's field and not the local `founding`, and `EpochAttachment{WriteKey: ...}` names a field
+// and does not read one, so the walk never treats a selector's `Sel` or a struct literal's key as
+// a value it bears. Without that, `self.founding` bore `founding` and every call taking it was a
+// sink -- a census that cries at a name collision is a census nobody keeps.
+//
+// WHAT IT DOES NOT WALK INTO, when intoLiterals is false, is a composite literal or a function
+// literal, because the clause above censuses every literal AT ITS OWN FIELD wherever it is
+// written, nested or not. `SealRecord(&ServerAttachment{Epoch: &EpochAttachment{WriteKey: k}})`
+// is reported once, at `literal message.EpochAttachment.WriteKey`, rather than four times up the
+// spine of one expression. That is precision and not coverage: the mutation table drives a key
+// into a nested literal and the site is still red, at the precise name. The TAINT step walks with
+// intoLiterals true, because a sealer handed a literal containing a key returns a value carrying
+// one, and that is how a sealed record comes to be tainted.
+func epochKeyBorneBy(expression ast.Expr, tainted map[string]bool, intoLiterals bool) []string {
+	if expression == nil {
+		return nil
 	}
-	return carries
+	borne := []string{}
+	seen := map[string]bool{}
+	carry := func(spelled string) {
+		if !seen[spelled] {
+			seen[spelled] = true
+			borne = append(borne, spelled)
+		}
+	}
+	recurse := func(inner ast.Expr) {
+		for _, spelled := range epochKeyBorneBy(inner, tainted, intoLiterals) {
+			carry(spelled)
+		}
+	}
+	ast.Inspect(expression, func(node ast.Node) bool {
+		switch shape := node.(type) {
+		case *ast.CallExpr:
+			if selector, ok := shape.Fun.(*ast.SelectorExpr); ok &&
+				epochKeyProducerSelectors[selector.Sel.Name] {
+				carry(epochKeyExpr(selector))
+				// the callee is the producer's own name; only its arguments are values
+				for _, argument := range shape.Args {
+					recurse(argument)
+				}
+				return false
+			}
+		case *ast.SelectorExpr:
+			if epochKeyProducerSelectors[shape.Sel.Name] {
+				// a key read STRAIGHT OFF A FIELD -- `delivery.WriteKey`, which is the
+				// protobuf's own spelling and one character shorter than the getter the
+				// producer net was written for.
+				carry(epochKeyExpr(shape))
+			}
+			recurse(shape.X)
+			return false
+		case *ast.KeyValueExpr:
+			if _, named := shape.Key.(*ast.Ident); named {
+				recurse(shape.Value)
+				return false
+			}
+		case *ast.CompositeLit:
+			if !intoLiterals {
+				return false
+			}
+		case *ast.FuncLit:
+			if !intoLiterals {
+				return false
+			}
+		case *ast.Ident:
+			if tainted[shape.Name] {
+				carry(shape.Name)
+			}
+		}
+		return true
+	})
+	sort.Strings(borne)
+	return borne
+}
+
+// epochKeyRhsCarriesAKey is the taint step, and it is [epochKeyBorneBy] asked of each value in a
+// binding. It is kept as its own name because it reads as what the fixpoint above needs.
+func epochKeyRhsCarriesAKey(right []ast.Expr, tainted map[string]bool) bool {
+	for _, expression := range right {
+		if 0 < len(epochKeyBorneBy(expression, tainted, true)) {
+			return true
+		}
+	}
+	return false
 }
 
 // epochKeyExpr spells a qualified name the way the source does, so a census entry reads as the code
@@ -418,6 +786,24 @@ func epochKeyExpr(expression ast.Expr) string {
 		return epochKeyExpr(shape.X)
 	case *ast.ArrayType:
 		return "[]" + epochKeyExpr(shape.Elt)
+
+	// THE FOUR SHAPES THE CENSUS USED TO DROP, now spelled rather than answered "?". They are
+	// here so a site's evidence reads as the source reads -- `writeKey[:]` rather than `?` -- and
+	// so the day one of them appears at a live site the failure names what it saw.
+	case *ast.SliceExpr:
+		return epochKeyExpr(shape.X) + "[:]"
+	case *ast.ParenExpr:
+		return "(" + epochKeyExpr(shape.X) + ")"
+	case *ast.TypeAssertExpr:
+		return epochKeyExpr(shape.X) + ".(" + epochKeyExpr(shape.Type) + ")"
+	case *ast.CallExpr:
+		return epochKeyExpr(shape.Fun) + "(...)"
+	case *ast.CompositeLit:
+		return epochKeyExpr(shape.Type) + "{...}"
+	case *ast.FuncLit:
+		return "func(...)"
+	case *ast.BasicLit:
+		return shape.Value
 	}
 	return "?"
 }
