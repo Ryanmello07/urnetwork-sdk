@@ -25,6 +25,14 @@ var (
 	ErrCreateRefused = errors.New("urmessage: the message server refused this group")
 	ErrHelloRefused  = errors.New("urmessage: the message server refused this Hello")
 
+	// Ruling 33's alignment, raised HERE rather than met as a REASON_REJECTED on the wire.
+	// `SubmitRequest.epoch_keys` is positionally aligned with `records`: an entry opposite a
+	// record with is_commit = 0 is a refusal, and so is a commit with no entry. A client that got
+	// the alignment wrong would be handing the server a key aimed at a record it does not open,
+	// and the one sentence that says which way round it went wrong is cheaper to read than the
+	// reason code that answers it.
+	ErrEpochKeyDelivery = errors.New("urmessage: the epoch keys on this request are not the ones the records on it need")
+
 	// The ordering §6.1 imposes, raised here rather than met as a REASON_REJECTED on the wire.
 	ErrGroupNotOpen  = errors.New("urmessage: this group has not been opened on the server; Open publishes the founding commit, the epoch's wraps and the marker that closes them")
 	ErrGroupOpen     = errors.New("urmessage: this group is already open on the server")

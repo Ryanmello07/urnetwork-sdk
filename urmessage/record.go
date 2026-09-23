@@ -55,6 +55,155 @@ func projectionOf(record *message.Record) (*protocol.Record, error) {
 	return projection, nil
 }
 
+// ── ruling 33's epoch key delivery, as a client populates it ─────────────────────────────────
+
+// epochKeyBytes is the width §5.4 gives write_key and read_key, and the width
+// `EpochKeyDelivery` declares for both of its fields: EXACTLY 32 octets, not at least.
+//
+// It is checked on this side as well as on the server's because the one caller that could get
+// here with a short key is a caller that looked one up and got nothing back, and a zero-length
+// key would ride onto the wire as a present-but-empty delivery -- which `message.proto` records as
+// the REASON_OK = 0 hazard: an empty entry decodes as two EMPTY KEYS and never as an absence.
+const epochKeyBytes = 32
+
+// epochKeyDelivery is the pair a commit's own epoch opens with, copied onto the request that
+// carries the commit.
+//
+// THE KEYS TRAVEL BESIDE THE RECORD AND NEVER INSIDE `protocol.Record`. That is ruling 33 and the
+// reason is item 244: `Record` is the server→client type in six places, so a key field on it would
+// be six serve paths that each have to remember to clear it -- and `Record`'s projection contract
+// makes it impossible anyway, because submit checks proto.Equal(projectionOf(ParseRecord(bytes)),
+// sent) and a key is by construction not implied by a projection of `record_bytes`.
+//
+// IT COPIES. `messagegroup.EpochKeys.WriteKey` hands back the session's own backing array rather
+// than a copy, and `EpochKeys.Destroy` zeroizes it -- so a delivery that aliased it would be two
+// empty keys the moment the deferred Destroy in the caller ran. The copy is the same move
+// [Group.Open] already makes for `bootstrap_write_key`.
+func epochKeyDelivery(writeKey []byte, readKey []byte) (*protocol.EpochKeyDelivery, error) {
+	if len(writeKey) != epochKeyBytes {
+		return nil, fmt.Errorf("%w: write_key is %d octets and the delivery carries exactly %d",
+			ErrEpochKeyDelivery, len(writeKey), epochKeyBytes)
+	}
+	if len(readKey) != epochKeyBytes {
+		return nil, fmt.Errorf("%w: read_key is %d octets and the delivery carries exactly %d",
+			ErrEpochKeyDelivery, len(readKey), epochKeyBytes)
+	}
+	return &protocol.EpochKeyDelivery{
+		WriteKey: append([]byte(nil), writeKey...),
+		ReadKey:  append([]byte(nil), readKey...),
+	}, nil
+}
+
+// commitCarriesItsKeys says whether a sealed record is a commit whose epoch keys travel BESIDE it
+// rather than inside it, which is the one question both epoch key sites turn on.
+//
+// THE ANSWER IS THE ATTACHMENT KIND AND IT IS READ OFF THE SEALED OCTETS. Under kind 0x0001 the
+// pair is IN the attachment, so a delivery beside it would be a second copy of two keys the
+// write_auth mac already covers, able to disagree with the one it covers. Under kind 0x0005 the
+// attachment carries LP(H(epoch_keys)) and no keys at all, so the delivery is the ONLY road they
+// have. Spec B §5.4 calls those two sentences its acceptance window, and the server answers this
+// question exactly this way -- `record.attachment.Kind == message.AttachmentEpochDigest` -- so a
+// client that answered it any other way would be guessing at a rule that is written down.
+//
+// IT IS PARSED AND NOT REMEMBERED. The kind comes from Header.ServerAttachment, the octets the
+// sealer produced and the write_auth mac covers, and never from the ServerAttachment value this
+// package handed the sealer: a decision whose two sides come from one expression cannot catch a
+// sealer that encoded something else. ParseEpochDigestAttachment is the sixth kind's only door and
+// it refuses every other kind by name, so its yes IS the discriminator and no second test is owed.
+func commitCarriesItsKeys(record *message.Record) bool {
+	if record == nil || !record.Header.IsCommit {
+		return false
+	}
+	_, err := message.ParseEpochDigestAttachment(record.Header.ServerAttachment)
+	return err == nil
+}
+
+// epochKeysFor is the delivery a sealed record owes, or nil for a record that owes none.
+//
+// IT ANSWERS nil FOR EVERY RECORD THIS PACKAGE CAN SEAL TODAY, AND THAT IS NOT A DISABLED FEATURE.
+// A delivery is owed by a kind 0x0005 commit and by nothing else, and this package cannot seal one:
+// messagegroup.GroupSession.SealRecord is the only seal door, it encodes through
+// message.EncodeServerAttachment, and that encoder asks serverAttachmentKindServed, which excludes
+// AttachmentEpochDigest. Measured, with the control in the same call: kind 0x0005 is refused by
+// name -- "a server attachment door was handed a kind it does not serve: kind 0x0005 at spec B
+// section 5.1 check 3's door" -- while kind 0x0001 encodes at 136 octets. So today every commit
+// this client seals carries its keys INSIDE the attachment, item 244 is open at those two sites,
+// and the carrier below stays empty of its own accord.
+//
+// THE DAY connect's DOOR OPENS, NOTHING HERE CHANGES AND THE KEYS START RIDING. The two commit
+// sites swap their message.EpochAttachment literal for message.NewEpochDigestAttachment, the kind
+// in the sealed octets becomes 0x0005, this function starts answering a delivery, and both requests
+// start carrying one. That is why the decision is keyed on the record rather than on a flag: a flag
+// would be a second place to remember, and this has none.
+//
+// AND EMITTING ONE UNCONDITIONALLY IS NOT THE SAFE SHAPE, measured rather than reasoned: a delivery
+// beside a kind 0x0001 commit is REFUSED -- "a kind 0x0001 commit arrived with an epoch key
+// delivery beside it" -- because under 0x0001 the server reads the keys out of the attachment and a
+// delivery is a field it would not read. Driven end to end through the real server, the
+// unconditional shape answered REASON_REJECTED to every epoch commit, with the unmodified client
+// as the control answering ok.
+func epochKeysFor(record *message.Record, writeKey []byte, readKey []byte) (
+	*protocol.EpochKeyDelivery, error) {
+
+	if !commitCarriesItsKeys(record) {
+		return nil, nil
+	}
+	return epochKeyDelivery(writeKey, readKey)
+}
+
+// alignedEpochKeys is `SubmitRequest.epoch_keys` for a submission of ONE record: the positional
+// alignment Spec B §4.3.3 states, enforced on this side.
+//
+// WHAT IT ADMITS, ENUMERATED, because it admits exactly two lengths and not a general batch.
+// §4.3.3 makes a batch containing a commit exactly one record, so `epoch_keys` is EMPTY when the
+// submission carries no commit OR carries one kind 0x0001 commit, and holds EXACTLY ONE ENTRY when
+// it carries one kind 0x0005 commit. There is no third length. For a mixed batch the field is not
+// under-specified, it is UNSATISFIABLE -- which is why this package submits one record at a time.
+//
+// THE RULE IS KEYED ON THE ATTACHMENT KIND AND NOT ON is_commit ALONE, and the distinction is the
+// whole of §5.4's acceptance window. `is_commit` alone gives two wrong answers: it would put a
+// delivery beside a 0x0001 commit, which the server refuses as a key it would not read, and it
+// would leave a 0x0005 commit with none, which the server refuses as an epoch it was never handed
+// what opens. Both are refusals the client can see coming, and seeing one here costs a sentence
+// where seeing it on the wire costs a spent stream index and a spent MLS generation.
+//
+// IT REFUSES IN BOTH DIRECTIONS AND NEITHER IS THE OTHER'S MIRROR. A 0x0005 commit with no
+// delivery is a device that derived an epoch and did not hand over what opens it. A record WITH an
+// unwanted delivery is the worse of the two: the entry is aimed POSITIONALLY, so a live epoch key
+// is pointed at a record that either opens nothing or already carries its own.
+//
+// IT IS NOT AN EMPTY ENTRY IN EITHER DIRECTION. Every field of `EpochKeyDelivery` has implicit
+// presence, so a zero entry is two EMPTY KEYS on the wire and not an absence -- the REASON_OK = 0
+// hazard `message.proto` records -- which is why the no-delivery case answers a nil slice and never
+// a slice of one zero value.
+//
+// BOTH SIDES ARE READ OFF THE SEALED RECORD, which is what the server checks against
+// ParseRecord(record_bytes) before it weighs this field at all. Reading either off the caller's
+// intention would be a check whose two sides came from one expression.
+func alignedEpochKeys(record *message.Record, delivery *protocol.EpochKeyDelivery) (
+	[]*protocol.EpochKeyDelivery, error) {
+
+	if record == nil {
+		return nil, fmt.Errorf("%w: there is no record to align against", ErrEpochKeyDelivery)
+	}
+	if commitCarriesItsKeys(record) {
+		if delivery == nil {
+			return nil, fmt.Errorf("%w: this is a kind 0x0005 commit and no epoch keys were handed over, so the epoch it opens would be installed by a server that was never given what opens it",
+				ErrEpochKeyDelivery)
+		}
+		return []*protocol.EpochKeyDelivery{delivery}, nil
+	}
+	if delivery != nil {
+		if record.Header.IsCommit {
+			return nil, fmt.Errorf("%w: this commit carries its keys inside a kind 0x0001 attachment and an epoch key delivery was handed over beside it, which is a second copy of two keys the write_auth mac already covers",
+				ErrEpochKeyDelivery)
+		}
+		return nil, fmt.Errorf("%w: this record is not a commit and an epoch key delivery was handed over for it, and an entry is aimed positionally at the record beside it",
+			ErrEpochKeyDelivery)
+	}
+	return nil, nil
+}
+
 // ── §4.3.8's req_auth, which the read path is authorized by ──────────────────────────────────
 
 // authorizeFetch computes §4.3.8's `req_auth` over the request's own canonical bytes, under the

@@ -1113,6 +1113,11 @@ func (self *Group) Open(ctx context.Context) error {
 	}
 
 	// (1) the founding commit, sealed at epoch zero and carrying the epoch it opens.
+	//
+	// ITS ATTACHMENT IS STILL KIND 0x0001 AND STILL CARRIES THE TWO KEYS IN THE CLEAR, which is
+	// item 244 unclosed at this site. [Group.publishCommitLocked] carries the measurement and the
+	// one edit that closes it; the short form is that `message.EncodeServerAttachment` refuses kind
+	// 0x0005 by name and it is the only encoder `messagegroup.GroupSession.SealRecord` runs.
 	founding, err := self.founding.SealRecord(message.RetentionPermanent, 0, true,
 		encodeHead(self.device.nowMs()), self.commit, 0, &message.ServerAttachment{
 			Kind: message.AttachmentEpoch,
@@ -1128,6 +1133,22 @@ func (self *Group) Open(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("urmessage: sealing the founding commit: %w", err)
 	}
+	// RULING 33's ROAD FOR EPOCH 1'S TWO KEYS, DECIDED OFF THE RECORD THAT WAS JUST SEALED.
+	// [epochKeysFor] answers a delivery for a kind 0x0005 commit and nil for a kind 0x0001 one,
+	// because under 0x0001 the keys are already inside the attachment and a delivery beside one is
+	// refused. §4.3.2's `epoch_keys` is SINGULAR -- this request carries exactly one record and it
+	// is always a commit -- so there is no alignment to compute here and no list to keep in step.
+	//
+	// AND THESE ARE EPOCH 1'S KEYS, NOT EPOCH 0'S. `bootstrap_write_key` below is write_key[0] and
+	// is a different field for a different job: it is what the server verifies the founding
+	// commit's own `write_auth` under, and §4.3.2 calls it self-certification protected by nothing
+	// but a rate limit. The pair here is what the commit OPENS -- the epoch the attachment names --
+	// and the two must never be confused, which is the reason they are derived from two different
+	// sessions a dozen lines apart and copied at two different sites.
+	delivery, err := epochKeysFor(founding, writeKey, readKey)
+	if err != nil {
+		return fmt.Errorf("urmessage: the epoch keys this group opens epoch %d with: %w", self.epoch, err)
+	}
 	created := append([]byte(nil), bootstrapWriteKey...)
 	if _, err := self.sendSealedLocked(ctx, self.founding, founding, "the founding commit",
 		func(record *protocol.Record) (protocol.Reason, uint64, error) {
@@ -1135,6 +1156,7 @@ func (self *Group) Open(ctx context.Context) error {
 				GroupId:           self.id,
 				InitialCommit:     record,
 				BootstrapWriteKey: created,
+				EpochKeys:         delivery,
 			})
 			if err != nil {
 				return protocol.Reason_REASON_INTERNAL, 0, err
@@ -1166,7 +1188,7 @@ func (self *Group) Open(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("urmessage: sealing an epoch wrap: %w", err)
 		}
-		if _, err := self.submitLocked(ctx, self.session, wrap, "an epoch wrap"); err != nil {
+		if _, err := self.submitLocked(ctx, self.session, wrap, "an epoch wrap", nil); err != nil {
 			return err
 		}
 	}
@@ -1180,7 +1202,7 @@ func (self *Group) Open(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("urmessage: sealing the epoch complete marker: %w", err)
 	}
-	if _, err := self.submitLocked(ctx, self.session, marker, "the epoch complete marker"); err != nil {
+	if _, err := self.submitLocked(ctx, self.session, marker, "the epoch complete marker", nil); err != nil {
 		return err
 	}
 
@@ -1345,8 +1367,37 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 	// and the NEW epoch's write and read keys, derived STRAIGHT OFF the staged exporter -- the
 	// same three steps installEpochOnLoop takes inside a session -- rather than off a second
 	// GroupSession, because a GroupSession's Close closes the handle it shares with this group.
-	// write_key and read_key travel to the server in the clear in the attachment, so nothing here
-	// is a new secret; the intermediates are erased.
+	//
+	// WHERE write_key AND read_key TRAVEL, AS OF RULING 33 AND AS THE TREE STANDS TODAY. The road
+	// ruling 33 built is the REQUEST, in `SubmitRequest.epoch_keys` aligned with the record, and it
+	// is built below -- but NOTHING TRAVELS ON IT YET, and the reason is not a switch. They travel
+	// inside the record instead, in the clear, in the kind 0x0001 `EpochAttachment`, because the
+	// substitution ruling 27 calls for
+	// -- kind 0x0005, carrying LP(H(epoch_keys)) instead of the pair -- CANNOT BE SEALED BY THIS
+	// PACKAGE TODAY. Measured, not assumed: `messagegroup.GroupSession.SealRecord` is the only seal
+	// door and it encodes through `message.EncodeServerAttachment`, whose
+	// `serverAttachmentKindServed` map excludes `AttachmentEpochDigest`, so kind 0x0005 is refused
+	// by name -- "a server attachment door was handed a kind it does not serve: kind 0x0005 at spec
+	// B section 5.1 check 3's door" -- with kind 0x0001 encoding at 136 octets as the control in
+	// the same call. `connect/messagegroup` names `AttachmentEpochDigest` nowhere in its production
+	// source (`AttachmentWrap`, one hit, is the control). So item 244 IS STILL OPEN at this site
+	// and this comment is not to be read as saying otherwise: the keys are in the served bytes
+	// until that door opens. The intermediates are erased either way.
+	//
+	// AND THE SERVER MAKES THE TWO A PACKAGE, WHICH IS WHY THE REQUEST IS EMPTY RATHER THAN BOTH
+	// ROADS BEING USED AT ONCE. §5.4's acceptance window is keyed on the attachment kind: a kind
+	// 0x0001 commit with a delivery beside it is REFUSED -- "a kind 0x0001 commit arrived with an
+	// epoch key delivery beside it" -- because under 0x0001 the server reads the keys out of the
+	// attachment and a delivery is a second copy it would not read. Measured through the real
+	// server: emitting one anyway answered REASON_REJECTED to every epoch commit, with the
+	// unmodified client as the control answering ok. So [epochKeysFor] asks the sealed record which
+	// kind it is and answers accordingly, which is the server's own rule and not a feature flag.
+	//
+	// WHAT CHANGES HERE WHEN THE DOOR OPENS is this literal and nothing else on this path: the
+	// attachment becomes `message.NewEpochDigestAttachment(groupId, public, writeKey, readKey)` --
+	// which reads the epoch once, out of the body it is building, so the digest cannot name an epoch
+	// the attachment disagrees with -- and the delivery below starts carrying the pair on its own,
+	// because it is keyed on that kind.
 	pending, err := self.handle.PendingEpoch()
 	if err != nil {
 		// THE FIRST EXIT ERASES LIKE EVERY LATER ONE. A staged commit whose facts cannot be read
@@ -1388,7 +1439,18 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 		self.handle.ClearPendingCommit()
 		return fmt.Errorf("urmessage: sealing the epoch commit: %w", err)
 	}
-	if _, err := self.submitLocked(ctx, self.session, commitRecord, "an epoch commit"); err != nil {
+	// (3a) ruling 33's road for those two keys: BESIDE the record, on the request that carries it,
+	// and never on `protocol.Record`. The decision is [epochKeysFor]'s and it is read off the
+	// attachment kind in the octets just sealed, which is how the server reads it -- so a kind
+	// 0x0001 commit, which is every commit this package can seal today, answers nil and rides
+	// alone, and a kind 0x0005 commit answers the pair the moment connect's seal door will encode
+	// one. The delivery COPIES, because the pair is also inside a sealer's hands here.
+	delivery, err := epochKeysFor(commitRecord, writeKey, readKey)
+	if err != nil {
+		self.handle.ClearPendingCommit()
+		return fmt.Errorf("urmessage: the epoch keys this commit opens epoch %d with: %w", newEpoch, err)
+	}
+	if _, err := self.submitLocked(ctx, self.session, commitRecord, "an epoch commit", delivery); err != nil {
 		// THE STAGED EPOCH IS ERASED ON EVERY ANSWER BUT REASON_OK, through the seam's own door,
 		// and the group is exactly where it was: handle, session and epoch all at the epoch the
 		// commit was built against, nothing persisted, nothing announced. The error says which
@@ -1443,7 +1505,7 @@ func (self *Group) publishEpochFanoutLocked(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("urmessage: sealing an epoch wrap: %w", err)
 		}
-		if _, err := self.submitLocked(ctx, self.session, wrap, "an epoch wrap"); err != nil {
+		if _, err := self.submitLocked(ctx, self.session, wrap, "an epoch wrap", nil); err != nil {
 			return err
 		}
 	}
@@ -1455,7 +1517,7 @@ func (self *Group) publishEpochFanoutLocked(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("urmessage: sealing the epoch complete marker: %w", err)
 	}
-	if _, err := self.submitLocked(ctx, self.session, marker, "the epoch complete marker"); err != nil {
+	if _, err := self.submitLocked(ctx, self.session, marker, "the epoch complete marker", nil); err != nil {
 		return err
 	}
 	return nil
@@ -1893,7 +1955,7 @@ func (self *Group) sendContentLocked(ctx context.Context, plaintext []byte, what
 	if err := self.device.persistSent(self.id, record.Header.StreamIndex, sealed); err != nil {
 		return nil, fmt.Errorf("urmessage: %s was sealed and NOT sent, because the copy a restart would show it from could not be persisted: %w", what, err)
 	}
-	recordId, err := self.submitLocked(ctx, self.session, record, what)
+	recordId, err := self.submitLocked(ctx, self.session, record, what, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1940,14 +2002,28 @@ func (self *Group) sendContentLocked(ctx context.Context, plaintext []byte, what
 }
 
 // submitLocked is 4.3.5's submit of one record, with S2-2's recovery around it.
+//
+// `delivery` IS RULING 33'S EPOCH KEY PAIR AND IT IS NON NIL FOR EXACTLY THE COMMITS. It is a
+// parameter rather than something derived here because the keys are the CALLER's -- they come off
+// the epoch the caller staged -- and [alignedEpochKeys] is what holds the parameter against the
+// record's own `is_commit`, in both directions, before anything reaches the wire.
+//
+// IT IS COMPUTED ONCE AND BOTH ATTEMPTS CARRY IT. S2-2's recovery re-MACs the record and submits
+// the SAME record a second time; the keys the commit opens its epoch with are a fact of that
+// record and not of the connection, so the second request carries the same delivery as the first.
 func (self *Group) submitLocked(ctx context.Context, session *messagegroup.GroupSession,
-	record *message.Record, what string) (uint64, error) {
+	record *message.Record, what string, delivery *protocol.EpochKeyDelivery) (uint64, error) {
 
+	aligned, err := alignedEpochKeys(record, delivery)
+	if err != nil {
+		return 0, fmt.Errorf("urmessage: submitting %s: %w", what, err)
+	}
 	return self.sendSealedLocked(ctx, session, record, what,
 		func(projection *protocol.Record) (protocol.Reason, uint64, error) {
 			response, err := self.device.transport.Call(ctx, &protocol.SubmitRequest{
-				GroupId: self.id,
-				Records: []*protocol.Record{projection},
+				GroupId:   self.id,
+				Records:   []*protocol.Record{projection},
+				EpochKeys: aligned,
 			})
 			if err != nil {
 				return protocol.Reason_REASON_INTERNAL, 0, err
@@ -2338,7 +2414,7 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 			return walk.opened, fmt.Errorf("%w: the response carried no fetch arm", ErrFetchRefused)
 		}
 		self.stats.Pages += 1
-		if err := self.checkAttestationLocked(since, fetched); err != nil {
+		if err := self.checkAttestationLocked(since, request.GetReadEpoch(), fetched); err != nil {
 			self.commitWalkLocked(walk)
 			return walk.opened, err
 		}
@@ -4207,7 +4283,14 @@ func ownFrameAlreadySpent(err error) bool {
 
 // checkAttestationLocked performs the two halves of 4.3.4 that need no key, and counts the half
 // that does. See [Group.Receive] for the whole of the decision and for S2-27.
-func (self *Group) checkAttestationLocked(since uint64, fetched *protocol.FetchResponse) error {
+//
+// `readEpoch` IS THE EPOCH THE REQUEST WAS AUTHENTICATED UNDER, PASSED IN RATHER THAN RE-READ.
+// It is `request.ReadEpoch`, the field `req_auth` was computed over, and not [Group.epoch] read a
+// second time: a walk can cross an epoch between pages -- refreshReadKey exists for exactly that
+// -- so a second read of the group's own epoch would be a different number from the one this page
+// was asked under, and the comparison below would be about the wrong request.
+func (self *Group) checkAttestationLocked(since uint64, readEpoch uint64,
+	fetched *protocol.FetchResponse) error {
 	attestation := fetched.GetAttestation()
 	if attestation == nil {
 		// THE DOWNGRADE CHECK, and it reads the server's OWN advertisement rather than a
@@ -4227,6 +4310,37 @@ func (self *Group) checkAttestationLocked(since uint64, fetched *protocol.FetchR
 	if attestation.GetSinceRecordId() != since {
 		return fmt.Errorf("%w: it names since_record_id %d and this fetch asked from %d",
 			ErrFetchAttestation, attestation.GetSinceRecordId(), since)
+	}
+	// RULING 32's read_epoch, HELD AGAINST THE EPOCH THIS REQUEST AUTHENTICATED UNDER. F0 made
+	// `high_water_record_id` ceiling-relative, so the ceiling is a third filter beside `class_mask`
+	// and `heads_only` -- and §4.3.4's stated purpose for those two is "so that a filtered fetch is
+	// not byte-indistinguishable from a withholding one". This is the half of that which costs no
+	// key: the client sent `ReadEpoch: self.epoch` and it knows what it sent, so a server that
+	// names a DIFFERENT ceiling in the attestation is contradicting the request in a field the
+	// client already holds. No fleet key, no signature, no PKI.
+	//
+	// WHAT IT CATCHES, AND IT IS NOT ITEM 244's READ-SIDE WITHHOLDING. A previous hand-off note
+	// claimed this comparison "catches ruling 32's measurement" and that claim is FALSE; it was
+	// corrected in connect 69bf704c's own commit message and the true sentence goes here, at the
+	// site, rather than being left to a reader to reconstruct. What this catches is a server
+	// TRUTHFULLY naming a ceiling below the one the request was MAC'd under -- a misconfigured,
+	// misrouted or mis-sharded server, a real class and a free one to close. What it CANNOT catch
+	// is the measurement ruling 32 was taken on: a server that clamps every reader to epoch 1,
+	// answers a `read_epoch = 3` request, and writes 3 in the attestation anyway. That answer is
+	// BYTE-IDENTICAL to an honest one -- seven of twelve records and two whole epochs withheld with
+	// every field agreeing -- and the only thing that separates them is the signature over the
+	// preimage `read_epoch` now sits in, which is unbuilt here and unbuilt on the server. A LYING
+	// CLAMP IS NOT DETECTABLE BY THIS CHECK OR BY ANY OTHER KEYLESS ONE.
+	//
+	// IT IS A REFUSAL AND NOT A COUNTER, which is the opposite of the high-water omission arm one
+	// page up, and the difference is what the two are about. The omission arm compares a server's
+	// number against what this device managed to open, and an honest server doing §7.2 retention
+	// will one day trip it. This compares a server's own statement against a value the client put
+	// on the wire itself; there is no retention, no pruning and no legitimate sweep that makes
+	// those two disagree, so there is no future in which refusing is wrong.
+	if attestation.GetReadEpoch() != readEpoch {
+		return fmt.Errorf("%w: it names read_epoch %d and this fetch was authenticated under %d",
+			ErrFetchAttestation, attestation.GetReadEpoch(), readEpoch)
 	}
 	if attestation.GetHighWaterRecordId() != fetched.GetHighWaterRecordId() {
 		return fmt.Errorf("%w: it names high_water %d and the response carries %d",
