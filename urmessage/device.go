@@ -254,6 +254,15 @@ type Device struct {
 	// references -- `XwingPrivateKey.Seed` answers a copy, and the store re-reads its file on
 	// every call -- so holding it leaves ONE array for Close to clear, while copying would leave
 	// the original behind with nothing pointing at it.
+	//
+	// AND [Device.Close] IS NOT THE ONLY ERASE THE ARRAY OWES, which is a repair and not a
+	// restatement. The seed is live BEFORE there is a Device to close -- `deviceIdentity` mints it
+	// two fallible statements before it hands it back, and [NewDevice] holds it across the engine's
+	// construction -- and on every refusal in between it used to go out of scope with its octets
+	// intact, with nothing left that could ever clear it. Each of those three live ranges now
+	// carries a deferred erase disarmed at its one exit that hands the seed on;
+	// TestEveryPathThatDropsTheDeviceErasesItsWrapSeed holds the property over the source rather
+	// than over a list of the exits that exist today.
 	wrapSeed []byte
 
 	nowMs  func() int64
@@ -302,6 +311,13 @@ type Device struct {
 // empty seed and every path but the decapsulation behaves exactly as it did;
 // [DurableStateStore.GetDeviceIdentity] carries the full reasoning, including why minting a
 // replacement here would be worse than the absence.
+//
+// AND A DEVICE THAT IS NOT BUILT ERASES THE SEED IT WAS HANDED. Between `deviceIdentity` and the
+// struct literal below, this function holds a private key across a call that can refuse, and a
+// refusal there produces no [Device] and therefore no [Device.Close] to clear it. The deferred
+// erase at the binding covers every exit below it, which is a property of the shape rather than of
+// the exits that exist today -- see the comment there, and
+// TestEveryPathThatDropsTheDeviceErasesItsWrapSeed, which asserts it over this function's source.
 func NewDevice(config DeviceConfig) (*Device, error) {
 	if config.Transport == nil {
 		return nil, ErrNoTransport
@@ -327,6 +343,24 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 		return nil, fmt.Errorf("urmessage: the mls crypto provider: %w", err)
 	}
 	signer, signerPub, leafKeys, wrapSeed, err := deviceIdentity(crypto, stateStore, random)
+	// THE SEED IS LIVE FROM HERE AND EVERY EXIT BELOW BUT ONE DROPS IT, so the erase is registered
+	// once, here, rather than written in front of the exits that exist today. Until this defer,
+	// [NewDevice] held a private key across one fallible call -- the engine's construction -- and
+	// returned it to the heap intact when that call refused. Nothing would ever Close such a
+	// device, because it was never built.
+	//
+	// IT IS REGISTERED BEFORE THE ERROR CHECK ON PURPOSE, which costs a no-op: on that arm
+	// `deviceIdentity` answers a nil seed and [zeroizeState] over nil does nothing. What it buys
+	// is that "every return below this line erases" is a property of the SHAPE rather than a case
+	// analysis a reader has to redo after each new return -- which is the whole of what
+	// TestEveryPathThatDropsTheDeviceErasesItsWrapSeed asserts, over this function and not over a
+	// list of its exits.
+	held := false
+	defer func() {
+		if !held {
+			zeroizeState(wrapSeed)
+		}
+	}()
 	if err != nil {
 		return nil, err
 	}
@@ -342,6 +376,9 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("urmessage: the mls engine: %w", err)
 	}
+	// the one exit that hands the seed on: the field below holds the array the defer would
+	// otherwise clear, and from here [Device.Close] owns it.
+	held = true
 	return &Device{
 		transport:        config.Transport,
 		reserver:         config.Reserver,
@@ -373,6 +410,14 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 // because minting over it would silently replace an identity that is still on the disk and leave
 // every group this device is in unreachable.
 //
+// AND A MINT THAT DOES NOT COMPLETE ERASES WHAT IT DREW. The seed is live from `xwing.Seed()`
+// until the return, across two statements that can both refuse -- the leaf keys encoding and the
+// write -- and until the deferred erase below it left the heap on either of them holding the
+// private half of a key pair whose public half nothing had published. The restore arm has a cover
+// of its own for the same reason, on an array the store answered. Neither erase reaches the copy
+// INSIDE the transient `messagegroup.XwingPrivateKey`; that limit is stated at `wrapSeed` below
+// and is `connect`'s to fix, not this step's.
+//
 // THE SEED AND THE LEAF KEYS BODY ARE ONE VALUE HERE AND ONE RECORD THERE. The public half this
 // function encodes and the seed it keeps come from a single [messagegroup.XwingGenerateKey] call
 // and are handed to [DeviceStore.PutDeviceIdentity] together, so there is no ordering in which a
@@ -385,8 +430,21 @@ func deviceIdentity(crypto mls.CryptoProvider, stateStore mls.StateStore, random
 	store, durable := stateStore.(DeviceStore)
 	if durable {
 		pub, priv, leafKeys, wrapSeed, err := store.GetDeviceIdentity()
+		// the restore arm's own cover. The array is the store's answer, freshly decoded and
+		// referenced by nothing else, so it is this call's to erase -- and on the one exit below
+		// that drops it the store refused and the array is empty, which makes this erase a no-op
+		// TODAY. It is registered anyway, for the reason [NewDevice]'s is: a cover written only
+		// where a value happens to be non-empty is a cover that has to be re-argued the day the
+		// arm changes, and nothing would report that it had not been.
+		restored := false
+		defer func() {
+			if !restored {
+				zeroizeState(wrapSeed)
+			}
+		}()
 		switch {
 		case err == nil:
+			restored = true
 			return mls.SignaturePrivateKey(priv), mls.SignaturePublicKey(pub), leafKeys, wrapSeed, nil
 		case errors.Is(err, ErrNoDeviceIdentity):
 			// the ordinary state of a fresh directory: fall through and mint.
@@ -407,6 +465,20 @@ func deviceIdentity(crypto mls.CryptoProvider, stateStore mls.StateStore, random
 	// `messagegroup.XwingPrivateKey` declares no erase and `connect` is not this step's to
 	// change. That is a real and stated limit on the erase below, not a claim it covers.
 	wrapSeed := xwing.Seed()
+	// AND THE MINT ARM'S, WHICH IS THE ONE THE FINDING WAS ABOUT. The seed exists for two more
+	// fallible statements -- the leaf keys encoding and the write -- before it is handed back, and
+	// until this defer BOTH of those refusals returned it to the heap with its octets intact. The
+	// leaf keys arm is not reachable from any case: Encode's two refusals are the alg_id, which
+	// this call writes as a constant, and the public half's length, which comes out of
+	// XwingGenerateKey -- so it is this ONE cover over BOTH returns that carries the measurement
+	// from the arm a case can drive to the arm it cannot, and
+	// TestEveryPathThatDropsTheDeviceErasesItsWrapSeed asserts that there is exactly one.
+	minted := false
+	defer func() {
+		if !minted {
+			zeroizeState(wrapSeed)
+		}
+	}()
 	leafKeys, err := (&mls.LeafKeysExtension{
 		AlgId:          mls.AlgIdXwing,
 		DeviceXwingPub: xwing.Public().Bytes(),
@@ -419,6 +491,8 @@ func deviceIdentity(crypto mls.CryptoProvider, stateStore mls.StateStore, random
 			return nil, nil, nil, nil, fmt.Errorf("urmessage: this device's identity could not be persisted: %w", err)
 		}
 	}
+	// the mint arm's one exit that hands the seed on, and from here it is [NewDevice]'s.
+	minted = true
 	return signer, signerPub, leafKeys.ExtensionData, wrapSeed, nil
 }
 

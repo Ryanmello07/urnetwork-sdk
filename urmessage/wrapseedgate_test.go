@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +40,17 @@ import (
 // is the refusal: the epoch-key gate's own header names `fmt.Errorf("%x", writeKey)` -- "an epoch
 // key in an error string, in every log that error ever reaches" -- as the exact shape it exists to
 // refuse, and nothing refused that shape for the seed. This file does.
+//
+// AND THE NET STOPPED ONE CALL SHORT OF THE DISK, which is the second finding this file carries
+// and is a defect of this file rather than of the package. The disposition named
+// `PutDeviceIdentity|call self.writeRecord` "THE SEED GOING TO DISK" while `writeRecord` and
+// `encodeStateRecord` -- the two functions the seed actually passes through on its way there --
+// were outside the census, so a `%x` of it inside either was refused by nothing. Measured the same
+// way: both mutants survived `go test ./urmessage/ -run '.*' -timeout 1800s` at `ok 6.117s` with
+// this gate `--- PASS`. The repair is one name in the net below (`parts`), because PRODUCER ONE
+// already knew how to seed a write path from a parameter; and where the walk NOW ends is written
+// down and asserted in [wrapSeedAccumulatorSites] rather than left to be inferred. M10-M15 at the
+// foot of this file drive it.
 //
 // IT IS THE EPOCH-KEY GATE'S SHAPE AND IT INHERITS THAT FILE'S THREE SCARS DELIBERATELY. Read its
 // header for the measurements; the short form is that a census must match the VALUE and not the
@@ -90,6 +102,7 @@ var wrapSeedProducerNames = map[string]bool{
 	"GetDeviceIdentity": true,
 	"deviceIdentity":    true,
 	"wrapSeed":          true,
+	"parts":             true,
 }
 
 // Every place in this package's production source that produces the seed, as
@@ -108,6 +121,40 @@ var wrapSeedProducerSites = map[string]string{
 	"PutDeviceIdentity|parameter wrapSeed": "the store's WRITE path, where the value arrives from " +
 		"the caller with a name and is otherwise indistinguishable from the three record parts " +
 		"beside it. Seeding here is what puts statestore_durable.go inside this census at all.",
+
+	// ── THE TWO CALLS FURTHER DOWN THE SAME ROAD ─────────────────────────────────────────────
+	//
+	// THE NET USED TO STOP ONE CALL SHORT OF THE DISK, AND THAT WAS A FINDING RATHER THAN A
+	// CHOICE. `PutDeviceIdentity|call self.writeRecord` was dispositioned below as "THE SEED
+	// GOING TO DISK" -- and `writeRecord` and `encodeStateRecord` were outside the census
+	// entirely, so a `%x` of the seed INSIDE either of them was refused by nothing. MEASURED, on
+	// the commit this entry repairs, two production sites mutated to leak it:
+	//
+	//	statestore_durable.go:720  fmt.Errorf("%w: %s could not be written (record %x): %v", …, record, err)
+	//	statestore_durable.go:346  fmt.Errorf("%w: a part of %d octets (%x) …", …, len(part), part)
+	//
+	// -- and BOTH survived `go test ./urmessage/ -run '.*' -timeout 1800s`, which answered
+	// `ok 6.117s`, with this very gate `--- PASS` when run by name. The seed reaches the disk
+	// through two calls and the disposition named only the first of them.
+	//
+	// THE REPAIR IS THE MECHANISM THE FILE ALREADY HAD, not a new one. `PutDeviceIdentity` is
+	// inside this census because PRODUCER ONE seeds a PARAMETER whose name is in the net above;
+	// `writeRecord` and `encodeStateRecord` receive the same value as `parts`, so `parts` joins
+	// the net and both functions seed themselves exactly as the store's write path does. That is
+	// also why the net is a set of NAMES and not of call sites: one name added reaches every
+	// function that spells the value that way.
+	//
+	// AND `parts` IS SEEDED AS A PARAMETER ONLY, which is what keeps this widening from swallowing
+	// the package. Seven functions in statestore_durable.go declare a LOCAL called `parts` -- every
+	// Get/Take/Records reader -- and PRODUCER ONE reads parameters and named results, so none of
+	// them is tainted by this line. The one that is censused, `GetDeviceIdentity`, was already
+	// censused before it, through PRODUCER TWO and its own name.
+	"writeRecord|parameter parts": "THE FIRST OF THE TWO CALLS THE NET USED TO STOP SHORT OF. " +
+		"Every durable value in this package is written through it -- the identity record among " +
+		"them -- and the seed arrives here as one of four `parts`, with no name of its own left.",
+	"encodeStateRecord|parameter parts": "THE SECOND, AND THE LAST PLACE THE SEED IS A GO VALUE " +
+		"BEFORE IT IS OCTETS IN A FRAME. It is where the record is assembled, and it is the " +
+		"function whose loop touches the seed's own array one part at a time.",
 	"DecapsulateToOwnLeaf|self.wrapSeed": "the field read, under [Device.mutex], on the one path " +
 		"that uses the seed for what it is for.",
 	"Close|self.wrapSeed": "the field read on the ERASE path. It is a producer like any other read " +
@@ -173,6 +220,22 @@ var wrapSeedSinks = map[string]wrapSeedSink{
 			"this function by an exit no other clause watches -- the caller binds it from a call " +
 			"nothing else taints -- and the caller is [NewDevice], whose own sites are below.",
 	},
+	"NewDevice|call zeroizeState": {
+		carries: []string{"wrapSeed"},
+		why: "THE ERASE ON THE WAY IN, inside the deferred closure that covers every exit of " +
+			"[NewDevice] below the binding but the one that hands the seed to the field. It is the " +
+			"same [zeroizeState] over the same array [Device.Close] clears at the other end of the " +
+			"device's life, and it is here because a device whose engine refused is a device " +
+			"nothing will ever Close. See TestEveryPathThatDropsTheDeviceErasesItsWrapSeed, which " +
+			"asserts the COVER rather than this call.",
+	},
+	"deviceIdentity|call zeroizeState": {
+		carries: []string{"wrapSeed"},
+		why: "the same erase in both of `deviceIdentity`'s arms -- one deferred closure per live " +
+			"range, the restore arm's over the array the store answered and the mint arm's over " +
+			"`xwing.Seed()`'s own. Two defers, one site, because this census keys on the call as " +
+			"written; the gate that tells them apart is the one that counts covers per BINDING.",
+	},
 	"NewDevice|literal Device.wrapSeed": {
 		carries: []string{"wrapSeed"},
 		why: "THE FIELD. It is HELD rather than copied, which is the erase talking: both of " +
@@ -216,7 +279,42 @@ var wrapSeedSinks = map[string]wrapSeedSink{
 	"PutDeviceIdentity|call self.writeRecord": {
 		carries: []string{"wrapSeed"},
 		why: "THE WRITE. One record, four parts, one fsync -- see " +
-			"TestEveryFsyncInThisPackageIsAtASiteThisSuiteNames for the durability half.",
+			"TestEveryFsyncInThisPackageIsAtASiteThisSuiteNames for the durability half. IT IS NOT " +
+			"THE END OF THE ROAD and this entry used to read as though it were: the three sites " +
+			"below are what the seed does AFTER this call, and until they were censused a `%x` of " +
+			"it inside either callee was refused by nothing.",
+	},
+
+	// ── AND THE TWO FUNCTIONS UNDER THAT CALL ────────────────────────────────────────────────
+	"writeRecord|call encodeStateRecord": {
+		carries: []string{"parts"},
+		why: "the four record parts -- signature public half, signature private half, leaf keys " +
+			"body, SEED -- being handed to the framing. `parts...` is a variadic forward and the " +
+			"walk reads it as the value it is: the same arrays the caller passed, not a copy.",
+	},
+	"writeRecord|call temp.Write": {
+		carries: []string{"record"},
+		why: "THE SEED REACHING THE FILE, which is the sentence the entry above used to carry on " +
+			"its own. `record` is tainted by DERIVATION -- it was bound from a call handed `parts` " +
+			"-- and by derivation is the right answer rather than an over-approximation here: the " +
+			"framed record literally contains the seed's octets, length-prefixed. It goes to the " +
+			"disk in the clear, which is S2-24 and is still open; this is now the site where that " +
+			"fact is held rather than one call upstream of it.",
+	},
+	"writeRecord|call zeroizeState": {
+		carries: []string{"record"},
+		why: "THE SECOND COPY BEING ERASED. `encodeStateRecord` assembles a record that is another " +
+			"copy of whatever secret it carries, and this deferred erase is the only thing that can " +
+			"still reach it once the write has returned. It is [zeroizeState] at a site this census " +
+			"had never seen, and an entry that listed `parts` here would be a different function: " +
+			"the CALLER's arrays are not this erase's to clear.",
+	},
+	"encodeStateRecord|call body.Write": {
+		carries: []string{"part"},
+		why: "THE SEED'S OWN ARRAY, one part at a time, going into the buffer the frame is built " +
+			"in. `part` is the range variable over `parts`, so on the identity record's fourth " +
+			"turn of that loop this IS the seed. See [wrapSeedAccumulatorSites] for where the walk " +
+			"stops after this call and why that limit is asserted rather than described.",
 	},
 	"PutDeviceIdentity|return": {
 		carries: []string{"wrapSeed"},
@@ -302,6 +400,57 @@ var wrapSeedCountedNotCarriedSites = map[string]string{
 	"DecapsulateToOwnLeaf|len self.wrapSeed": "the EMPTY-seed guard, which is a store written " +
 		"before the seed was retained or a device that has been Closed. It refuses by name " +
 		"([ErrNoDeviceWrapKey]) rather than expanding zero octets into a valid-looking key.",
+	"encodeStateRecord|len parts": "the framing's own arity: the 255 refusal, and the part count " +
+		"written into the frame's header as one byte. It counts the RECORD's parts and not the " +
+		"seed's octets, and the refusal beside it formats that count.",
+	"encodeStateRecord|len part": "the framing's per-part width: the length that does not fit a " +
+		"uint32 prefix, and the prefix itself. On the identity record's fourth part this is the " +
+		"length of the seed, and the refusal beside it formats that length. It is the site M12 " +
+		"drives: one edit turns it into the value.",
+}
+
+// THE WALK'S OWN HORIZON: every call at which the seed enters an OBJECT this census does not
+// follow it into. Held both ways, exactly like the four above.
+//
+// WHY IT IS A CENSUS AND NOT A PARAGRAPH. This file's net now reaches the last Go value the seed
+// is before it becomes octets in a frame -- but a taint walk over names stops where a value is
+// handed to a method and lives on inside the receiver. Two such calls exist and both are real:
+// `body.Write(part)` puts the seed inside a *bytes.Buffer, and `temp.Write(record)` puts the
+// framed record inside an *os.File. After each of them the walk knows nothing, so
+// `fmt.Errorf("%x", body.Bytes())` INSIDE encodeStateRecord is a shape this gate would not refuse.
+// That is a limit, it is stated here rather than in a comment nothing checks, and it is ASSERTED:
+// a third accumulator appearing -- the seed written into a second buffer, a hasher, a writer -- is
+// a site with no entry and this gate goes red at it. M13 drives exactly that.
+//
+// THE THREE CLAUSES THAT NARROW IT, each for its own reason:
+//
+//   - THE RECEIVER MUST NOT BE A PACKAGE. `fmt.Errorf(…, wrapSeed)` and
+//     `messagegroup.XwingKeyGenFromSeed(self.wrapSeed)` are calls through a qualified name and
+//     not methods on a value, and calling them accumulators would put every leak shape this file
+//     exists to refuse into a permitted list. The import set of each file is read for this, so
+//     the test is "is this identifier one of THIS FILE's imports" and not a guess at a spelling.
+//   - THE CALLEE MUST NOT RE-SEED. `self.writeRecord(…, wrapSeed)` and
+//     `store.PutDeviceIdentity(…, wrapSeed)` are calls into functions whose own parameters are in
+//     [wrapSeedProducerNames], so the walk does NOT stop there -- it starts again inside them,
+//     which is the whole of this commit's repair. A site listed here that re-seeds would be a
+//     limit claimed where there is none.
+//   - THE RECEIVER MUST BE UNTAINTED. A method on a value the walk already follows is not a
+//     horizon; it is a sink, and it is censused as one above.
+//
+// A BARE CALL IS NOT AN ACCUMULATOR. `zeroizeState(self.wrapSeed)` has no receiver to accumulate
+// into and its argument is censused as a sink like every other call's.
+var wrapSeedAccumulatorSites = map[string]string{
+	"writeRecord|accumulate temp.Write": "THE DISK. The framed record -- the seed inside it -- " +
+		"goes into the *os.File this write is committing, and what happens to those octets after " +
+		"this call is the filesystem's and not a value any walk over this package's names can " +
+		"follow. It is the honest end of this census: the seed is on disk in the clear, S2-24.",
+	"encodeStateRecord|accumulate body.Write": "THE FRAME. Each part, the seed among them, goes " +
+		"into the *bytes.Buffer the record is assembled in, and the walk does not follow it into " +
+		"the buffer -- so `body.Bytes()` reads back a value this census does not know carries the " +
+		"seed. It is the one blind spelling left on the road to the disk, and naming it here is " +
+		"what stops the next reader assuming the road is fully censused. The value comes back out " +
+		"as `writeRecord`'s `record`, which IS censused, so the blindness is bounded by this one " +
+		"function's body.",
 }
 
 func TestEveryWrapSeedInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.T) {
@@ -309,7 +458,13 @@ func TestEveryWrapSeedInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 	sinks := map[string][]string{}
 	carried := map[string]map[string]bool{}
 	counted := map[string][]string{}
+	accumulated := map[string][]string{}
 	unspent := map[string][]string{}
+
+	// the functions the walk STARTS AGAIN inside, read off their own signatures rather than
+	// listed: this is what tells the horizon census below that `self.writeRecord(…, wrapSeed)` is
+	// not a place the walk stops.
+	reseeds := wrapSeedReseedingFunctions(t)
 
 	sources := stateTestProductionSources(t)
 	for _, name := range sources {
@@ -322,6 +477,7 @@ func TestEveryWrapSeedInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
+		imported := wrapSeedImportNames(parsed)
 		for _, declaration := range parsed.Decls {
 			function, ok := declaration.(*ast.FuncDecl)
 			if !ok || function.Body == nil {
@@ -541,6 +697,43 @@ func TestEveryWrapSeedInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 				return true
 			})
 
+			// THE HORIZON CENSUS, taken with the narrowing's own census and for the same reason:
+			// every call at which a seed-bearing value is handed to a METHOD ON A VALUE this walk
+			// does not follow. It is where the census ends, and where it ends is asserted below
+			// against [wrapSeedAccumulatorSites] rather than left for a reader to infer from the
+			// absence of entries.
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok || wrapSeedIsBuiltinLen(call, local) {
+					return true
+				}
+				selector, method := call.Fun.(*ast.SelectorExpr)
+				if !method {
+					return true // a bare call has no receiver to accumulate into
+				}
+				root := wrapSeedRootName(selector.X)
+				switch {
+				case root == "":
+					return true // a receiver with no single root -- a literal, a call
+				case imported[root]:
+					return true // a package-qualified call is not a method on a value
+				case tainted[root]:
+					return true // a receiver the walk already follows is a sink, not a horizon
+				case reseeds[selector.Sel.Name]:
+					return true // the walk starts again inside it; see [wrapSeedProducerNames]
+				}
+				borne := []string{}
+				for _, argument := range call.Args {
+					borne = append(borne, bears(argument, tainted, false)...)
+				}
+				if len(borne) == 0 {
+					return true
+				}
+				site := where + "|accumulate " + wrapSeedExpr(selector)
+				accumulated[site] = append(accumulated[site], at(call)+" "+fmt.Sprint(borne))
+				return true
+			})
+
 			if len(tainted) == 0 && len(producers) == 0 {
 				continue
 			}
@@ -657,6 +850,11 @@ func TestEveryWrapSeedInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 	for _, site := range epochKeySortedMap(counted) {
 		t.Logf("    %s  at %v", site, counted[site])
 	}
+	t.Logf("THE WALK'S HORIZON (%d) -- the calls at which a seed-bearing value enters an object "+
+		"this census does not follow it into, which is where this gate stops knowing:", len(accumulated))
+	for _, site := range epochKeySortedMap(accumulated) {
+		t.Logf("    %s  at %v", site, accumulated[site])
+	}
 	t.Logf("EXCLUDED, and excluded is not the same as absent -- tainted values that reach no sink "+
 		"in their own function, so nothing carried them anywhere: %v", unspent)
 
@@ -716,6 +914,79 @@ func TestEveryWrapSeedInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 			"that holds it: every site it removed is named here. A site with no entry is a count "+
 			"nobody weighed; an entry with no site means the tree stopped counting the seed there, "+
 			"which is a change this file has to be read against before it is deleted.")
+
+	// ── AND WHERE THE CENSUS ENDS, ASSERTED RATHER THAN LEFT TO BE INFERRED ───────────────────
+	wrapSeedHold(t, "accumulator site", accumulated, wrapSeedAccumulatorSites,
+		"A TAINT WALK OVER NAMES STOPS WHERE A VALUE IS HANDED TO A METHOD AND LIVES ON INSIDE THE "+
+			"RECEIVER, and this census is that stopping place written down. A site with no entry is "+
+			"a NEW blind spot -- the seed put into a buffer, a hasher or a writer nobody weighed -- "+
+			"and the sink clause above will have censused the call while knowing nothing about what "+
+			"the object does with it afterwards. An entry with no site is a limit that has been "+
+			"lifted or moved, and this file's claim about how far it reaches has to be re-read "+
+			"before the entry is deleted.")
+}
+
+// wrapSeedReseedingFunctions is every function this package DECLARES whose own parameters or named
+// results carry a name in [wrapSeedProducerNames] -- which is to say, every function the taint walk
+// starts again inside rather than stopping at.
+//
+// IT IS READ OFF THE SIGNATURES AND NOT LISTED, because a list would be a second spelling of
+// [wrapSeedProducerNames] and would drift from it silently. Today it answers `PutDeviceIdentity`,
+// `writeRecord` and `encodeStateRecord`: the store's write path and the two calls under it, which
+// is exactly the road this commit extended the net along.
+func wrapSeedReseedingFunctions(t *testing.T) map[string]bool {
+	t.Helper()
+	reseeds := map[string]bool{}
+	fileSet := token.NewFileSet()
+	for _, name := range stateTestProductionSources(t) {
+		parsed, err := parser.ParseFile(fileSet, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, declaration := range parsed.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			for _, fields := range []*ast.FieldList{function.Type.Params, function.Type.Results} {
+				if fields == nil {
+					continue
+				}
+				for _, field := range fields.List {
+					for _, target := range field.Names {
+						if wrapSeedProducerNames[target.Name] {
+							reseeds[function.Name.Name] = true
+						}
+					}
+				}
+			}
+		}
+	}
+	if len(reseeds) == 0 {
+		t.Fatal("no production function in this package re-seeds the walk, so the horizon census " +
+			"below would call every call into this package's own store a stopping place")
+	}
+	return reseeds
+}
+
+// wrapSeedImportNames is the identifiers THIS FILE qualifies a package by, so that `fmt.Errorf` and
+// `messagegroup.XwingKeyGenFromSeed` are told apart from `temp.Write` by reading the file's imports
+// rather than by guessing at a spelling. An aliased import answers its alias; anything else answers
+// the last element of its path, which is what the language resolves the qualifier to.
+func wrapSeedImportNames(parsed *ast.File) map[string]bool {
+	names := map[string]bool{}
+	for _, one := range parsed.Imports {
+		if one.Name != nil {
+			names[one.Name.Name] = true
+			continue
+		}
+		path := strings.Trim(one.Path.Value, "\"")
+		if at := strings.LastIndex(path, "/"); 0 <= at {
+			path = path[at+1:]
+		}
+		names[path] = true
+	}
+	return names
 }
 
 // wrapSeedHold is the both-directions assertion the three censuses share.
@@ -902,6 +1173,10 @@ func wrapSeedExpr(expression ast.Expr) string {
 // THE MUTATION TABLE, MEASURED
 // ══════════════════════════════════════════════════════════════════════════════════════════════
 //
+// M1-M9 WERE RUN AGAINST THE FIRST VERSION OF THIS FILE AND M10-M15 AGAINST THE SECOND, the one
+// whose net reaches the disk. They are one table because they are one gate; see the second block
+// below for what the six later rows vary and why the first nine could not have caught them.
+//
 // NINE MUTANTS, AND EVERY ONE VARIES A DIFFERENT MECHANISM. That is the whole discipline of this
 // table and it is the one four gates in this track were beaten for want of: a table whose every
 // entry varies the same attribute -- a different destination for the same bare identifier --
@@ -972,3 +1247,70 @@ func wrapSeedExpr(expression ast.Expr) string {
 // THERE IS NO LEAK IN THE TREE THIS FILE LANDS ON and this file does not claim to have found one.
 // What it claims is the narrower and checkable thing: the leak was possible, it was measured
 // possible, and it is now refused.
+//
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// AND SIX MORE, FOR THE NET THAT NOW REACHES THE DISK
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+//
+// THE FINDING THE SECOND PASS TOOK, and it is this file's own disposition having overclaimed. The
+// entry at `PutDeviceIdentity|call self.writeRecord` read "THE SEED GOING TO DISK" -- and
+// `writeRecord` and `encodeStateRecord` were outside the census, so the seed's last two hops were
+// censused by nothing at all. The two mutants that reproduced it are M10 and M11 and both SURVIVED
+// the unrepaired gate:
+//
+//	before the repair:  go test ./urmessage/ -run '.*' -timeout 1800s          ->  ok  … 6.117s
+//	                    …-run 'TestEveryWrapSeedInThisPackage…' -v             ->  --- PASS (0.01s)
+//	after  the repair:  each of M10, M11 run alone                             ->  --- FAIL
+//
+// WHAT THE REPAIR WAS: one name. `parts` joins [wrapSeedProducerNames], and PRODUCER ONE -- the
+// clause that put `statestore_durable.go` inside this census at all, by seeding the PARAMETER
+// `PutDeviceIdentity(…, wrapSeed []byte)` -- seeds `writeRecord(…, parts …[]byte)` and
+// `encodeStateRecord(…, parts …[]byte)` the same way. The mechanism was already here; what was
+// missing was the second name on the road.
+//
+// M10-M15 ARE SIX MECHANISMS AGAIN AND NOT SIX DESTINATIONS. M10 and M11 are the finding, at the
+// two ends of the new reach and by two different producer paths (a DERIVED value in one, a RANGE
+// VARIABLE off the parameter in the other). M12 drives the narrowing's census inside the new
+// region. M13 introduces a SECOND OBJECT the seed enters, which is the shape the horizon census
+// exists for. M14 does not attack the gate at all -- it changes the WRITE'S API, which is how a
+// road moves out from under a disposition. M15 attacks the re-seeding clause itself, which is the
+// one thing holding the whole widening up.
+//
+//	M10 a `%x` of the assembled record at writeRecord's write failure -- the taint reached it by
+//	    DERIVATION, `record` having been bound from a call handed `parts`
+//	    -> sink site "writeRecord|call fmt.Errorf" has no entry in the disposition
+//	    -> AND sink site "writeRecord|return" has no entry  -- two clauses, independently
+//	M11 a `%x` of one part at encodeStateRecord's width refusal -- the taint reached it through a
+//	    RANGE BINDING off the parameter, and on the identity record that part IS the seed
+//	    -> sink site "encodeStateRecord|call fmt.Errorf" has no entry in the disposition
+//	    -> AND sink site "encodeStateRecord|return" has no entry
+//	M12 the NARROWING inside the newly reached region: `_ = len(record)` added to writeRecord, a
+//	    function that counts nothing today
+//	    -> counted-not-carried site "writeRecord|len record" has no entry in the disposition
+//	M13 A SECOND ACCUMULATOR: `body.Write(part)` routed through a `spare := bytes.NewBuffer(nil)`.
+//	    This is the shape the horizon census is for -- the seed entering an object nobody weighed
+//	    -> accumulator site "encodeStateRecord|accumulate spare.Write" has no entry
+//	    -> AND the disposition says accumulator site "encodeStateRecord|accumulate body.Write" is
+//	       allowed and the census does not find it
+//	    -> AND both directions again at the SINK clause, for the same two spellings
+//	M14 A CHANGE OF API RATHER THAN AN ATTACK: `temp.Write(record)` replaced by
+//	    `os.WriteFile(tempPath, record, 0o600)`, which is how the road moves out from under an entry
+//	    -> sink site "writeRecord|call os.WriteFile" has no entry in the disposition
+//	    -> AND the disposition says sink site "writeRecord|call temp.Write" is allowed and the
+//	       census does not find it
+//	    -> AND the same stale report from the horizon census
+//	M15 THE RE-SEEDING CLAUSE ITSELF: `writeRecord`'s parameter renamed `parts` -> `values`, which
+//	    is the whole widening switched off from inside the source this gate reads. Every direction
+//	    fires at once, which is the gate reporting that it has gone blind:
+//	    -> the disposition says producer site "writeRecord|parameter parts" is allowed and the
+//	       census does not find it
+//	    -> AND its three sinks all go stale -- "call encodeStateRecord", "call temp.Write",
+//	       "call zeroizeState"
+//	    -> AND, because `writeRecord` has left [wrapSeedReseedingFunctions], accumulator site
+//	       "PutDeviceIdentity|accumulate self.writeRecord" has no entry -- the census correctly
+//	       reporting that the walk now STOPS at the call it used to walk through
+//
+// Applied one at a time by the same python edit that ASSERTS count == 1, reverted by a byte copy
+// of a snapshot taken before the run, sha256 verified equal after every single revert
+// (`ba343cf4b332595bbafa3192e8d4e97f0fff2b6af4660d7f6eec35702be77368` for statestore_durable.go).
+// No `git checkout --`, no stash.
