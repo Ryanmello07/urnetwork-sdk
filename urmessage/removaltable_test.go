@@ -84,11 +84,40 @@
 // bought exactly one thing and it was worth buying: the sixth pass's own surviving mutant,
 // `len(removedLeaves) < 4`, sat at arity four.
 //
+// ── ARITY IS NOT THE ONLY AXIS, WHICH IS THE 2026-09-24 (EIGHTH PASS) CORRECTION ─────────────
+//
+// The sentence that stood here said the residual neither instrument covers is *a narrowing written
+// into some OTHER statement of the exit, ABOVE this interval*, and "above this interval" made a
+// claim about ONE axis at a door that does not decide on one. EACH DOOR DECIDES ON MORE THAN ONE
+// INPUT, and until this pass only arity was driven as a bounded interval at either.
+//
+//   - THE RESOLUTION'S EXIT DECIDES ON THREE INPUTS: `len(removedLeaves)`, the held answer --
+//     `alreadyHeld`, which carries `heldAt` beside it -- and WHICH ARM called it. MEASURED, by a
+//     `println` planted above the guard and run over this table: every refusing row sat at `heldAt`
+//     in {1, 2}. So `alreadyHeld = alreadyHeld && heldAt < 3`, written between the binding and the
+//     guard at pqepoch.go sha256 1608f28c11c9, passed this table, passed BOTH predicate readings
+//     and passed all 171 cases in this package, with the removal rule gone for every receiver whose
+//     history of the replayed value starts at epoch 3 or later. That is an ordinary shape and not a
+//     contrived one: a committer replaying pq_secret[k] for k >= 3 in a group that has rotated a
+//     few times. The control fires for its own reason -- the same statement at `heldAt < 2` (sha256
+//     2d0e19f01e8d) turns this table RED at `digest/one-leaf/committed-by-a-non-owner-admin`, the
+//     only refusing row whose refusal named epoch 2.
+//   - THE PRE-APPLY DOOR DECIDES ON `len(removedLeaves)`, `digest != nil` AND `self.epoch`.
+//     MEASURED the same way: every digest-less call of that door arrived at `self.epoch == 1`, so
+//     `1 < self.epoch -> return nil`, in any spelling, passed this table at every arity it drives.
+//
+// Both axes are DRIVEN and PRINTED now, each with its own three controls, beside the arity interval
+// and in the same line, and each DECLARED number is held against the one production itself reports.
+// What is still outside every instrument is stated on the axis it is outside of: `heldAt < 4` at
+// the resolution and `2 < self.epoch` at the door are each one step above a printed top, exactly as
+// `len(removedLeaves) < 5` is, and a row is what moves each edge.
+//
 // That is the honest residual of this instrument and it is why the predicate readings in
 // pqdarkgate_test.go are kept -- for the class no table can cover (an arm that no row drives
-// because the arm does not exist yet) and for a narrowing written into the guard's own condition
-// above this interval. What NEITHER covers, stated because it is the shape that got through last
-// time: a narrowing written into some OTHER statement of the exit, above this interval.
+// because the arm does not exist yet) and for a narrowing written into either door's own CONDITION,
+// in any conditional shape, above these intervals. What NEITHER covers: a narrowing written into
+// some OTHER statement of the resolution's exit, above the intervals this table prints -- on any of
+// its three inputs, and not on arity alone.
 package urmessage
 
 import (
@@ -96,6 +125,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -285,12 +315,27 @@ type removalPage struct {
 }
 
 type removalInput struct {
-	name     string
-	door     removalDoor
-	shape    string
-	arity    int
-	followed bool
-	build    func(t *testing.T) *removalPage
+	name  string
+	door  removalDoor
+	shape string
+	// arity is len(removedLeaves), the axis every one of the six bypassed gates was defeated on.
+	// It is DECLARED here because the interval is printed before any row is built, and it is HELD
+	// against the built page in [removalPage.drive]: a row declaring an arity its builder does not
+	// produce would make the printed interval false in exactly the direction it exists to be true
+	// in.
+	arity int
+	// heldAt is the epoch [refuseRemovalOnHeldSecret] must NAME for this row, and 0 when this row
+	// takes no such refusal -- every followed row, and every row of the pre-apply door, whose
+	// refusal cannot name one because that door never asks. It is the resolution's SECOND input,
+	// printed as its own interval beside the arity one, and it is held against the number
+	// production wrote into its own sentence rather than against a re-derivation here.
+	heldAt uint64
+	// doorEpoch is `self.epoch` when [Group.refuseUnrotatedRemovalLocked] runs, which is the
+	// receiver's epoch before this row's page is delivered. It is that door's THIRD input and it
+	// was driven at exactly one point until this pass. It is 0 on a row of the other door.
+	doorEpoch uint64
+	followed  bool
+	build     func(t *testing.T) *removalPage
 }
 
 // EVERY REMOVAL SHAPE THIS PACKAGE CAN PUT ON THE WIRE, DRIVEN THROUGH THE PRODUCTION RECEIVE PATH
@@ -302,24 +347,24 @@ type removalInput struct {
 func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProductionReceivePath(t *testing.T) {
 	rows := []removalInput{
 		// ── the digest door: one to FOUR leaves on the secret the victims hold ──────────────
-		{name: "digest/one-leaf/current-epoch", door: digestDoor, arity: 1, followed: false,
+		{name: "digest/one-leaf/current-epoch", door: digestDoor, arity: 1, heldAt: 1, followed: false,
 			shape: "a removal with a complete openable fan-out carrying the secret the group is " +
 				"standing on, under a digest that names it",
 			build: buildHeldFanOut(1, unrotatedFanOut{})},
-		{name: "digest/two-leaves/current-epoch", door: digestDoor, arity: 2, followed: false,
+		{name: "digest/two-leaves/current-epoch", door: digestDoor, arity: 2, heldAt: 1, followed: false,
 			shape: "the same, removing two leaves: one ADMIN ejecting two devices at once",
 			build: buildHeldFanOut(2, unrotatedFanOut{})},
-		{name: "digest/three-leaves/current-epoch", door: digestDoor, arity: 3, followed: false,
+		{name: "digest/three-leaves/current-epoch", door: digestDoor, arity: 3, heldAt: 1, followed: false,
 			shape: "the same, removing THREE leaves. This is the axis three separate mutants " +
 				"survived on: `len(removedLeaves) < 3` in the guard's binding left every other " +
 				"case in this package green",
 			build: buildHeldFanOut(3, unrotatedFanOut{})},
-		{name: "digest/three-leaves/fresh-wraps-held-digest", door: digestDoor, arity: 3, followed: false,
+		{name: "digest/three-leaves/fresh-wraps-held-digest", door: digestDoor, arity: 3, heldAt: 1, followed: false,
 			shape: "three leaves, wraps carrying FRESH octets and a digest naming the held value: " +
 				"the compatibility arm reached at arity three, which no candidate-reading check " +
 				"could ever have refused",
 			build: buildFreshFanOutHeldDigest(3)},
-		{name: "digest/four-leaves/current-epoch", door: digestDoor, arity: 4, followed: false,
+		{name: "digest/four-leaves/current-epoch", door: digestDoor, arity: 4, heldAt: 1, followed: false,
 			shape: "the same, removing FOUR leaves. THIS IS THE ARITY THE SIXTH PASS LEFT " +
 				"OUTSIDE THE TABLE, and it is here because the static reading that was supposed " +
 				"to cover the rest of the axis did not: while the guard was two nested " +
@@ -345,6 +390,13 @@ func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProd
 				"arity this table drives carries both dispositions or the refusing row at it " +
 				"proves nothing",
 			build: buildHonestRotation(4)},
+		{name: "digest/one-leaf/honest-rotated/after-three-rotations", door: digestDoor, arity: 1, followed: true,
+			shape: "THE CONTROL AT THE TOP OF THE heldAt INTERVAL. The same world as " +
+				"`earlier-epoch/held-at-epoch-3` -- three honest rotations first -- and then a " +
+				"removal that DOES rotate, which is followed. Without it the refusal at heldAt 3 " +
+				"reads as a refusal of a DEEP HISTORY rather than of the replay inside it, which " +
+				"is the same argument the four-leaf control above makes on the arity axis",
+			build: buildHonestRotationAfter(3, 1)},
 		{name: "digest/no-removal/unrotated", door: digestDoor, arity: 0, followed: true,
 			shape: "THE COMPLEMENT OF THE GUARD'S PREDICATE. An epoch change on the secret the " +
 				"group already holds that removes NOBODY -- every group on the deployed alpha -- " +
@@ -357,23 +409,33 @@ func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProd
 			build: buildOneOctetFromHeld},
 
 		// ── the digest door: the table, not the current row; and the committer axis ─────────
-		{name: "digest/one-leaf/earlier-epoch", door: digestDoor, arity: 1, followed: false,
+		{name: "digest/one-leaf/earlier-epoch", door: digestDoor, arity: 1, heldAt: 1, followed: false,
 			shape: "a removal opening epoch 3 on pq_secret[1]: a different octet string, the same " +
 				"removed member holding it, and a subject narrowed to the current row answers no",
-			build: buildEarlierEpochReplay},
-		{name: "digest/one-leaf/earlier-epoch/late-joiner", door: digestDoor, arity: 1, followed: false,
+			build: buildEarlierEpochReplay(1, 1)},
+		{name: "digest/one-leaf/earlier-epoch/held-at-epoch-3", door: digestDoor, arity: 1, heldAt: 3, followed: false,
+			shape: "THE TOP OF THE SECOND INTERVAL. A group that has rotated three honest times " +
+				"and a committer that replays pq_secret[3]: the same shape as the row above it " +
+				"with the REPLAYED EPOCH moved up, so the refusal it takes names epoch 3. This is " +
+				"the arity axis's counterpart and it is here because the axis was one point wide " +
+				"below three: `alreadyHeld = alreadyHeld && heldAt < 3` written between the " +
+				"binding and the guard (pqepoch.go sha256 1608f28c11c9) passed this table, both " +
+				"predicate readings and all 171 cases in this package. A narrowing a driven case " +
+				"can catch belongs in the table as a row",
+			build: buildEarlierEpochReplay(3, 3)},
+		{name: "digest/one-leaf/earlier-epoch/late-joiner", door: digestDoor, arity: 1, heldAt: 1, followed: false,
 			shape: "the same replay in a world holding a member admitted at epoch 3. The FOUNDER " +
 				"refuses it; the late joiner FOLLOWS it, in this row's own `then`, which is " +
 				"ledger ruling 43's first residual driven rather than described",
 			build: buildLateJoinerResidual},
-		{name: "digest/one-leaf/committed-by-a-non-owner-admin", door: digestDoor, arity: 1, followed: false,
+		{name: "digest/one-leaf/committed-by-a-non-owner-admin", door: digestDoor, arity: 1, heldAt: 2, followed: false,
 			shape: "the removal is committed by a promoted ADMIN and not by the founder, so " +
 				"`the committer is the group's owner` stops being a silent premise of every " +
 				"removal case in this package",
 			build: buildAdminCommitter},
 
 		// ── the digest door: a removal bundled with an add ──────────────────────────────────
-		{name: "digest/one-leaf-and-one-add/current-epoch", door: digestDoor, arity: 1, followed: false,
+		{name: "digest/one-leaf-and-one-add/current-epoch", door: digestDoor, arity: 1, heldAt: 1, followed: false,
 			shape: "ONE COMMIT THAT BOTH ADDS AND REMOVES, on the held secret. The removed-leaf " +
 				"list is not the whole of what the commit does, and the rule is keyed to the " +
 				"removal inside it",
@@ -384,31 +446,47 @@ func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProd
 			build: buildBundledRemoval(true)},
 
 		// ── the other door: the 0x0001 class, which had no gate on its own predicate ────────
-		{name: "noDigest/one-leaf", door: noDigestDoor, arity: 1, followed: false,
+		{name: "noDigest/one-leaf", door: noDigestDoor, arity: 1, doorEpoch: 1, followed: false,
 			shape: "a removal on a commit carrying no epoch digest at all -- the shape every " +
 				"build before the rotation emits -- refused BEFORE ApplyCommit",
 			build: buildNoDigestRemoval(1)},
-		{name: "noDigest/two-leaves", door: noDigestDoor, arity: 2, followed: false,
+		{name: "noDigest/two-leaves", door: noDigestDoor, arity: 2, doorEpoch: 1, followed: false,
 			shape: "the same, two leaves",
 			build: buildNoDigestRemoval(2)},
-		{name: "noDigest/three-leaves", door: noDigestDoor, arity: 3, followed: false,
+		{name: "noDigest/three-leaves", door: noDigestDoor, arity: 3, doorEpoch: 1, followed: false,
 			shape: "the same, THREE leaves. This door's predicate was held by neither behaviour " +
 				"nor structure at any arity above one",
 			build: buildNoDigestRemoval(3)},
-		{name: "noDigest/four-leaves", door: noDigestDoor, arity: 4, followed: false,
+		{name: "noDigest/four-leaves", door: noDigestDoor, arity: 4, doorEpoch: 1, followed: false,
 			shape: "the same, FOUR leaves. The two doors carry the same arity interval on " +
 				"purpose: a narrowing written at one arity above the table is a mutant at EITHER " +
 				"door, and an interval that stopped a leaf short here would be the door's own " +
 				"edge sitting somewhere a reader has to work out",
 			build: buildNoDigestRemoval(4)},
-		{name: "noDigest/one-leaf-and-one-add", door: noDigestDoor, arity: 1, followed: false,
+		{name: "noDigest/one-leaf-and-one-add", door: noDigestDoor, arity: 1, doorEpoch: 1, followed: false,
 			shape: "a digest-less commit that both adds and removes, refused before the apply",
 			build: buildNoDigestBundle},
-		{name: "noDigest/no-removal", door: noDigestDoor, arity: 0, followed: true,
+		{name: "noDigest/no-removal", door: noDigestDoor, arity: 0, doorEpoch: 1, followed: true,
 			shape: "THE COMPLEMENT AT THIS DOOR. A digest-less commit that removes NOBODY reaches " +
 				"the resolution's no-digest arm and is followed; a door that refused every " +
 				"digest-less commit goes red here",
-			build: buildNoDigestNoRemoval},
+			build: buildNoDigestNoRemoval(0)},
+
+		// ── the other door at a SECOND self.epoch, which is its own undriven axis ───────────
+		{name: "noDigest/one-leaf/after-one-rotation", door: noDigestDoor, arity: 1, doorEpoch: 2, followed: false,
+			shape: "THE SAME DIGEST-LESS REMOVAL ONE HONEST ROTATION LATER, so this door is " +
+				"decided at `self.epoch == 2` and not only at the founding epoch. Every " +
+				"digest-less call of it arrived at epoch 1 until this row existed, MEASURED by a " +
+				"`println` at the top of the door, and a narrowing keyed on `1 < self.epoch` -- " +
+				"as a top-level `if`, as an `else if` welded onto `digest != nil`, or as a " +
+				"`switch` -- passed this table at every arity",
+			build: buildNoDigestRemovalAfter(1, 1)},
+		{name: "noDigest/no-removal/after-one-rotation", door: noDigestDoor, arity: 0, doorEpoch: 2, followed: true,
+			shape: "THE COMPLEMENT AT THAT SECOND EPOCH. A digest-less commit removing NOBODY at " +
+				"epoch 2 is followed, so the row above it is not a refusal of the EPOCH itself -- " +
+				"every point of this axis carries both dispositions, for the reason the arity " +
+				"controls give",
+			build: buildNoDigestNoRemoval(1)},
 	}
 
 	// ── THE COMPLEMENT, PRINTED BEFORE ANYTHING IS ASSERTED ─────────────────────────────────
@@ -418,9 +496,22 @@ func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProd
 	// every one of the six bypassed gates was defeated on.
 	drivenArities := map[removalDoor][]int{}
 	dispositions := map[string]int{}
+	// THE SECOND AXIS AT EACH DOOR, WHICH IS THE 2026-09-24 (EIGHTH PASS) ADDITION. Neither door
+	// decides on arity alone -- the resolution reads the held answer, which carries `heldAt`, and
+	// this door reads `self.epoch` -- and a complement printed on one axis of three reads as a
+	// complement. `heldAt` is collected over the REFUSING rows of the digest door, because those
+	// are the rows whose refusal carries a `heldAt` to name; `self.epoch` is collected over every
+	// row of the other door, because that door reads it on every call.
+	drivenHeldAt, drivenDoorEpochs := []uint64{}, []uint64{}
 	for _, row := range rows {
 		if !slices.Contains(drivenArities[row.door], row.arity) {
 			drivenArities[row.door] = append(drivenArities[row.door], row.arity)
+		}
+		if row.door == digestDoor && !row.followed && !slices.Contains(drivenHeldAt, row.heldAt) {
+			drivenHeldAt = append(drivenHeldAt, row.heldAt)
+		}
+		if row.door == noDigestDoor && !slices.Contains(drivenDoorEpochs, row.doorEpoch) {
+			drivenDoorEpochs = append(drivenDoorEpochs, row.doorEpoch)
 		}
 		key := string(row.door) + "/followed"
 		if !row.followed {
@@ -428,23 +519,40 @@ func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProd
 		}
 		dispositions[key] += 1
 	}
+	slices.Sort(drivenHeldAt)
+	slices.Sort(drivenDoorEpochs)
 	// THE AXIS IS PRINTED AS AN INTERVAL AND AS THE FACT THAT IT IS BOUNDED, which is the
 	// 2026-09-24 (seventh pass) correction. It was printed as the SET {0, 1, 2, 3}, and a set
 	// reads as a choice of points while the thing a reader needs is the EDGE: for any constant k
 	// this table drives, `< k+1` is the narrowing outside it, so what matters is where the top is
 	// and that there IS a top. Both are in the line now, with the first undriven arity named.
+	//
+	// AND THE SECOND AXIS IS IN THE SAME LINE, which is the 2026-09-24 (eighth pass) correction:
+	// an axis printed in a different place from the one a reader is looking at is an axis nobody
+	// compares. Each door's line now names both of the inputs this table drives as intervals AND
+	// the first point above each top, so the two residuals read the same way.
 	for _, door := range []removalDoor{digestDoor, noDigestDoor} {
 		arities := drivenArities[door]
 		slices.Sort(arities)
+		second, top := "heldAt (the epoch the refusal NAMES)", drivenHeldAt
+		outside := "`alreadyHeld = alreadyHeld && heldAt < %d` between the binding and the guard, " +
+			"which NOTHING here and nothing in pqdarkgate_test.go reads"
+		if door == noDigestDoor {
+			second, top = "self.epoch (where this door is decided)", drivenDoorEpochs
+			outside = "`%d <= self.epoch -> return nil` in the door, in any conditional shape"
+		}
 		t.Logf("DOOR %q drives len(removedLeaves) over the INTERVAL [%d, %d], every arity in it "+
-			"and NOTHING ABOVE IT: %d followed row(s), %d refused. The axis is BOUNDED, so a "+
-			"bypass keyed on %d <= len(removedLeaves) -- `len(removedLeaves) < %d` at either "+
-			"door, or on the held answer between its binding and the guard -- passes this table, "+
-			"and above this interval the predicate readings in pqdarkgate_test.go cover the "+
-			"guard's own condition and nothing else",
+			"and NOTHING ABOVE IT, AND %s over the INTERVAL [%d, %d]: %d followed row(s), %d "+
+			"refused. BOTH axes are BOUNDED, so a bypass keyed on %d <= len(removedLeaves) -- "+
+			"`len(removedLeaves) < %d` at either door -- passes this table, and so does one keyed "+
+			"one step above the second interval: "+outside+". Above the arity interval and above "+
+			"the second one, the predicate readings in pqdarkgate_test.go cover each door's own "+
+			"CONDITION, in any conditional shape, and nothing else",
 			door, arities[0], arities[len(arities)-1],
+			second, top[0], top[len(top)-1],
 			dispositions[string(door)+"/followed"], dispositions[string(door)+"/refused"],
-			arities[len(arities)-1]+1, arities[len(arities)-1]+1)
+			arities[len(arities)-1]+1, arities[len(arities)-1]+1,
+			top[len(top)-1]+1)
 	}
 
 	// ── AND THE TABLE'S OWN CONTROLS ────────────────────────────────────────────────────────
@@ -480,20 +588,115 @@ func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProd
 		}
 	}
 
+	// ── AND THE SECOND AXIS HAS THE SAME THREE CONTROLS, WHICH IS WHAT MAKES IT AN AXIS ─────
+	//
+	// A second interval printed without controls is the first one's mistake repeated: `[1, 3]`
+	// stays true at both endpoints while the middle is gone, and a top nobody asserts drifts back
+	// down the next time a row is deleted. Both axes start at ONE and not at zero -- epoch 1 is
+	// the founding epoch, the lowest a device can hold anything at and the lowest this door can be
+	// decided at -- which is the difference from the arity axis and is why it is a separate check
+	// rather than the same loop.
+	for _, axis := range []struct {
+		name    string
+		driven  []uint64
+		atLeast uint64
+		why     string
+	}{
+		{name: "heldAt at the digest door", driven: drivenHeldAt, atLeast: 3,
+			why: "epoch 3 is where `alreadyHeld = alreadyHeld && heldAt < 3` (pqepoch.go sha256 " +
+				"1608f28c11c9) sat and survived this table, both predicate readings and all 171 " +
+				"cases in this package, while every refusing row here named epoch 1 or 2"},
+		{name: "self.epoch at the pre-apply door", driven: drivenDoorEpochs, atLeast: 2,
+			why: "every digest-less call of that door arrived at epoch 1 until a row drove a " +
+				"second point, so `1 < self.epoch -> return nil` -- as a top-level `if`, as an " +
+				"`else if`, or as a `switch` -- passed this table at every arity it drives"},
+	} {
+		if len(axis.driven) == 0 {
+			t.Fatalf("CONTROL FAILED: %s is driven at no point at all, so the interval printed "+
+				"above it is empty and the line is a summary of nothing", axis.name)
+		}
+		// AND WHAT THIS ONE CATCHES TODAY, SAID RATHER THAN ASSUMED. Contiguity is load-bearing on
+		// the heldAt axis, which is three points wide: deleting the row at heldAt 2 leaves [1 3]
+		// and this fires. On the door's epoch axis it is two points wide, so there is no middle to
+		// delete and the printed interval is already held whole by the two checks below it. It is
+		// written for both because the third point is one row away, and a control added the day it
+		// is needed is one nobody has driven.
+		for at, point := range axis.driven {
+			if point != axis.driven[0]+uint64(at) {
+				t.Fatalf("CONTROL FAILED: %s drives %v, which is not the contiguous interval the "+
+					"line above prints -- %d is missing. A hole makes that line false in the one "+
+					"direction it exists to be true in", axis.name, axis.driven, axis.driven[0]+uint64(at))
+			}
+		}
+		if axis.driven[0] != 1 {
+			t.Fatalf("CONTROL FAILED: %s drives %v and does not start at the FOUNDING EPOCH. "+
+				"Epoch 1 is the lowest value this input can take, and an interval that starts "+
+				"above it leaves the oldest history in the group undriven", axis.name, axis.driven)
+		}
+		if axis.driven[len(axis.driven)-1] < axis.atLeast {
+			t.Fatalf("CONTROL FAILED: %s drives %v and stops below %d. %s", axis.name,
+				axis.driven, axis.atLeast, axis.why)
+		}
+	}
+
+	// THE THIRD INPUT OF THE RESOLUTION'S EXIT IS THE ARM, and it is MEASURED rather than
+	// declared: each refusing row of the digest door reports which of [Group.resolvePqSecretLocked]'s
+	// arms called the guard, read out of the sentence production itself wrote.
+	armsAtARefusal := map[string]int{}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			built := row.build(t)
-			built.drive(t, row)
+			if arm := built.drive(t, row); arm != "" {
+				armsAtARefusal[arm] += 1
+			}
 		})
+	}
+
+	// ── AND THE THIRD AXIS, PRINTED FROM WHAT THE RUN ACTUALLY REACHED ──────────────────────
+	//
+	// WHY THIS ONE IS NOT AN INTERVAL. The arm is a finite enumeration and not a number, so its
+	// complement is stated by naming the member no row reaches and WHY: the third arm, "carries no
+	// epoch digest at all", cannot reach a refusal here at all, because a digest-less commit that
+	// removes a leaf is refused by the OTHER door before ApplyCommit. That is a theorem about the
+	// two doors and not a gap -- and the `noDigest/no-removal` rows drive that arm at arity zero,
+	// where it is FOLLOWED, so the arm is reached and only its refusing disposition is unreachable.
+	arms, reached := slices.Sorted(maps.Keys(armsAtARefusal)), 0
+	for _, count := range armsAtARefusal {
+		reached += count
+	}
+	t.Logf("THE RESOLUTION'S THIRD INPUT, MEASURED: %d refusing row(s) reached %d of the exit's "+
+		"THREE arms -- %q. The arm this table cannot drive to a refusal is `carries no epoch "+
+		"digest at all`, and it is unreachable by construction rather than by omission: a "+
+		"digest-less commit that removes a leaf never gets past the pre-apply door",
+		reached, len(arms), arms)
+	if len(arms) < 2 {
+		t.Fatalf("CONTROL FAILED: every refusing row of the digest door reached the same arm "+
+			"(%v). A narrowing keyed on `how` would then be a narrowing this table cannot see, "+
+			"and the line above would be reporting one point as an enumeration", arms)
 	}
 }
 
 // drive puts one built page through the production receive path and holds everything a
-// disposition means. It is shared by every row, so what a row says is a SHAPE.
-func (self *removalPage) drive(t *testing.T, row removalInput) {
+// disposition means. It is shared by every row, so what a row says is a SHAPE. It answers the arm
+// of [Group.resolvePqSecretLocked] the refusal came from, or "" when the row took no refusal that
+// names one.
+func (self *removalPage) drive(t *testing.T, row removalInput) string {
 	t.Helper()
 	world, receiver := self.world, self.receiver
 	t.Logf("SHAPE: %s", row.shape)
+
+	// ── EVERY DECLARED AXIS IS HELD AGAINST THE BUILT PAGE, BEFORE ANYTHING ELSE ────────────
+	//
+	// The intervals are printed from the DECLARATIONS on the rows, above, and a declaration that
+	// disagrees with what its builder produces makes that line false while every row still passes.
+	// Arity is checkable here; `heldAt` and `self.epoch` are checked below against what production
+	// itself reports, which is the stronger direction and is why they are not re-derived here.
+	if row.arity != len(self.removes) {
+		t.Fatalf("CONTROL FAILED: this row declares arity %d and its page removes %v. The interval "+
+			"printed above is built from the DECLARATIONS, so a row that declares one arity and "+
+			"drives another makes that line false in the direction it exists to be true in",
+			row.arity, self.removes)
+	}
 
 	// ── THE COUNTERFACTUAL, FIRST, so the disposition below is about something ──────────────
 	if self.retained != nil {
@@ -522,6 +725,20 @@ func (self *removalPage) drive(t *testing.T, row removalInput) {
 	before := append([]byte(nil), receiver.group.pqSecretLocked()...)
 	refusedBefore := receiver.group.Stats().CommitRefused
 
+	// `self.epoch` INSIDE THE PRE-APPLY DOOR IS THE RECEIVER'S EPOCH HERE, one statement before
+	// the page goes in, so the declaration that builds this door's printed interval is held
+	// against the value the door will actually read.
+	if row.door == noDigestDoor && at != row.doorEpoch {
+		t.Fatalf("CONTROL FAILED: this row declares that %s's door runs at self.epoch %d and the "+
+			"receiver stands at %d. That declaration is what the epoch interval printed above is "+
+			"built from", receiver.name, row.doorEpoch, at)
+	}
+	if row.door == digestDoor && row.doorEpoch != 0 {
+		t.Fatalf("CONTROL FAILED: this row is at the digest door and declares doorEpoch %d. That "+
+			"field is the PRE-APPLY door's input and a row of the other door carrying one would "+
+			"put a point on an interval nothing drives", row.doorEpoch)
+	}
+
 	err := world.deliver(receiver, self.page...)
 
 	if row.followed {
@@ -545,7 +762,7 @@ func (self *removalPage) drive(t *testing.T, row removalInput) {
 		if self.then != nil {
 			self.then(t)
 		}
-		return
+		return ""
 	}
 
 	// ── THE REFUSAL, BY NAME ────────────────────────────────────────────────────────────────
@@ -564,6 +781,32 @@ func (self *removalPage) drive(t *testing.T, row removalInput) {
 	// -- the predicate is `0 < len(...)` -- and is invisible to a disposition, but it cannot print
 	// leaves it no longer has.
 	self.assertNamesEveryRemovedLeaf(t, err)
+	// ── AND THE EPOCH IT NAMES IS THE SECOND AXIS, READ OFF PRODUCTION'S OWN SENTENCE ───────
+	//
+	// [refuseRemovalOnHeldSecret] prints `heldAt`, so the number this row declares is held against
+	// the number the EXIT computed rather than against a re-derivation in this file -- which is
+	// the difference between an axis and a label. The pre-apply door cannot name one: it never
+	// asks [Group.pqSecretHeldAtLocked] anything, and a row of that door declaring a heldAt would
+	// put a point on the digest door's interval that nothing drives.
+	arm := ""
+	if named, readable := heldAtNamedIn(err.Error()); readable {
+		if row.door != digestDoor {
+			t.Fatalf("CONTROL FAILED: this row is at door %q and its refusal names a heldAt of "+
+				"%d. Only the resolution's exit asks that question, so a refusal from the "+
+				"pre-apply door carrying one means the doors have moved", row.door, named)
+		}
+		if named != row.heldAt {
+			t.Fatalf("CONTROL FAILED: this row declares heldAt %d and the refusal production "+
+				"wrote names epoch %d. The heldAt interval printed above is built from the "+
+				"DECLARATIONS, so a row sitting somewhere other than where it says makes that "+
+				"line false", row.heldAt, named)
+		}
+		arm, _ = armNamedIn(err.Error())
+	} else if row.heldAt != 0 {
+		t.Fatalf("CONTROL FAILED: this row declares heldAt %d and its refusal names no epoch at "+
+			"all: %q. A declared point that no refusal reports is a point on the printed "+
+			"interval that nothing drives", row.heldAt, err.Error())
+	}
 	// ── THE GROUP DID NOT FOLLOW IT, WHICH IS RULING 41 ─────────────────────────────────────
 	if receiver.group.epoch != at {
 		t.Fatalf("%s stands at epoch %d after refusing, want %d: a refused commit is not followed",
@@ -617,7 +860,40 @@ func (self *removalPage) drive(t *testing.T, row removalInput) {
 	if self.then != nil {
 		self.then(t)
 	}
+	return arm
 }
+
+// heldAtNamedIn reads the epoch [refuseRemovalOnHeldSecret] says this receiver first held the
+// answered value at, out of the sentence production wrote, or reports that the sentence carries
+// none -- which is every refusal from the pre-apply door.
+func heldAtNamedIn(message string) (uint64, bool) {
+	at := strings.Index(message, heldAtOpener)
+	if at < 0 {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(strings.TrimSpace(message[at+len(heldAtOpener):]), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+// armNamedIn reads `how` -- which arm of [Group.resolvePqSecretLocked] answered -- out of the same
+// sentence. It is the exit's third input and it is enumerated rather than bounded, so it is
+// collected from the run and printed instead of being declared on the rows.
+func armNamedIn(message string) (string, bool) {
+	const opener = "] and "
+	at := strings.Index(message, opener)
+	end := strings.Index(message, heldAtOpener)
+	if at < 0 || end < 0 || end < at+len(opener) {
+		return "", false
+	}
+	return strings.TrimSuffix(message[at+len(opener):end], " -- "), true
+}
+
+// heldAtOpener is the tail of [refuseRemovalOnHeldSecret]'s own format string, copied from it. Two
+// readers take it, so a change to that sentence moves one literal and not two.
+const heldAtOpener = "a value THIS DEVICE has held at epoch "
 
 // assertNamesEveryRemovedLeaf holds that the refusal an operator reads names the commit's WHOLE
 // removed-leaf list, as a set and not in a fixed order -- the order is connect's application order
@@ -697,6 +973,43 @@ func removalCohort(t *testing.T, victims int) (*rotWorld, *rotMember, *rotMember
 	return world, committer, receiver, removing, retained
 }
 
+// removalVictims answers the members [removalCohort] founded to be removed, so a builder that has
+// to deliver something to all of them does not re-spell their names.
+func removalVictims(world *rotWorld, victims int) []*rotMember {
+	world.t.Helper()
+	members := []*rotMember{}
+	for at := 0; at < victims; at += 1 {
+		members = append(members, world.member(fmt.Sprintf("victim%d", at)))
+	}
+	return members
+}
+
+// rotateHonestly runs `rounds` honest rotations that remove nobody, delivers each to every
+// receiver, and answers the pq_secret each round opened its epoch on, BY THAT EPOCH.
+//
+// IT EXISTS BECAUSE THE SECOND AXIS NEEDS A HISTORY AND THREE BUILDERS NEED THE SAME ONE. At epoch
+// 1 a device holds exactly one row, so `heldAt` can only be 1 and `self.epoch` can only be 1 -- the
+// two inputs the 2026-09-24 (eighth pass) repair drives -- and every builder that wants a second
+// point has to walk the receiver forward first. The map is keyed by epoch so a caller can replay a
+// NAMED one rather than counting rotations backwards.
+func (self *rotWorld) rotateHonestly(committer *rotMember, rounds int, receivers ...*rotMember) map[uint64][]byte {
+	self.t.Helper()
+	opened := map[uint64][]byte{}
+	for at := 0; at < rounds; at += 1 {
+		published := self.rotate(committer, nil, func() ([]byte, []byte, []byte, error) {
+			return committer.handle.Commit(nil)
+		})
+		for _, receiver := range receivers {
+			if err := self.deliver(receiver, published.page()...); err != nil {
+				self.t.Fatalf("CONTROL FAILED: %s's walk over honest rotation %d of %d answered %v",
+					receiver.name, at+1, rounds, err)
+			}
+		}
+		opened[published.opens] = append([]byte(nil), published.pqSecret...)
+	}
+	return opened
+}
+
 func buildHeldFanOut(victims int, how unrotatedFanOut) func(t *testing.T) *removalPage {
 	return func(t *testing.T) *removalPage {
 		world, committer, receiver, removing, retained := removalCohort(t, victims)
@@ -737,14 +1050,39 @@ func buildFreshFanOutHeldDigest(victims int) func(t *testing.T) *removalPage {
 }
 
 func buildHonestRotation(victims int) func(t *testing.T) *removalPage {
+	return buildHonestRotationAfter(0, victims)
+}
+
+// buildHonestRotationAfter is the honest rotated removal with a HISTORY in front of it: `rotations`
+// honest rotations that remove nobody, walked by the receiver and by every victim, and then the
+// removal. At `rotations == 0` it is exactly what [buildHonestRotation] always was.
+//
+// THE RETAINED VALUE IS READ AFTER THE ROTATIONS AND NOT BEFORE THEM, for [buildAdminCommitter]'s
+// reason: the counterfactual has to be about the row the committer is replaying, and the founding
+// value stops being that row the moment the group moves.
+func buildHonestRotationAfter(rotations int, victims int) func(t *testing.T) *removalPage {
 	return func(t *testing.T) *removalPage {
 		world, committer, receiver, removing, retained := removalCohort(t, victims)
+		walkers := append([]*rotMember{receiver}, removalVictims(world, victims)...)
+		world.rotateHonestly(committer, rotations, walkers...)
+		if 0 < victims {
+			retained = append([]byte(nil), world.member("victim0").group.pqSecretLocked()...)
+		}
 		published := world.rotate(committer, removing, func() ([]byte, []byte, []byte, error) {
 			return committer.handle.CommitRemove(removing)
 		})
-		return &removalPage{world: world, committer: committer, receiver: receiver,
+		page := &removalPage{world: world, committer: committer, receiver: receiver,
 			page: published.page(), opens: published.opens, removes: removing,
 			opensOn: published.pqSecret, retained: retained}
+		page.also = func(t *testing.T) {
+			if want := rotations + 1; len(receiver.group.pqSecrets) != want {
+				t.Fatalf("CONTROL FAILED: %s holds %d pq_secret row(s) after %d honest "+
+					"rotation(s), want %d. This row is the FOLLOWED control at the top of the "+
+					"heldAt interval and its whole claim is that the world has a history",
+					receiver.name, len(receiver.group.pqSecrets), rotations, want)
+			}
+		}
+		return page
 	}
 }
 
@@ -797,40 +1135,65 @@ func buildOneOctetFromHeld(t *testing.T) *removalPage {
 	return page
 }
 
-func buildEarlierEpochReplay(t *testing.T) *removalPage {
-	world, committer, receiver, removing, atOne := removalCohort(t, 1)
-	victim := world.member("victim0")
-	// THE HONEST ROTATION THAT GIVES THE RECEIVER A SECOND ROW. At epoch 1 there is one row, so
-	// "the current row" and "the whole table" are the same set and the replay below is invisible.
-	first := world.rotate(committer, nil, func() ([]byte, []byte, []byte, error) {
-		return committer.handle.Commit(nil)
-	})
-	for _, member := range []*rotMember{receiver, victim} {
-		if err := world.deliver(member, first.page()...); err != nil {
-			t.Fatalf("CONTROL FAILED: %s's walk over an honest rotation answered %v", member.name, err)
+// buildEarlierEpochReplay is a removal fanned out on an EARLIER epoch's pq_secret, after
+// `rotations` honest rotations, replaying the value the receiver first held at `replaying`.
+//
+// IT TAKES THE REPLAYED EPOCH AS A PARAMETER, WHICH IS THE 2026-09-24 (EIGHTH PASS) REPAIR. It was
+// written with both numbers fixed at one -- one rotation, epoch 1's value -- and so was every other
+// refusing row in this table: `heldAt` was 1 everywhere but at the admin row, where it is 2. That
+// left the exit's SECOND input driven over two points while its first was driven over five, and
+// `alreadyHeld = alreadyHeld && heldAt < 3` (pqepoch.go sha256 1608f28c11c9) passed both
+// instruments and the whole package. The shape it let through is ordinary: a committer replaying
+// pq_secret[k] for k >= 3 in a group that has rotated a few times.
+func buildEarlierEpochReplay(rotations int, replaying uint64) func(t *testing.T) *removalPage {
+	return func(t *testing.T) *removalPage {
+		world, committer, receiver, removing, atOne := removalCohort(t, 1)
+		victim := world.member("victim0")
+		// THE HONEST ROTATIONS THAT GIVE THE RECEIVER MORE THAN ONE ROW. At epoch 1 there is one
+		// row, so "the current row" and "the whole table" are the same set and any replay is
+		// invisible; the founding draw is epoch 1's and is not one of them.
+		opened := world.rotateHonestly(committer, rotations, receiver, victim)
+		opened[1] = atOne
+		replayed, known := opened[replaying]
+		if !known {
+			t.Fatalf("this row replays epoch %d and %d honest rotation(s) opened epochs %v; a "+
+				"replay of an epoch nobody opened would be a replay of nil", replaying, rotations,
+				slices.Sorted(maps.Keys(opened)))
 		}
+		published := world.fanOutOnTheHeldSecret(committer, removing, func() ([]byte, []byte, []byte, error) {
+			return committer.handle.CommitRemove(removing)
+		}, unrotatedFanOut{opensOn: replayed})
+		page := &removalPage{world: world, committer: committer, receiver: receiver,
+			page: published.page(), opens: published.opens, removes: removing,
+			opensOn: published.pqSecret, retained: replayed}
+		page.also = func(t *testing.T) {
+			if want := rotations + 1; len(receiver.group.pqSecrets) != want {
+				t.Fatalf("CONTROL FAILED: %s holds %d row(s) after %d rotation(s), want %d; with "+
+					"one row this row measures the case above it", receiver.name,
+					len(receiver.group.pqSecrets), rotations, want)
+			}
+			if bytes.Equal(receiver.group.pqSecretLocked(), replayed) {
+				t.Fatalf("CONTROL FAILED: the group's CURRENT secret IS the replayed one, so " +
+					"this is the unrotated shape and not a replay of a different octet string")
+			}
+			if !bytes.Equal(published.pqSecret, replayed) {
+				t.Fatalf("CONTROL FAILED: the fixture opened epoch %d on something other than "+
+					"epoch %d's secret", published.opens, replaying)
+			}
+			// AND THE ROW SITS WHERE IT SAYS ON THE SECOND AXIS. The refusal's own `heldAt` is
+			// asserted in [removalPage.drive] against the row's declaration; this is the same
+			// fact one step earlier, so a fixture whose rotations quietly re-drew the same octets
+			// -- which would collapse every epoch onto heldAt 1 -- is caught before delivery
+			// rather than as a confusing disagreement afterwards.
+			if at, held := receiver.group.pqSecretHeldAtLocked(replayed); !held || at != replaying {
+				t.Fatalf("CONTROL FAILED: %s first held the replayed value at epoch %d "+
+					"(held=%v) and this row is built to replay epoch %d. Every rotation must "+
+					"draw fresh octets or the epochs collapse onto one point", receiver.name,
+					at, held, replaying)
+			}
+		}
+		return page
 	}
-	published := world.fanOutOnTheHeldSecret(committer, removing, func() ([]byte, []byte, []byte, error) {
-		return committer.handle.CommitRemove(removing)
-	}, unrotatedFanOut{opensOn: atOne})
-	page := &removalPage{world: world, committer: committer, receiver: receiver,
-		page: published.page(), opens: published.opens, removes: removing,
-		opensOn: published.pqSecret, retained: atOne}
-	page.also = func(t *testing.T) {
-		if len(receiver.group.pqSecrets) < 2 {
-			t.Fatalf("CONTROL FAILED: %s holds %d row(s) after one rotation; with one row this "+
-				"row measures the case above it", receiver.name, len(receiver.group.pqSecrets))
-		}
-		if bytes.Equal(receiver.group.pqSecretLocked(), atOne) {
-			t.Fatalf("CONTROL FAILED: epoch 2's secret IS epoch 1's, so the replay is not of a " +
-				"different octet string")
-		}
-		if !bytes.Equal(published.pqSecret, atOne) {
-			t.Fatalf("CONTROL FAILED: the fixture opened epoch %d on something other than epoch "+
-				"1's secret", published.opens)
-		}
-	}
-	return page
 }
 
 // buildLateJoinerResidual is ledger ruling 43's first residual, driven. One page, two receivers,
@@ -982,14 +1345,48 @@ func buildBundledRemoval(honest bool) func(t *testing.T) *removalPage {
 }
 
 func buildNoDigestRemoval(victims int) func(t *testing.T) *removalPage {
+	return buildNoDigestRemovalAfter(0, victims)
+}
+
+// buildNoDigestRemovalAfter is the digest-less removal with `rotations` honest rotations in front
+// of it, which is the only knob that moves `self.epoch` -- [Group.refuseUnrotatedRemovalLocked]'s
+// THIRD input and the one this table drove at exactly one point until the eighth pass.
+//
+// WHAT THAT ONE POINT COST, measured rather than asserted: a `println` at the top of that door,
+// run over this table, reported `self.epoch == 1` on every digest-less call of it -- one-leaf,
+// two-leaves, three-leaves, four-leaves, one-leaf-and-one-add and no-removal, six rows and one
+// epoch. So `1 < self.epoch -> return nil` passed at every arity, in three spellings: a top-level
+// `if` (pqepoch.go sha256 aa6068572817), an `else if` welded onto `digest != nil` (68d2fbf1c38c)
+// and a `switch` (bdd81e69ac7f). The last two also passed every gate in pqdarkgate_test.go.
+func buildNoDigestRemovalAfter(rotations int, victims int) func(t *testing.T) *removalPage {
 	return func(t *testing.T) *removalPage {
 		world, committer, receiver, removing, retained := removalCohort(t, victims)
+		walkers := append([]*rotMember{receiver}, removalVictims(world, victims)...)
+		world.rotateHonestly(committer, rotations, walkers...)
+		if 0 < victims {
+			retained = append([]byte(nil), world.member("victim0").group.pqSecretLocked()...)
+		}
 		published := world.fanOutOnTheHeldSecret(committer, removing, func() ([]byte, []byte, []byte, error) {
 			return committer.handle.CommitRemove(removing)
 		}, unrotatedFanOut{noDigest: true})
-		return &removalPage{world: world, committer: committer, receiver: receiver,
+		page := &removalPage{world: world, committer: committer, receiver: receiver,
 			page: published.page(), opens: published.opens, removes: removing,
 			opensOn: published.pqSecret, retained: retained}
+		page.also = func(t *testing.T) {
+			// THE COMMIT REALLY CARRIES NO DIGEST, read off the record this page delivers. The
+			// door's whole predicate is `digest != nil`, so a fixture that quietly attached one
+			// would make this row a slow copy of a digest-door row -- at the wrong door, and
+			// with its `self.epoch` declaration on an interval nothing drives.
+			digest, err := epochDigestOf(&published.commit.record.Header)
+			if err != nil {
+				t.Fatalf("reading this row's commit for a digest: %v", err)
+			}
+			if digest != nil {
+				t.Fatalf("CONTROL FAILED: this row's commit carries an epoch digest for epoch "+
+					"%d, so it does not reach the pre-apply door at all", digest.Epoch)
+			}
+		}
+		return page
 	}
 }
 
@@ -1003,12 +1400,19 @@ func buildNoDigestBundle(t *testing.T) *removalPage {
 		opensOn: published.pqSecret, retained: retained}
 }
 
-func buildNoDigestNoRemoval(t *testing.T) *removalPage {
-	world, committer, receiver, _, _ := removalCohort(t, 0)
-	published := world.fanOutOnTheHeldSecret(committer, nil, func() ([]byte, []byte, []byte, error) {
-		return committer.handle.Commit(nil)
-	}, unrotatedFanOut{noDigest: true})
-	return &removalPage{world: world, committer: committer, receiver: receiver,
-		page: published.page(), opens: published.opens, removes: nil,
-		opensOn: published.pqSecret}
+// buildNoDigestNoRemoval is the pre-apply door's complement at a chosen `self.epoch`: a
+// digest-less commit that removes NOBODY, after `rotations` honest rotations. It carries the same
+// parameter as the refusing builder because every point of the epoch axis needs both dispositions
+// -- a refused row at an epoch with no followed row beside it is a refusal of the EPOCH.
+func buildNoDigestNoRemoval(rotations int) func(t *testing.T) *removalPage {
+	return func(t *testing.T) *removalPage {
+		world, committer, receiver, _, _ := removalCohort(t, 0)
+		world.rotateHonestly(committer, rotations, receiver)
+		published := world.fanOutOnTheHeldSecret(committer, nil, func() ([]byte, []byte, []byte, error) {
+			return committer.handle.Commit(nil)
+		}, unrotatedFanOut{noDigest: true})
+		return &removalPage{world: world, committer: committer, receiver: receiver,
+			page: published.page(), opens: published.opens, removes: nil,
+			opensOn: published.pqSecret}
+	}
 }

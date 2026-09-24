@@ -863,10 +863,39 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 		// answer rather than only on a removal: it is a read of two maps bounded by
 		// [messagegroup.PastEpochWindow], it has no effects, and it is constant-time by
 		// construction. Mutation S3 of the fifth pass measured exactly this binding as an
-		// equivalent edit. THE RESIDUAL, NAMED: a statement between this binding and the guard can
-		// still narrow `alreadyHeld`, and at an arity the table drives it goes red there -- above
-		// the interval the table prints, it is outside both instruments, which is what that
-		// interval is printed for.
+		// equivalent edit.
+		//
+		// THE RESIDUAL, NAMED -- AND THE SENTENCE THAT STOOD HERE WAS FALSE, WHICH IS THE
+		// 2026-09-24 (EIGHTH PASS) REPAIR. It said a statement between this binding and the guard
+		// "goes red there" at an arity the table drives, and that only ABOVE the printed interval
+		// is such a statement outside both instruments. THIS EXIT DECIDES ON THREE INPUTS, NOT
+		// ONE: `len(removedLeaves)`, the held answer -- `alreadyHeld`, which carries `heldAt`
+		// beside it -- and WHICH ARM called this closure. Only the first was driven as a bounded
+		// interval, so a narrowing keyed on `heldAt` INSIDE the printed arity interval was outside
+		// both instruments too:
+		//
+		//	alreadyHeld = alreadyHeld && heldAt < 3
+		//
+		// written on the next line, at pqepoch.go sha256 1608f28c11c9, sat at ARITY ONE and passed
+		// the driven table, passed both predicate readings, and passed all 171 cases in this
+		// package -- with the rule gone for every receiver whose history of the replayed value
+		// starts at epoch 3 or later. That is a committer replaying pq_secret[k] for k >= 3 in a
+		// group that has rotated a few times, and under it the removed member keeps
+		// storage_root[n+1], which is the whole of ledger item 243.
+		//
+		// WHERE EACH INPUT STOPS, AND ALL THREE ARE PRINTED BY THE TABLE NOW:
+		//
+		//   - `len(removedLeaves)` is driven over the bounded INTERVAL [0, 4]. `< 5` is outside it
+		//     and is caught by the predicate reading, because it is written in this CONDITION.
+		//   - `heldAt` is driven over the bounded INTERVAL [1, 3] -- the top is the row
+		//     `digest/one-leaf/earlier-epoch/held-at-epoch-3`. `heldAt < 4` is outside it AND
+		//     outside the readings when it is written as a statement rather than into the
+		//     condition. That is the honest residual and a row is what moves the edge.
+		//   - the ARM is an enumeration of three and is not an interval. Two of the three are
+		//     driven to a refusal; the third, "carries no epoch digest at all", cannot reach one
+		//     here at all, because a digest-less commit that removes a leaf is refused before the
+		//     apply by [Group.refuseUnrotatedRemovalLocked]. That is a theorem about the two
+		//     doors rather than a gap.
 		heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret)
 		if 0 < len(removedLeaves) && alreadyHeld {
 			return nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)

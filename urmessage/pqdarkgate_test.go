@@ -2605,9 +2605,49 @@ func removalGuardDefect(exit *ast.FuncLit) (string, string) {
 // clause 3 does: the condition is read whole as source text, held against a written disposition
 // BOTH WAYS, and a condition that is a NAME is refused for being a name.
 //
-// ITS SUBJECT IS EVERY TOP-LEVEL CONDITIONAL OF THE DOOR, because this door decides by returning
-// nil early: a predicate added ANYWHERE in it can let a removal past, and "the ones I thought to
-// look at" is how the six rounds went.
+// ITS SUBJECT IS EVERY CONDITIONAL SHAPE IN THE DOOR'S BODY, because this door decides by
+// returning nil early: a predicate added ANYWHERE in it can let a removal past, and "the ones I
+// thought to look at" is how the six rounds went.
+//
+// AND THAT SENTENCE WAS FALSE OF THIS CODE UNTIL 2026-09-24 (EIGHTH PASS), WHICH IS THE CLASS
+// LEDGER ITEM 253 NAMES: a gate whose class is a shape the defect does not have. It said "every
+// top-level conditional" in capitals and it walked `declaration.Body.List`, casting each element to
+// `*ast.IfStmt` and skipping everything else in silence. An `else if` lives in `IfStmt.Else` and is
+// not an element of `Body.List` at all; a `switch` is not an `*ast.IfStmt`. MEASURED, each applied
+// to production and reverted, all three the SAME narrowing in three spellings:
+//
+//	D-A  `if 1 < self.epoch { return nil }` at the top level  (sha256 aa6068572817) -> GATES FAIL
+//	D-D  `} else if 1 < self.epoch { return nil }` on `digest != nil`  (68d2fbf1c38c) -> GATES PASS
+//	D-B  `switch { case 1 < self.epoch: return nil }`  (bdd81e69ac7f) -> GATES PASS
+//
+// All three passed the driven table, because every digest-less row of it sat at `self.epoch == 1`.
+// D-A is the positive control and it fires for its own reason -- "this door decides on `1 <
+// self.epoch` and this gate has no disposition for that predicate" -- so the only difference
+// between the caught one and the two survivors was the SPELLING.
+//
+// WHAT WAS REPAIRED, IN BOTH INSTRUMENTS AND NOT ONLY HERE. The table now drives this door at TWO
+// values of `self.epoch` and prints that interval beside its arity one, which is where a narrowing
+// a driven case can catch belongs (ledger ruling 46). This reading is what covers the same
+// narrowing ABOVE that interval, and it is widened rather than added: it walks the WHOLE body with
+// [ast.Inspect] -- so an `else` chain, a `switch`, a type switch, a `select` and a loop are all
+// reached -- and it refuses every conditional shape that is not one of the two dispositioned `if`s
+// by NAME rather than skipping it in silence. Silently skipping a node it has no reading for is the
+// one behaviour that made the header's own sentence false.
+//
+// AND [removalGuardDefect] IS DELIBERATELY NOT WIDENED WITH IT, because it does not have this
+// hole and the difference is measured rather than assumed: its clause `onAPath != len(guarded)`
+// requires every refusal to sit inside a TOP-LEVEL conditional, so a guard rewritten as `switch {
+// case 0 < len(removedLeaves) && alreadyHeld: ... }` is refused there for its own reason -- *1 of
+// its 1 refusal(s) are outside a conditional at the top level of the exit* -- while the table
+// stays green. This door has no such clause because it decides by returning nil EARLY: there is no
+// refusal position to anchor on, and that asymmetry is why only one of the two readings moved.
+//
+// HONEST BOUND ON WHAT A REGRESSION HERE COSTS, stated rather than inflated: a digest-less removal
+// that slips this door is still refused after the apply by the resolution's guard -- `digest ==
+// nil`, `isHeld`, so [Group.resolvePqSecretLocked] answers the held secret and the exit refuses it.
+// What is lost is ruling 41's PRE-APPLY promise, that the receiver's MLS handle must not move, and
+// not the removal rule itself. That promise is what the table's `receiver.handle.Epoch() !=
+// handleAt` assertion exists for.
 func doorPredicateDefect(declaration *ast.FuncDecl) ([]string, string) {
 	predicates := map[string]string{
 		"len(removedLeaves) == 0": "a commit that removes NOTHING is untouched by this door. It " +
@@ -2618,30 +2658,90 @@ func doorPredicateDefect(declaration *ast.FuncDecl) ([]string, string) {
 			"could still read is a statement about the wire rather than about the commit, and a " +
 			"permanent halt may not rest on a record a bystander can write",
 	}
-	read, seen := []string{}, map[string]bool{}
-	for _, statement := range declaration.Body.List {
-		conditional, isIf := statement.(*ast.IfStmt)
-		if !isIf {
-			continue
+	// EVERY `if` THAT IS SOMEBODY'S `else` IS MARKED FIRST, so a refusal taken in an else chain can
+	// say WHERE it was found. Without it D-D would be refused with D1's sentence and the row would
+	// keep passing after the widening that exists for it was reverted.
+	inAnElseChain := map[ast.Node]bool{}
+	ast.Inspect(declaration.Body, func(node ast.Node) bool {
+		conditional, isIf := node.(*ast.IfStmt)
+		if !isIf || conditional.Else == nil {
+			return true
 		}
-		condition := sourceText(conditional.Cond)
-		read = append(read, "`if "+condition+"`")
-		if _, isName := boundName(conditional.Cond); isName {
-			return read, fmt.Sprintf("this door decides on the NAME %q. Whatever that name is "+
-				"bound to is a level of indirection between the commit and the decision, and it "+
-				"is the road that defeated the resolution's own guard: narrowing the BINDING by "+
-				"one token leaves the door byte-identical. Write the predicate whole", condition)
+		// THE WHOLE ELSE SUBTREE AND NOT ITS ROOT, so a conditional nested one block deeper inside
+		// an `else { ... }` is reported where it really is rather than as a top-level one. A
+		// location a reading states wrongly is a sentence the next reader has to re-derive.
+		ast.Inspect(conditional.Else, func(inner ast.Node) bool {
+			inAnElseChain[inner] = true
+			return true
+		})
+		return true
+	})
+	read, seen, defect := []string{}, map[string]bool{}, ""
+	// THE WALK IS THE WHOLE BODY AND NOT ITS TOP LEVEL, which is the 2026-09-24 (eighth pass)
+	// repair: `Body.List` holds neither an `else if` (it is `IfStmt.Else`) nor a `switch` case, and
+	// both were MEASURED letting the same narrowing through while this walk reported the door
+	// clean. Every conditional shape reached here is either one of the two dispositioned `if`s or
+	// is REFUSED BY NAME -- a node skipped in silence is what made this function's own header false.
+	ast.Inspect(declaration.Body, func(node ast.Node) bool {
+		if defect != "" {
+			return false
 		}
-		why, dispositioned := predicates[condition]
-		if !dispositioned {
-			return read, fmt.Sprintf("this door decides on `%s` and this gate has no disposition "+
-				"for that predicate. Every predicate here can let a removal past, and the driven "+
-				"table cannot cover one past the arities it drives -- `len(removedLeaves) == 0 || "+
-				"4 < len(removedLeaves)` passes every row of it. So a new predicate gets a row "+
-				"saying what it reads and why", condition)
+		where := "at the top level of this door"
+		if inAnElseChain[node] {
+			where = "in an ELSE CHAIN -- which lives in `IfStmt.Else` and is not an element of " +
+				"`Body.List` at all, so a walk over the body's top level cannot see it"
 		}
-		seen[condition] = true
-		read[len(read)-1] = "`if " + condition + "` (" + why + ")"
+		switch shape := node.(type) {
+		case *ast.IfStmt:
+			condition := sourceText(shape.Cond)
+			read = append(read, "`if "+condition+"` ("+where+")")
+			if _, isName := boundName(shape.Cond); isName {
+				defect = fmt.Sprintf("this door decides on the NAME %q, %s. Whatever that name is "+
+					"bound to is a level of indirection between the commit and the decision, and "+
+					"it is the road that defeated the resolution's own guard: narrowing the "+
+					"BINDING by one token leaves the door byte-identical. Write the predicate "+
+					"whole", condition, where)
+				return false
+			}
+			why, dispositioned := predicates[condition]
+			if !dispositioned {
+				defect = fmt.Sprintf("this door decides on `%s`, %s, and this gate has no "+
+					"disposition for that predicate. Every predicate here can let a removal past, "+
+					"and the driven table cannot cover one past the intervals it drives -- "+
+					"`len(removedLeaves) == 0 || 4 < len(removedLeaves)` passes every row of it, "+
+					"and so does `2 < self.epoch`. So a new predicate gets a row saying what it "+
+					"reads and why", condition, where)
+				return false
+			}
+			seen[condition] = true
+			read[len(read)-1] = "`if " + condition + "` (" + why + ")"
+		case *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt, *ast.ForStmt, *ast.RangeStmt:
+			kind := "an unnamed conditional shape"
+			switch shape.(type) {
+			case *ast.SwitchStmt:
+				kind = "a SWITCH statement"
+			case *ast.TypeSwitchStmt:
+				kind = "a TYPE SWITCH statement"
+			case *ast.SelectStmt:
+				kind = "a SELECT statement"
+			case *ast.ForStmt:
+				kind = "a FOR loop"
+			case *ast.RangeStmt:
+				kind = "a RANGE loop"
+			}
+			read = append(read, kind)
+			defect = fmt.Sprintf("this door holds %s. This gate disposes of PLAIN `if` conditions "+
+				"and has no reading for any other conditional shape, and every one of them can "+
+				"return early exactly as an `if` can: `switch { case 1 < self.epoch: return nil }` "+
+				"was MEASURED passing the driven table AND every gate here (pqepoch.go sha256 "+
+				"bdd81e69ac7f) while this walk looked only at `*ast.IfStmt` elements of the body's "+
+				"top level. Write the predicate as an `if` and give it a row above", kind)
+			return false
+		}
+		return true
+	})
+	if defect != "" {
+		return read, defect
 	}
 	for condition, why := range predicates {
 		if !seen[condition] {
@@ -2744,7 +2844,7 @@ func (self *Group) refuseUnrotatedRemovalLocked(digest *message.EpochDigestAttac
 // is gone would be a refusal nothing needs, and this project has already been bitten by a gate
 // whose header named a class its code did not cover.
 //
-// WHAT IS LEFT IS FOURTEEN ROWS ACROSS TWO READINGS, and every one of them exists because the
+// WHAT IS LEFT IS SIXTEEN ROWS ACROSS TWO READINGS, and every one of them exists because the
 // mutant under it was measured PASSING the driven table:
 //
 //   - the resolution's exit: the refusal computed and dropped, the refusal returned beside the
@@ -2752,7 +2852,10 @@ func (self *Group) refuseUnrotatedRemovalLocked(digest *message.EpochDigestAttac
 //     (seventh pass) addition -- the same narrowing planted ONE LINE LOWER in a re-nested guard,
 //     which is the placement that passed both instruments while this walk read only the outer of
 //     two conditions;
-//   - the other door: a narrowed predicate and a predicate hidden behind a NAME.
+//   - the other door: a narrowed predicate, a predicate hidden behind a NAME, and -- the
+//     2026-09-24 (eighth pass) addition -- the SAME narrowing in two spellings this reading could
+//     not see at all, an `else if` and a `switch`, both measured passing every instrument while
+//     the identical predicate written as a top-level `if` was caught.
 //
 // AND EACH REFUSAL NAMES THE CLAUSE IT IS REFUSED BY. Without that, six rows could all be refused
 // by clause 1 and the table would be six copies of one measurement.
@@ -2788,13 +2891,19 @@ func TestBothRemovalDoorsAreDecidedByAPredicateWrittenWholeAndTheRefusalIsReturn
 			why: "THIS READING'S RESIDUAL, AS A ROW RATHER THAN AS A PARAGRAPH. The held answer " +
 				"is a name because it is a call's second result, and a statement that rewrites it " +
 				"before the guard is a statement this reading does not look at. It is ACCEPTED " +
-				"here and the table is what catches it, MEASURED on production both ways: the same " +
-				"edit written `< 4` turns the TABLE RED -- the refused rows at the arities it " +
-				"excludes are inside the driven interval -- and passes these gates, while `< 5`, " +
-				"one arity above that interval, passes the table AND these gates. That second " +
-				"reading is the residual, and it is why the table prints its interval and says it " +
-				"is BOUNDED. An accepted row is the honest way to carry it, because a residual " +
-				"written only in a header is one nobody measures"},
+				"here and the table is what catches it. AND THE MEASUREMENT IN THIS ROW USED TO " +
+				"BE ENTIRELY ON THE ARITY AXIS, which was the 2026-09-24 (eighth pass) blocker: " +
+				"the exit decides on THREE inputs -- `len(removedLeaves)`, the held answer (which " +
+				"carries `heldAt`) and the arm -- and this row measured a narrowing on the first " +
+				"of them only, so `alreadyHeld = alreadyHeld && heldAt < 3` (pqepoch.go sha256 " +
+				"1608f28c11c9) sat at ARITY ONE, inside the printed arity interval, and passed " +
+				"the table, both these gates and all 171 cases in the package. MEASURED on " +
+				"production, both axes and both sides of each edge: `&& len(removedLeaves) < 4` " +
+				"turns the TABLE RED and `< 5` does not; `&& heldAt < 3` turns the TABLE RED now " +
+				"that a row drives a refusal at heldAt 3, and `heldAt < 4` does not. Each axis " +
+				"has a printed interval and each has an edge one step above it, which is why the " +
+				"table prints BOTH and says both are BOUNDED. An accepted row is the honest way " +
+				"to carry it, because a residual written only in a header is one nobody measures"},
 		{row: "R9 the refusal, computed and dropped",
 			was:   "\t\t\treturn nil, refuseRemovalOnHeldSecret(",
 			now:   "\t\t\t_ = refuseRemovalOnHeldSecret(",
@@ -2964,6 +3073,28 @@ func TestBothRemovalDoorsAreDecidedByAPredicateWrittenWholeAndTheRefusalIsReturn
 			names: "decides on the NAME",
 			why: "the road that defeated the resolution's own guard four rounds running, refused " +
 				"here before it is walked rather than after"},
+		{row: "D4 the same narrowing welded on as an ELSE IF -- the 2026-09-24 (eighth pass) blocker",
+			was: "\tif digest != nil {\n\t\treturn nil\n\t}\n",
+			now: "\tif digest != nil {\n\t\treturn nil\n\t} else if 1 < self.epoch {\n" +
+				"\t\treturn nil\n\t}\n",
+			names: "in an ELSE CHAIN",
+			why: "MEASURED PASSING THE DRIVEN TABLE AND EVERY GATE HERE, against production at " +
+				"pqepoch.go sha256 68d2fbf1c38c, with the whole package green at 171 PASS / 0 " +
+				"FAIL. Its positive control is D-A, the SAME predicate as a top-level `if` (sha256 " +
+				"aa6068572817), which this reading always caught -- so the only difference between " +
+				"the caught spelling and this one was that `IfStmt.Else` is not an element of " +
+				"`Body.List`. The table drives this door at two epochs now and catches it too; " +
+				"this row is what covers the same narrowing ABOVE that interval"},
+		{row: "D5 the same narrowing as a SWITCH -- the other half of the same blocker",
+			was:   "\tif len(removedLeaves) == 0 {\n\t\treturn nil\n\t}\n",
+			now:   "\tif len(removedLeaves) == 0 {\n\t\treturn nil\n\t}\n\tswitch {\n\tcase 1 < self.epoch:\n\t\treturn nil\n\t}\n",
+			names: "holds a SWITCH statement",
+			why: "the second spelling, MEASURED at pqepoch.go sha256 bdd81e69ac7f: table PASS, " +
+				"gates PASS, package 171 PASS / 0 FAIL. A switch is not an `*ast.IfStmt` and was " +
+				"skipped in silence, which is the behaviour that made this function's header -- " +
+				"`ITS SUBJECT IS EVERY TOP-LEVEL CONDITIONAL` -- false of its own code. It is " +
+				"refused for the shape and not for the predicate, so the row survives a rename of " +
+				"`self.epoch`"},
 	}
 	for _, row := range doorRows {
 		source := doorShape
@@ -3001,9 +3132,9 @@ func TestBothRemovalDoorsAreDecidedByAPredicateWrittenWholeAndTheRefusalIsReturn
 		t.Fatalf("the production door is refused by this reading: %s", doorDefect)
 	}
 
-	if accepted != 4 || refused != 10 {
+	if accepted != 4 || refused != 12 {
 		t.Fatalf("this table ran %d accepted row(s) and %d refused one(s); it is written as 4 and "+
-			"10, and a row that was deleted rather than answered is what this count is here to find",
+			"12, and a row that was deleted rather than answered is what this count is here to find",
 			accepted, refused)
 	}
 }
