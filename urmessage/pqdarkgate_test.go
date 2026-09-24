@@ -116,6 +116,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2441,17 +2442,23 @@ func TestEveryReturnOfTheResolutionThatCanCarryAPqSecretGoesThroughTheGuardedExi
 // one leaf. So the sub-class the behaviour holds is "the bypass is false where a test drives it",
 // and the complement of that sub-class was held by nothing at all until clause 5.
 //
-// THE RESIDUAL THAT IS LEFT, NAMED, AND IT IS NOW ONE STEP OUT OF THIS FUNCTION RATHER THAN
-// INSIDE IT. Clauses 5 to 7 hold everything between `resolvePqSecretLocked`'s parameter list and
-// the refusal. What they do not hold is what the CALLER hands over: `group.go` passes
-// `decision.RemovedLeaves`, and a narrowing written there -- a caller that truncates the list
-// before the call -- satisfies every clause here. That is a different subject with a different
-// gate, it is named at the head of this file, and it is not claimed to be covered. Nor is a
-// [Group.pqSecretHeldAtLocked] rewritten to answer false; THAT one the behaviour does hold, and
-// the reason is the distinction above -- it is a predicate every driven case makes true, so
-// TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch,
+// THE RESIDUAL THAT IS LEFT, NAMED, AND IT IS NOW OUTSIDE THIS MODULE RATHER THAN INSIDE THIS
+// FUNCTION. Clauses 5 to 8 hold everything between `resolvePqSecretLocked`'s parameter list and
+// the refusal; clause 9, in the mutant table's last section, holds the rest of the same path on
+// this side -- `group.go` hands both removal doors `decision.RemovedLeaves`, whole, and neither
+// `decision` nor its leaves may be rewritten between them. Where it STOPS is
+// `authorizeCommitLocked` filling `decision` from connect's `processed.Commit.RemovedLeaves()`:
+// another repository, another subject, and not claimed here.
+//
+// NOR IS a [Group.pqSecretHeldAtLocked] rewritten to answer false; THAT one the behaviour does
+// hold, and the reason is the distinction above -- it is a predicate every driven case makes
+// true, so TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch,
 // TestTheCompatibilityArmOfTheResolutionIsClosedToARemoval and
-// TestTheWrapCandidateArmOfTheResolutionIsClosedToARemoval catch it, one per arm.
+// TestTheWrapCandidateArmOfTheResolutionIsClosedToARemoval catch it, one per arm. And nor is a
+// [refuseRemovalOnHeldSecret] that answers a nil error on some commit: that is not this bypass --
+// it answers (nil, nil) rather than the held secret, so the group follows the epoch with NO
+// pq_secret and fails loudly at the next AEAD rather than quietly onto a value it holds -- but it
+// is a different function with no gate of its own and it is recorded rather than covered.
 //
 // It answers (what it READ, what is WRONG). The reading is returned rather than discarded so that
 // a narrowing shows up in a log line, which is what the two mutants above did not: they left the
@@ -3343,6 +3350,87 @@ func TestTheRemovalGuardIsDecidedByValuesNothingInTheResolutionCanRewrite(t *tes
 	if defect != "" {
 		t.Fatalf("the production resolution is refused by this gate: %s", defect)
 	}
+	// ── 9. AND THE CALLER HANDS OVER THE COMMIT'S WHOLE LIST ────────────────────────────────
+	//
+	// Clauses 6 to 8 hold everything from `resolvePqSecretLocked`'s parameter list inward. This
+	// is the rest of the same path and the same class, not a new shape: the property is *the
+	// guard decides on the commit's removed-leaf list*, and on this side of the module boundary
+	// that list arrives as `decision.RemovedLeaves`. A caller that truncates it satisfies every
+	// clause above, so the residual named at [removalGuardDefect] is closed here rather than
+	// merely recorded. Where it STOPS is `decision` itself: `authorizeCommitLocked` fills it from
+	// connect's `processed.Commit.RemovedLeaves()`, which is another repository's subject.
+	//
+	// BOTH DOORS ARE READ, and that is the point of doing it here rather than at one call: the
+	// pre-apply refusal and the resolution are the two detectors ruling 43 says do not overlap in
+	// time, and a narrowing that fed one a different list from the other would put the two out of
+	// agreement about one commit.
+	const list = "decision.RemovedLeaves"
+	doors := map[string]int{"refuseUnrotatedRemovalLocked": 0, "resolvePqSecretLocked": 0}
+	ingest := parseFuncDecl(t, "group.go", "ingestCommitLocked")
+	ast.Inspect(ingest, func(node ast.Node) bool {
+		call, isCall := node.(*ast.CallExpr)
+		if !isCall {
+			return true
+		}
+		selector, isSelector := call.Fun.(*ast.SelectorExpr)
+		if !isSelector {
+			return true
+		}
+		if _, isDoor := doors[selector.Sel.Name]; !isDoor {
+			return true
+		}
+		doors[selector.Sel.Name] += 1
+		handed := []string{}
+		for _, argument := range call.Args {
+			handed = append(handed, sourceText(argument))
+		}
+		t.Logf("ingestCommitLocked hands %s: %v", selector.Sel.Name, handed)
+		if !slices.Contains(handed, list) {
+			t.Fatalf("ingestCommitLocked hands %s the arguments %v and none of them is `%s`. The "+
+				"guard inside reads its parameter WHOLE and cannot tell a truncated list from a "+
+				"short one, so a narrowing written HERE -- `%s[:1]` -- takes the removal rule out "+
+				"for every commit above that length and leaves every clause in "+
+				"removalGuardDefect reading correctly",
+				selector.Sel.Name, handed, list, list)
+		}
+		return true
+	})
+	for door, count := range doors {
+		if count != 1 {
+			t.Fatalf("ingestCommitLocked calls %s %d time(s) and this gate is written against "+
+				"exactly one. Two calls are two lists one commit is judged by, and zero is a door "+
+				"that has moved somewhere this gate does not read", door, count)
+		}
+	}
+	// AND THE LIST IS NOT REWRITTEN BETWEEN THE TWO DOORS. `decision` is bound once by
+	// `authorizeCommitLocked` and nothing else in the function may touch it or its leaves --
+	// `decision.RemovedLeaves = decision.RemovedLeaves[:1]` above the doors is the narrowing in
+	// its last available dress, and the source text at both call sites stays byte-identical.
+	bindings, writes := 0, []string{}
+	ast.Inspect(ingest, func(node ast.Node) bool {
+		assign, isAssign := node.(*ast.AssignStmt)
+		if !isAssign {
+			return true
+		}
+		for _, target := range assign.Lhs {
+			root, path := rootIdent(target)
+			if root == nil || root.Name != "decision" {
+				continue
+			}
+			if assign.Tok == token.DEFINE && path == "decision" {
+				bindings += 1
+				continue
+			}
+			writes = append(writes, path)
+		}
+		return true
+	})
+	if bindings != 1 || 0 < len(writes) {
+		t.Fatalf("ingestCommitLocked binds `decision` %d time(s) and writes %v. The two removal "+
+			"doors read `%s` off it, so a second binding or any write is a narrowing that leaves "+
+			"both call sites byte-identical", bindings, writes, list)
+	}
+
 	if accepted != 3 || refused != 15 {
 		t.Fatalf("this table ran %d accepted row(s) and %d refused one(s); it is written as 3 and "+
 			"15, and a row that was deleted rather than answered is what this count is here to "+
