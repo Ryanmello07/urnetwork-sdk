@@ -144,6 +144,10 @@ var wrapSeedNotThisFunctionsToErase = map[string]string{
 		"which is the erase that belongs to this function and is censused as a sink next door.",
 	"writeRecord|parameter parts":       "the same array one call further in, now one of four record parts.",
 	"encodeStateRecord|parameter parts": "and one call further still, at the framing.",
+	"groupRecordOf|parameter parts": "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED. It is in " +
+		"this census only because the net above seeds any parameter called `parts`, and the ownership " +
+		"answer is the same one: the six parts are the CALLER's, read off the disk by " +
+		"[DurableStateStore.GroupRecords] and handed on to a [GroupRecord] that outlives this call.",
 }
 
 // THE SECOND NARROWING'S COMPLEMENT: every local bound from a value DERIVED from the seed rather
@@ -201,7 +205,7 @@ func TestEveryPathThatDropsTheDeviceErasesItsWrapSeed(t *testing.T) {
 		// would say so. This counts it, and the assertion is at the foot of the test.
 		ast.Inspect(parsed, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
-			if !ok || wrapSeedCalleeName(call.Fun) != "zeroizeState" {
+			if !ok || censusCalleeName(call.Fun) != "zeroizeState" {
 				return true
 			}
 			for _, argument := range call.Args {
@@ -302,7 +306,7 @@ func TestEveryPathThatDropsTheDeviceErasesItsWrapSeed(t *testing.T) {
 						if index, producer := wrapSeedProducerResultIndex(values[0]); producer {
 							if index < len(targets) {
 								call := values[0].(*ast.CallExpr)
-								hold(targets[index], wrapSeedExpr(call.Fun))
+								hold(targets[index], censusExpr(call.Fun))
 							}
 							return
 						}
@@ -314,12 +318,12 @@ func TestEveryPathThatDropsTheDeviceErasesItsWrapSeed(t *testing.T) {
 						if position, producer := wrapSeedProducerResultIndex(values[index]); producer {
 							if position == 0 {
 								call := values[index].(*ast.CallExpr)
-								hold(targets[index], wrapSeedExpr(call.Fun))
+								hold(targets[index], censusExpr(call.Fun))
 							}
 							continue
 						}
 						if wrapSeedAliasedBy(values[index], liveNames) {
-							hold(targets[index], wrapSeedExpr(values[index]))
+							hold(targets[index], censusExpr(values[index]))
 						}
 					}
 				}
@@ -382,7 +386,7 @@ func TestEveryPathThatDropsTheDeviceErasesItsWrapSeed(t *testing.T) {
 						if !bare || identifier.Name == "_" || identifier.Name == "err" {
 							continue
 						}
-						site := where + "|" + identifier.Name + " = " + wrapSeedExpr(call.Fun)
+						site := where + "|" + identifier.Name + " = " + censusExpr(call.Fun)
 						derived[site] = append(derived[site], at(node))
 					}
 				}
@@ -473,19 +477,19 @@ func TestEveryPathThatDropsTheDeviceErasesItsWrapSeed(t *testing.T) {
 	}
 
 	// ── AND ASSERTED, IN BOTH DIRECTIONS ──────────────────────────────────────────────────────
-	wrapSeedHold(t, "seed-bearing binding", bindings, wrapSeedLiveBindings,
+	censusHold(t, "seed-bearing binding", bindings, wrapSeedLiveBindings,
 		"A BINDING IS WHERE THIS GATE'S WHOLE SEARCH BEGINS: every drop it refuses is a return "+
 			"found IN SCOPE OF ONE. A site with no entry is a live range nobody weighed. An entry "+
 			"with no site is worse -- it is this gate having gone blind, because nothing is in "+
 			"scope of a binding that was not found, no drop is reported, and the refusal above "+
 			"passes by having nothing to refuse.")
-	wrapSeedHold(t, "not-this-function's-to-erase site", parameters, wrapSeedNotThisFunctionsToErase,
+	censusHold(t, "not-this-function's-to-erase site", parameters, wrapSeedNotThisFunctionsToErase,
 		"A PARAMETER CARRYING THE SEED IS THE CALLER'S ARRAY, and erasing it would hand the device "+
 			"32 zero octets -- a well formed seed that decapsulates to a uniform-looking wrong "+
 			"secret. That is why this gate declines to treat a parameter as a binding, and this is "+
 			"the census of every site the decision removed. A site with no entry is a new parameter "+
 			"carrying key material that nobody has decided the ownership of.")
-	wrapSeedHold(t, "derived-not-aliased site", derived, wrapSeedDerivedNotAliasedSites,
+	censusHold(t, "derived-not-aliased site", derived, wrapSeedDerivedNotAliasedSites,
 		"A VALUE DERIVED FROM THE SEED IS NOT THE SEED'S ARRAY, and this gate follows aliases only. "+
 			"Each site it removed is a copy of key material this package cannot erase, and naming "+
 			"them is what stops this file being read as 'every copy of the seed is erased' -- which "+
@@ -517,7 +521,7 @@ func wrapSeedProducerResultIndex(expression ast.Expr) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	index, producer := wrapSeedLiveProducerResult[wrapSeedCalleeName(call.Fun)]
+	index, producer := wrapSeedLiveProducerResult[censusCalleeName(call.Fun)]
 	return index, producer
 }
 
@@ -618,7 +622,7 @@ func wrapSeedErasingDefers(body *ast.BlockStmt, name string) []token.Pos {
 		erases := false
 		ast.Inspect(statement.Call, func(inner ast.Node) bool {
 			call, isCall := inner.(*ast.CallExpr)
-			if !isCall || wrapSeedCalleeName(call.Fun) != "zeroizeState" {
+			if !isCall || censusCalleeName(call.Fun) != "zeroizeState" {
 				return true
 			}
 			for _, argument := range call.Args {

@@ -233,7 +233,8 @@ func (self *roleWorld) deliver(receiver *roleMember, page ...*sealed) error {
 		rows = append(rows, &protocol.Record{RecordId: one.recordId, RecordBytes: encoded})
 	}
 	group.openPageLocked(&protocol.FetchResponse{Records: rows}, walk)
-	return group.commitWalkLocked(walk)
+	// nil for the reason pqrotation_test.go names: no fetch, so no transport refusal.
+	return group.commitWalkLocked(walk, nil)
 }
 
 // commitAndPublish runs one of the seam's by-value arms on the committer's handle, merges, and

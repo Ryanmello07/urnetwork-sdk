@@ -2582,12 +2582,15 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 	pageLimit := uint32(defaultFetchLimit)
 	for page := 0; ; page += 1 {
 		if maxFetchPages <= page {
-			self.commitWalkLocked(walk)
-			return walk.opened, fmt.Errorf("%w: %d pages, cursor at record %d", ErrFetchIncomplete, page, self.cursor)
+			// walk.resolvedTo AND NOT self.cursor, because this sentence is now built BEFORE
+			// the commit rather than after it. They are ONE number -- commitWalkLocked's first
+			// statement is `self.cursor = walk.resolvedTo` -- and the walk's copy is the one
+			// that reads the position the next [Group.Receive] will resume from.
+			return walk.opened, self.commitWalkLocked(walk, fmt.Errorf(
+				"%w: %d pages, cursor at record %d", ErrFetchIncomplete, page, walk.resolvedTo))
 		}
 		if err := refreshReadKey(); err != nil {
-			self.commitWalkLocked(walk)
-			return walk.opened, err
+			return walk.opened, self.commitWalkLocked(walk, err)
 		}
 		since := walk.from
 		request := &protocol.FetchRequest{
@@ -2597,13 +2600,11 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 			Limit:         pageLimit,
 		}
 		if err := authorizeFetch(request, readKey, nonce); err != nil {
-			self.commitWalkLocked(walk)
-			return walk.opened, err
+			return walk.opened, self.commitWalkLocked(walk, err)
 		}
 		response, err := self.device.transport.Call(ctx, request)
 		if err != nil {
-			self.commitWalkLocked(walk)
-			return walk.opened, fmt.Errorf("urmessage: Fetch: %w", err)
+			return walk.opened, self.commitWalkLocked(walk, fmt.Errorf("urmessage: Fetch: %w", err))
 		}
 		if response.GetReason() == protocol.Reason_REASON_OVERSIZE && 1 < pageLimit {
 			// §4.3.1's TWO BOUNDS DO NOT AGREE, AND THE CLIENT IS THE PARTY THAT CAN SAY SO.
@@ -2630,18 +2631,22 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 			continue
 		}
 		if response.GetReason() != protocol.Reason_REASON_OK {
-			self.commitWalkLocked(walk)
-			return walk.opened, fmt.Errorf("%w: %v", ErrFetchRefused, response.GetReason())
+			// THE ARM A DARK GROUP TAKES ON EVERY FETCH AFTER THE FIRST, which is why the
+			// answer has to come out of commitWalkLocked and not out of this line. A group with
+			// the wrong pq_secret has the wrong read_key, and the server verifies req_auth
+			// before it reaches any AEAD -- so REASON_REJECTED here is the SYMPTOM of
+			// [Group.wrapDark] and this used to be the sentence that replaced it.
+			return walk.opened, self.commitWalkLocked(walk,
+				fmt.Errorf("%w: %v", ErrFetchRefused, response.GetReason()))
 		}
 		fetched := response.GetFetch()
 		if fetched == nil {
-			self.commitWalkLocked(walk)
-			return walk.opened, fmt.Errorf("%w: the response carried no fetch arm", ErrFetchRefused)
+			return walk.opened, self.commitWalkLocked(walk,
+				fmt.Errorf("%w: the response carried no fetch arm", ErrFetchRefused))
 		}
 		self.stats.Pages += 1
 		if err := self.checkAttestationLocked(since, request.GetReadEpoch(), fetched); err != nil {
-			self.commitWalkLocked(walk)
-			return walk.opened, err
+			return walk.opened, self.commitWalkLocked(walk, err)
 		}
 		self.openPageLocked(fetched, walk)
 		if fetched.GetComplete() {
@@ -2702,12 +2707,12 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 			walk.from = fetched.GetNextRecordId()
 		}
 		if walk.from <= since {
-			self.commitWalkLocked(walk)
-			return walk.opened, fmt.Errorf("%w: %d records, next_record_id %d, position still %d",
-				ErrFetchNoProgress, len(fetched.GetRecords()), fetched.GetNextRecordId(), walk.from)
+			return walk.opened, self.commitWalkLocked(walk,
+				fmt.Errorf("%w: %d records, next_record_id %d, position still %d",
+					ErrFetchNoProgress, len(fetched.GetRecords()), fetched.GetNextRecordId(), walk.from))
 		}
 	}
-	return walk.opened, self.commitWalkLocked(walk)
+	return walk.opened, self.commitWalkLocked(walk, nil)
 }
 
 // How many times one record is fetched and allowed to fail to open before this group gives up on
@@ -2794,12 +2799,38 @@ type pageWalk struct {
 // THE CURSOR BECOMES THE RESOLVED POSITION AND NOT THE PAGING ONE. That is the repair: a record
 // that did not open holds this back, so the next [Group.Receive] asks the server for it again.
 //
-// THE ORDER THE THREE ERRORS ARE RETURNED IN IS A DECISION. The identity refusal first, because it
-// is the only one that stops this device sealing and because carrying on would carry on producing
-// the collision; then the record that did not open, which is the existing contract and names a
-// specific record; then the server that held records back, which moves [Stats.Omitted] whether or
-// not it is the value returned.
-func (self *Group) commitWalkLocked(walk *pageWalk) error {
+// `fetchErr` IS THE TRANSPORT'S OWN REFUSAL AND IT IS A PARAMETER BECAUSE A RETURN VALUE WAS
+// DISCARDABLE. Five arms of [Group.Receive] used to call this function as a statement and return
+// their own transport error, so everything decided below was thrown away on every one of them.
+// MEASURED against a real server: a group that went dark at epoch 2 answered the sentinel on its
+// FIRST Receive -- the one that ingests the commit -- and `REASON_REJECTED` on the second and
+// every later one, because a dark group's read_key is wrong, the server verifies req_auth before
+// it reaches any AEAD, and that refusal arm is therefore the GUARANTEED arm for a dark group
+// rather than an incidental one. The diagnosis ruling 38 exists to keep could never reach a
+// caller again. Passing the error IN makes the decision one place the compiler will not let an
+// arm skip; a sixth arm added tomorrow has to say what its error is, and
+// [TestEveryErrorReceiveAnswersComesOutOfTheWalksOwnCommit] refuses one that answers around it.
+//
+// THE ORDER THE FIVE ERRORS ARE RETURNED IN IS A DECISION, and the two ahead of `fetchErr` are
+// ahead of it for the same reason they are ahead of each other: they are STICKY refusals about
+// THIS DEVICE'S OWN PERMANENT STATE, and the transport refusal is a symptom of them.
+//
+//  1. the identity refusal, because it is the only one that stops this device sealing and because
+//     carrying on would carry on producing the collision;
+//  2. the wrap that never arrived, ruling 38's diagnosis, which is the CAUSE of the fetch refusal
+//     below rather than a competitor with it;
+//  3. the transport's own refusal, which is what stopped THIS walk and is the more proximate
+//     answer for every group that is not in one of the two states above;
+//  4. the record that did not open, which is the existing contract and names a specific record;
+//  5. the server that held records back, which moves [Stats.Omitted] whether or not it is
+//     returned.
+//
+// WHAT IT COSTS, NAMED RATHER THAN LEFT TO BE FOUND: a caller of a group in one of the two sticky
+// states can no longer read a cancelled context or a transport outage off the error [Group.Receive]
+// answers -- errors.Is(err, context.Canceled) is false there. That is the intended direction. A
+// group whose identity is in use or whose epoch has no secret does not become well by being
+// retried, and a caller that reads the refusal as transport is a caller that retries for ever.
+func (self *Group) commitWalkLocked(walk *pageWalk, fetchErr error) error {
 	self.cursor = walk.resolvedTo
 	// THE HEADS THIS WALK AUTHENTICATED GO TO THE DISK HERE, once per walk and only when one rose.
 	// The write's failure is held and answered LAST, below the walk's own three, because it is the
@@ -2872,14 +2903,25 @@ func (self *Group) commitWalkLocked(walk *pageWalk) error {
 	if self.identityInUse != nil {
 		return self.identityInUse
 	}
-	// THEN THE WRAP THAT NEVER ARRIVED, ahead of walk.firstFailure and for the same reason the
-	// identity refusal is ahead of both: it is the CAUSE of most of what comes after it. A group
-	// with no pq_secret for its epoch fails to open every record of that epoch at the AEAD tag,
-	// so a walk that reported walk.firstFailure would report the symptom on some arbitrary record
-	// and lose the sentence about the wrap -- which is exactly the undiagnosable REASON_REJECTED
-	// ruling 38 exists to prevent. It is STICKY, so it is answered on every later walk too.
+	// THEN THE WRAP THAT NEVER ARRIVED, ahead of the fetch refusal and of walk.firstFailure, and
+	// for the same reason the identity refusal is ahead of all three: it is the CAUSE of what
+	// comes after it. A group with no pq_secret for its epoch has the wrong read_key AND the wrong
+	// write_key, so the server refuses req_auth before any AEAD is reached and every record of
+	// that epoch that IS served fails at the tag -- a walk that reported either would report the
+	// symptom and lose the sentence about the wrap, which is exactly the undiagnosable
+	// REASON_REJECTED ruling 38 exists to prevent. It is STICKY, so it is answered on every later
+	// walk too, AND SINCE THIS COMMIT IT IS ALSO ANSWERED ON EVERY LATER walk's REFUSED FETCH,
+	// which is the arm a dark group actually takes from its second Receive onwards. The sticky
+	// copy is the whole of why it can be: `resolveErr` was said once, by one walk, a process ago.
 	if self.wrapDark != nil {
 		return self.wrapDark
+	}
+	// THEN THE TRANSPORT, which is what stopped THIS walk. Below the two sticky refusals and above
+	// the walk's own two, which is exactly where the old code put it for four of the five arms by
+	// accident of order: an arm that returned its own fetch error after calling this function
+	// skipped 1 and 2 and also skipped 4 and 5. Only the skipping of 1 and 2 was a defect.
+	if fetchErr != nil {
+		return fetchErr
 	}
 	if walk.firstFailure != nil {
 		return walk.firstFailure

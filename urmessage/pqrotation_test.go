@@ -321,6 +321,80 @@ func (self *rotWorld) rotate(committer *rotMember, removing []uint32,
 	return one
 }
 
+// advanceWithoutRotating is the epoch change EVERY BUILD BEFORE THIS COMMIT MADE: a commit that
+// opens the next epoch on the secret the group already has, with no draw and no fan-out.
+//
+// IT IS NOT A DEGRADED [rotWorld.rotate] AND IT IS NOT A MUTANT. It is the shape that wrote every
+// group record on the deployed alpha, and it is the only way to build a group whose HISTORY ran
+// group-lifetime -- which is the precondition of the one case that needs it, the five-part restore
+// with a backlog UNDER it. A world built with `rotate` has a different past: every epoch below the
+// restore point ran on its own secret, and a five-part record naming that epoch would then be a
+// record no build ever wrote.
+//
+// The receiver's compatibility arm is what opens it: the digest is computed over the keys the HELD
+// secret descends from, so [Group.resolvePqSecretLocked] reproduces it from the value every member
+// already has and no wrap is looked for. ExpectedWrapCount is zero because there is no fan-out.
+func (self *rotWorld) advanceWithoutRotating(committer *rotMember) *rotation {
+	self.t.Helper()
+	group := committer.group
+	commit, _, _, err := committer.handle.Commit(nil)
+	if err != nil {
+		self.t.Fatalf("%s's commit: %v", committer.name, err)
+	}
+	pending, err := committer.handle.PendingEpoch()
+	if err != nil {
+		self.t.Fatalf("%s's pending epoch: %v", committer.name, err)
+	}
+	held := group.pqSecretLocked()
+	newMlsSecret, err := committer.handle.PendingExport(storageExporterLabel, nil, storageExporterBytes)
+	if err != nil {
+		self.t.Fatalf("%s's staged exporter: %v", committer.name, err)
+	}
+	newRoot := messagegroup.StorageRoot(newMlsSecret, held)
+	writeKey, readKey := message.WriteKey(newRoot), message.ReadKey(newRoot)
+	groupId, err := epochDigestGroupId(group.id)
+	if err != nil {
+		self.t.Fatalf("the group id: %v", err)
+	}
+	contextHash := rotSha256(pending.GroupContext)
+	digest, err := message.NewEpochDigestAttachment(groupId, message.EpochDigestAttachment{
+		Epoch:            pending.Epoch,
+		AlgId:            epochAttachmentAlgId,
+		GroupContextHash: contextHash[:],
+		// ONE AND NOT ZERO: the attachment builder refuses a count of zero by name -- MASTER
+		// section 8.2's `+1` is the epoch's own snapshot, which every commit owes whether or not
+		// it fans out. This is the count a build before the rotation emitted.
+		ExpectedWrapCount: 1,
+	}, writeKey, readKey)
+	if err != nil {
+		self.t.Fatalf("the epoch digest: %v", err)
+	}
+	record, err := group.session.SealRecord(message.RetentionPermanent, 0, true,
+		encodeHead(time.Now().UnixMilli()), commit, 0, &message.ServerAttachment{
+			Kind:        message.AttachmentEpochDigest,
+			EpochDigest: digest,
+		})
+	if err != nil {
+		self.t.Fatalf("%s sealing its commit record: %v", committer.name, err)
+	}
+	one := &rotation{opens: pending.Epoch, pqSecret: append([]byte(nil), held...)}
+	one.commit = self.number(record)
+	if err := committer.handle.MergePendingCommit(); err != nil {
+		self.t.Fatalf("%s's MergePendingCommit: %v", committer.name, err)
+	}
+	group.filePqSecretLocked(pending.Epoch, one.pqSecret)
+	if err := group.session.AdvanceEpoch(one.pqSecret); err != nil {
+		self.t.Fatalf("%s advancing to epoch %d: %v", committer.name, pending.Epoch, err)
+	}
+	if err := group.crossEpochLadderLocked(pending.Epoch); err != nil {
+		self.t.Fatalf("%s crossing the epoch: %v", committer.name, err)
+	}
+	if err := group.enterEpochLocked(); err != nil {
+		self.t.Fatalf("%s entering epoch %d: %v", committer.name, pending.Epoch, err)
+	}
+	return one
+}
+
 func (self *rotWorld) number(record *message.Record) *sealed {
 	one := &sealed{recordId: self.nextRecordId, record: record}
 	self.nextRecordId += 1
@@ -359,7 +433,10 @@ func (self *rotWorld) deliver(receiver *rotMember, page ...*sealed) error {
 		rows = append(rows, &protocol.Record{RecordId: one.recordId, RecordBytes: encoded})
 	}
 	group.openPageLocked(&protocol.FetchResponse{Records: rows}, walk)
-	return group.commitWalkLocked(walk)
+	// nil: this harness hands a page straight to openPageLocked and never fetches, so there
+	// is no transport refusal to weigh. The arm that HAS one is only reachable against a real
+	// server -- see cp3b/pqrotation_test.go.
+	return group.commitWalkLocked(walk, nil)
 }
 
 // storageRootOf is the value the whole of item 243 is about: this member's own storage root at the
@@ -775,6 +852,74 @@ func TestARestartAfterARotationComesBackWithTheTableAndOpensItsBacklog(t *testin
 	}
 }
 
+// THE WALK'S STICKY REFUSALS OUTRANK THE TRANSPORT'S OWN, AND THE TRANSPORT'S OUTRANKS THE
+// WALK'S PER-WALK ANSWERS. That ordering is [Group.commitWalkLocked]'s whole contract with
+// [Group.Receive] since the transport error became a parameter, and it is driven here directly
+// because the arm it exists for -- a server REFUSING a dark group's fetch -- cannot be reached
+// from this package: there is no transport in it.
+//
+// IT IS HELD IN BOTH DIRECTIONS, over the same walk and the same group, because "the sticky one
+// wins" is satisfiable by a function that ALWAYS answers the sticky one and has stopped reporting
+// the transport at all. The second clause is what refuses that.
+//
+// WHY THE ORDER IS THIS WAY ROUND, in one sentence, since it is a decision and not a discovery: a
+// dark group's read_key is wrong, so the server refuses req_auth before it reaches any AEAD --
+// the refusal is the SYMPTOM and [Group.wrapDark] is the cause, and a caller told the symptom
+// retries for ever.
+func TestTheWalksStickyRefusalsOutrankTheTransportsOwn(t *testing.T) {
+	world := newRotWorld(t, "alice", "bob")
+	bob := world.member("bob")
+	group := bob.group
+
+	refused := fmt.Errorf("%w: %v", ErrFetchRefused, protocol.Reason_REASON_REJECTED)
+	fresh := func() *pageWalk {
+		return &pageWalk{
+			own: [16]byte{}, leaves: map[[16]byte]uint32{}, opened: []*Message{},
+			from: group.cursor, reached: group.cursor, resolvedTo: group.cursor,
+			reconciled: group.reconciled, complete: true, unobtainable: map[uint64]bool{},
+		}
+	}
+
+	// ── ONE: with no sticky refusal standing, the transport's error IS the answer. This is the
+	// control, and it fires for its own reason: it is the behaviour the repair must not have
+	// replaced with a blanket "always answer the walk".
+	if group.wrapDark != nil || group.identityInUse != nil {
+		t.Fatalf("this case's fixture is already refusing, so clause one measures nothing")
+	}
+	if err := group.commitWalkLocked(fresh(), refused); !errors.Is(err, ErrFetchRefused) {
+		t.Fatalf("with nothing sticky standing, a refused fetch answered %v, want ErrFetchRefused", err)
+	}
+
+	// ── TWO: the sticky diagnosis, and now the SAME refusal must not be what the caller is told.
+	group.wrapDark = fmt.Errorf("%w: 1 wrap(s) at this device's own wrap_target_handle for epoch "+
+		"2 did not open", ErrWrapUnreadable)
+	err := group.commitWalkLocked(fresh(), refused)
+	if !errors.Is(err, ErrWrapUnreadable) {
+		t.Fatalf("a dark group answered %v for a refused fetch, want the sticky ErrWrapUnreadable. "+
+			"That is the undiagnosable REASON_REJECTED ruling 38 exists to prevent, and it is the "+
+			"arm a dark group takes on EVERY fetch after the first", err)
+	}
+	if errors.Is(err, ErrFetchRefused) {
+		t.Fatalf("a dark group's answer still matches ErrFetchRefused, so a caller that reads the " +
+			"refusal as transport will retry a group that cannot recover by being retried")
+	}
+
+	// ── THREE: it is STICKY, so the next walk says it again -- with no fetch error at all, which
+	// is the arm the urmessage harness reaches and the one mutant M9 of the previous commit drove.
+	if err := group.commitWalkLocked(fresh(), nil); !errors.Is(err, ErrWrapUnreadable) {
+		t.Fatalf("the second walk of a dark group answered %v, want the sticky ErrWrapUnreadable", err)
+	}
+
+	// ── FOUR: the identity refusal outranks BOTH, which is the order the function's own doc
+	// states and the only one that keeps a device from carrying on producing a collision.
+	group.identityInUse = fmt.Errorf("%w: a second copy of this identity", ErrIdentityInUse)
+	if err := group.commitWalkLocked(fresh(), refused); !errors.Is(err, ErrIdentityInUse) {
+		t.Fatalf("with both sticky refusals standing, the answer was %v, want ErrIdentityInUse", err)
+	}
+	group.identityInUse = nil
+	group.wrapDark = nil
+}
+
 // ── 4. AN OLD STORE ──────────────────────────────────────────────────────────────────────────
 
 // A GROUP RECORD WRITTEN BEFORE THE TABLE RESTORES, AND THE DEVICE GOES ON WORKING -- INCLUDING
@@ -828,10 +973,38 @@ func TestAGroupRecordWrittenBeforeTheTableRestoresAndFollowsTheNextRotation(t *t
 	if !found || !bytes.Equal(held, world.founding) {
 		t.Fatalf("the restored group does not hold the scalar at the epoch the record names")
 	}
-	if len(restored.pqSecrets) != 1 {
-		t.Fatalf("the restored table holds %d row(s), want 1; the scalar is evidence for exactly "+
-			"one epoch and a reader that invented more would be filing values nobody wrote",
-			len(restored.pqSecrets))
+	// THE TABLE IS EXACTLY THE WINDOW AT OR BELOW THE EPOCH THE RECORD NAMES, AND EVERY ROW IS THE
+	// SCALAR. This clause read `len(restored.pqSecrets) != 1` until the case below it was written,
+	// on the reasoning that "the scalar is evidence for exactly one epoch". That reasoning was
+	// wrong in the direction that loses history -- see
+	// TestAFivePartRecordRestoredAboveABacklogKeepsItAcrossTheFirstRotation, where one row cost a
+	// restored device every epoch under it at its first rotation -- and this replacement is
+	// strictly stronger than the count it removed: it pins WHICH epochs are filed, in both
+	// directions, and the OCTETS of every row, so a reader that invented a value, filed an epoch
+	// the record is no evidence for, or stopped filing one is red here.
+	lowest := uint64(0)
+	if messagegroup.PastEpochWindow < old.Epoch {
+		lowest = old.Epoch - messagegroup.PastEpochWindow
+	}
+	for epoch := lowest; epoch <= old.Epoch; epoch += 1 {
+		row, filed := restored.pqSecretAtLocked(epoch)
+		if !filed || !bytes.Equal(row, world.founding) {
+			t.Fatalf("the restored table has no row carrying the scalar at epoch %d, and a "+
+				"five-part record is evidence for every epoch in the window at or below the one "+
+				"it names", epoch)
+		}
+	}
+	if uint64(len(restored.pqSecrets)) != old.Epoch-lowest+1 {
+		t.Fatalf("the restored table holds %d row(s) and the window at or below epoch %d is %d "+
+			"epochs wide; a row outside it is a value nobody wrote",
+			len(restored.pqSecrets), old.Epoch, old.Epoch-lowest+1)
+	}
+	if pqSecretsShowRotation([]restoredPqSecret{
+		{epoch: lowest, secret: restored.pqSecrets[lowest]},
+		{epoch: old.Epoch, secret: restored.pqSecrets[old.Epoch]},
+	}) {
+		t.Fatalf("the filled window reads as a ROTATION, which would take the compatibility path " +
+			"away from every group on the alpha")
 	}
 	// A RESTORED GROUP IS NOT RECONCILED, which is this package's standing rule and not this
 	// case's subject; a Receive is what reconciles one, and the walk below is what a Receive does
@@ -870,8 +1043,137 @@ func TestAGroupRecordWrittenBeforeTheTableRestoresAndFollowsTheNextRotation(t *t
 	if len(after) != 1 || after[0].PqSecrets == nil {
 		t.Fatalf("the record written after the rotation carries no table")
 	}
-	if len(after[0].PqSecrets) != 2 {
-		t.Fatalf("the record written after the rotation holds %d row(s), want 2", len(after[0].PqSecrets))
+	if len(after[0].PqSecrets) != len(restored.pqSecrets) {
+		t.Fatalf("the record written after the rotation holds %d row(s) and the group holds %d",
+			len(after[0].PqSecrets), len(restored.pqSecrets))
+	}
+}
+
+// A FIVE-PART RECORD RESTORED **ABOVE A BACKLOG** KEEPS THAT BACKLOG ACROSS ITS FIRST ROTATION.
+//
+// THE CASE ABOVE CANNOT SEE THIS AND THAT IS THE FINDING. It restores at epoch one, which has no
+// history under it, so "the scalar is evidence for exactly one epoch" and "the scalar is evidence
+// for every epoch this group has lived through" are the same sentence there. They are not the same
+// sentence for a long-lived device, and the difference costs it everything below its restore epoch
+// the moment it follows one rotation:
+//
+//   - `restoredPqSecrets` filed the scalar for ONE epoch, the one the record names;
+//   - connect's group-lifetime premise answered every epoch below it -- correctly, and only while
+//     the premise stood;
+//   - the first rotation installs a DIFFERENT value, `installPqSecretOnLoop` refutes the premise on
+//     the octets, and the epochs below the restore point now have neither a row nor the premise.
+//
+// Reproduced before it was repaired, with this exact case: epochs 1 and 2 reachable BEFORE the
+// rotation and `ErrPqSecretUnknownEpoch` after it. It is not a corner: [Group.cursor] is in-memory
+// only, so every restart re-walks the group from record zero, and a walk that cannot open the
+// epochs below its restore point retries each of those records [maxRecordAttempts] times and
+// abandons them. THE WORSE OUTCOME OF THE TWO the task names -- the device starts, and fails later.
+//
+// THE PREMISE THE REPAIR RESTS ON, stated so it can be argued with: a FIVE-PART record was written
+// by a build that could not rotate, so that group ran group-lifetime for the whole of its life up
+// to the epoch the record names. Filing the scalar across the window is therefore not inventing
+// evidence -- it is writing down, as rows that survive a refutation, exactly the answers connect's
+// premise was already giving for exactly those epochs.
+//
+// THE HISTORY HAS TO BE BUILT THE OLD WAY OR THE CASE IS A FICTION: see
+// [rotWorld.advanceWithoutRotating]. A backlog built with [rotWorld.rotate] would be a past in
+// which every epoch had its own secret, and a five-part record naming its top is a record no build
+// ever wrote.
+func TestAFivePartRecordRestoredAboveABacklogKeepsItAcrossTheFirstRotation(t *testing.T) {
+	world := newRotWorld(t, "alice", "bob")
+	alice, bob := world.member("alice"), world.member("bob")
+	bobLeaf := bob.leaf
+	restoreAt := bob.group.epoch
+
+	// TWO EPOCH CHANGES THE OLD WAY, so the group's whole history ran on the founding scalar.
+	for at := 0; at < 2; at += 1 {
+		published := world.advanceWithoutRotating(alice)
+		if err := world.deliver(bob, published.page()...); err != nil {
+			t.Fatalf("bob's walk over a non-rotating epoch change: %v", err)
+		}
+		if !bytes.Equal(bob.group.pqSecretLocked(), world.founding) {
+			t.Fatalf("a non-rotating epoch change changed the secret, so this case's history is " +
+				"not the one a build before this commit produced")
+		}
+	}
+	backlog := []uint64{restoreAt, restoreAt + 1}
+	top := bob.group.epoch
+	if top != restoreAt+2 {
+		t.Fatalf("this case's fixture stands at epoch %d, want %d", top, restoreAt+2)
+	}
+
+	records, err := bob.dev.store.GroupRecords()
+	if err != nil {
+		t.Fatalf("GroupRecords: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("the disk holds %d group record(s), want 1", len(records))
+	}
+	old := &GroupRecord{
+		GroupId:        records[0].GroupId,
+		PqSecret:       append([]byte(nil), world.founding...),
+		GroupHandleKey: records[0].GroupHandleKey,
+		Epoch:          top,
+		Opened:         true,
+	}
+	if old.PqSecrets != nil {
+		t.Fatalf("this case's fixture is not the old shape")
+	}
+
+	revived := restoredRotDevice(t, bob)
+	restored, err := revived.device.restoreOne(revived.store, old, restoreTestNonce(), 1)
+	if err != nil {
+		t.Fatalf("restoreOne over a five-part record above a backlog: %v", err)
+	}
+	defer restored.Close()
+	restored.reconciled = true
+
+	// ── BEFORE, WHICH IS THE CONTROL: the backlog is reachable, so the comparison below is
+	// about the ROTATION and not about a restore that never had those epochs at all.
+	for _, epoch := range backlog {
+		if err := rotPastEpochReachable(restored.session, epoch, alice.leaf); err != nil {
+			t.Fatalf("CONTROL FAILED: epoch %d is not reachable BEFORE the rotation (%v), so this "+
+				"case cannot show a rotation taking it away", epoch, err)
+		}
+	}
+
+	// ── ONE ORDINARY ROTATION ───────────────────────────────────────────────────────────────
+	published := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+		return alice.handle.Commit(nil)
+	})
+	back := &rotMember{name: "bob after the restart", root: bob.root, dev: bob.dev,
+		handle: restored.handle, session: restored.session, group: restored, leaf: bobLeaf}
+	if err := world.deliver(back, published.page()...); err != nil {
+		t.Fatalf("the restored device's walk over the first rotation it meets: %v", err)
+	}
+	if restored.wrapDark != nil {
+		t.Fatalf("the restored device went dark at the first rotation it met: %v", restored.wrapDark)
+	}
+	if !bytes.Equal(restored.pqSecretLocked(), published.pqSecret) {
+		t.Fatalf("the restored device did not install the secret the fan-out carried, so the " +
+			"premise was never refuted and this case is measuring nothing")
+	}
+
+	// ── AFTER, WHICH IS THE PROPERTY ────────────────────────────────────────────────────────
+	for _, epoch := range backlog {
+		if err := rotPastEpochReachable(restored.session, epoch, alice.leaf); err != nil {
+			t.Fatalf("epoch %d became unreachable the moment this device followed its first "+
+				"rotation: %v. The premise that answered it has been refuted, and the row that "+
+				"should have replaced the premise was never filed", epoch, err)
+		}
+	}
+
+	// AND THE WINDOW IS THE BOUND, not the whole history: an epoch below it is refused BY NAME,
+	// which is the second direction and is what keeps this repair from claiming a history it
+	// cannot serve. It is asserted against the same door, so a session that answered everything
+	// would fail here instead.
+	if messagegroup.PastEpochWindow < top {
+		t.Fatalf("this case's fixture stands above the window, so the clause below is vacuous")
+	}
+	beyond := top + messagegroup.PastEpochWindow + 1
+	if err := rotPastEpochReachable(restored.session, beyond, alice.leaf); err == nil {
+		t.Fatalf("epoch %d is above this session's own epoch by more than the window and was "+
+			"answered anyway", beyond)
 	}
 }
 

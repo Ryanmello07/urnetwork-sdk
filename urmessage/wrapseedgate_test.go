@@ -1,13 +1,6 @@
 package urmessage
 
 import (
-	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"os"
-	"sort"
-	"strings"
 	"testing"
 )
 
@@ -65,7 +58,7 @@ import (
 // so a census that called `len(wrapSeed)` a carried value would put `PutDeviceIdentity|call
 // fmt.Errorf` in the disposition with `wrapSeed` in its carries list -- and that entry would then
 // be a STANDING PERMIT to format the seed itself at that same call, which is the defect this file
-// exists for, reintroduced by its own repair. So [wrapSeedBorneBy] refuses to look through the
+// exists for, reintroduced by its own repair. So [censusBorneBy] refuses to look through the
 // builtin `len`. THAT IS A NARROWING AND IT IS ASSERTED RATHER THAN PRINTED: every site the
 // narrowing removed is collected in its own census and held both ways against
 // [wrapSeedCountedNotCarriedSites] below, so an excluded site is a site somebody weighed and wrote
@@ -149,6 +142,8 @@ var wrapSeedProducerSites = map[string]string{
 	// Get/Take/Records reader -- and PRODUCER ONE reads parameters and named results, so none of
 	// them is tainted by this line. The one that is censused, `GetDeviceIdentity`, was already
 	// censused before it, through PRODUCER TWO and its own name.
+	"groupRecordOf|parameter parts": "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Seeding a PARAMETER is " +
+		"what makes that function censusable at all -- see pq-M2.",
 	"writeRecord|parameter parts": "THE FIRST OF THE TWO CALLS THE NET USED TO STOP SHORT OF. " +
 		"Every durable value in this package is written through it -- the identity record among " +
 		"them -- and the seed arrives here as one of four `parts`, with no name of its own left.",
@@ -292,6 +287,42 @@ var wrapSeedSinks = map[string]wrapSeedSink{
 	},
 
 	// ── AND THE TWO FUNCTIONS UNDER THAT CALL ────────────────────────────────────────────────
+	"groupRecordOf|literal GroupRecord.GroupId": {
+		carries: []string{"parts"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is part one, the group id.",
+	},
+	"groupRecordOf|literal GroupRecord.PqSecret": {
+		carries: []string{"parts"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is part two, the persisted pq_secret.",
+	},
+	"groupRecordOf|literal GroupRecord.GroupHandleKey": {
+		carries: []string{"parts"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is part three, the group_handle_key.",
+	},
+	"groupRecordOf|literal GroupRecord.Epoch": {
+		carries: []string{"parts"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is part four, an epoch.",
+	},
+	"groupRecordOf|literal GroupRecord.Opened": {
+		carries: []string{"parts"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is part five, a flag.",
+	},
+	"groupRecordOf|call binary.BigEndian.Uint64": {
+		carries: []string{"parts"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is part four being read as a number.",
+	},
+	"groupRecordOf|call decodePqSecretTable": {
+		carries: []string{"parts"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is part six going to the table decoder.",
+	},
+	"groupRecordOf|assign record.PqSecrets": {
+		carries: []string{"table"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is that decoded table landing on the record.",
+	},
+	"groupRecordOf|return": {
+		carries: []string{"record"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is the whole record, or one of two arity refusals that format the record's directory name and two counts.",
+	},
 	"writeRecord|call encodeStateRecord": {
 		carries: []string{"parts"},
 		why: "the four record parts -- signature public half, signature private half, leaf keys " +
@@ -409,7 +440,7 @@ var wrapSeedSinks = map[string]wrapSeedSink{
 // THE NARROWING'S OWN CENSUS: every place this package takes a COUNT of the seed and this gate
 // therefore declined to call a carried value. Held both ways, exactly like the three above.
 //
-// THIS IS THE COMPLEMENT OF [wrapSeedBorneBy]'s ONE EXCLUSION, WRITTEN DOWN AND ASSERTED. A
+// THIS IS THE COMPLEMENT OF [censusBorneBy]'s ONE EXCLUSION, WRITTEN DOWN AND ASSERTED. A
 // narrowing that is merely printed tells a reader what was removed; only an assertion tells the
 // NEXT COMMIT that it may not narrow further. An entry here with no site is the tree having
 // stopped counting the seed where it used to. That is sometimes a fix nobody deleted the entry
@@ -438,6 +469,9 @@ var wrapSeedCountedNotCarriedSites = map[string]string{
 		"function: a door that stopped making the check would leave the other door's entry still " +
 		"describing the tree. It refuses by the same name for the same reason -- 32 zero octets " +
 		"expand into a well formed pair that opens nothing and reports nothing.",
+	"groupRecordOf|len parts":    "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is the group record's arity switch: five parts or six, and the refusals beside them format those COUNTS.",
+	"groupRecordOf|len parts[3]": "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is its epoch part's width, as a site of its own because this census spells the index, and the refusals beside them format those COUNTS.",
+	"groupRecordOf|len parts[4]": "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is its opened flag's width, likewise, and the refusals beside them format those COUNTS.",
 	"encodeStateRecord|len parts": "the framing's own arity: the 255 refusal, and the part count " +
 		"written into the frame's header as one byte. It counts the RECORD's parts and not the " +
 		"seed's octets, and the refusal beside it formats that count.",
@@ -492,383 +526,20 @@ var wrapSeedAccumulatorSites = map[string]string{
 }
 
 func TestEveryWrapSeedInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.T) {
-	producers := map[string][]string{}
-	sinks := map[string][]string{}
-	carried := map[string]map[string]bool{}
-	counted := map[string][]string{}
-	accumulated := map[string][]string{}
-	unspent := map[string][]string{}
-
-	// the functions the walk STARTS AGAIN inside, read off their own signatures rather than
-	// listed: this is what tells the horizon census below that `self.writeRecord(…, wrapSeed)` is
-	// not a place the walk stops.
-	reseeds := wrapSeedReseedingFunctions(t)
-
-	sources := stateTestProductionSources(t)
-	for _, name := range sources {
-		content, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		fileSet := token.NewFileSet()
-		parsed, err := parser.ParseFile(fileSet, name, content, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
-		imported := wrapSeedImportNames(parsed)
-		for _, declaration := range parsed.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Body == nil {
-				continue
-			}
-			where := function.Name.Name
-			at := func(node ast.Node) string {
-				return fmt.Sprintf("%s:%d", name, fileSet.Position(node.Pos()).Line)
-			}
-
-			// THE NAMES THIS FUNCTION DECLARED. Two clauses need them. A bare name on the left of
-			// an assignment is a REBINDING when this function declared it and a SINK when it did
-			// not, because a name that outlives the call parks a key for the lifetime of whatever
-			// holds it. And the `len` exclusion below asks this map whether the builtin has been
-			// shadowed, because a local named `len` would turn one clause of this gate off.
-			local := map[string]bool{"_": true}
-			receiver := ""
-			declare := func(fields *ast.FieldList) {
-				if fields == nil {
-					return
-				}
-				for _, field := range fields.List {
-					for _, target := range field.Names {
-						local[target.Name] = true
-					}
-				}
-			}
-			declare(function.Recv)
-			if function.Recv != nil && 0 < len(function.Recv.List) &&
-				0 < len(function.Recv.List[0].Names) {
-				receiver = function.Recv.List[0].Names[0].Name
-			}
-			declare(function.Type.Params)
-			declare(function.Type.Results)
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				switch shape := node.(type) {
-				case *ast.AssignStmt:
-					if shape.Tok == token.DEFINE {
-						for _, target := range shape.Lhs {
-							if identifier, ok := target.(*ast.Ident); ok {
-								local[identifier.Name] = true
-							}
-						}
-					}
-				case *ast.ValueSpec:
-					for _, target := range shape.Names {
-						local[target.Name] = true
-					}
-				case *ast.RangeStmt:
-					if shape.Tok == token.DEFINE {
-						for _, target := range []ast.Expr{shape.Key, shape.Value} {
-							if identifier, ok := target.(*ast.Ident); ok {
-								local[identifier.Name] = true
-							}
-						}
-					}
-				case *ast.FuncLit:
-					declare(shape.Type.Params)
-					declare(shape.Type.Results)
-				}
-				return true
-			})
-			bears := func(expression ast.Expr, tainted map[string]bool, intoLiterals bool) []string {
-				return wrapSeedBorneBy(expression, tainted, intoLiterals, local)
-			}
-
-			tainted := map[string]bool{}
-
-			// PRODUCER ONE: a PARAMETER or named result carrying a producer's name. This is the
-			// store's write path and nothing else -- `PutDeviceIdentity(…, wrapSeed []byte)` --
-			// and without it statestore_durable.go is outside this census entirely.
-			seedParameters := func(fields *ast.FieldList) {
-				if fields == nil {
-					return
-				}
-				for _, field := range fields.List {
-					for _, target := range field.Names {
-						if !wrapSeedProducerNames[target.Name] {
-							continue
-						}
-						site := where + "|parameter " + target.Name
-						producers[site] = append(producers[site], at(target))
-						tainted[target.Name] = true
-					}
-				}
-			}
-			seedParameters(function.Type.Params)
-			seedParameters(function.Type.Results)
-
-			// PRODUCER TWO: the body of a producer-named function. Inside `GetDeviceIdentity` the
-			// seed is `parts[3]`, a generic record part off a generic record read, and no call or
-			// field read in that function would taint anything at all. So each RESULT EXPRESSION
-			// of a producer-named function seeds the taint at its own root name. Calls and
-			// literals in result position seed nothing -- `fmt.Errorf(...)` is an error and
-			// `mls.SignaturePrivateKey(priv)` already carries `priv` by the walk below -- and the
-			// RECEIVER is never a root, so `self.wrapSeed` seeds the field read's clause and not
-			// the whole of `self`.
-			if wrapSeedProducerNames[where] {
-				ast.Inspect(function.Body, func(node ast.Node) bool {
-					statement, ok := node.(*ast.ReturnStmt)
-					if !ok {
-						return true
-					}
-					for _, result := range statement.Results {
-						root := wrapSeedRootName(result)
-						if root == "" || root == "_" || root == "err" || root == "nil" ||
-							root == receiver || !local[root] {
-							continue
-						}
-						site := where + "|result " + root
-						producers[site] = append(producers[site], at(result))
-						tainted[root] = true
-					}
-					return true
-				})
-			}
-
-			// PRODUCER THREE: a CALL whose callee's final name is in the net, spelled bare
-			// (`deviceIdentity(...)`) or qualified (`xwing.Seed()`, `store.GetDeviceIdentity()`).
-			// The epoch-key gate's net reads selectors alone; the seed's own package helper is
-			// called by its bare name, and a net that could not see it would have left
-			// [NewDevice]'s struct literal -- the field this whole step added -- uncensused.
-			callee := map[ast.Node]bool{}
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				named := wrapSeedCalleeName(call.Fun)
-				if named == "" || !wrapSeedProducerNames[named] {
-					return true
-				}
-				callee[call.Fun] = true
-				site := where + "|" + wrapSeedExpr(call.Fun)
-				producers[site] = append(producers[site], at(call))
-				return true
-			})
-
-			// PRODUCER FOUR: a bare FIELD READ, `self.wrapSeed`, which is how the one field this
-			// step added is spelled everywhere it is used. Not counted twice when the same
-			// selector was already spent as a callee.
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				selector, ok := node.(*ast.SelectorExpr)
-				if !ok || callee[selector] || !wrapSeedProducerNames[selector.Sel.Name] {
-					return true
-				}
-				site := where + "|" + wrapSeedExpr(selector)
-				producers[site] = append(producers[site], at(selector)+" field")
-				return true
-			})
-
-			// THE FIXPOINT, over every binding form the language has. It runs to a fixpoint rather
-			// than once because a seed reaches its sink through as many hops as the source cares
-			// to take. `var x = wrapSeed` and `for _, b := range wrapSeed` bind here exactly as
-			// `x := wrapSeed` does: the epoch-key gate was defeated by the first of those three
-			// spellings and its scar is copied here rather than relearned.
-			for spin := 0; spin < 16; spin += 1 {
-				grew := false
-				bind := func(targets []ast.Expr, values []ast.Expr) {
-					carries := false
-					for _, value := range values {
-						if 0 < len(bears(value, tainted, true)) {
-							carries = true
-						}
-					}
-					if !carries {
-						return
-					}
-					for _, target := range targets {
-						identifier, ok := target.(*ast.Ident)
-						if !ok || identifier.Name == "_" || identifier.Name == "err" {
-							continue
-						}
-						if !tainted[identifier.Name] {
-							tainted[identifier.Name] = true
-							grew = true
-						}
-					}
-				}
-				ast.Inspect(function.Body, func(node ast.Node) bool {
-					switch shape := node.(type) {
-					case *ast.AssignStmt:
-						bind(shape.Lhs, shape.Rhs)
-					case *ast.ValueSpec:
-						declared := []ast.Expr{}
-						for _, target := range shape.Names {
-							declared = append(declared, target)
-						}
-						bind(declared, shape.Values)
-					case *ast.RangeStmt:
-						bind([]ast.Expr{shape.Key, shape.Value}, []ast.Expr{shape.X})
-					}
-					return true
-				})
-				if !grew {
-					break
-				}
-			}
-
-			// THE NARROWING'S CENSUS, taken BEFORE the sinks and independently of them: every
-			// `len(...)` of a seed-bearing expression. [wrapSeedBorneBy] will decline to look
-			// through these, so this is the only place they are seen, and they are ASSERTED
-			// against a written-down list rather than dropped.
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok || !wrapSeedIsBuiltinLen(call, local) {
-					return true
-				}
-				for _, argument := range call.Args {
-					borne := bears(argument, tainted, true)
-					if len(borne) == 0 {
-						continue
-					}
-					site := where + "|len " + wrapSeedExpr(argument)
-					counted[site] = append(counted[site], at(call)+" "+fmt.Sprint(borne))
-				}
-				return true
-			})
-
-			// THE HORIZON CENSUS, taken with the narrowing's own census and for the same reason:
-			// every call at which a seed-bearing value is handed to a METHOD ON A VALUE this walk
-			// does not follow. It is where the census ends, and where it ends is asserted below
-			// against [wrapSeedAccumulatorSites] rather than left for a reader to infer from the
-			// absence of entries.
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok || wrapSeedIsBuiltinLen(call, local) {
-					return true
-				}
-				selector, method := call.Fun.(*ast.SelectorExpr)
-				if !method {
-					return true // a bare call has no receiver to accumulate into
-				}
-				root := wrapSeedRootName(selector.X)
-				switch {
-				case root == "":
-					return true // a receiver with no single root -- a literal, a call
-				case imported[root]:
-					return true // a package-qualified call is not a method on a value
-				case tainted[root]:
-					return true // a receiver the walk already follows is a sink, not a horizon
-				case reseeds[selector.Sel.Name]:
-					return true // the walk starts again inside it; see [wrapSeedProducerNames]
-				}
-				borne := []string{}
-				for _, argument := range call.Args {
-					borne = append(borne, bears(argument, tainted, false)...)
-				}
-				if len(borne) == 0 {
-					return true
-				}
-				site := where + "|accumulate " + wrapSeedExpr(selector)
-				accumulated[site] = append(accumulated[site], at(call)+" "+fmt.Sprint(borne))
-				return true
-			})
-
-			if len(tainted) == 0 && len(producers) == 0 {
-				continue
-			}
-
-			// THE SINKS. Every clause asks an EXPRESSION and not a node class, which is the
-			// epoch-key gate's second scar: `x = wrapSeed[:]`, `(wrapSeed)`, `[]byte(wrapSeed)`
-			// and `any(wrapSeed).([]byte)` are ONE site rather than four holes.
-			landed := map[string]bool{}
-			record := func(site string, node ast.Node, expression ast.Expr, borne []string) {
-				sinks[site] = append(sinks[site], at(node)+" "+wrapSeedExpr(expression))
-				if carried[site] == nil {
-					carried[site] = map[string]bool{}
-				}
-				for _, spelled := range borne {
-					carried[site][spelled] = true
-					if tainted[spelled] {
-						landed[spelled] = true
-					}
-				}
-			}
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				switch shape := node.(type) {
-				case *ast.CompositeLit:
-					spelled := wrapSeedExpr(shape.Type)
-					for index, element := range shape.Elts {
-						value := element
-						field := fmt.Sprintf("element %d", index)
-						if pair, ok := element.(*ast.KeyValueExpr); ok {
-							value = pair.Value
-							field = wrapSeedExpr(pair.Key)
-						}
-						borne := bears(value, tainted, false)
-						if len(borne) == 0 {
-							continue
-						}
-						record(fmt.Sprintf("%s|literal %s.%s", where, spelled, field),
-							element, value, borne)
-					}
-				case *ast.CallExpr:
-					// the builtin `len` is not a sink: it is the narrowing, and it has a census
-					// of its own two clauses up.
-					if wrapSeedIsBuiltinLen(shape, local) {
-						return true
-					}
-					for _, argument := range shape.Args {
-						borne := bears(argument, tainted, false)
-						if len(borne) == 0 {
-							continue
-						}
-						record(fmt.Sprintf("%s|call %s", where, wrapSeedExpr(shape.Fun)),
-							shape, argument, borne)
-					}
-				case *ast.AssignStmt:
-					for index, target := range shape.Lhs {
-						if identifier, bare := target.(*ast.Ident); bare && local[identifier.Name] {
-							continue
-						}
-						var source ast.Expr
-						switch {
-						case len(shape.Lhs) == len(shape.Rhs):
-							source = shape.Rhs[index]
-						case len(shape.Rhs) == 1:
-							source = shape.Rhs[0]
-						default:
-							continue
-						}
-						borne := bears(source, tainted, false)
-						if len(borne) == 0 {
-							continue
-						}
-						record(fmt.Sprintf("%s|assign %s", where, wrapSeedExpr(target)),
-							shape, source, borne)
-					}
-				case *ast.ReturnStmt:
-					for _, result := range shape.Results {
-						borne := bears(result, tainted, false)
-						if len(borne) == 0 {
-							continue
-						}
-						record(where+"|return", shape, result, borne)
-					}
-				case *ast.SendStmt:
-					borne := bears(shape.Value, tainted, false)
-					if 0 < len(borne) {
-						record(fmt.Sprintf("%s|send %s", where, wrapSeedExpr(shape.Chan)),
-							shape, shape.Value, borne)
-					}
-				}
-				return true
-			})
-			for identifier := range tainted {
-				if !landed[identifier] {
-					unspent[where] = append(unspent[where], identifier)
-				}
-			}
-		}
-	}
+	// THE WALK IS [runCensus] AND THE NET IS THIS FILE'S. Until this commit the four-producer
+	// fixpoint below lived in this function's body; the third census in this package would have
+	// been a third copy of it, so it moved to census_test.go and this gate now asks for the
+	// same five censuses by name. Nothing in the walk changed but the producer net becoming an
+	// argument -- which rows M3, M5, M6 and M9 of the mutation table at the foot of this file
+	// were re-run to hold, after the move, against the same failure texts.
+	census := runCensus(t, wrapSeedProducerNames)
+	sources := census.sources
+	producers := census.producers
+	sinks := census.sinks
+	carried := census.carried
+	counted := census.counted
+	accumulated := census.accumulated
+	unspent := census.unspent
 
 	// ── THE COMPLEMENT, PRINTED: what this search covered and what it left out ────────────────
 	t.Logf("production sources read (%d): %v", len(sources), sources)
@@ -897,7 +568,7 @@ func TestEveryWrapSeedInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 		"in their own function, so nothing carried them anywhere: %v", unspent)
 
 	// ── AND ASSERTED, IN BOTH DIRECTIONS, AGAINST THREE WRITTEN-DOWN DISPOSITIONS ─────────────
-	wrapSeedHold(t, "producer site", producers, wrapSeedProducerSites,
+	censusHold(t, "producer site", producers, wrapSeedProducerSites,
 		"A name that produces this device's X-Wing seed is where this gate's whole search begins. "+
 			"A site with no entry is a seed coming from somewhere nobody weighed; an entry with no "+
 			"site is this gate having gone BLIND -- the producer was respelled, and the sink "+
@@ -915,7 +586,7 @@ func TestEveryWrapSeedInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 		"seed landing somewhere nobody weighed, and `BlobId: wrapSeed[:]` fails here exactly as " +
 		"`fmt.Errorf(\"%x\", wrapSeed)` does. An entry with no site is a disposition that has " +
 		"stopped describing the code."
-	wrapSeedHold(t, "sink site", sinks, sinkWhy, sinkNarrowing)
+	censusHold(t, "sink site", sinks, sinkWhy, sinkNarrowing)
 
 	// ── THE SECOND NARROWING: NOT ONLY WHERE, BUT WHICH VALUE ─────────────────────────────────
 	for _, site := range epochKeySortedMap(sinks) {
@@ -944,7 +615,7 @@ func TestEveryWrapSeedInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 	}
 
 	// ── AND THE ONE NARROWING'S OWN COMPLEMENT, ASSERTED THE SAME WAY ─────────────────────────
-	wrapSeedHold(t, "counted-not-carried site", counted, wrapSeedCountedNotCarriedSites,
+	censusHold(t, "counted-not-carried site", counted, wrapSeedCountedNotCarriedSites,
 		"A COUNT OF THE SEED IS NOT THE SEED -- `len(wrapSeed)` is an int -- and that single "+
 			"exclusion is what keeps the two store-side refusals OUT of the sink disposition, so "+
 			"that an entry for them can never become a standing permit to format the value itself "+
@@ -954,7 +625,7 @@ func TestEveryWrapSeedInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 			"which is a change this file has to be read against before it is deleted.")
 
 	// ── AND WHERE THE CENSUS ENDS, ASSERTED RATHER THAN LEFT TO BE INFERRED ───────────────────
-	wrapSeedHold(t, "accumulator site", accumulated, wrapSeedAccumulatorSites,
+	censusHold(t, "accumulator site", accumulated, wrapSeedAccumulatorSites,
 		"A TAINT WALK OVER NAMES STOPS WHERE A VALUE IS HANDED TO A METHOD AND LIVES ON INSIDE THE "+
 			"RECEIVER, and this census is that stopping place written down. A site with no entry is "+
 			"a NEW blind spot -- the seed put into a buffer, a hasher or a writer nobody weighed -- "+
@@ -962,249 +633,6 @@ func TestEveryWrapSeedInThisPackageGoesWhereTheDispositionSaysItGoes(t *testing.
 			"the object does with it afterwards. An entry with no site is a limit that has been "+
 			"lifted or moved, and this file's claim about how far it reaches has to be re-read "+
 			"before the entry is deleted.")
-}
-
-// wrapSeedReseedingFunctions is every function this package DECLARES whose own parameters or named
-// results carry a name in [wrapSeedProducerNames] -- which is to say, every function the taint walk
-// starts again inside rather than stopping at.
-//
-// IT IS READ OFF THE SIGNATURES AND NOT LISTED, because a list would be a second spelling of
-// [wrapSeedProducerNames] and would drift from it silently. Today it answers `PutDeviceIdentity`,
-// `writeRecord` and `encodeStateRecord`: the store's write path and the two calls under it, which
-// is exactly the road this commit extended the net along.
-func wrapSeedReseedingFunctions(t *testing.T) map[string]bool {
-	t.Helper()
-	reseeds := map[string]bool{}
-	fileSet := token.NewFileSet()
-	for _, name := range stateTestProductionSources(t) {
-		parsed, err := parser.ParseFile(fileSet, name, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
-		for _, declaration := range parsed.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if !ok {
-				continue
-			}
-			for _, fields := range []*ast.FieldList{function.Type.Params, function.Type.Results} {
-				if fields == nil {
-					continue
-				}
-				for _, field := range fields.List {
-					for _, target := range field.Names {
-						if wrapSeedProducerNames[target.Name] {
-							reseeds[function.Name.Name] = true
-						}
-					}
-				}
-			}
-		}
-	}
-	if len(reseeds) == 0 {
-		t.Fatal("no production function in this package re-seeds the walk, so the horizon census " +
-			"below would call every call into this package's own store a stopping place")
-	}
-	return reseeds
-}
-
-// wrapSeedImportNames is the identifiers THIS FILE qualifies a package by, so that `fmt.Errorf` and
-// `messagegroup.XwingKeyGenFromSeed` are told apart from `temp.Write` by reading the file's imports
-// rather than by guessing at a spelling. An aliased import answers its alias; anything else answers
-// the last element of its path, which is what the language resolves the qualifier to.
-func wrapSeedImportNames(parsed *ast.File) map[string]bool {
-	names := map[string]bool{}
-	for _, one := range parsed.Imports {
-		if one.Name != nil {
-			names[one.Name.Name] = true
-			continue
-		}
-		path := strings.Trim(one.Path.Value, "\"")
-		if at := strings.LastIndex(path, "/"); 0 <= at {
-			path = path[at+1:]
-		}
-		names[path] = true
-	}
-	return names
-}
-
-// wrapSeedHold is the both-directions assertion the three censuses share.
-func wrapSeedHold(t *testing.T, what string, found map[string][]string,
-	disposition map[string]string, why string) {
-
-	t.Helper()
-	if len(found) == 0 {
-		t.Errorf("this gate found no %s at all in %d production files. An empty census passes every "+
-			"refusal below by having nothing to refuse, which is how a search that has stopped "+
-			"reading its own subject reports success.", what, len(stateTestProductionSources(t)))
-	}
-	for site := range found {
-		reason, dispositioned := disposition[site]
-		if !dispositioned {
-			t.Errorf("%s %q has no entry in the disposition.\n%s", what, site, why)
-			continue
-		}
-		t.Logf("    %s %s is allowed: %s", what, site, reason)
-	}
-	for site := range disposition {
-		if _, ok := found[site]; !ok {
-			t.Errorf("the disposition says %s %q is allowed and the census does not find it.\n%s",
-				what, site, why)
-		}
-	}
-}
-
-// wrapSeedBorneBy is THE ONE QUESTION this gate asks of an expression: which seed-bearing values
-// does it bear? It answers the tainted identifiers, the producer calls and the producer field
-// reads anywhere inside the expression, spelled the way the source spells them, and the taint step
-// and all five sink clauses run it. One predicate asked in every position is the point: the defect
-// the epoch-key gate took at 4fde7ad was two positions asking a narrower question than the taint
-// step did, so `writeKey[:]` was censused nowhere at all.
-//
-// IT MATCHES THE VALUE AND NOT THE NODE CLASS, for the reason that file records: `wrapSeed` is an
-// *ast.Ident, `wrapSeed[:]` an *ast.SliceExpr, `(wrapSeed)` an *ast.ParenExpr, `parts[3]` an
-// *ast.IndexExpr, `[]byte(wrapSeed)` an *ast.CallExpr and `any(wrapSeed).([]byte)` an
-// *ast.TypeAssertExpr -- six spellings of one private key.
-//
-// ITS ONE EXCLUSION IS THE BUILTIN `len`, and it is the clause that differs from the epoch-key
-// gate. `len(wrapSeed)` is an int and carries no octet of the key; calling it a carried value
-// would force a disposition entry at every site that checks a length, and an entry at a
-// `fmt.Errorf` is a permit for whatever else is formatted there. The exclusion is asked of the
-// CALL and not the name, and it refuses to fire when the function has declared a local called
-// `len` -- a shadow would otherwise switch this clause off from inside the code it inspects. Every
-// site it removes is censused and asserted; see [wrapSeedCountedNotCarriedSites].
-//
-// A NAME IN A NAME POSITION IS NOT A VALUE. `Device{wrapSeed: wrapSeed}` names a field on the left
-// and reads a value on the right, and a walk that treated the key as a read would make every
-// struct literal in the package a site.
-//
-// WHAT IT DOES NOT WALK INTO, when intoLiterals is false, is a composite or function literal,
-// because the clause above censuses every literal AT ITS OWN FIELD wherever it is written. The
-// TAINT step walks with intoLiterals true, because a call handed a literal containing the seed
-// returns a value derived from it.
-func wrapSeedBorneBy(expression ast.Expr, tainted map[string]bool, intoLiterals bool,
-	local map[string]bool) []string {
-
-	if expression == nil {
-		return nil
-	}
-	borne := []string{}
-	seen := map[string]bool{}
-	carry := func(spelled string) {
-		if !seen[spelled] {
-			seen[spelled] = true
-			borne = append(borne, spelled)
-		}
-	}
-	recurse := func(inner ast.Expr) {
-		for _, spelled := range wrapSeedBorneBy(inner, tainted, intoLiterals, local) {
-			carry(spelled)
-		}
-	}
-	ast.Inspect(expression, func(node ast.Node) bool {
-		switch shape := node.(type) {
-		case *ast.CallExpr:
-			if wrapSeedIsBuiltinLen(shape, local) {
-				return false
-			}
-			named := wrapSeedCalleeName(shape.Fun)
-			if named != "" && wrapSeedProducerNames[named] {
-				carry(wrapSeedExpr(shape.Fun))
-				// the callee is the producer's own name; only its arguments are values
-				for _, argument := range shape.Args {
-					recurse(argument)
-				}
-				return false
-			}
-		case *ast.SelectorExpr:
-			if wrapSeedProducerNames[shape.Sel.Name] {
-				carry(wrapSeedExpr(shape))
-			}
-			recurse(shape.X)
-			return false
-		case *ast.KeyValueExpr:
-			if _, named := shape.Key.(*ast.Ident); named {
-				recurse(shape.Value)
-				return false
-			}
-		case *ast.CompositeLit:
-			if !intoLiterals {
-				return false
-			}
-		case *ast.FuncLit:
-			if !intoLiterals {
-				return false
-			}
-		case *ast.Ident:
-			if tainted[shape.Name] {
-				carry(shape.Name)
-			}
-		}
-		return true
-	})
-	sort.Strings(borne)
-	return borne
-}
-
-// wrapSeedIsBuiltinLen answers whether this call is the builtin `len` and not some local of that
-// name. A function that declared `len` would otherwise turn the one exclusion of [wrapSeedBorneBy]
-// into a hole, from inside the source this gate inspects.
-func wrapSeedIsBuiltinLen(call *ast.CallExpr, local map[string]bool) bool {
-	identifier, bare := call.Fun.(*ast.Ident)
-	return bare && identifier.Name == "len" && !local["len"] && len(call.Args) == 1
-}
-
-// wrapSeedCalleeName is the last name of a callee, bare or qualified: `deviceIdentity` and
-// `xwing.Seed` both answer their own final name. The epoch-key gate reads selectors alone, and the
-// seed's own package helper is called by its bare name.
-func wrapSeedCalleeName(callee ast.Expr) string {
-	switch shape := callee.(type) {
-	case *ast.Ident:
-		return shape.Name
-	case *ast.SelectorExpr:
-		return shape.Sel.Name
-	case *ast.ParenExpr:
-		return wrapSeedCalleeName(shape.X)
-	}
-	return ""
-}
-
-// wrapSeedRootName is the identifier an expression is rooted at, or "" for an expression with no
-// single root -- a call, a literal, an arithmetic. It is what the producer-function seeding binds:
-// `parts[3]` is rooted at `parts` and `leafKeys.ExtensionData` at `leafKeys`. A SELECTOR whose
-// field is itself in the producer net has no root here, because the field read is a producer in
-// its own right and seeding its receiver would taint the whole of `self`.
-func wrapSeedRootName(expression ast.Expr) string {
-	switch shape := expression.(type) {
-	case *ast.Ident:
-		return shape.Name
-	case *ast.ParenExpr:
-		return wrapSeedRootName(shape.X)
-	case *ast.IndexExpr:
-		return wrapSeedRootName(shape.X)
-	case *ast.SliceExpr:
-		return wrapSeedRootName(shape.X)
-	case *ast.StarExpr:
-		return wrapSeedRootName(shape.X)
-	case *ast.UnaryExpr:
-		return wrapSeedRootName(shape.X)
-	case *ast.SelectorExpr:
-		if wrapSeedProducerNames[shape.Sel.Name] {
-			return ""
-		}
-		return wrapSeedRootName(shape.X)
-	}
-	return ""
-}
-
-// wrapSeedExpr spells an expression the way the source does, so a census entry reads as the code
-// reads. It is [epochKeyExpr] with the INDEX kept -- `parts[3]` rather than `parts` -- because the
-// store's read path spells the seed as one part of a generic record and a census that printed
-// `parts` four times over would name the same site for four different values.
-func wrapSeedExpr(expression ast.Expr) string {
-	if index, ok := expression.(*ast.IndexExpr); ok {
-		return wrapSeedExpr(index.X) + "[" + wrapSeedExpr(index.Index) + "]"
-	}
-	return epochKeyExpr(expression)
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1344,7 +772,7 @@ func wrapSeedExpr(expression ast.Expr) string {
 //	       census does not find it
 //	    -> AND its three sinks all go stale -- "call encodeStateRecord", "call temp.Write",
 //	       "call zeroizeState"
-//	    -> AND, because `writeRecord` has left [wrapSeedReseedingFunctions], accumulator site
+//	    -> AND, because `writeRecord` has left [censusReseedingFunctions], accumulator site
 //	       "PutDeviceIdentity|accumulate self.writeRecord" has no entry -- the census correctly
 //	       reporting that the walk now STOPS at the call it used to walk through
 //

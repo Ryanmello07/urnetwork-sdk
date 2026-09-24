@@ -1335,42 +1335,63 @@ func (self *DurableStateStore) GroupRecords() ([]*GroupRecord, error) {
 			}
 			return nil, err
 		}
-		// FIVE PARTS OR SIX, AND THE FIVE IS THE DEPLOYED ALPHA'S DISK. It is the same arity
-		// switch [DurableStateStore.GetDeviceIdentity] already takes for the x-wing seed, and it
-		// is what makes item 243's rotation shippable at all: a restore that refused a record
-		// written before the table is a device that can never start again, and every group on the
-		// alpha was written before it.
-		//
-		// A FIVE-PART RECORD LEAVES [GroupRecord.PqSecrets] NIL, and nil is the signal rather than
-		// an accident: a six-part record whose table happens to be empty decodes to an EMPTY
-		// SLICE, so "this build wrote no rows" and "there was never a table" stay two states. The
-		// first is a bug in this package and the second is the alpha's disk, and a reader that
-		// collapsed them would answer the bug with the compatibility path. [Device.restoreOne] is
-		// the one place that distinction is acted on.
-		if len(parts) != 5 && len(parts) != 6 {
-			return nil, fmt.Errorf("%w: the group record in %s carries %d parts, want 6 or the 5 a store written before the pq_secret table holds",
-				ErrStateStoreFormat, name, len(parts))
-		}
-		if len(parts[3]) != 8 || len(parts[4]) != 1 {
-			return nil, fmt.Errorf("%w: the group record in %s is not one this build wrote", ErrStateStoreFormat, name)
-		}
-		record := &GroupRecord{
-			GroupId:        parts[0],
-			PqSecret:       parts[1],
-			GroupHandleKey: parts[2],
-			Epoch:          binary.BigEndian.Uint64(parts[3]),
-			Opened:         parts[4][0] == 1,
-		}
-		if len(parts) == 6 {
-			table, err := decodePqSecretTable(parts[5])
-			if err != nil {
-				return nil, fmt.Errorf("%w: the group record in %s: %w", ErrStateStoreFormat, name, err)
-			}
-			record.PqSecrets = table
+		record, err := groupRecordOf(name, parts)
+		if err != nil {
+			return nil, err
 		}
 		records = append(records, record)
 	}
 	return records, nil
+}
+
+// groupRecordOf is one durable group record's parts as a [GroupRecord], and the arity switch that
+// lets a store written before the pq_secret table still be read.
+//
+// FIVE PARTS OR SIX, AND THE FIVE IS THE DEPLOYED ALPHA'S DISK. It is the same arity switch
+// [DurableStateStore.GetDeviceIdentity] already takes for the x-wing seed, and it is what makes
+// item 243's rotation shippable at all: a restore that refused a record written before the table
+// is a device that can never start again, and every group on the alpha was written before it.
+//
+// A FIVE-PART RECORD LEAVES [GroupRecord.PqSecrets] NIL, and nil is the signal rather than an
+// accident: a six-part record whose table happens to be empty decodes to an EMPTY SLICE, so "this
+// build wrote no rows" and "there was never a table" stay two states. The first is a bug in this
+// package and the second is the alpha's disk, and a reader that collapsed them would answer the
+// bug with the compatibility path. [Device.restoreOne] is the one place that distinction is acted
+// on.
+//
+// IT IS A FUNCTION RATHER THAN THE BODY OF THAT LOOP BECAUSE OF A MEASUREMENT, which is the part
+// worth keeping. Inside [DurableStateStore.GroupRecords] the record's parts are a LOCAL called
+// `parts` -- a generic record off a generic read -- and no census in this package could taint it:
+// pqsecretgate_test.go's walk seeds a PARAMETER, and wrapseedgate_test.go's `parts` entry seeds
+// the WRITE path's three functions and not this one. Mutant pq-M2 measured it: a `%x` of
+// `parts[1]` -- the persisted pq_secret itself -- in this decode's own "not one this build wrote"
+// refusal SURVIVED `go test ./urmessage -run '.*'` at `ok 6.6s`, with both dataflow gates PASS.
+// A parameter has a name the walk can seed, so the same leak in this function is refused. The
+// reader's arity switch, its two refusals and its field reads are one unit anyway, and splitting
+// them out is what the writer ([DurableStateStore.PutGroupRecord]) already did.
+func groupRecordOf(name string, parts [][]byte) (*GroupRecord, error) {
+	if len(parts) != 5 && len(parts) != 6 {
+		return nil, fmt.Errorf("%w: the group record in %s carries %d parts, want 6 or the 5 a store written before the pq_secret table holds",
+			ErrStateStoreFormat, name, len(parts))
+	}
+	if len(parts[3]) != 8 || len(parts[4]) != 1 {
+		return nil, fmt.Errorf("%w: the group record in %s is not one this build wrote", ErrStateStoreFormat, name)
+	}
+	record := &GroupRecord{
+		GroupId:        parts[0],
+		PqSecret:       parts[1],
+		GroupHandleKey: parts[2],
+		Epoch:          binary.BigEndian.Uint64(parts[3]),
+		Opened:         parts[4][0] == 1,
+	}
+	if len(parts) == 6 {
+		table, err := decodePqSecretTable(parts[5])
+		if err != nil {
+			return nil, fmt.Errorf("%w: the group record in %s: %w", ErrStateStoreFormat, name, err)
+		}
+		record.PqSecrets = table
+	}
+	return record, nil
 }
 
 // DeleteGroupRecord removes one group's record AND every MLS epoch state beside it.

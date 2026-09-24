@@ -312,6 +312,9 @@ type shapedStore struct {
 	bendRecordId uint64
 	bendsLeft    int
 
+	// what [shapedStore.bendAll] bends, and for how many more fetches each one is bent.
+	bendMany map[uint64]int
+
 	// how many more submit ANSWERS to lose, under fetchLosesOneSubmitAnswer.
 	loseAnswers int
 
@@ -411,6 +414,25 @@ func (self *shapedStore) bend(recordId uint64, fetches int) {
 	self.bendRecordId, self.bendsLeft = recordId, fetches
 }
 
+// bendAll names SEVERAL records at once, each bent for the same number of fetches.
+//
+// IT IS NOT A CONVENIENCE OVER [shapedStore.bend]. One case has to bend a whole epoch fan-out
+// because it cannot tell one member's wrap row from another's FROM THE SERVER SIDE: a
+// wrap_target_handle is derived from the group_handle_key and the server -- correctly, m1 Task 14
+// Property 2 -- cannot invert one, and neither can a test holding only what the store holds.
+// Bending every wrap row of the epoch is how a case makes the one addressed to a named device
+// unreadable without knowing which one it is.
+func (self *shapedStore) bendAll(recordIds []uint64, fetches int) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if self.bendMany == nil {
+		self.bendMany = map[uint64]int{}
+	}
+	for _, recordId := range recordIds {
+		self.bendMany[recordId] = fetches
+	}
+}
+
 func (self *shapedStore) Fetch(ctx context.Context, request *store.FetchRequest) (*store.FetchResult, error) {
 	result, err := self.Store.Fetch(ctx, request)
 	if err != nil || self.shape == fetchNormal {
@@ -456,6 +478,19 @@ func (self *shapedStore) Fetch(ctx context.Context, request *store.FetchRequest)
 	if self.shape == fetchBendsOneRecord {
 		self.mutex.Lock()
 		defer self.mutex.Unlock()
+		// the SET first, and it is independent of the single-record arm below rather than a
+		// special case of it: a case that names a set is bending a fan-out and a case that names
+		// one record is bending one record, and neither is allowed to disturb the other's count.
+		for _, record := range result.Records {
+			left, marked := self.bendMany[record.RecordId]
+			if !marked || left <= 0 || len(record.CtBody) == 0 {
+				continue
+			}
+			bent := append([]byte(nil), record.CtBody...)
+			bent[0] ^= 0xFF
+			record.CtBody = bent
+			self.bendMany[record.RecordId] = left - 1
+		}
 		if self.bendsLeft <= 0 {
 			return result, nil
 		}

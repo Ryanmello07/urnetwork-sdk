@@ -171,7 +171,8 @@ func (self *kindWalk) deliver(page ...*sealed) ([]*Message, error) {
 		rows = append(rows, &protocol.Record{RecordId: one.recordId, RecordBytes: encoded})
 	}
 	self.bob.openPageLocked(&protocol.FetchResponse{Records: rows}, walk)
-	return walk.opened, self.bob.commitWalkLocked(walk)
+	// nil for the reason pqrotation_test.go names: no fetch, so no transport refusal.
+	return walk.opened, self.bob.commitWalkLocked(walk, nil)
 }
 
 // held answers the [Message] bob's group holds under one message_id, RIGHT NOW.

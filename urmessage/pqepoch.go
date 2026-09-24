@@ -6,6 +6,26 @@
 // and the three ways that delivery can fail said out loud rather than surfacing as a group that
 // stopped working.
 //
+// THE connect COMMIT THIS PACKAGE REQUIRES, STATED BECAUSE A MERGE ORDER CAN BE GOT WRONG AND A
+// WORKING TREE CANNOT SHOW IT. This file consumes [messagegroup.InstallPqSecret],
+// [messagegroup.DeclarePqSecretRotated], [messagegroup.ErrPqSecretEpochConflict] and
+// [messagegroup.ErrPqSecretUnknownEpoch], and NONE of them exists before connect 74abe029 --
+// three commits past 39931315, which is where item 243's step 2 left that repository.
+//
+//	git show 39931315:messagegroup/pqsecret.go
+//	  -> fatal: path '…' exists on disk, but not in '39931315'
+//	git show 39931315:messagegroup/wrap.go              (the control, in the same query)
+//	  -> present
+//
+// Per symbol, OCCURRENCES under messagegroup/ at 39931315 vs at 74abe029 -- re-measured here
+// rather than quoted, with `git grep -o -h <sym> <rev> -- messagegroup/ | wc -l`:
+// InstallPqSecret 0/58, DeclarePqSecretRotated 0/20, ErrPqSecretEpochConflict 0/10,
+// ErrPqSecretUnknownEpoch 0/16; and the controls that are EQUAL at both revisions, which is what
+// makes the zeros mean something rather than meaning the query was wrong: SealWrapBody 22/22,
+// OpenWrapBody 47/47, ErrEphWrapWindowUnruled 6/6. SO THIS PACKAGE REQUIRES connect >= 74abe029
+// AND DOES NOT COMPILE AGAINST 39931315. `git status --porcelain` being empty in both
+// repositories is true of the WORKING TREES and says nothing whatever about this.
+//
 // WHY IT HAD TO BE BUILT WITH REMOVAL AND NOT AFTER IT (item 243, ruled 2026-09-18). pq_secret is
 // the ONLY post-quantum material in this system -- item 251 measured connect/mls's HPKE hard-wired
 // to X25519, so the MLS exporter carries no post-quantum contribution at all. A lifetime pq_secret
@@ -80,11 +100,16 @@
 // Every group on the deployed alpha was written by a build that held ONE pq_secret scalar, and
 // [GroupRecord] has one field for it. A restore that refused such a record would be a device that
 // can never start again, so the read path takes a 5-part record as it always did and files that
-// one scalar at the epoch the record names, with the group-lifetime PREMISE intact -- which is
-// connect's own compatibility path ([messagegroup.GroupSession] answers every epoch out of the one
-// secret it holds while no second value has been observed). A 6-part record carries the table and
-// the premise's refutation with it. [DurableStateStore.GroupRecords] is where the arity switch
-// lives and it is the same shape the x-wing seed's own 3-or-4 part switch already uses.
+// scalar as a ROW FOR EVERY EPOCH IN THE WINDOW AT OR BELOW THE ONE THE RECORD NAMES -- see
+// [restoredPqSecrets] for why that is evidence rather than invention, and for the defect that
+// filing one row cost a long-lived device at its first rotation. The group-lifetime PREMISE is
+// left standing beside those rows, because they all carry one value and
+// [pqSecretsShowRotation] decides on the octets; connect's own compatibility path
+// ([messagegroup.GroupSession] answers every epoch out of the one secret it holds while no second
+// value has been observed) then behaves exactly as it did before. A 6-part record carries the
+// table and the premise's refutation with it and is NOT filled in: it was written by a build that
+// can rotate, so a missing row is a missing row. [groupRecordOf] is where the arity switch lives
+// and it is the same shape the x-wing seed's own 3-or-4 part switch already uses.
 package urmessage
 
 import (
@@ -256,11 +281,37 @@ type restoredPqSecret struct {
 // secret of the epoch the record names beside it.
 //
 // THIS IS WHERE AN OLD STORE IS ANSWERED, and the answer is one sentence: a record with no table
-// (five parts, every group on the deployed alpha) becomes ONE row -- the scalar it carries, at the
-// epoch it names -- because that is the only claim such a record supports. The device was standing
-// at that epoch when it wrote the record, and the scalar was that epoch's secret; nothing in the
-// record says anything about any other epoch, and connect's group-lifetime premise is what answers
-// those, correctly, for exactly these groups.
+// (five parts, every group on the deployed alpha) becomes one row FOR EVERY EPOCH INSIDE THE
+// WINDOW AT OR BELOW THE ONE IT NAMES, all carrying the scalar, because a five-part record is
+// evidence for exactly that and nothing less.
+//
+// IT USED TO BE ONE ROW AND THAT WAS A DEFECT, reproduced before it was repaired by
+// TestAFivePartRecordRestoredAboveABacklogKeepsItAcrossTheFirstRotation: a device restored at
+// epoch 3 from a five-part record answered epochs 1 and 2 out of connect's group-lifetime premise,
+// followed ONE ordinary rotation, and `installPqSecretOnLoop` refuted that premise on the octets
+// -- after which epochs 1 and 2 had neither a row nor the premise and every record of theirs
+// stopped opening at the AEAD tag. `trackSessionLadderLocked` passes ErrPqSecretUnknownEpoch
+// through as a FAILURE rather than as a gap, so those records became walk.firstFailure, were
+// retried maxRecordAttempts times and abandoned. [Group.cursor] is in-memory only, so every
+// restart re-walks the group from record zero and meets them again. The device STARTS and fails
+// later, which is the worse of the two outcomes.
+//
+// WHY THE WHOLE WINDOW IS EVIDENCE AND NOT AN INVENTION, which is the one sentence to argue with:
+// a FIVE-PART record was written by a build that could not rotate, so pq_secret was ONE value for
+// the whole of that group's life up to the epoch the record names. The rows this fills in are
+// therefore exactly the answers connect's premise was already giving for exactly those epochs --
+// written down as table rows, which survive the refutation, instead of resting on a premise, which
+// does not. Nothing below the window is filled: an epoch more than [messagegroup.PastEpochWindow]
+// behind can serve no open `pastEpochOnLoop` would admit, InstallPqSecret refuses it by name, and
+// claiming it would tell a caller its history was recovered when it was not.
+//
+// AND THE ROWS ALL CARRY ONE VALUE, so [pqSecretsShowRotation] -- which compares OCTETS and never
+// counts rows -- still answers false for them, the premise is left standing, and a restored device
+// that meets no rotation behaves exactly as it did before this repair.
+//
+// A SIX-PART RECORD IS NOT FILLED IN, and the asymmetry is the point: it was written by a build
+// that CAN rotate, so a missing row is a missing row and there is no premise behind it to write
+// down.
 //
 // IT REFUSES A RECORD WHOSE TABLE DOES NOT COVER ITS OWN EPOCH, and that refusal is the reason
 // this is a function rather than a loop at the call site. A group restored without pq_secret at
@@ -274,8 +325,26 @@ func restoredPqSecrets(record *GroupRecord) ([]restoredPqSecret, []byte, error) 
 		if len(record.PqSecret) == 0 {
 			return nil, nil, fmt.Errorf("%w: this group record carries neither a pq_secret table nor a pq_secret", ErrStateStoreFormat)
 		}
-		secret := append([]byte(nil), record.PqSecret...)
-		return []restoredPqSecret{{epoch: record.Epoch, secret: secret}}, secret, nil
+		// the arithmetic is the window's own, spelled the way connect spells it and guarded
+		// against the underflow a uint64 subtraction has: a group below the window's width has
+		// lived every epoch it has, starting at zero.
+		lowest := uint64(0)
+		if messagegroup.PastEpochWindow < record.Epoch {
+			lowest = record.Epoch - messagegroup.PastEpochWindow
+		}
+		table := make([]restoredPqSecret, 0, record.Epoch-lowest+1)
+		var current []byte
+		for epoch := lowest; epoch <= record.Epoch; epoch += 1 {
+			// EACH ROW IS ITS OWN ARRAY. They go into [Group.pqSecrets] and into connect's own
+			// table, and both erase an entry in place when the window moves past it; rows sharing
+			// one array would blank every other row the first time one of them was retired.
+			secret := append([]byte(nil), record.PqSecret...)
+			table = append(table, restoredPqSecret{epoch: epoch, secret: secret})
+			if epoch == record.Epoch {
+				current = secret
+			}
+		}
+		return table, current, nil
 	}
 	table := make([]restoredPqSecret, 0, len(record.PqSecrets))
 	var current []byte
