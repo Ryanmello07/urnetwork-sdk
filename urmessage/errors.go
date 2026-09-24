@@ -403,6 +403,20 @@ var (
 	// answer, and the write is tried again on the next walk.
 	ErrPeerHeadsPersist = errors.New("urmessage: the receiver-ladder heads could not be persisted")
 
+	// This device's own durable stream floor could not be raised past a stream index the server
+	// already holds a claim at under this device's own sender_handle. Ledger item 245.
+	//
+	// IT IS NOT THE COLLISION AND IT IS THE ONE MOMENT BEFORE ONE. A newcomer that lands on a
+	// removed member's leaf inherits that member's sender_handle byte for byte -- the derivation
+	// takes no epoch and no identity -- so its first send would seal at an index the removed
+	// member has already spent, be answered REASON_STREAM_INDEX_REUSED, and latch
+	// [ErrIdentityInUse] for the life of the process. [Group.seedOwnStreamLocked] moves the floor
+	// past those claims on the walk that sees them, and this is what it answers when it cannot:
+	// every record of the walk is still delivered, and what is refused is the SENTENCE that this
+	// group's next send would land. Unlike [ErrIdentityInUse] it is NOT sticky, because nothing
+	// has gone wrong yet -- the next [Group.Receive] tries the floor again.
+	ErrStreamFloor = errors.New("urmessage: this device's own stream floor could not be raised past another occupant's claims")
+
 	// The store holds no device identity yet, which is the ordinary state of a fresh
 	// directory and is what makes [NewDevice] mint one rather than refuse.
 	ErrNoDeviceIdentity = errors.New("urmessage: this state store holds no device identity")

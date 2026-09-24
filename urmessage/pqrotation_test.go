@@ -614,13 +614,16 @@ func (self *rotWorld) deliver(receiver *rotMember, page ...*sealed) error {
 	if err != nil {
 		self.t.Fatalf("%s's sender handle: %v", receiver.name, err)
 	}
-	leaves, err := group.leavesLocked()
-	if err != nil {
-		self.t.Fatalf("%s's leaves: %v", receiver.name, err)
-	}
+	group.ownHandles[own] = true
 	walk := &pageWalk{
-		own:          own,
-		leaves:       leaves,
+		// THE SAME THREE LINES [Group.Receive] WRITES, and the handle table is deliberately
+		// EMPTY rather than prebuilt: it is per record epoch now (ledger item 245) and
+		// [Group.walkLeavesLocked] fills it on the first record of each epoch. A harness that
+		// handed the walk one prebuilt table would be the very defect this file's removal rows
+		// drive.
+		own:          group.ownHandles,
+		ownNow:       own,
+		leaves:       map[uint64]map[[16]byte]uint32{},
 		opened:       []*Message{},
 		from:         group.cursor,
 		reached:      group.cursor,
@@ -1321,8 +1324,9 @@ func TestTheWalksStickyRefusalsOutrankTheTransportsOwn(t *testing.T) {
 	refused := fmt.Errorf("%w: %v", ErrFetchRefused, protocol.Reason_REASON_REJECTED)
 	fresh := func() *pageWalk {
 		return &pageWalk{
-			own: [16]byte{}, leaves: map[[16]byte]uint32{}, opened: []*Message{},
-			from: group.cursor, reached: group.cursor, resolvedTo: group.cursor,
+			own: map[[16]byte]bool{}, leaves: map[uint64]map[[16]byte]uint32{},
+			opened: []*Message{},
+			from:   group.cursor, reached: group.cursor, resolvedTo: group.cursor,
 			reconciled: group.reconciled, complete: true, unobtainable: map[uint64]bool{},
 		}
 	}

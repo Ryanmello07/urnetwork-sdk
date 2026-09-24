@@ -963,6 +963,76 @@ func (self *StreamStore) ReserveStreamIndex(groupId []byte, senderHandle []byte)
 	return next, nil
 }
 
+// SeedStreamIndex raises one stream's high water to `floor` WITHOUT handing an index out, so that
+// the next ReserveStreamIndex for it answers floor+1. It answers the high water the row carries
+// afterwards: `floor` when the seed moved it, and the row's own number when it did not.
+//
+// WHY IT EXISTS, and it is ledger item 245's first piece. A sender_handle is
+// SenderHandle(group_handle_key, leaf) and carries NO epoch and no identity, so a newcomer that
+// lands on a leaf a removed member used to stand at inherits that member's sixteen octets --
+// therefore its row here, which is keyed on (group_id, sender_handle) and on nothing else. Its
+// reserver has never allocated for that row, so it starts at index 1, and index 1 under those
+// octets is a stream index the SERVER already holds a claim at: the submit is answered
+// REASON_STREAM_INDEX_REUSED and urmessage latches ErrIdentityInUse for the life of the process.
+// The newcomer can never send in that group. Seeding the row past the highest index a walk saw
+// under those octets is what makes the two occupants' index ranges DISJOINT -- and disjoint ranges
+// are also what stops their message_ids colliding, because MASTER section 8.4.5 expands an id from
+// (group_id, sender_handle, stream_index) and the first two are equal by construction here.
+//
+// IT IS NOT AN ALLOCATION AND THAT IS THE WHOLE OF ITS CONTRACT. Nothing may seal at `floor`: the
+// caller is declaring that somebody ELSE has already spent every index up to it. Contract clause 1
+// is a promise about indices this store HANDS OUT, and this hands none out -- it moves the floor
+// the next one is taken above, which is clause 2's "HighWater never rewinds" read forwards.
+//
+// IT IS MONOTONE, AND A SEED BELOW THE ROW IS A NO-OP RATHER THAN A REFUSAL. The number a caller
+// reads off a walk is EVIDENCE about what a stream has spent and is not an authority over it; a
+// row that already stands higher holds better evidence, and rewinding it is the one thing this
+// store exists to make impossible.
+//
+// THE LAST INDEX A u64 HOLDS IS REFUSED BY NAME rather than written. A row seeded there has no
+// next position, so the seed would leave the stream permanently unallocatable -- the same state
+// ReserveStreamIndex refuses above, arrived at through a call that hands out nothing and would
+// otherwise report success.
+func (self *StreamStore) SeedStreamIndex(groupId []byte, senderHandle []byte, floor uint64) (uint64, error) {
+	key, err := streamKeyFromOctets(groupId, senderHandle)
+	if err != nil {
+		return 0, err
+	}
+	rowName := streamRowName(key)
+
+	self.allocMutex.Lock()
+	defer self.allocMutex.Unlock()
+
+	if err := self.refuseIfClosed(); err != nil {
+		return 0, err
+	}
+	if floor == math.MaxUint64 {
+		return 0, fmt.Errorf(
+			"%w: row %s cannot be seeded at the last index a u64 holds, because a row seeded there has no next position and no later call could make one",
+			ErrStreamStoreConsumed,
+			rowName,
+		)
+	}
+	persisted, err := self.persistedHighWater(rowName)
+	if err != nil {
+		if errors.Is(err, ErrStreamStoreRewound) {
+			return 0, fmt.Errorf(
+				"%w; the next index this store would allocate is one it has already returned to a caller, and a seed moves a floor rather than repairing that (%w)",
+				err,
+				ErrStreamStoreConsumed,
+			)
+		}
+		return 0, err
+	}
+	if floor <= persisted {
+		return persisted, nil
+	}
+	if err := self.writeOneRecord(rowName, floor); err != nil {
+		return 0, err
+	}
+	return floor, nil
+}
+
 // StreamHighWater is section 8.2's query: the highest index this store has ever allocated for the
 // stream, or 0 for a stream it has never seen.
 //

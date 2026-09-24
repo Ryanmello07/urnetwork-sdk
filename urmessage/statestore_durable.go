@@ -396,6 +396,64 @@ type GroupRecord struct {
 
 	// The epoch [WrapDarkKind] was taken at. Meaningless when that is zero.
 	WrapDarkEpoch uint64
+
+	// ── THE LEAF LEDGER: WHICH LEAVES THIS DEVICE HAS STOOD AT, AND WHICH ONES HAVE LEFT ────
+	//
+	// LEDGER ITEM 245, AND IT IS ONE PART CARRYING TWO TABLES because the two are facts about the
+	// same thing -- a LEAF -- and a leaf's row answers both. A device's sender_handle is
+	// SenderHandle(group_handle_key, leaf) and group_handle_key never rotates, so the set of
+	// handles this device has held is exactly the set of leaves it has stood at, derived and never
+	// stored; and the epoch a leaf departed at is what says which epochs its records belong to it.
+	//
+	// WHY IT IS ON THE DISK. Neither table can be rebuilt from anything else here. The commits
+	// that would say so are on the SERVER and this device has already followed them -- a re-walk
+	// meets each one at an epoch it has left and skips it as ceremony -- and the tree the MLS state
+	// holds says who stands in the group NOW, which is precisely the question a departed leaf is
+	// outside of. A device that came back without them abandoned the removed member's records after
+	// three fetches ([maxRecordAttempts]) and showed its own lines from an earlier leaf as a
+	// stranger's.
+	//
+	// WHAT AN OLD STORE DOES, NAMED RATHER THAN DISCOVERED. A record written before part nine
+	// carries NO ledger and decodes to a nil slice -- the same signal [GroupRecord.PqSecrets] uses
+	// one field up -- and [Device.restoreOne] then seeds the set with the ONE leaf this device
+	// stands at today and leaves the departed table empty. That is exactly the state every build
+	// before this one was in, so such a device restores, opens its backlog and keeps working. What
+	// it loses is stated: handles it held at an EARLIER leaf, and the records of leaves that
+	// departed before the restart AND were never refilled. A refilled leaf still resolves, because
+	// the member standing at it derives the same sixteen octets. A restore that REFUSED such a
+	// record would be a device that can never start again, which is the one outcome no
+	// compatibility question may reach.
+	//
+	// IT IS BOUNDED AND THE BOUND IS THE TREE'S, which is said because "one row per leaf that has
+	// ever stood here" reads like an unbounded log. A row is written for a leaf INDEX, once,
+	// whatever happens at it afterwards -- a leaf removed, refilled and removed again is one row --
+	// and RFC 9420 indexes leaves densely, so the table is at most as wide as the widest the tree
+	// has ever been. Item 242's ruling 7 caps that at 1,000 leaves in v1, and a row is thirteen
+	// octets.
+	Leaves []LeafOccupancy
+}
+
+// LeafOccupancy is one row of [GroupRecord.Leaves]: one leaf of one group, whether THIS DEVICE has
+// ever stood at it, and the epoch its occupant was removed at.
+//
+// IT IS A LEAF AND NOT A HANDLE, and that is a saving and a discipline at once. The handle is
+// SenderHandle(group_handle_key, leaf), derivable by anybody holding the group's own lifetime key,
+// so storing sixteen derived octets beside the four they come from would be a second spelling of
+// one fact -- and the day the two disagreed, the stored one would win over the derivation every
+// other member computes.
+type LeafOccupancy struct {
+	// The leaf index.
+	Leaf uint32
+
+	// DepartedEpoch is the epoch the commit that REMOVED this leaf's occupant OPENED: the leaf
+	// stood at every epoch strictly BELOW it and at none above. ZERO means "not departed", which
+	// is not ambiguous -- no commit opens epoch zero, because epoch zero is where a group is
+	// founded.
+	DepartedEpoch uint64
+
+	// Own is whether THIS DEVICE has stood at this leaf, and therefore whether the handle it
+	// derives is one this device's own records carry.
+	Own bool
 }
 
 // The values of [GroupRecord.WrapDarkKind]. Zero is "not dark" and is not a kind, so a record
@@ -504,6 +562,89 @@ func decodePqSecretWitness(encoded []byte) ([]EpochPqSecretWitness, error) {
 	}
 	return rows, nil
 }
+
+// sortLeafOccupancy puts a leaf ledger in ascending leaf order, in place, for
+// [sortEpochPqSecretWitness]'s reason: the part is one appended frame, and a map's iteration order
+// would make two writes of one unchanged ledger two different files for the store's rename dance to
+// pay for.
+//
+// IT IS A THIRD COPY OF THE SAME INSERTION SORT AND THAT IS DELIBERATE, exactly as the second one
+// is. The three carry three different row types over three different keys -- an epoch, an epoch and
+// a LEAF -- and a shared one would either take a comparison function (paying reflection and an
+// interface allocation on a handful of rows) or collapse the three row types into one, which is how
+// a digest ends up in a field called a secret.
+func sortLeafOccupancy(rows []LeafOccupancy) {
+	for at := 1; at < len(rows); at += 1 {
+		row := rows[at]
+		back := at - 1
+		for 0 <= back && row.Leaf < rows[back].Leaf {
+			rows[back+1] = rows[back]
+			back -= 1
+		}
+		rows[back+1] = row
+	}
+}
+
+// encodeLeafOccupancy is [GroupRecord.Leaves] as the one octet string part NINE carries:
+// u32(leaf) ‖ u64(departed_epoch) ‖ u8(flags), repeated, big-endian. Thirteen octets a row.
+//
+// THE WIDTH IS FIXED AND THERE IS NO LENGTH PREFIX, which is the witness part's shape one table
+// over and for its reason: every field here is a number of this package's own choosing, so a row of
+// any other width is a record this build did not write, and a length octet would be a field whose
+// only purpose is to carry a value the reader must then refuse anyway.
+//
+// FLAGS AND NOT A BOOL OCTET, with exactly one bit defined. The two tables this part carries are
+// two questions about one leaf and a third will be a third bit rather than a tenth part; a reader
+// of this build refuses any other bit set, so a row written by a later build reaches this one as a
+// named refusal instead of as a leaf whose ownership it has silently mis-read.
+func encodeLeafOccupancy(rows []LeafOccupancy) []byte {
+	encoded := make([]byte, 0, len(rows)*leafOccupancyRowBytes)
+	for _, row := range rows {
+		var octets [leafOccupancyRowBytes]byte
+		binary.BigEndian.PutUint32(octets[0:4], row.Leaf)
+		binary.BigEndian.PutUint64(octets[4:12], row.DepartedEpoch)
+		if row.Own {
+			octets[12] = leafOccupancyOwnBit
+		}
+		encoded = append(encoded, octets[:]...)
+	}
+	return encoded
+}
+
+// decodeLeafOccupancy reads what [encodeLeafOccupancy] wrote, and refuses anything else.
+//
+// A SHORT TAIL IS A REFUSAL, for [decodePqSecretWitness]'s reason one part over: a ledger that
+// silently lost its last rows is a device that comes back unable to resolve a departed member's
+// records, or showing its own earlier lines as a stranger's -- the two defects this part exists to
+// close, arriving through the reader.
+func decodeLeafOccupancy(encoded []byte) ([]LeafOccupancy, error) {
+	if len(encoded)%leafOccupancyRowBytes != 0 {
+		return nil, fmt.Errorf("%w: the leaf ledger is %d octets and a row is %d",
+			ErrStateStoreFormat, len(encoded), leafOccupancyRowBytes)
+	}
+	rows := []LeafOccupancy{}
+	for at := 0; at < len(encoded); at += leafOccupancyRowBytes {
+		flags := encoded[at+12]
+		if flags&^leafOccupancyOwnBit != 0 {
+			return nil, fmt.Errorf("%w: a leaf ledger row carries flags %#02x and this build defines %#02x",
+				ErrStateStoreFormat, flags, leafOccupancyOwnBit)
+		}
+		rows = append(rows, LeafOccupancy{
+			Leaf:          binary.BigEndian.Uint32(encoded[at : at+4]),
+			DepartedEpoch: binary.BigEndian.Uint64(encoded[at+4 : at+12]),
+			Own:           flags&leafOccupancyOwnBit != 0,
+		})
+	}
+	return rows, nil
+}
+
+const (
+	// One [LeafOccupancy] row on the disk: u32(leaf) ‖ u64(departed_epoch) ‖ u8(flags).
+	leafOccupancyRowBytes = 4 + 8 + 1
+
+	// The one bit part nine's flags octet defines: this device has stood at this leaf.
+	leafOccupancyOwnBit byte = 0x01
+)
 
 // sortEpochPqSecrets puts a table in ascending epoch order, in place.
 //
@@ -1474,8 +1615,18 @@ func (self *DurableStateStore) PutGroupRecord(record *GroupRecord) error {
 	if err != nil {
 		return err
 	}
+	// THE NINTH PART, AND IT IS WRITTEN ON EVERY RECORD FOR THE SEVENTH'S AND EIGHTH'S REASON: the
+	// reader tells shapes apart by ARITY, so a part whose presence depended on whether this group
+	// had ever removed anybody would make two records of one group two shapes. Empty for a group
+	// whose ledger a caller supplied nothing for, which is a real state and is NOT invented around:
+	// a caller that filled in the compatibility fields alone has said nothing about which leaves
+	// this device has stood at, and seeding a row from the group's current membership here would be
+	// this store answering, on the caller's behalf, the one question [Device.restoreOne] answers
+	// where a handle can actually be derived.
+	ledger := encodeLeafOccupancy(record.Leaves)
 	return self.writeRecord(self.groupRecordPath(record.GroupId), stateKindGroupRecord,
-		record.GroupId, record.PqSecret, record.GroupHandleKey, epochOctets[:], flags, table, dark, witness)
+		record.GroupId, record.PqSecret, record.GroupHandleKey, epochOctets[:], flags, table, dark,
+		witness, ledger)
 }
 
 // encodeWrapDark is [GroupRecord.WrapDarkKind] and [GroupRecord.WrapDarkEpoch] as the one octet
@@ -1593,8 +1744,8 @@ func (self *DurableStateStore) GroupRecords() ([]*GroupRecord, error) {
 // reader's arity switch, its two refusals and its field reads are one unit anyway, and splitting
 // them out is what the writer ([DurableStateStore.PutGroupRecord]) already did.
 func groupRecordOf(name string, parts [][]byte) (*GroupRecord, error) {
-	if len(parts) < 5 || 8 < len(parts) {
-		return nil, fmt.Errorf("%w: the group record in %s carries %d parts, want 8, the 7 a store written before the pq_secret witness holds, the 6 a store written before the wrap_dark part holds, or the 5 a store written before the pq_secret table holds",
+	if len(parts) < 5 || 9 < len(parts) {
+		return nil, fmt.Errorf("%w: the group record in %s carries %d parts, want 9, the 8 a store written before the leaf ledger holds, the 7 a store written before the pq_secret witness holds, the 6 a store written before the wrap_dark part holds, or the 5 a store written before the pq_secret table holds",
 			ErrStateStoreFormat, name, len(parts))
 	}
 	if len(parts[3]) != 8 || len(parts[4]) != 1 {
@@ -1632,12 +1783,25 @@ func groupRecordOf(name string, parts [][]byte) (*GroupRecord, error) {
 	// below the window and none to invent. What such a device loses is named in
 	// [GroupRecord.PqSecretWitness] and in [Group.pqSecretWitness], and it is one restart's worth
 	// of pre-window history per group.
-	if len(parts) == 8 {
+	if 8 <= len(parts) {
 		witness, err := decodePqSecretWitness(parts[7])
 		if err != nil {
 			return nil, fmt.Errorf("%w: the group record in %s: %w", ErrStateStoreFormat, name, err)
 		}
 		record.PqSecretWitness = witness
+	}
+	// AND A RECORD WITH NO LEAF LEDGER KNOWS ONE LEAF, which is evidence and not a default: it was
+	// written by a build in which a device's handle was one value and a departed leaf was nothing at
+	// all, so there is no ledger on that disk and none to invent HERE -- inventing one needs a
+	// group_handle_key expansion, and this function decodes octets. [Device.restoreOne] is where the
+	// one leaf this device stands at becomes the set, which is what every build before this one
+	// held. What such a device loses is named at [GroupRecord.Leaves].
+	if len(parts) == 9 {
+		ledger, err := decodeLeafOccupancy(parts[8])
+		if err != nil {
+			return nil, fmt.Errorf("%w: the group record in %s: %w", ErrStateStoreFormat, name, err)
+		}
+		record.Leaves = ledger
 	}
 	return record, nil
 }

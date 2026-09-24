@@ -381,6 +381,29 @@ func (self *Device) restoreOne(store DeviceStore, record *GroupRecord, nonce []b
 			restored.pqSecretWitness[row.Epoch] = witness
 		}
 	}
+	// AND THE LEAF LEDGER, WHICH IS LEDGER ITEM 245 SURVIVING THE PROCESS THAT LEARNED IT.
+	// [Group.initTables] has just seeded the handle set with the ONE leaf this device stands at
+	// today; these are the rows the record carries -- leaves this device stood at BEFORE the one it
+	// stands at now, and leaves whose occupants this device watched a commit remove.
+	//
+	// AN EMPTY PART IS NOT A DEFECT AND IS NOT INVENTED AROUND, and it is the residual
+	// [GroupRecord.Leaves] names: a record written before part nine carries no rows, so what comes
+	// back is the one leaf the tree says. That device is in the state every build before this one
+	// was in -- it resolves a departed leaf's records only while the leaf has been REFILLED, and it
+	// shows lines it wrote from an earlier leaf as a stranger's -- and it STARTS, which is the
+	// property that decides how a compatibility question is answered here.
+	//
+	// THE HANDLE IS DERIVED AND NEVER STORED, so a ledger written by a build with a different
+	// derivation could not put a handle in this set at all: what it carries is a leaf index, and the
+	// expansion is this build's own.
+	for _, row := range record.Leaves {
+		if row.Own {
+			restored.ownHandles[messagegroup.SenderHandle(restored.groupHandleKey, row.Leaf)] = true
+		}
+		if row.DepartedEpoch != 0 {
+			restored.departedAt[row.Leaf] = row.DepartedEpoch
+		}
+	}
 	// AND THE COPIES OF WHAT THIS DEVICE SAID IN IT, which since connect 4c030dc are the only
 	// place its own half of the conversation can be read from (MG-4: a member cannot open its own
 	// application record). A store that will not answer refuses THIS group by name rather than

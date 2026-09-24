@@ -132,6 +132,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -365,6 +366,12 @@ func TestTheWrapDarkPartIsOptionalAndRefusesWhatThisBuildDidNotWrite(t *testing.
 			}
 			rows = append(rows, witness)
 		}
+		if 9 <= parts {
+			rows = append(rows, encodeLeafOccupancy([]LeafOccupancy{
+				{Leaf: 1, DepartedEpoch: 3, Own: false},
+				{Leaf: 2, DepartedEpoch: 0, Own: true},
+			}))
+		}
 		return rows
 	}
 	for _, one := range []struct {
@@ -373,6 +380,7 @@ func TestTheWrapDarkPartIsOptionalAndRefusesWhatThisBuildDidNotWrite(t *testing.
 		kind    uint8
 		epoch   uint64
 		witness int
+		leaves  int
 		bad     bool
 	}{
 		{name: "five parts: the deployed alpha's disk", parts: base(5, nil), kind: wrapDarkNone},
@@ -393,7 +401,22 @@ func TestTheWrapDarkPartIsOptionalAndRefusesWhatThisBuildDidNotWrite(t *testing.
 		// record this build did not write and must not be read as a witness that ends early.
 		{name: "a pq_secret witness row of the wrong width",
 			parts: append(base(7, nil), bytes.Repeat([]byte{0x44}, 8+16)), bad: true},
-		{name: "nine parts", parts: append(base(8, nil), nil), bad: true},
+		// PART NINE, LEDGER ITEM 245's LEAF LEDGER, and its three shapes in this same table for
+		// the witness part's reason: the arity is what tells an old disk from a new one, so each
+		// arity has to be driven here or the compatibility claim is a sentence.
+		{name: "nine parts, empty ledger: this build, a group that has removed nobody and whose " +
+			"caller supplied no rows", parts: append(base(8, nil), nil),
+			kind: wrapDarkNone, witness: 1},
+		{name: "nine parts, a ledger", parts: base(9, nil), kind: wrapDarkNone, witness: 1, leaves: 2},
+		{name: "a leaf ledger row of the wrong width",
+			parts: append(base(8, nil), bytes.Repeat([]byte{0x55}, leafOccupancyRowBytes-1)), bad: true},
+		// A FLAGS OCTET THIS BUILD DOES NOT DEFINE. Part nine carries one bit today and a later
+		// build's second bit must arrive as a named refusal rather than as a leaf whose ownership
+		// this build has silently mis-read -- a leaf wrongly marked `own` is this device claiming
+		// another member's records, which is exactly the defect part nine exists to close.
+		{name: "a leaf ledger row with a flag this build does not define",
+			parts: append(base(8, nil), []byte{0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0x02}), bad: true},
+		{name: "ten parts", parts: append(base(9, nil), nil), bad: true},
 	} {
 		t.Run(one.name, func(t *testing.T) {
 			record, err := groupRecordOf("a-group", one.parts)
@@ -421,6 +444,26 @@ func TestTheWrapDarkPartIsOptionalAndRefusesWhatThisBuildDidNotWrite(t *testing.
 					"witnesses NOTHING and one written by this build witnesses what it carries; "+
 					"collapsing the two would invent a witness for a disk that has none",
 					len(record.PqSecretWitness), one.witness)
+			}
+			if len(record.Leaves) != one.leaves {
+				t.Fatalf("decoded %d leaf ledger row(s), want %d: a record written before part "+
+					"nine carries NO ledger and one written by this build carries what it was "+
+					"given; collapsing the two would invent an occupancy table for a disk that "+
+					"has none, and [Device.restoreOne] acts on that distinction",
+					len(record.Leaves), one.leaves)
+			}
+			if one.leaves == 2 {
+				// AND THE ROWS COME BACK AS THEY WENT IN, BOTH FIELDS, BOTH VALUES. A decoder
+				// that read the flags octet as the low byte of the epoch, or that dropped the
+				// `own` bit, would pass the count above and would hand a restore a device that
+				// does not recognise its own handle.
+				want := []LeafOccupancy{
+					{Leaf: 1, DepartedEpoch: 3, Own: false},
+					{Leaf: 2, DepartedEpoch: 0, Own: true},
+				}
+				if !slices.Equal(record.Leaves, want) {
+					t.Fatalf("the leaf ledger decoded %+v, want %+v", record.Leaves, want)
+				}
 			}
 			// AND THE HALT COMES BACK AS A HALT, IN THE FIELD IT WAS WRITTEN FROM. One kind
 			// column, two fields: a kind that is the removal refusal restores as [Group.halted]

@@ -1036,14 +1036,15 @@ func urnet_message_group_stats(self C.uint64_t) *C.char {
 		ObserverReactionRefused: stats.ObserverReactionRefused,
 		RoleUndeterminable:      stats.RoleUndeterminable,
 
-		Ingested:         stats.Ingested,
-		CommitRefused:    stats.CommitRefused,
-		CommitRefusedOwn: stats.CommitRefusedOwn,
-		FailedOpen:       stats.FailedOpen,
-		Submitted:        stats.Submitted,
-		Rebound:          stats.Rebound,
-		Pages:            stats.Pages,
-		Unattested:       stats.Unattested,
+		Ingested:          stats.Ingested,
+		CommitRefused:     stats.CommitRefused,
+		CommitRefusedOwn:  stats.CommitRefusedOwn,
+		FailedOpen:        stats.FailedOpen,
+		Submitted:         stats.Submitted,
+		Rebound:           stats.Rebound,
+		Pages:             stats.Pages,
+		Unattested:        stats.Unattested,
+		StreamFloorSeeded: stats.StreamFloorSeeded,
 	}, "urnet_message_group_stats")
 }
 
@@ -1409,7 +1410,19 @@ type messageInfo struct {
 	// 3.1's sender_handle, 16 octets, lower case hex. It is the routing identity of the member
 	// that sealed the record and IT IS NOT A NAME: the alpha has no identity system.
 	SenderHandle string `json:"sender_handle"`
-	Mine         bool   `json:"mine"`
+	// THE CREDENTIAL IDENTITY OF THE MEMBER THAT SIGNED THIS RECORD, at the epoch it was SEALED
+	// at, lower case hex, and "" on a record that did not open. It is the same value
+	// urnet_message_group_members answers as identity_pub, so a caller joins a LINE to a ROSTER
+	// ROW on this and never on sender_handle.
+	//
+	// THAT IS NOT A PREFERENCE, IT IS ledger item 245. sender_handle is derived from the LEAF
+	// alone and the group's handle key never rotates, so a member added onto a removed member's
+	// leaf carries the removed member's sender_handle byte for byte -- two people, one label,
+	// for ever. A caller keyed on sender_handle merges their two histories into one row and
+	// attributes each to the other. sender_identity is what MLS signs and is the only value here
+	// that separates them.
+	SenderIdentity string `json:"sender_identity"`
+	Mine           bool   `json:"mine"`
 	// THE ROLE THE SENDER HELD AT THE EPOCH THIS RECORD WAS SEALED AT: "owner", "admin", "member"
 	// or "observer", and "" on a record that did not open. Spec C §5.6's SenderRoleAtSend.
 	//
@@ -1629,6 +1642,12 @@ type messageGroupStats struct {
 	Rebound          uint64 `json:"rebound"`
 	Pages            uint64 `json:"pages"`
 	Unattested       uint64 `json:"unattested"`
+	// Times this group RAISED the floor of its own durable stream past indices the server already
+	// holds claims at under this device's own sender_handle (ledger item 245). It is EXACTLY ZERO
+	// on a healthy device for the life of a group; it goes to one on the first walk of a device
+	// that was added onto a REMOVED member's leaf, which is the walk that stops that device being
+	// refused on its first send and unable to send in that group for the life of the process.
+	StreamFloorSeeded uint64 `json:"stream_floor_seeded"`
 }
 
 func messageInfoOf(entry messageEntry) *messageInfo {
@@ -1646,6 +1665,7 @@ func messageInfoOf(entry messageEntry) *messageInfo {
 	return &messageInfo{
 		RecordId:         message.RecordId,
 		SenderHandle:     string(handle),
+		SenderIdentity:   hex.EncodeToString(message.SenderIdentity),
 		Mine:             message.Mine,
 		SenderRoleAtSend: message.SenderRoleAtSend,
 		SentAtMs:         message.SentAtMs,

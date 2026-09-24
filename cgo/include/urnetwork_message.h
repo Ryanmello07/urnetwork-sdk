@@ -352,7 +352,8 @@ bool urnet_message_group_is_open(uint64_t self);
  * wrap_unreadable, wrap_orphaned, gap_malformed, gap_unsupported,
  * gap_out_of_window, opened_past_epoch, hidden_observer, observer_reaction_refused,
  * role_undeterminable, ingested,
- * commit_refused, commit_refused_own, failed_open, submitted, rebound, pages, unattested.
+ * commit_refused, commit_refused_own, failed_open, submitted, rebound, pages, unattested,
+ * stream_floor_seeded.
  *
  * THE LIST ABOVE IS THE JSON'S OWN KEY LIST, IN ITS ORDER, and a go test in this directory reads it
  * off this file and holds it equal to the keys the json carries -- it went stale once, omitting
@@ -444,11 +445,17 @@ uint64_t urnet_message_group_list_at(uint64_t self, int32_t index);
 
 int32_t urnet_message_list_count(uint64_t self);
 /* one message's metadata as json, WITHOUT the body and WITHOUT its reactions:
- *   {"record_id":u64,"sender_handle":"<32 hex>","mine":bool,"sender_role_at_send":"member",
+ *   {"record_id":u64,"sender_handle":"<32 hex>","sender_identity":"<hex>","mine":bool,
+ *    "sender_role_at_send":"member",
  *    "sent_at_ms":i64,"body_len":i32,"message_id":"<64 hex>","kind":u8,"gap":"","reply_to_id":"",
  *    "deleted":bool,"reaction_count":i32}
  * THE KEY LIST ABOVE IS THE JSON'S OWN, IN ITS ORDER, and a go test in this directory holds it so.
- * sender_handle is 16 opaque octets and IS NOT A NAME: the alpha has no identity system.
+ * sender_handle is 16 opaque octets and IS NOT A NAME and IS NOT AN ATTRIBUTION EITHER: it is
+ * derived from the LEAF alone and the group's handle key never rotates, so a member added onto a
+ * REMOVED member's leaf carries the removed member's sender_handle byte for byte -- two people,
+ * one label, for ever (msgrepo ledger item 245). JOIN A LINE TO A ROSTER ROW ON sender_identity,
+ * which is what MLS signs and is the same value urnet_message_group_members answers as
+ * identity_pub; it is "" only on a record that did not open.
  *
  * sender_role_at_send is the role the SENDER HELD AT THE EPOCH THIS RECORD WAS SEALED AT --
  * "owner", "admin", "member", "observer" -- and "" on a record that did not open. IT IS A FACT

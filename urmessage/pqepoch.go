@@ -438,7 +438,46 @@ func (self *Group) groupRecordLocked(opened bool) *GroupRecord {
 		Opened:          opened,
 		WrapDarkKind:    wrapDarkKindOf(diagnosis),
 		WrapDarkEpoch:   at,
+		Leaves:          self.leafLedgerRecordsLocked(),
 	}
+}
+
+// leafLedgerRecordsLocked is [Group.ownHandles] and [Group.departedAt] as the one table part nine
+// carries. Ledger item 245.
+//
+// THE OWN HALF IS WRITTEN AS LEAVES AND NOT AS HANDLES, and this function is the place that
+// conversion happens, in the one direction it can. A handle is
+// SenderHandle(group_handle_key, leaf) and the derivation is one-way, so the set on [Group] --
+// which is what the receive path reads, sixteen octets at a time, once per record -- cannot be
+// turned back into leaves here. The leaves are taken from the tree instead: this device's OWN leaf
+// is the one it stands at now, and every departed leaf this group has filed is a row whether or not
+// this device ever stood at it. What that costs is stated rather than hidden: a handle this device
+// held at an EARLIER leaf, learned in this process and not derivable from the tree, is carried
+// through the restart only if that leaf is also in the departed table -- which it is, because the
+// only way this device's leaf moves is a removal it followed.
+func (self *Group) leafLedgerRecordsLocked() []LeafOccupancy {
+	rows := map[uint32]LeafOccupancy{}
+	for leaf, departed := range self.departedAt {
+		rows[leaf] = LeafOccupancy{Leaf: leaf, DepartedEpoch: departed}
+	}
+	if self.handle != nil && len(self.groupHandleKey) != 0 {
+		for leaf, row := range rows {
+			if self.ownHandles[messagegroup.SenderHandle(self.groupHandleKey, leaf)] {
+				row.Own = true
+				rows[leaf] = row
+			}
+		}
+		own := self.handle.OwnLeafIndex()
+		row := rows[own]
+		row.Leaf, row.Own = own, true
+		rows[own] = row
+	}
+	table := make([]LeafOccupancy, 0, len(rows))
+	for _, row := range rows {
+		table = append(table, row)
+	}
+	sortLeafOccupancy(table)
+	return table
 }
 
 // wrapDarkKindOf is which of the three ways a wrap fails an error is, as [GroupRecord] spells it,
@@ -1437,10 +1476,15 @@ func (self *Group) ingestWrapLocked(walk *pageWalk, recordId uint64, parsed *mes
 	if tag == nil {
 		return false
 	}
-	ownLeaf, known := walk.leaves[walk.own]
-	if !known {
-		return false
-	}
+	// THIS DEVICE'S OWN LEAF, OFF THE TREE AND NOT OUT OF A HANDLE TABLE. It used to be
+	// `walk.leaves[walk.own]` -- a lookup of this device's own handle in the membership table,
+	// which is the derivation run forwards and then inverted through a map to get back the leaf it
+	// started from. That was already a long way round; since ledger item 245 it is also WRONG, for
+	// the reason that item exists: the handle is a function of the LEAF alone, so the row it finds
+	// is the row of whoever stands at that leaf, and after a removal and a refill that is somebody
+	// else. [messagegroup.GroupHandle.OwnLeafIndex] is the tree's own answer and cannot be
+	// confused by an occupant.
+	ownLeaf := self.handle.OwnLeafIndex()
 	// THE MEMBER COMPUTES ITS OWN HANDLE AND THE SERVER CANNOT INVERT ONE -- m1 Task 14 Property
 	// 2. The epoch in the derivation is the one the TAG names and never this group's, because the
 	// wrap is filed under the epoch it delivers and is written while the group still stands at the
@@ -1481,7 +1525,11 @@ func (self *Group) ingestWrapLocked(walk *pageWalk, recordId uint64, parsed *mes
 	//
 	// The ceremony arm commits no ratchet, so this peek spends nothing the sender's next ordinary
 	// record needs.
-	senderLeaf, senderKnown := walk.leaves[parsed.Header.SenderHandle]
+	leaves, err := self.walkLeavesLocked(walk, parsed.Header.Epoch)
+	if err != nil {
+		return false
+	}
+	senderLeaf, senderKnown := leaves[parsed.Header.SenderHandle]
 	if !senderKnown {
 		return false
 	}

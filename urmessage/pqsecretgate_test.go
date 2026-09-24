@@ -152,6 +152,14 @@ var pqSecretProducerSites = map[string]string{
 		"the answer to 'have I ever held this' is kept for ever while the secret is not.",
 	"sortEpochPqSecretWitness|parameter rows": "the same rows arriving at the sort, seeded for the same reason and carrying the same " +
 		"digests.",
+	"encodeLeafOccupancy|parameter rows": "THE LEAF LEDGER'S ROWS, AND THEY CARRY LEAF INDICES AND EPOCHS AND NOT SECRETS. In " +
+		"this census for the witness encoder's reason one entry up -- the producer net seeds any " +
+		"parameter named `rows`, an over-approximation kept on purpose -- and what these hold is " +
+		"ledger item 245's part nine: u32(leaf), u64(departed_epoch) and a flags octet. Every " +
+		"field of it is a number that is already in the plaintext header of a record the server " +
+		"stores, or in the ratchet tree every member holds.",
+	"sortLeafOccupancy|parameter rows": "the same rows arriving at the sort, seeded for the same reason and carrying the same " +
+		"numbers.",
 	"witnessPqSecretLocked|parameter pqSecret": "THE SECRET ARRIVING AT THE WITNESS, and this one IS a pq_secret: the whole point of the " +
 		"function is that a value is hashed here and the hash is what is kept. It arrives from " +
 		"[Group.filePqSecretLocked] -- the one door a row goes in by -- so there is no site that " +
@@ -478,6 +486,47 @@ var pqSecretSinks = map[string]pqSecretSink{
 	"groupRecordOf|assign record.PqSecretWitness": {
 		carries: []string{"witness"},
 		why:     "that decoded witness landing on the record.",
+	},
+	"groupRecordOf|call decodeLeafOccupancy": {
+		carries: []string{"parts"},
+		why: "part NINE going to the leaf ledger decoder, for the witness decoder's reason two " +
+			"entries up: the record's parts are seeded whole and this walk does not tell one part " +
+			"from another. What that part holds is ledger item 245's occupancy table -- leaf " +
+			"indices, the epoch each departed at, and one flag octet -- and no key material of " +
+			"any kind.",
+	},
+	"groupRecordOf|assign record.Leaves": {
+		carries: []string{"ledger"},
+		why:     "that decoded leaf ledger landing on the record.",
+	},
+	"sortLeafOccupancy|assign rows[?]": {
+		carries: []string{"rows", "row"},
+		why: "the insertion sort's own two writes, which is what a sort IS. It is in this census " +
+			"because the producer net seeds any parameter named `rows`; what moves here is a " +
+			"[LeafOccupancy] -- a leaf index, an epoch and a flag.",
+	},
+	"encodeLeafOccupancy|call binary.BigEndian.PutUint32": {
+		carries: []string{"row"},
+		why:     "the leaf index being written into part nine's fixed-width row.",
+	},
+	"encodeLeafOccupancy|call binary.BigEndian.PutUint64": {
+		carries: []string{"row"},
+		why:     "the epoch that leaf departed at, into the same row.",
+	},
+	"restoreOne|call messagegroup.SenderHandle": {
+		carries: []string{"row", "restored"},
+		why: "THE RESTORED LEAF BECOMING THE HANDLE IT DERIVES, which is ledger item 245's fourth " +
+			"piece coming back off the disk. `row` is tainted because the restore's loop variables " +
+			"are seeded by this census's `rows` net; what crosses is `row.Leaf`, a u32 index, and " +
+			"the key is group_handle_key -- the group's own lifetime value, which every member " +
+			"holds and which is not a pq_secret. The handle is DERIVED here rather than stored, so " +
+			"part nine can carry no handle and no derivation of one.",
+	},
+	"restoreOne|assign restored.departedAt[row.Leaf]": {
+		carries: []string{"row"},
+		why: "the same row's departure epoch landing in [Group.departedAt], which is what lets a " +
+			"restarted device still resolve the records a removed leaf sealed below the commit " +
+			"that removed it.",
 	},
 	"restoreOne|call copy": {
 		carries: []string{"row"},
@@ -924,6 +973,8 @@ var pqSecretCountedNotCarriedSites = map[string]string{
 		"any other width is refused rather than length-prefixed.",
 	"encodePqSecretWitness|len rows":    "the capacity hint for the witness frame.",
 	"sortEpochPqSecretWitness|len rows": "the witness sort's bound.",
+	"encodeLeafOccupancy|len rows":      "the capacity hint for part nine's frame.",
+	"sortLeafOccupancy|len rows":        "the leaf ledger sort's bound.",
 	"witnessPqSecretLocked|len pqSecret": "the witness's own emptiness guard: an empty value is not witnessed, because " +
 		"[Group.pqSecretHeldAtLocked] answers false for an empty candidate and a witness row of " +
 		"H(nothing) would make 'this device holds nothing' read as 'this device has already held it'.",

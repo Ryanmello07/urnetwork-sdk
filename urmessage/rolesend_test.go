@@ -663,7 +663,7 @@ func TestAnUnreadableRoleLeavesAnEmptyRoleAndOneCountAndTheRecordStillArrives(t 
 	// AND A MESSAGE WITH NO ROLE IS STILL A MESSAGE. deliverLocked keeps it, indexes it and does
 	// not count it as hidden: "" is not "observer".
 	entry := &Content{Kind: KindText, Text: "a line whose sender's role could not be read"}
-	received := newMessage(entry, 77, make([]byte, 16), false, 5, aTarget(0xF4), "")
+	received := newMessage(entry, 77, make([]byte, 16), nil, false, 5, aTarget(0xF4), "")
 	hiddenBefore := bob.group.Stats().HiddenObserver
 	if !bob.group.deliverLocked(received, entry) {
 		t.Fatal("a message with no role was not delivered as a line")

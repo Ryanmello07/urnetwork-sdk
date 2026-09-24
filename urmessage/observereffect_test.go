@@ -273,14 +273,14 @@ func TestARefusedObserverReactionIsHeldOnceAndRefusedAtEveryRebuild(t *testing.T
 	lineId, observerId, memberId := aTarget(0xE1), aTarget(0xE2), aTarget(0xE3)
 
 	text := &Content{Kind: KindText, Text: "a line an observer reacts to"}
-	deliverOneThroughAWalk(group, newMessage(text, 10, member, false, 0, lineId, "member"), text)
+	deliverOneThroughAWalk(group, newMessage(text, 10, member, nil, false, 0, lineId, "member"), text)
 
 	reaction := &Content{Kind: KindReactionAdd, Target: lineId, Emoji: "👍"}
 	// the same observer record twice, which is what a rewind over an earlier failure delivers
-	deliverOneThroughAWalk(group, newMessage(reaction, 11, observer, false, 0, observerId, "observer"), reaction)
-	deliverOneThroughAWalk(group, newMessage(reaction, 11, observer, false, 0, observerId, "observer"), reaction)
+	deliverOneThroughAWalk(group, newMessage(reaction, 11, observer, nil, false, 0, observerId, "observer"), reaction)
+	deliverOneThroughAWalk(group, newMessage(reaction, 11, observer, nil, false, 0, observerId, "observer"), reaction)
 	// and the member's identical one, which rebuilds the same target a third time
-	deliverOneThroughAWalk(group, newMessage(reaction, 12, member, false, 0, memberId, "member"), reaction)
+	deliverOneThroughAWalk(group, newMessage(reaction, 12, member, nil, false, 0, memberId, "member"), reaction)
 
 	held := heldIn(t, group, lineId)
 	if len(held.Reactions) != 1 || !bytes.Equal(held.Reactions[0].SenderHandle, member) {

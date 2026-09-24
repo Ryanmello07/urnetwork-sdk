@@ -85,6 +85,28 @@ func (self *streamIndexReserver) HighWater(stream messagegroup.StreamKey) (uint6
 	return highWater, nil
 }
 
+// SeedTo raises this stream's floor to `floor` without allocating, and answers the high water the
+// row carries afterwards. See [StreamStore.SeedStreamIndex] for what a seed is and why ledger item
+// 245 needs one.
+//
+// IT IS NOT PART OF messagegroup.StreamIndexReserver AND IT MUST NOT BE. That interface is the
+// surface a SENDER RATCHET allocates through, and a ratchet has no business moving a floor; the
+// one caller is urmessage's receiving walk, which reaches it through an optional interface of its
+// own and goes on working against a reserver that does not have it. The same flattening and the
+// same sentinel mapping are used, because a second reading of either is this file's own header's
+// defect.
+func (self *streamIndexReserver) SeedTo(stream messagegroup.StreamKey, floor uint64) (uint64, error) {
+	parts, err := self.keyOctets(stream)
+	if err != nil {
+		return 0, self.classify(err)
+	}
+	highWater, err := self.store.SeedStreamIndex(parts[0], parts[1], floor)
+	if err != nil {
+		return 0, self.classify(err)
+	}
+	return highWater, nil
+}
+
 // keyOctets is THE flattening: a StreamKey onto section 8.2's positional []byte parameters, in
 // the key type's own declaration order.
 //

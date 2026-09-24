@@ -285,7 +285,11 @@ func TestTheMessageInfoCarriesEveryFieldUrmessageKeeps(t *testing.T) {
 	message := &urmessage.Message{
 		RecordId:     7,
 		SenderHandle: []byte{0x00, 0x11, 0xAB, 0xFF, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
-		Mine:         true,
+		// AND AN IDENTITY THAT IS NOT THE HANDLE, deliberately: the two are the field pair
+		// msgrepo ledger item 245 exists to keep apart, and a fixture that gave them the same
+		// octets would pass a projection that carried the handle twice.
+		SenderIdentity: bytes.Repeat([]byte{0x9E}, 32),
+		Mine:           true,
 		// "observer" and not "member", because it is the one value of this field a caller must
 		// ACT on: a projection that carried the field and answered "" for it would pass the
 		// non-zero check with any other role in the fixture and would hide every observer.

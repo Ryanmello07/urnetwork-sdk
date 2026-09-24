@@ -209,13 +209,13 @@ func (self *roleWorld) deliver(receiver *roleMember, page ...*sealed) error {
 	if err != nil {
 		self.t.Fatalf("%s's sender handle: %v", receiver.name, err)
 	}
-	leaves, err := group.leavesLocked()
-	if err != nil {
-		self.t.Fatalf("%s's leaves: %v", receiver.name, err)
-	}
+	group.ownHandles[own] = true
 	walk := &pageWalk{
-		own:          own,
-		leaves:       leaves,
+		// the same three lines [Group.Receive] writes; the handle table is per record epoch
+		// (ledger item 245) and [Group.walkLeavesLocked] fills it as the walk meets each epoch.
+		own:          group.ownHandles,
+		ownNow:       own,
+		leaves:       map[uint64]map[[16]byte]uint32{},
 		opened:       []*Message{},
 		from:         group.cursor,
 		reached:      group.cursor,
