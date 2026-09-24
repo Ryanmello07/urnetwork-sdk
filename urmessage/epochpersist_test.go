@@ -125,7 +125,7 @@ func TestAnEpochChangeIsPersistedAndTheRestartComesBackAtItAndSeals(t *testing.T
 		t.Fatalf("the handle stands at epoch %d after the ingest, want 2", epoch)
 	}
 	// what the ingest site will do: a session over the new epoch, then the door.
-	session, err := messagegroup.NewGroupSession(restored.handle, restored.pqSecret, restored.groupHandleKey,
+	session, err := messagegroup.NewGroupSession(restored.handle, restored.pqSecretLocked(), restored.groupHandleKey,
 		revived.device.reserver, revived.device.nowMs, restoreTestNonce())
 	if err != nil {
 		t.Fatalf("the session at epoch 2: %v", err)
@@ -133,6 +133,10 @@ func TestAnEpochChangeIsPersistedAndTheRestartComesBackAtItAndSeals(t *testing.T
 	restored.mutex.Lock()
 	restored.session.Close()
 	restored.session = session
+	// and what the ingest site ALSO does since ledger item 251's ruling 40: file the epoch's own
+	// pq_secret, so the record the door writes carries a table covering the epoch it names. This
+	// world does not rotate, so the value is the one the group already held.
+	restored.filePqSecretLocked(restored.handle.Epoch(), restored.pqSecretLocked())
 	err = restored.enterEpochLocked()
 	restored.mutex.Unlock()
 	if err != nil {
@@ -255,7 +259,7 @@ func TestAnUnopenedGroupEntersItsEpochWithoutWritingARecord(t *testing.T) {
 		id:             groupId,
 		handle:         handle,
 		groupHandleKey: make([]byte, 32),
-		pqSecret:       make([]byte, messagegroup.PqSecretBytes),
+		pqSecrets:      map[uint64][]byte{handle.Epoch(): make([]byte, messagegroup.PqSecretBytes)},
 	}
 	if err := unopened.enterEpochLocked(); err != nil {
 		t.Fatalf("enterEpochLocked on an unopened group: %v", err)
@@ -293,7 +297,7 @@ func TestTheDoorReportsAStoreThatWouldNotTakeTheRecord(t *testing.T) {
 		id:             groupId,
 		handle:         handle,
 		groupHandleKey: make([]byte, 32),
-		pqSecret:       make([]byte, messagegroup.PqSecretBytes),
+		pqSecrets:      map[uint64][]byte{handle.Epoch(): make([]byte, messagegroup.PqSecretBytes)},
 		opened:         true,
 	}
 	// the control: the same door over the same store, open, takes the record.

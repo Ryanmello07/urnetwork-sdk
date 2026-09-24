@@ -59,6 +59,51 @@ var (
 	// commit has fallen off the group and cannot read the next message.
 	ErrCommitIngest = errors.New("urmessage: this group received a membership-change commit it could not follow into the next epoch")
 
+	// ── the three ways a rotated pq_secret fails to arrive (ledger item 251's ruling 38) ───
+	//
+	// THEY ARE THREE SENTINELS AND NOT ONE, AND THAT IS THE RULING RATHER THAN A PREFERENCE.
+	// The day a device wrap carries key material, a member that never opens a readable one
+	// goes dark in BOTH directions and permanently: read_key[n+1] and write_key[n+1] both hang
+	// off storage_root[n+1], and the server verifies req_auth before any AEAD is reached, so
+	// what the field sees is REASON_REJECTED with nothing readable behind it. The orphan case
+	// -- a fan-out from a committer that LOST its CAS race, addressed to an epoch that never
+	// opened under its secret -- "must be a typed refusal separable from this one, or the two
+	// are indistinguishable in the field". They have three different repairs: the orphan needs
+	// none and resolves at the next commit, the unreadable wrap is a wrong key or an altered
+	// record, and the missing wrap is item 132's omission and is the one an operator must act
+	// on.
+	//
+	// Each has a counter beside it on [Stats], because a sentinel is only visible to a caller
+	// that is holding the error and cannot answer "is this happening".
+
+	// NO WRAP ADDRESSED TO THIS DEVICE ARRIVED for an epoch that was opened with a pq_secret
+	// this device does not hold. It is item 132's omission attack arriving as a diagnosis: a
+	// committer that leaves one member out of the fan-out while declaring the matching
+	// expected_wrap_count produces a group that is writable, self-consistent to the server and
+	// permanently unreadable for the omitted member, and this is the omitted member saying so.
+	//
+	// IT IS NOT REACHED WHEN THE COMMITTER SIMPLY DID NOT ROTATE. A commit built before
+	// rotation opens its epoch with the secret every member already holds, which reproduces
+	// that epoch's own H(epoch_keys) and is taken; see [Group.resolvePqSecretLocked].
+	ErrNoWrapForEpoch = errors.New("urmessage: no device wrap for this epoch reached this device, so it holds neither of that epoch's keys and can neither read nor write in it")
+
+	// A WRAP AT THIS DEVICE'S OWN wrap_target_handle ARRIVED AND DID NOT OPEN. X-Wing's
+	// ML-KEM-768 half uses implicit rejection -- a ciphertext produced for another key
+	// decapsulates successfully, to a pseudorandom secret -- so this is always the Poly1305 tag
+	// and never a decapsulation error, and it means the record was sealed to a different
+	// encapsulation key, at a different epoch, or was altered.
+	ErrWrapUnreadable = errors.New("urmessage: a device wrap addressed to this device did not open, so this device holds no pq_secret for the epoch it was for")
+
+	// A WRAP ADDRESSED TO THIS DEVICE OPENED, FOR AN EPOCH THAT WAS THEN OPENED BY SOMEBODY
+	// ELSE'S COMMIT. Ruling 37 has the fan-out submitted at epoch n, staged and pre-merge, so a
+	// committer writes its wraps and then loses the race for the commit -- which leaves wraps
+	// addressed to an epoch that never opened under their secret. This build PRODUCES that
+	// state by design, which is why the detector ships with the rotation rather than after it.
+	//
+	// IT IS NOT A FAULT AND IT REPAIRS ITSELF: the winner's own wrap is in the same page, and
+	// this sentinel is reached only when no candidate at all reproduced the epoch's digest.
+	ErrOrphanWrap = errors.New("urmessage: the device wraps this device opened for this epoch are the fan-out of a commit that lost its race, and none of them carries the secret this epoch was opened with")
+
 	// The role model refused a commit, on either arm: MASTER §11's "refused by the committing
 	// client, and rejected by every receiving client on validation". On RECEIPT it is an ingested
 	// commit this device would not follow (ledger item 242's R1, [authorizeCommit] on every

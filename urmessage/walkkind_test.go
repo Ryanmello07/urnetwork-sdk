@@ -105,7 +105,7 @@ func newKindWalk(t *testing.T) *kindWalk {
 		id:             append([]byte(nil), groupId...),
 		handle:         bobHandle,
 		groupHandleKey: groupHandleKey,
-		pqSecret:       pqSecret,
+		pqSecrets:      map[uint64][]byte{bobHandle.Epoch(): pqSecret},
 		session:        bobSession,
 		epoch:          bobHandle.Epoch(),
 		opened:         true,

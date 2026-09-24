@@ -72,7 +72,7 @@ func TestAfterAnEpochChangeEveryTrackedKeyNamesTheNewEpochAndTheOldOnesArePrinte
 		id:             append([]byte(nil), groupId...),
 		handle:         handle,
 		groupHandleKey: groupHandleKey,
-		pqSecret:       pqSecret,
+		pqSecrets:      map[uint64][]byte{1: pqSecret},
 		session:        session,
 		epoch:          1,
 		opened:         true,
@@ -120,7 +120,11 @@ func TestAfterAnEpochChangeEveryTrackedKeyNamesTheNewEpochAndTheOldOnesArePrinte
 	if err := group.handle.ApplyCommit(processed); err != nil {
 		t.Fatalf("ApplyCommit: %v", err)
 	}
-	if err := group.session.AdvanceEpoch(group.pqSecret); err != nil {
+	// the harness files what production's publishCommitLocked files, at the epoch it is entering,
+	// so the table and the session agree about the epoch below this line as they do above it.
+	carried := group.pqSecretLocked()
+	group.filePqSecretLocked(group.handle.Epoch(), carried)
+	if err := group.session.AdvanceEpoch(carried); err != nil {
 		t.Fatalf("AdvanceEpoch: %v", err)
 	}
 	newEpoch := group.handle.Epoch()

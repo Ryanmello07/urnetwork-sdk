@@ -122,7 +122,12 @@
 // three `connect/messagegroup`'s own join test names, plus the group id:
 //
 //   - the MLS Welcome and ratchet tree, which is ledger 44a's named hand-off;
-//   - `pq_secret`, drawn by [messagegroup.NewPqSecret], whose DELIVERY is M1-20 / m1 task 14;
+//   - `pq_secret` AT THE EPOCH THE JOINER IS ADMITTED AT, drawn by [messagegroup.NewPqSecret].
+//     THIS IS THE ONLY EPOCH THE INVITE CARRIES ONE FOR, and since ledger item 251 it is no
+//     longer the only epoch there is: every later epoch draws its own and delivers it in that
+//     epoch's device wrap (pqepoch.go), which is m1 task 14's carrier built. The Invite is
+//     still the founding delivery -- MASTER section 7's own, out of band -- because the leaf a
+//     joiner will occupy does not exist when the fan-out that opens its epoch is sealed;
 //   - `group_handle_key`, computed by `GroupHandleKey(StorageRoot(...))`, whose carrier is M1-2;
 //   - the 32 octet group id the server rows are keyed by.
 //

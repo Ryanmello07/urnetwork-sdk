@@ -1023,6 +1023,10 @@ func urnet_message_group_stats(self C.uint64_t) *C.char {
 		Unopened:        stats.Unopened,
 		Omitted:         stats.Omitted,
 		SkippedClass:    stats.SkippedClass,
+		WrapOpened:      stats.WrapOpened,
+		WrapMissing:     stats.WrapMissing,
+		WrapUnreadable:  stats.WrapUnreadable,
+		WrapOrphaned:    stats.WrapOrphaned,
 		GapMalformed:    stats.GapMalformed,
 		GapUnsupported:  stats.GapUnsupported,
 		GapOutOfWindow:  stats.GapOutOfWindow,
@@ -1536,6 +1540,22 @@ type messageGroupStats struct {
 	Unopened        uint64 `json:"unopened"`
 	Omitted         uint64 `json:"omitted"`
 	SkippedClass    uint64 `json:"skipped_class"`
+	// THE DEVICE WRAP THAT CARRIES pq_secret[n+1] (ledger item 251, rulings 37 and 38). Four
+	// numbers for four states, three of them failures with a typed sentinel each. The day a wrap
+	// carries key material a member that never opens a readable one goes dark in BOTH directions
+	// and permanently, with an undiagnosable REASON_REJECTED -- so a caller that can only learn
+	// about it by holding an error cannot answer "is this happening to my users". These are what
+	// it reads instead.
+	//
+	// wrap_opened rises by one per epoch change this device did not commit itself, and a zero
+	// across a commit is the first thing to look at. wrap_missing is item 132's omission measured
+	// at the victim; wrap_unreadable is a wrap at this device's own handle that did not open; and
+	// wrap_orphaned is the fan-out of a committer that LOST its CAS race, which repairs itself --
+	// a number there with no wrap_missing beside it is the healthy reading.
+	WrapOpened     uint64 `json:"wrap_opened"`
+	WrapMissing    uint64 `json:"wrap_missing"`
+	WrapUnreadable uint64 `json:"wrap_unreadable"`
+	WrapOrphaned   uint64 `json:"wrap_orphaned"`
 	// Records that OPENED and became a GAP rather than a message, counted apart because they are
 	// two different sentences about the group and only one of them is anybody's fault.
 	//

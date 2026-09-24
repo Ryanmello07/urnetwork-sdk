@@ -92,7 +92,17 @@ var epochKeyProducerSites = map[string]string{
 	"Open|bootstrap.WriteKey":              "write_key[0], §4.3.2's bootstrap key, which certifies the founding commit and is NOT what it opens",
 	"publishCommitLocked|message.WriteKey": "the write key of the epoch the staged commit opens, off the staged exporter",
 	"publishCommitLocked|message.ReadKey":  "the read key of the same",
-	"Receive|next.ReadKey":                 "the read key §4.3.8's req_auth is computed under, re-derived when the walk crosses an epoch",
+	"matchesEpochDigestLocked|message.WriteKey": "THE RECEIVER'S SIDE OF THE SAME PAIR, derived to " +
+		"be COMPARED and never to be used. Ledger item 251's rotation makes a receiver ask which " +
+		"pq_secret the epoch it is entering was opened with, and the only authenticated answer is " +
+		"H(epoch_keys) inside the commit's own attachment -- so the candidate secret is run through " +
+		"the same three steps the committer took and the digest is recomputed. The keys live for the " +
+		"length of that one call and are erased inside it; see the sink entries below, which is where " +
+		"that claim is held rather than asserted here.",
+	"matchesEpochDigestLocked|message.ReadKey": "the read key of the same comparison, for the same " +
+		"call's length. Both halves are in the digest's preimage, LP-framed, so a candidate that " +
+		"reproduced only one of them would not reproduce the digest.",
+	"Receive|next.ReadKey": "the read key §4.3.8's req_auth is computed under, re-derived when the walk crosses an epoch",
 }
 
 // epochKeySink is one entry in the disposition below: WHICH VALUES a site may receive, and why.
@@ -157,6 +167,40 @@ var epochKeySinks = map[string]epochKeySink{
 			"mention the keys -- so it is tainted by DERIVATION and not by CONTENT, and no arrangement " +
 			"of this analysis will separate the two. That is the whole reason the sentence 'the record " +
 			"carries no key' is a MEASUREMENT over the sealed octets and not a clause of this gate.",
+	},
+
+	"matchesEpochDigestLocked|call message.EpochKeysDigest": {
+		carries: []string{"writeKey", "readKey"},
+		why: "THE COMPARISON ITSELF, and it is the one place in this package a pair of epoch keys " +
+			"is used for something other than opening or authorising an epoch. It is SHA-256 over " +
+			"\"URmessage/v1/epochkeys\" | LP(group_id) | u64(opens_epoch) | LP(write_key) | LP(read_key), " +
+			"the same function the server recomputes in §5.1 check 3 -- so what leaves this call is a " +
+			"digest and never a key. It is what binds item 132's wrap rows to the epoch marker: a " +
+			"candidate pq_secret that reproduces the digest is the secret this epoch was opened with.",
+	},
+	"matchesEpochDigestLocked|call zeroizeState": {
+		carries: []string{"writeKey", "readKey"},
+		why: "THE ERASE. Both halves of the pair are function locals with no field to reach them, " +
+			"so this call is the only thing that can, and it runs before the answer is returned " +
+			"rather than in a defer -- the digest has already been computed by then and a deferred " +
+			"erase would leave the pair live across the comparison for no reason. THE THIRD ERASE " +
+			"AT THIS SITE IS THE STORAGE ROOT AND IT IS NOT LISTED, because `messagegroup.StorageRoot` " +
+			"is not in this gate's producer net: `root` is untainted here and listing it would be an " +
+			"entry naming a value this census does not find, which the both-ways hold refuses. It is " +
+			"erased all the same, at the same line, and that is a fact about the code rather than " +
+			"about this gate.",
+	},
+	"matchesEpochDigestLocked|call subtle.ConstantTimeCompare": {
+		carries: []string{"computed"},
+		why: "the two DIGESTS being compared -- `computed` is tainted by derivation from the pair " +
+			"and is thirty-two octets of SHA-256 output, not a key. Constant time because guardrail " +
+			"G8 sends every comparison over a value derived from key material in this tree through it.",
+	},
+	"matchesEpochDigestLocked|return": {
+		carries: []string{"computed"},
+		why: "the VERDICT, a bool. `computed` is listed because the census reads the whole return " +
+			"statement and the expression mentions it; what crosses this boundary is the answer to " +
+			"\"is this candidate the epoch's own secret\", and both keys are already erased above it.",
 	},
 
 	"Open|literal protocol.CreateGroupRequest.BootstrapWriteKey": {

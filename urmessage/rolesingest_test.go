@@ -141,7 +141,7 @@ func (self *roleWorld) enroll(name string, dev *crossProcessDevice, handle messa
 		id:             append([]byte(nil), self.groupId...),
 		handle:         handle,
 		groupHandleKey: self.groupHandleKey,
-		pqSecret:       self.pqSecret,
+		pqSecrets:      map[uint64][]byte{handle.Epoch(): self.pqSecret},
 		session:        session,
 		epoch:          handle.Epoch(),
 		opened:         true,
@@ -182,6 +182,10 @@ func (self *roleWorld) publish(committer *roleMember, commit []byte) *sealed {
 		self.t.Fatalf("%s sealing its commit record: %v", committer.name, err)
 	}
 	newEpoch := committer.handle.Epoch()
+	// the harness files what production's publishCommitLocked files, at the epoch it is entering.
+	// This world does not rotate -- its whole subject is roles -- so the value is the same one,
+	// and what the line buys is that the table covers the epoch enterEpochLocked persists.
+	committer.group.filePqSecretLocked(newEpoch, self.pqSecret)
 	if err := committer.session.AdvanceEpoch(self.pqSecret); err != nil {
 		self.t.Fatalf("%s advancing its session to epoch %d: %v", committer.name, newEpoch, err)
 	}

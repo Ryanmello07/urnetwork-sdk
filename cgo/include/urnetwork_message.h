@@ -348,7 +348,8 @@ bool urnet_message_group_id(uint64_t self, uint8_t* out, int32_t* inout_len);
 uint64_t urnet_message_group_epoch(uint64_t self);
 bool urnet_message_group_is_open(uint64_t self);
 /* what this group has SEEN, as json: fetched, opened, skipped_ceremony, skipped_own, opened_own,
- * own_without_copy, skipped_seen, unopened, omitted, skipped_class, gap_malformed, gap_unsupported,
+ * own_without_copy, skipped_seen, unopened, omitted, skipped_class, wrap_opened, wrap_missing,
+ * wrap_unreadable, wrap_orphaned, gap_malformed, gap_unsupported,
  * gap_out_of_window, opened_past_epoch, hidden_observer, observer_reaction_refused,
  * role_undeterminable, ingested,
  * commit_refused, commit_refused_own, failed_open, submitted, rebound, pages, unattested.
@@ -371,6 +372,17 @@ bool urnet_message_group_is_open(uint64_t self);
  * counts records that opened and whose sender's role could not be read: it MUST STAY ZERO, because
  * the role is read off the same handle the open read, and it is not gap_out_of_window's
  * counterpart -- a record no schedule reaches never opens and is never asked about.
+ * wrap_opened, wrap_missing, wrap_unreadable and wrap_orphaned are the epoch device wrap that
+ * carries this group post-quantum secret for the epoch a commit opens (ledger item 251).
+ * wrap_opened rises by one per epoch change this device did not commit itself, and a zero
+ * across a commit is the first thing to look at. The other three are FAILURES with a typed
+ * error each, and they are three numbers rather than one because they have three repairs: a
+ * wrap that never arrived is a committer that left this device out of the fan-out; one that did
+ * not open was sealed to a key this device does not hold; and wrap_orphaned is the fan-out of a
+ * committer that LOST its race to open the epoch, which repairs itself -- a number there with
+ * no wrap_missing beside it is the healthy reading. A device with wrap_missing or
+ * wrap_unreadable above zero can neither read nor write at that epoch and says so by name,
+ * rather than meeting an undiagnosable refusal from the server.
  * ingested counts membership-change commits this device followed
  * into the next epoch; commit_refused counts the ones its receiving-side role check refused --
  * a number there is a member that committed what its role does not permit, and a group this

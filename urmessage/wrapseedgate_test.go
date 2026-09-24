@@ -157,6 +157,12 @@ var wrapSeedProducerSites = map[string]string{
 		"function whose loop touches the seed's own array one part at a time.",
 	"DecapsulateToOwnLeaf|self.wrapSeed": "the field read, under [Device.mutex], on the one path " +
 		"that uses the seed for what it is for.",
+	"openWrapToOwnLeaf|self.wrapSeed": "the field read, under the same mutex, on the SECOND path " +
+		"that uses it for what it is for: opening a device wrap addressed to this leaf, which is " +
+		"ledger item 243's receive leg. Two paths and not one because the wrap door needs the " +
+		"PRIVATE KEY and not a shared secret -- see its own header -- and each is censused where " +
+		"it stands rather than through a shared helper, so a door that stopped taking the mutex " +
+		"or stopped checking the length is a site this gate reads on its own terms.",
 	"Close|self.wrapSeed": "the field read on the ERASE path. It is a producer like any other read " +
 		"of the field, and the sink it reaches is [zeroizeState].",
 
@@ -361,6 +367,33 @@ var wrapSeedSinks = map[string]wrapSeedSink{
 			"party the ciphertext was addressed to. The SEED is not at this return and an entry " +
 			"that listed it would be a different method.",
 	},
+	"openWrapToOwnLeaf|call messagegroup.XwingKeyGenFromSeed": {
+		carries: []string{"self.wrapSeed"},
+		why: "THE SAME SPEND, FOR THE WRAP DOOR. Ledger item 243's receive leg opens a device wrap " +
+			"addressed to this leaf, and `messagegroup.OpenWrapBody` takes the private key rather " +
+			"than a shared secret -- because the KEM's answer is not the answer: ML-KEM-768 uses " +
+			"implicit rejection, so a ciphertext for another leaf decapsulates SUCCESSFULLY, and " +
+			"everything that separates mine from not-mine (the envelope comparison, then the " +
+			"Poly1305 tag) lives above the KEM inside that call. Re-expanded on every call for " +
+			"DecapsulateToOwnLeaf's reason, unchanged.",
+	},
+	"openWrapToOwnLeaf|call messagegroup.OpenWrapBody": {
+		carries: []string{"private"},
+		why: "the expanded pair reaching the wrap door. `private` is tainted by DERIVATION exactly " +
+			"as it is at the decapsulation site above, and correctly: an expanded X-Wing private " +
+			"key IS the seed's content. The other six arguments are wire values off the record -- " +
+			"the group id, the epoch, the two type octets, the wrap_target_handle and the body -- " +
+			"and none of them is tainted, which is what this entry's carries list says.",
+	},
+	"openWrapToOwnLeaf|return": {
+		carries: []string{"private"},
+		why: "THE WRAP'S ENVELOPE AND PAYLOAD LEAVING THIS METHOD, and `private` is listed because " +
+			"the census reads the whole return statement and the expression mentions it. What " +
+			"crosses this boundary is OpenWrapBody's two results: an eleven-octet cleartext " +
+			"envelope, and the pq_secret the wrap carried -- which is key material, is the caller's " +
+			"to file in [Group.pqSecrets], and is erased by that table's own discipline. THE SEED " +
+			"IS NOT AT THIS RETURN and an entry that listed it would be a different method.",
+	},
 	"Close|call zeroizeState": {
 		carries: []string{"self.wrapSeed"},
 		why: "THE ERASE. [zeroizeState] overwrites the one array [NewDevice] held, IN PLACE, under " +
@@ -400,6 +433,11 @@ var wrapSeedCountedNotCarriedSites = map[string]string{
 	"DecapsulateToOwnLeaf|len self.wrapSeed": "the EMPTY-seed guard, which is a store written " +
 		"before the seed was retained or a device that has been Closed. It refuses by name " +
 		"([ErrNoDeviceWrapKey]) rather than expanding zero octets into a valid-looking key.",
+	"openWrapToOwnLeaf|len self.wrapSeed": "the SAME empty-seed guard on the wrap door, and it is " +
+		"a site of its own rather than a shared one because this census keys on the enclosing " +
+		"function: a door that stopped making the check would leave the other door's entry still " +
+		"describing the tree. It refuses by the same name for the same reason -- 32 zero octets " +
+		"expand into a well formed pair that opens nothing and reports nothing.",
 	"encodeStateRecord|len parts": "the framing's own arity: the 255 refusal, and the part count " +
 		"written into the frame's header as one byte. It counts the RECORD's parts and not the " +
 		"seed's octets, and the refusal beside it formats that count.",

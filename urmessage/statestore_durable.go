@@ -276,9 +276,47 @@ type GroupRecord struct {
 	// The 32 octet group id the server keys its rows by.
 	GroupId []byte
 
-	// §7's pq_secret, drawn by [messagegroup.NewPqSecret] at the founding and carried to the
-	// joiner in the [Invite].
+	// §7's pq_secret AT THE EPOCH THIS RECORD NAMES, drawn by [messagegroup.NewPqSecret] and
+	// carried to a joiner in the [Invite].
+	//
+	// IT USED TO BE THE GROUP'S ONE SECRET FOR ITS WHOLE LIFE and this field is what is left of
+	// that reading. Ledger item 243 ruled the lifetime value in 2026-09-18 "on the explicit
+	// condition that rotating it is a prerequisite of shipping REMOVAL", and item 251's ruling 40
+	// is that condition coming due: a removed member that keeps the post-quantum half of every
+	// future epoch's storage root has not been removed from a quantum adversary at all. So the
+	// state that matters is [GroupRecord.PqSecrets] below, and this field is the CURRENT epoch's
+	// entry written a second time.
+	//
+	// WHY IT IS STILL WRITTEN, which is the whole of what an OLD STORE does. A record written
+	// before rotation has five parts and this field is part two; a record written by this build
+	// has six, and the sixth is the table. The reader takes both arities: on a five-part record it
+	// files this one scalar at the epoch the record names and leaves connect's group-lifetime
+	// premise standing, which answers every past epoch out of that one value -- the behaviour of
+	// every build before this one, exactly. So a device whose disk was written by the deployed
+	// alpha restores, opens its backlog and keeps working, and the day it ingests a rotated
+	// commit the premise is refuted by the octets rather than by a version.
+	//
+	// WHAT IT DOES NOT BUY IS A DOWNGRADE. A build from before this commit meeting a six-part
+	// record refuses THAT GROUP by name (`ErrStateStoreFormat`, "not one this build wrote"),
+	// because its reader tests `len(parts) != 5`. That is loud rather than silent -- it never
+	// mis-reads the table as some other field -- and it is stated here rather than discovered.
 	PqSecret []byte
+
+	// pq_secret PER EPOCH: item 251's ruling 40, and the value a restart has to come back holding
+	// or it opens nothing above the epoch it was written at.
+	//
+	// ASCENDING BY EPOCH, and the order is part of the value rather than tidiness: the record is
+	// one frame of appended parts, and a map's iteration order would make two writes of one
+	// unchanged table two different files for the store's rename dance to pay for.
+	//
+	// BOUNDED BY [messagegroup.PastEpochWindow] by the writer, not by the reader, for the same
+	// reason connect bounds its own: an entry further behind than that can serve no open any
+	// schedule on this device would admit, so persisting it is persisting a retired epoch's
+	// post-quantum secret for nothing.
+	//
+	// EMPTY ON A RECORD WRITTEN BEFORE ROTATION, which is how the reader tells the two shapes
+	// apart without a version octet: see [DurableStateStore.GroupRecords].
+	PqSecrets []EpochPqSecret
 
 	// group_handle_key: the epoch ZERO storage root's expansion. It never moves, which is why it
 	// is stored once rather than per epoch.
@@ -297,6 +335,99 @@ type GroupRecord struct {
 	// never opened would be refused by the server at its first send, with a REASON the caller
 	// would have to decode; carrying the bit means [Group.Send] refuses it by name instead.
 	Opened bool
+}
+
+// EpochPqSecret is one row of [GroupRecord.PqSecrets]: an epoch and the post-quantum half its
+// storage root was extracted from.
+type EpochPqSecret struct {
+	Epoch    uint64
+	PqSecret []byte
+}
+
+// sortEpochPqSecrets puts a table in ascending epoch order, in place.
+//
+// AN INSERTION SORT AND NOT sort.Slice, because the table is at most
+// [messagegroup.PastEpochWindow] + 1 rows and is almost always already sorted -- it is built by
+// walking a map whose keys are a short run of consecutive epochs -- so the comparison function, the
+// reflection and the interface allocation would all be spent on 33 rows that are in order.
+func sortEpochPqSecrets(rows []EpochPqSecret) {
+	for at := 1; at < len(rows); at += 1 {
+		row := rows[at]
+		back := at - 1
+		for 0 <= back && row.Epoch < rows[back].Epoch {
+			rows[back+1] = rows[back]
+			back -= 1
+		}
+		rows[back+1] = row
+	}
+}
+
+// encodePqSecretTable is [GroupRecord.PqSecrets] as the one octet string part six carries:
+// u64(epoch) ‖ u8(len) ‖ pq_secret, repeated, big-endian.
+//
+// IT IS ONE PART AND NOT ONE PART PER ROW, and that is not a saving. The record framing's own
+// arity is a single octet ([encodeStateRecord] refuses 255 parts), so a table spread over parts
+// would put a 253-epoch ceiling on this group's history inside a frame whose reader could not say
+// which limit it had hit. One part is a table with its own length discipline, and the arity of the
+// record stays a shape rather than a budget.
+//
+// THE LENGTH IS A u8 AND THE WIDTH IS NOT CHECKED AGAINST [messagegroup.PqSecretBytes] HERE, which
+// is deliberate and is a rule this store already follows for every other secret it writes: the
+// store frames octets and the party that knows what a value has to be is the one that uses it.
+// A 32-octet check here would be a SECOND copy of connect's own -- NewGroupSession and
+// InstallPqSecret both refuse a pq_secret that is not [messagegroup.PqSecretBytes], by name, at the
+// moment it would become a storage root -- and two copies of one width is one of them drifting
+// when the suite moves. What this refuses is what the FRAMING cannot carry: an empty value, which
+// would make a row indistinguishable from a row that is not there, and one past 255, which the
+// length octet cannot express.
+func encodePqSecretTable(rows []EpochPqSecret) ([]byte, error) {
+	encoded := make([]byte, 0, len(rows)*(8+1+messagegroup.PqSecretBytes))
+	for _, row := range rows {
+		if len(row.PqSecret) == 0 || 255 < len(row.PqSecret) {
+			return nil, fmt.Errorf("%w: the pq_secret for epoch %d is %d octets and a row's length prefix is one octet and may not be zero",
+				ErrStateStoreFormat, row.Epoch, len(row.PqSecret))
+		}
+		var epochOctets [8]byte
+		binary.BigEndian.PutUint64(epochOctets[:], row.Epoch)
+		encoded = append(encoded, epochOctets[:]...)
+		encoded = append(encoded, byte(len(row.PqSecret)))
+		encoded = append(encoded, row.PqSecret...)
+	}
+	return encoded, nil
+}
+
+// decodePqSecretTable reads what [encodePqSecretTable] wrote, and refuses anything else.
+//
+// A SHORT TAIL IS A REFUSAL AND NEVER A TABLE THAT ENDS EARLY. A restore that silently dropped the
+// last rows of this table would be a device that comes back holding the wrong post-quantum half
+// for its most recent epochs -- ruling 40's own defect, arriving through the reader -- and the
+// symptom is an AEAD tag with no diagnosis anywhere. The whole part parses or the group refuses.
+func decodePqSecretTable(encoded []byte) ([]EpochPqSecret, error) {
+	rows := []EpochPqSecret{}
+	at := 0
+	for at < len(encoded) {
+		if len(encoded)-at < 9 {
+			return nil, fmt.Errorf("%w: the pq_secret table has %d octets left and a row's head is 9",
+				ErrStateStoreFormat, len(encoded)-at)
+		}
+		epoch := binary.BigEndian.Uint64(encoded[at : at+8])
+		width := int(encoded[at+8])
+		at += 9
+		if len(encoded)-at < width {
+			return nil, fmt.Errorf("%w: the pq_secret for epoch %d says %d octets and %d are left",
+				ErrStateStoreFormat, epoch, width, len(encoded)-at)
+		}
+		if width == 0 {
+			return nil, fmt.Errorf("%w: the pq_secret for epoch %d is zero octets, which is a row that is not there",
+				ErrStateStoreFormat, epoch)
+		}
+		rows = append(rows, EpochPqSecret{
+			Epoch:    epoch,
+			PqSecret: append([]byte(nil), encoded[at:at+width]...),
+		})
+		at += width
+	}
+	return rows, nil
 }
 
 // ── the record format ────────────────────────────────────────────────────────────────────────
@@ -1126,8 +1257,45 @@ func (self *DurableStateStore) PutGroupRecord(record *GroupRecord) error {
 	if record.Opened {
 		flags[0] = 1
 	}
+	// THE SIXTH PART, AND A RECORD WITH NO TABLE IS STILL WRITTEN WITH ONE -- empty. The reader
+	// tells the shapes apart by ARITY and not by content, so a six-part record whose table is
+	// empty is a record this build wrote about a group it holds no per-epoch secret for, while a
+	// five-part record is a record written before rotation. Collapsing the two would make "the
+	// table is empty" and "there was never a table" one state, and the first is a bug in this
+	// package while the second is the alpha's disk.
+	//
+	// AND A CALLER THAT SUPPLIED ONLY THE SCALAR GETS THE ROW THAT SCALAR IS. [GroupRecord] is an
+	// exported type and the field it used to have one of is still there; a caller filling in
+	// PqSecret and leaving PqSecrets nil has said exactly one true thing -- "this group's secret
+	// at this epoch is these octets" -- and writing that as an EMPTY table would produce a record
+	// this package's own restore then refuses, which is a footgun built out of a compatibility
+	// field. The two shapes are one row either way.
+	rows := record.PqSecrets
+	if rows == nil {
+		rows = []EpochPqSecret{{Epoch: record.Epoch, PqSecret: record.PqSecret}}
+	}
+	// A TABLE THAT DOES NOT COVER THE RECORD'S OWN EPOCH IS REFUSED HERE AND NOT AT THE READ.
+	// A group restored without pq_secret at the epoch its session is built at seals every record
+	// under a storage root no peer reproduces, silently -- ruling 40's defect with a restart in
+	// front of it -- and the write is the last moment the caller that could fix it is still on the
+	// stack. The read refuses it too, because a file can be hand-edited between the two.
+	covered := false
+	for _, row := range rows {
+		if row.Epoch == record.Epoch {
+			covered = true
+			break
+		}
+	}
+	if !covered {
+		return fmt.Errorf("%w: this group record stands at epoch %d and its pq_secret table holds %d row(s), none of them that epoch's",
+			ErrStateStoreFormat, record.Epoch, len(rows))
+	}
+	table, err := encodePqSecretTable(rows)
+	if err != nil {
+		return err
+	}
 	return self.writeRecord(self.groupRecordPath(record.GroupId), stateKindGroupRecord,
-		record.GroupId, record.PqSecret, record.GroupHandleKey, epochOctets[:], flags)
+		record.GroupId, record.PqSecret, record.GroupHandleKey, epochOctets[:], flags, table)
 }
 
 // GroupRecords walks the group directory and answers every record it holds.
@@ -1167,16 +1335,40 @@ func (self *DurableStateStore) GroupRecords() ([]*GroupRecord, error) {
 			}
 			return nil, err
 		}
-		if len(parts) != 5 || len(parts[3]) != 8 || len(parts[4]) != 1 {
+		// FIVE PARTS OR SIX, AND THE FIVE IS THE DEPLOYED ALPHA'S DISK. It is the same arity
+		// switch [DurableStateStore.GetDeviceIdentity] already takes for the x-wing seed, and it
+		// is what makes item 243's rotation shippable at all: a restore that refused a record
+		// written before the table is a device that can never start again, and every group on the
+		// alpha was written before it.
+		//
+		// A FIVE-PART RECORD LEAVES [GroupRecord.PqSecrets] NIL, and nil is the signal rather than
+		// an accident: a six-part record whose table happens to be empty decodes to an EMPTY
+		// SLICE, so "this build wrote no rows" and "there was never a table" stay two states. The
+		// first is a bug in this package and the second is the alpha's disk, and a reader that
+		// collapsed them would answer the bug with the compatibility path. [Device.restoreOne] is
+		// the one place that distinction is acted on.
+		if len(parts) != 5 && len(parts) != 6 {
+			return nil, fmt.Errorf("%w: the group record in %s carries %d parts, want 6 or the 5 a store written before the pq_secret table holds",
+				ErrStateStoreFormat, name, len(parts))
+		}
+		if len(parts[3]) != 8 || len(parts[4]) != 1 {
 			return nil, fmt.Errorf("%w: the group record in %s is not one this build wrote", ErrStateStoreFormat, name)
 		}
-		records = append(records, &GroupRecord{
+		record := &GroupRecord{
 			GroupId:        parts[0],
 			PqSecret:       parts[1],
 			GroupHandleKey: parts[2],
 			Epoch:          binary.BigEndian.Uint64(parts[3]),
 			Opened:         parts[4][0] == 1,
-		})
+		}
+		if len(parts) == 6 {
+			table, err := decodePqSecretTable(parts[5])
+			if err != nil {
+				return nil, fmt.Errorf("%w: the group record in %s: %w", ErrStateStoreFormat, name, err)
+			}
+			record.PqSecrets = table
+		}
+		records = append(records, record)
 	}
 	return records, nil
 }

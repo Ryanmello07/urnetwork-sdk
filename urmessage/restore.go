@@ -253,7 +253,17 @@ func (self *Device) restoreOne(store DeviceStore, record *GroupRecord, nonce []b
 	if err != nil {
 		return nil, fmt.Errorf("%w: group %x at epoch %d: %w", ErrRestore, record.GroupId, record.Epoch, err)
 	}
-	session, err := messagegroup.NewGroupSession(handle, record.PqSecret, record.GroupHandleKey,
+	// THE TABLE THIS RECORD CAME BACK WITH, AND WHAT IT IS WHEN THERE IS NONE. A record written
+	// before item 251's ruling 40 has five parts and nil here; one written by this build has six
+	// and a table, possibly empty. [restoredPqSecrets] turns either into the map this group runs
+	// on, and it is where the old store's single scalar becomes pq_secret at the epoch the record
+	// names.
+	table, current, err := restoredPqSecrets(record)
+	if err != nil {
+		handle.Close()
+		return nil, fmt.Errorf("%w: group %x at epoch %d: %w", ErrRestore, record.GroupId, record.Epoch, err)
+	}
+	session, err := messagegroup.NewGroupSession(handle, current, record.GroupHandleKey,
 		self.reserver, self.nowMs, nonce)
 	if err != nil {
 		handle.Close()
@@ -264,12 +274,60 @@ func (self *Device) restoreOne(store DeviceStore, record *GroupRecord, nonce []b
 		session.Close()
 		return nil, fmt.Errorf("%w: group %x: the past epoch loader: %w", ErrRestore, record.GroupId, err)
 	}
+	// THE PAST EPOCHS GO BACK INTO THE SESSION, AND THE PREMISE IS DROPPED ONLY IF THE TABLE
+	// REFUTES IT. connect's [messagegroup.GroupSession] starts every session holding the
+	// group-lifetime premise -- "the one secret I have answers every epoch" -- which is correct
+	// for every group written before rotation and WRONG for a group that has rotated, where it
+	// re-derives a past epoch's storage root out of today's secret and every record of that epoch
+	// stops opening at the AEAD tag with nothing saying why. Rotation is a property of the GROUP
+	// and is durable; the refutation a session makes by comparing octets is a property of ONE
+	// PROCESS and dies with it. This is where the durable fact is handed back.
+	//
+	// IT IS DECIDED ON THE OCTETS AND NOT ON THE ARITY, which is the same rule connect uses one
+	// layer down. A six-part record whose rows all carry ONE value is a group this build wrote
+	// and that has not rotated -- a founder that never committed, or a joiner holding one epoch --
+	// and declaring it rotated would cost it every epoch it holds no separate row for, refusing
+	// history it can in fact still read. So the declaration follows two different values and
+	// nothing else.
+	//
+	// THE RESIDUAL, NAMED: a device that joined a ROTATING group at epoch n holds one row, so the
+	// premise stands and an epoch below n would be answered with pq_secret[n]. It holds no MLS
+	// state below n either, so that epoch refuses at the past-epoch store before a secret is ever
+	// asked for -- the bound is real, and it is the same residual connect's own pqsecret.go header
+	// names from the other side.
+	for _, row := range table {
+		if row.epoch == record.Epoch {
+			continue
+		}
+		// A ROW OUTSIDE THE WINDOW IS SKIPPED AND NOT REFUSED, and the difference is a device that
+		// starts against one that does not. messagegroup.InstallPqSecret answers
+		// ErrEpochOutOfWindow for a row more than PastEpochWindow behind -- correctly, since no
+		// open at that epoch would be admitted -- and a restore that made that an error would
+		// refuse the whole group over a row nothing can use. The writer bounds the table at
+		// [Group.enterEpochLocked], so a row here is one a store written before that bound landed
+		// still holds, or one a hand-edited file carries.
+		if row.epoch < record.Epoch && record.Epoch-row.epoch > messagegroup.PastEpochWindow {
+			continue
+		}
+		if err := session.InstallPqSecret(row.epoch, row.secret); err != nil {
+			session.Close()
+			handle.Close()
+			return nil, fmt.Errorf("%w: group %x: pq_secret[%d]: %w", ErrRestore, record.GroupId, row.epoch, err)
+		}
+	}
+	if pqSecretsShowRotation(table) {
+		if err := session.DeclarePqSecretRotated(); err != nil {
+			session.Close()
+			handle.Close()
+			return nil, fmt.Errorf("%w: group %x: %w", ErrRestore, record.GroupId, err)
+		}
+	}
 	restored := &Group{
 		device:         self,
 		id:             append([]byte(nil), record.GroupId...),
 		handle:         handle,
 		groupHandleKey: append([]byte(nil), record.GroupHandleKey...),
-		pqSecret:       append([]byte(nil), record.PqSecret...),
+		pqSecrets:      pqSecretsMapOf(table),
 		session:        session,
 		sessionBound:   nonceEpoch,
 		epoch:          record.Epoch,

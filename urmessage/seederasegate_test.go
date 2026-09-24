@@ -166,6 +166,12 @@ var wrapSeedDerivedNotAliasedSites = map[string]string{
 		"the key pair it is the seed OF. A derived value and not an alias: erasing `private` is " +
 		"not something this package can do, and following it would make this gate demand an erase " +
 		"that has nowhere to land.",
+	"openWrapToOwnLeaf|private = messagegroup.XwingKeyGenFromSeed": "THE SAME EXPANSION, one " +
+		"layer out, for the door that opens a device wrap rather than a bare encapsulation " +
+		"(ledger item 243's receive leg). It is a second site and not a shared one because the " +
+		"two calls answer different things -- a shared secret and a wrap's payload -- and the " +
+		"residual is the same one, unchanged and still `connect`'s: `*messagegroup.XwingPrivateKey` " +
+		"declares no erase, so the expanded copy of the seed inside it cannot be dropped from here.",
 }
 
 func TestEveryPathThatDropsTheDeviceErasesItsWrapSeed(t *testing.T) {

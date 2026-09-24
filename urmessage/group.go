@@ -57,6 +57,15 @@ const alphaEpochCompleteBody = "urmessage/v1 alpha epoch complete"
 // problem instead of like a server problem.
 const maxFetchPages = 1024
 
+// The page size a walk ASKS FOR on its first fetch, which is spec B §4.3.1's own advertised
+// `max_records_per_fetch` and is therefore what the server would have used for a request that
+// named none.
+//
+// IT IS A STARTING POINT AND NOT A BOUND: see [Group.Receive]'s REASON_OVERSIZE arm, which halves
+// it when a page of this many records is more than `max_response_bytes` will carry. The two
+// server bounds are a COUNT and a SIZE and nothing in the protocol relates them.
+const defaultFetchLimit = 512
+
 // Message is one entry of the conversation: what one record SAYS, after the content envelope has
 // been read.
 //
@@ -384,6 +393,33 @@ type Stats struct {
 	// Records skipped because they are not a class this build opens.
 	SkippedClass uint64
 
+	// ── the device wrap that carries pq_secret[n+1] (ledger item 251, rulings 37 and 38) ──
+	//
+	// FOUR NUMBERS FOR FOUR STATES, and three of them are failures with a sentinel each. A
+	// wrap that carries key material is the thing a member goes permanently dark without, in
+	// BOTH directions, and a caller that can only learn about it by holding an error cannot
+	// answer "is this happening to my users". These are what it reads instead.
+
+	// Device wraps addressed to THIS device that opened and were staged for the epoch they
+	// deliver. In an unremarkable group this rises by exactly one per epoch change this device
+	// did not commit itself, and a zero here across a commit is the first thing to look at.
+	WrapOpened uint64
+
+	// Epochs this device could not take a pq_secret for because NO wrap addressed to it
+	// arrived and the secret it already held is not the one the epoch was opened with.
+	// [ErrNoWrapForEpoch]. It is item 132's omission measured at the victim.
+	WrapMissing uint64
+
+	// Device wraps at this device's own wrap_target_handle that did NOT open.
+	// [ErrWrapUnreadable].
+	WrapUnreadable uint64
+
+	// Device wraps that opened and were not the epoch's own secret: the fan-out of a commit
+	// that lost its CAS race. [ErrOrphanWrap]. A number here with no [Stats.WrapMissing] beside
+	// it is the healthy reading -- two committers raced, this device opened both wraps and used
+	// the winner's.
+	WrapOrphaned uint64
+
 	// Records that OPENED and became a GAP rather than a message: the two values of [GapReason]
 	// this build produces, counted apart because they are two different sentences about the
 	// group and only one of them is anybody's fault.
@@ -611,7 +647,29 @@ type Group struct {
 	id             []byte
 	handle         messagegroup.GroupHandle
 	groupHandleKey []byte
-	pqSecret       []byte
+
+	// pq_secret PER EPOCH, ledger item 251's ruling 40 read from this side. It used to be ONE
+	// []byte and the field it replaces was the group-lifetime scalar item 243 ruled in 2026-09-18
+	// "on the explicit condition that rotating it is a prerequisite of shipping REMOVAL", because
+	// a lifetime value leaves a removed member a permanent contribution to every future epoch's
+	// storage_root. pqepoch.go's header carries the whole account; the short form is that this is
+	// the only post-quantum material in the system, the MLS exporter contributes none, and one
+	// value forever is a removal that removes nothing from a quantum adversary.
+	//
+	// BOUNDED BY [messagegroup.PastEpochWindow], the same bound connect's own table and
+	// connect/mls's state deletion use, and every evicted entry is ERASED rather than dropped.
+	// It is persisted: see [GroupRecord.PqSecrets] and what an old store does.
+	pqSecrets map[uint64][]byte
+
+	// The device wraps this group has OPENED and not yet judged, under the epoch each one
+	// delivers, and how many arrived at this device's own handle and did not open.
+	//
+	// THEY ARE STAGED AND NOT INSTALLED because the only thing that can judge them arrives after
+	// them: ruling 37 puts the fan-out on the wire ahead of the commit, and the commit's
+	// H(epoch_keys) is the authenticator that says which candidate is the epoch's own secret. See
+	// [Group.resolvePqSecretLocked].
+	wrapsFor        map[uint64][]wrapCandidate
+	wrapsUnreadable map[uint64]int
 
 	mutex sync.Mutex
 
@@ -807,6 +865,22 @@ type Group struct {
 	// identityInUse is sticky and is the whole of the clone refusal. Once set, every Send is
 	// refused with it. See [Group.Receive].
 	identityInUse error
+
+	// wrapDark is STICKY and is ruling 38's diagnosis kept where a caller can still find it.
+	//
+	// A member that followed a commit into an epoch it holds no pq_secret for is dark in BOTH
+	// directions at that epoch and permanently: read_key and write_key both descend from
+	// storage_root, and the server verifies req_auth before any AEAD, so what the field sees is
+	// REASON_REJECTED with nothing readable behind it. The ingest says so ONCE, through its own
+	// error, and this is the copy every later refusal is made with -- because without it the
+	// second walk reports an AEAD failure on some record and the sentence about the wrap is gone.
+	// It is one of [ErrNoWrapForEpoch], [ErrWrapUnreadable] and [ErrOrphanWrap], with the epoch
+	// named inside it.
+	//
+	// IT IS NOT REPAIRABLE IN THIS PROCESS AND THAT IS WHY IT IS STICKY RATHER THAN A COUNTER
+	// ALONE. The wraps for epoch n+1 were written at epoch n, below this group's cursor and below
+	// item 246's ceiling for a reader that has moved on; there is no later page they arrive in.
+	wrapDark error
 }
 
 // ── founding and joining ─────────────────────────────────────────────────────────────────────
@@ -864,9 +938,13 @@ func (self *Device) CreateGroup(ctx context.Context, groupId []byte) (*Group, er
 		id:             append([]byte(nil), groupId...),
 		handle:         handle,
 		groupHandleKey: groupHandleKey,
-		pqSecret:       pqSecret,
-		founding:       founding,
-		foundingBound:  nonceEpoch,
+		// AT EPOCH ZERO, WHICH IS THE ONE EPOCH A FOUNDING DRAW CAN FILE. The commit
+		// [Group.AddMember] makes opens epoch one and files that epoch's own entry beside it;
+		// from the first commit to an OPEN group on, every epoch's value arrives through the
+		// device wrap. See pqepoch.go.
+		pqSecrets:     map[uint64][]byte{0: pqSecret},
+		founding:      founding,
+		foundingBound: nonceEpoch,
 		// a group founded in THIS process holds an identity drawn in this process. There is
 		// no earlier writer of its stream to reconcile against.
 		reconciled: true,
@@ -927,10 +1005,14 @@ func (self *Device) Join(ctx context.Context, invite *Invite) (*Group, error) {
 		id:             append([]byte(nil), invite.GroupId...),
 		handle:         handle,
 		groupHandleKey: append([]byte(nil), invite.GroupHandleKey...),
-		pqSecret:       append([]byte(nil), invite.PqSecret...),
-		session:        session,
-		sessionBound:   nonceEpoch,
-		epoch:          handle.Epoch(),
+		// AT THE EPOCH THE WELCOME ADMITTED THIS DEVICE AT, and at no other. MASTER section 7's
+		// out-of-band delivery is what an [Invite] is: the joiner is handed the secret of the
+		// epoch it is joining, it was not present for any epoch below and can vouch for none of
+		// them, and every epoch ABOVE arrives through that epoch's own device wrap.
+		pqSecrets:    map[uint64][]byte{handle.Epoch(): append([]byte(nil), invite.PqSecret...)},
+		session:      session,
+		sessionBound: nonceEpoch,
+		epoch:        handle.Epoch(),
 		// The founder opened it. A joiner cannot observe that and does not pretend to: if it
 		// has not, every send below is refused by the server and the refusal is returned.
 		opened: true,
@@ -938,13 +1020,7 @@ func (self *Device) Join(ctx context.Context, invite *Invite) (*Group, error) {
 		reconciled: true,
 	}
 	group.initTables()
-	if err := self.persistGroup(&GroupRecord{
-		GroupId:        group.id,
-		PqSecret:       group.pqSecret,
-		GroupHandleKey: group.groupHandleKey,
-		Epoch:          group.epoch,
-		Opened:         true,
-	}); err != nil {
+	if err := self.persistGroup(group.groupRecordLocked(true)); err != nil {
 		// the session first and the handle after it, which is [Group.Close]'s own order: the
 		// session owns the loop that the handle is reached through.
 		session.Close()
@@ -1007,7 +1083,18 @@ func (self *Group) AddMember(keyPackage []byte) (*Invite, error) {
 	// self-certified founding commit needs. Delete that property in connect and this file starts
 	// sealing the founding commit under epoch one's key, which the server refuses because it
 	// verifies it under the bootstrap key the same request carries.
-	session, err := messagegroup.NewGroupSession(self.handle, self.pqSecret, self.groupHandleKey,
+	//
+	// AND THE FOUNDING COMMIT'S EPOCH TAKES THE SECRET EPOCH ZERO WAS DRAWN WITH, which is the
+	// ONE epoch change in this package that does not rotate, and the reason is the carrier rather
+	// than an exception. The device wrap is what delivers a rotated secret, a wrap is addressed to
+	// a leaf's published X-Wing key, and at this moment the only OTHER member of this group has
+	// not joined yet -- it is holding the Welcome this call is about to answer. Its copy of epoch
+	// one's secret is [Invite.PqSecret], out of band, MASTER section 7's founding delivery. So
+	// epoch one's entry is filed here as a COPY of epoch zero's, deliberately and once, and every
+	// commit to an OPEN group from then on draws a fresh one ([Group.publishCommitLocked]).
+	foundingSecret := self.pqSecretLocked()
+	self.filePqSecretLocked(self.handle.Epoch(), foundingSecret)
+	session, err := messagegroup.NewGroupSession(self.handle, foundingSecret, self.groupHandleKey,
 		self.device.reserver, self.device.nowMs, nonce)
 	if err != nil {
 		return nil, fmt.Errorf("urmessage: the session at epoch %d: %w", self.handle.Epoch(), err)
@@ -1043,11 +1130,14 @@ func (self *Group) AddMember(keyPackage []byte) (*Invite, error) {
 	if err := self.enterEpochLocked(); err != nil {
 		return nil, err
 	}
+	// THE SECRET OF THE EPOCH THIS INVITE ADMITS INTO, read out of the table after the entry above
+	// rather than off a field that used to mean one thing forever. [Device.Join] files it at
+	// `handle.Epoch()`, which is the same epoch, and the two sides are two reads of one value.
 	return &Invite{
 		GroupId:        append([]byte(nil), self.id...),
 		Welcome:        append([]byte(nil), welcome...),
 		RatchetTree:    append([]byte(nil), ratchetTree...),
-		PqSecret:       append([]byte(nil), self.pqSecret...),
+		PqSecret:       append([]byte(nil), self.pqSecretLocked()...),
 		GroupHandleKey: append([]byte(nil), self.groupHandleKey...),
 	}, nil
 }
@@ -1104,7 +1194,13 @@ func (self *Group) Open(ctx context.Context) error {
 	}
 	contextHash := sha256.Sum256(groupContext)
 
-	wrapTargets, err := self.wrapTargetsLocked()
+	// THE FOUNDING FAN-OUT IS THE ONE THAT CARRIES NO KEY MATERIAL, and it stays that way. Every
+	// other epoch's fan-out delivers pq_secret[n+1] under X-Wing to each leaf that is already a
+	// member; at epoch one there is no such leaf -- the only other member is holding the Welcome
+	// and takes its copy out of band in [Invite.PqSecret], MASTER section 7's founding delivery.
+	// A wrap addressed to a leaf for a secret that leaf already has would be a second copy of the
+	// same value on the wire for nothing. See [alphaWrapBody], and pqepoch.go's header.
+	wrapTargets, err := self.wrapTargetsAtLocked(self.epoch, nil)
 	if err != nil {
 		return err
 	}
@@ -1194,7 +1290,7 @@ func (self *Group) Open(ctx context.Context) error {
 		wrap, err := self.session.SealRecord(message.RetentionPermanent, 0, false,
 			encodeHead(self.device.nowMs()), []byte(alphaWrapBody), 0, &message.ServerAttachment{
 				Kind: message.AttachmentWrap,
-				Wrap: &message.WrapTag{WrapTargetHandle: append([]byte(nil), target[:]...), Epoch: self.epoch},
+				Wrap: &message.WrapTag{WrapTargetHandle: append([]byte(nil), target.handle[:]...), Epoch: self.epoch},
 			})
 		if err != nil {
 			return fmt.Errorf("urmessage: sealing an epoch wrap: %w", err)
@@ -1221,13 +1317,7 @@ func (self *Group) Open(ctx context.Context) error {
 	// The opened bit, so that a restarted device knows the group is publishable rather than
 	// finding out at its first send. The error says what actually happened: the group IS open
 	// on the server, and it is the RECORD that did not land.
-	if err := self.device.persistGroup(&GroupRecord{
-		GroupId:        self.id,
-		PqSecret:       self.pqSecret,
-		GroupHandleKey: self.groupHandleKey,
-		Epoch:          self.epoch,
-		Opened:         true,
-	}); err != nil {
+	if err := self.device.persistGroup(self.groupRecordLocked(true)); err != nil {
 		return fmt.Errorf("urmessage: this group is open on the server and its record could not be persisted, so a restart would refuse to send in it: %w", err)
 	}
 	return nil
@@ -1295,15 +1385,20 @@ func (self *Group) AddMemberAndPublish(ctx context.Context, keyPackage []byte) (
 	// (2)-(5) announce, submit, and -- once the server has taken it -- merge, enter and fan out
 	// the epoch the commit opens. A refusal erases the staged epoch and answers here with nothing
 	// moved; the key package is the joiner's and a retry after Receive may offer it again.
-	if err := self.publishCommitLocked(ctx, commit); err != nil {
+	if err := self.publishCommitLocked(ctx, commit, nil); err != nil {
 		return nil, err
 	}
 
+	// THE ROTATED SECRET AND NOT THE ONE THE GROUP HAD A MOMENT AGO. publishCommitLocked drew
+	// pq_secret[n+1], fanned it out to the members that were already here and entered the epoch,
+	// so the table's current entry IS the new epoch's -- which is what this joiner needs and what
+	// no wrap could have carried to it, because the leaf it will occupy did not exist when the
+	// fan-out was sealed. See [Group.wrapTargetsAtLocked]'s Add arm.
 	return &Invite{
 		GroupId:        append([]byte(nil), self.id...),
 		Welcome:        append([]byte(nil), welcome...),
 		RatchetTree:    append([]byte(nil), ratchetTree...),
-		PqSecret:       append([]byte(nil), self.pqSecret...),
+		PqSecret:       append([]byte(nil), self.pqSecretLocked()...),
 		GroupHandleKey: append([]byte(nil), self.groupHandleKey...),
 	}, nil
 }
@@ -1325,6 +1420,13 @@ func (self *Group) committableLocked() error {
 	}
 	if self.identityInUse != nil {
 		return self.identityInUse
+	}
+	// A GROUP THAT WENT DARK MUST NOT COMMIT EITHER, and the reason is worse than for a send: a
+	// commit built on a storage_root no peer reproduces opens an epoch whose write and read keys
+	// nobody else can derive, and every member that follows it is dark behind this one. Ruling
+	// 38's sentinel is returned rather than the REASON_REJECTED the server would answer with.
+	if self.wrapDark != nil {
+		return self.wrapDark
 	}
 	if !self.reconciled {
 		return fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
@@ -1372,7 +1474,16 @@ func (self *Group) committableLocked() error {
 // the marker -- is the same three records either way. expected_wrap_count is the STAGED tree's
 // member count, and the fan-out after the merge wraps to the live tree's members: they are one
 // tree, and the seam's own test holds the two readings equal across a merge.
-func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error {
+//
+// `removing` IS THE LEAVES THIS COMMIT TAKES OUT OF THE GROUP, and it is a parameter rather than a
+// read because there is nothing to read it off. The fan-out is built pre-merge, from the LIVE tree
+// (the seam publishes no staged leaf's X-Wing key), and a removed member is still in that tree --
+// so a fan-out that did not exclude it would hand the member this commit removes the next epoch's
+// post-quantum secret, which is item 243's whole subject arriving inverted. Its caller is the arm
+// that built the commit and therefore holds the list; every other arm passes nil, and an arm that
+// forgot would be caught by the property rather than by this sentence:
+// TestAMemberRemovedByACommitCannotDeriveTheEpochThatCommitOpens.
+func (self *Group) publishCommitLocked(ctx context.Context, commit []byte, removing []uint32) error {
 	// (2) the facts of the epoch the staged commit opens, off the staged value: the epoch, the
 	// member count the fan-out will wrap to, the group context the server keys the epoch under,
 	// and the NEW epoch's write and read keys, derived STRAIGHT OFF the staged exporter -- the
@@ -1421,17 +1532,57 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 		return fmt.Errorf("urmessage: the epoch the staged commit opens: %w", err)
 	}
 	newEpoch := pending.Epoch
+
+	// (2a) and (2b) THE ROTATION AND THE FAN-OUT IT IS CARRIED BY, both decided by ONE call:
+	// [Group.stageEpochRotationLocked]. It is a function rather than thirty lines here because
+	// everything it decides has to be decided together -- the secret, who gets it, and the rows
+	// that carry it -- and because a test that re-spelled those three steps would measure its own
+	// arithmetic. MEASURED: it did. The first draft of this file left the draw inline and the
+	// property suite built its own fan-out beside it, so a mutant that reused one secret across
+	// every epoch -- item 243's whole subject, inverted -- passed the entire suite.
+	staged, err := self.stageEpochRotationLocked(newEpoch, removing)
+	if err != nil {
+		self.handle.ClearPendingCommit()
+		return err
+	}
+	pqNext, targets := staged.pqSecret, staged.targets
+	defer zeroizeState(pqNext)
+
 	newMlsSecret, err := self.handle.PendingExport(storageExporterLabel, nil, storageExporterBytes)
 	if err != nil {
 		self.handle.ClearPendingCommit()
 		return fmt.Errorf("urmessage: the new epoch's exporter: %w", err)
 	}
-	newRoot := messagegroup.StorageRoot(newMlsSecret, self.pqSecret)
+	newRoot := messagegroup.StorageRoot(newMlsSecret, pqNext)
 	writeKey := message.WriteKey(newRoot)
 	readKey := message.ReadKey(newRoot)
 	zeroizeState(newMlsSecret)
 	zeroizeState(newRoot)
 	contextHash := sha256.Sum256(pending.GroupContext)
+
+	// (2c) RULING 37's WRAPS: SEALED AND SUBMITTED HERE, PRE-MERGE, AT EPOCH n -- AND AHEAD OF THE
+	// COMMIT RECORD.
+	//
+	// AHEAD OF IT, which is the half the ruling states as a consequence rather than as an order,
+	// and it is forced by the server rather than chosen here. A write is accepted only at the
+	// group's CURRENT epoch; the moment the commit is taken, current_epoch is n+1; so a wrap
+	// sealed at n and submitted after the commit is REASON_EPOCH_STALE. Before it, the group is
+	// still at n, the fan-out is complete at n, and item 246's F0 ceiling serves a reader standing
+	// at n both these rows and the commit -- "the commit and its wrap in one page", one round
+	// trip, no server change. After the merge would also be one epoch too late for the OTHER
+	// reason the ruling gives: at n+1 a reader at n is served none of it, and read_key[n+1] needs
+	// pq_secret[n+1] needs the wrap. Circular.
+	//
+	// AND THE COST IS THE ORPHAN. A fan-out written before the race is a fan-out that outlives a
+	// LOST race, addressed to an epoch that never opened under this secret. That is item 132's
+	// orphan case, it is produced here by design, and it is why the detector ships in the same
+	// commit (ruling 38): see [ErrOrphanWrap] and [Group.resolvePqSecretLocked].
+	for _, wrap := range staged.wraps {
+		if _, err := self.submitLocked(ctx, self.session, wrap, "an epoch wrap", nil); err != nil {
+			self.handle.ClearPendingCommit()
+			return err
+		}
+	}
 
 	// (3) the commit record, sealed at the OLD epoch by self.session -- which is the epoch the
 	// handle is still at -- announcing the new epoch. The server takes it iff its header names
@@ -1445,7 +1596,7 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 		Epoch:             newEpoch,
 		AlgId:             epochAttachmentAlgId,
 		GroupContextHash:  contextHash[:],
-		ExpectedWrapCount: uint32(pending.MemberCount),
+		ExpectedWrapCount: uint32(len(targets)),
 	}, writeKey, readKey)
 	if err != nil {
 		self.handle.ClearPendingCommit()
@@ -1493,7 +1644,14 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 	if err := self.handle.MergePendingCommit(); err != nil {
 		return fmt.Errorf("urmessage: the server accepted the commit that opens epoch %d and this device could not merge it: %w", newEpoch, err)
 	}
-	if err := self.session.AdvanceEpoch(self.pqSecret); err != nil {
+	// THE ROTATED SECRET IS FILED AND ADVANCED WITH, AND IT IS ONE VALUE READ TWICE RATHER THAN
+	// TWO. connect's AdvanceEpoch now REFUSES a value that differs from an entry already standing
+	// at the epoch it is entering -- messagegroup.ErrPqSecretEpochConflict, added in the same
+	// track's step 3 -- so a caller that filed pq_secret[n+1] and then advanced with the group
+	// scalar meets a typed refusal at this line instead of the silent blackout it used to get.
+	// Both halves take pqNext.
+	self.filePqSecretLocked(newEpoch, pqNext)
+	if err := self.session.AdvanceEpoch(pqNext); err != nil {
 		return fmt.Errorf("urmessage: advancing the session to epoch %d: %w", newEpoch, err)
 	}
 	self.commit = append([]byte(nil), commit...)
@@ -1504,38 +1662,16 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 		return err
 	}
 
-	// (5) the wrap fan-out and the marker that makes the new epoch writable.
-	return self.publishEpochFanoutLocked(ctx)
-}
-
-// publishEpochFanoutLocked seals and submits §6.1 step (2)'s wrap set and the marker that closes
-// it, at this group's CURRENT epoch. It is the half of [Group.Open] that is not the founding
-// commit, and [Group.publishCommitLocked] runs it after the group has entered the new epoch.
-func (self *Group) publishEpochFanoutLocked(ctx context.Context) error {
-	wrapTargets, err := self.wrapTargetsLocked()
-	if err != nil {
-		return err
-	}
-	if len(wrapTargets) == 0 {
-		return ErrNoMemberAdded
-	}
-	for _, target := range wrapTargets {
-		wrap, err := self.session.SealRecord(message.RetentionPermanent, 0, false,
-			encodeHead(self.device.nowMs()), []byte(alphaWrapBody), 0, &message.ServerAttachment{
-				Kind: message.AttachmentWrap,
-				Wrap: &message.WrapTag{WrapTargetHandle: append([]byte(nil), target[:]...), Epoch: self.epoch},
-			})
-		if err != nil {
-			return fmt.Errorf("urmessage: sealing an epoch wrap: %w", err)
-		}
-		if _, err := self.submitLocked(ctx, self.session, wrap, "an epoch wrap", nil); err != nil {
-			return err
-		}
-	}
+	// (5) the marker that makes the new epoch writable. The wraps it closes went out at (2c),
+	// before the commit, and its wrap_count is the length of the SAME target list
+	// expected_wrap_count was taken from -- one expression, so the server's only fan-out check
+	// cannot be defeated by this client disagreeing with itself. That is the half of item 132 a
+	// client can close; the half it cannot is that neither store counts a wrap row, which is why
+	// the receive side binds the rows to the epoch through H(epoch_keys) instead.
 	marker, err := self.session.SealRecord(message.RetentionDurable, 0, false,
 		encodeHead(self.device.nowMs()), []byte(alphaEpochCompleteBody), 0, &message.ServerAttachment{
 			Kind:     message.AttachmentComplete,
-			Complete: &message.EpochComplete{Epoch: self.epoch, WrapCount: uint32(len(wrapTargets))},
+			Complete: &message.EpochComplete{Epoch: self.epoch, WrapCount: uint32(len(targets))},
 		})
 	if err != nil {
 		return fmt.Errorf("urmessage: sealing the epoch complete marker: %w", err)
@@ -1544,19 +1680,6 @@ func (self *Group) publishEpochFanoutLocked(ctx context.Context) error {
 		return err
 	}
 	return nil
-}
-
-// wrapTargetsLocked is one wrap_target_handle per member of the group at its current epoch.
-func (self *Group) wrapTargetsLocked() ([][16]byte, error) {
-	targets := [][16]byte{}
-	for at := 0; at < self.handle.MemberCount(); at += 1 {
-		leaf, _, _, err := self.handle.MemberAt(at)
-		if err != nil {
-			return nil, fmt.Errorf("urmessage: the group's member %d: %w", at, err)
-		}
-		targets = append(targets, messagegroup.WrapTargetHandle(self.groupHandleKey, self.epoch, leaf))
-	}
-	return targets, nil
 }
 
 // enterEpochLocked moves this group to the epoch its handle now stands at, AND WRITES THE RECORD IN
@@ -1592,16 +1715,24 @@ func (self *Group) wrapTargetsLocked() ([][16]byte, error) {
 // epoch and whose epoch field names another, which every header this group seals would carry.
 func (self *Group) enterEpochLocked() error {
 	self.epoch = self.handle.Epoch()
+	// THE WINDOW IS A FUNCTION OF THIS FIELD, SO IT IS BOUNDED WHERE THIS FIELD MOVES. The
+	// pq_secret table's bound is `self.epoch - epoch > PastEpochWindow`, which cannot be evaluated
+	// correctly anywhere the epoch has not yet moved: [Group.filePqSecretLocked] runs BEFORE the
+	// advance on both the commit path and the ingest path, so its own drop is always one epoch
+	// behind. MEASURED as exactly that -- a member walked to epoch 33 kept its epoch-zero entry,
+	// persisted it, and the next restore refused the whole group because
+	// messagegroup.InstallPqSecret will not file a row 33 epochs behind. Here it is one line at
+	// the one door, ahead of the persist, so what reaches the disk is already inside the bound.
+	self.dropPqSecretsBelowWindowLocked()
 	if !self.opened {
 		return nil
 	}
-	if err := self.device.persistGroup(&GroupRecord{
-		GroupId:        self.id,
-		PqSecret:       self.pqSecret,
-		GroupHandleKey: self.groupHandleKey,
-		Epoch:          self.epoch,
-		Opened:         true,
-	}); err != nil {
+	// AND THE pq_secret TABLE GOES WITH IT, THROUGH THIS SAME DOOR. The epoch number and the
+	// secret that epoch runs on are one fact: a record naming epoch n+1 beside a table whose
+	// highest entry is n is a restart that comes back holding the wrong post-quantum half and
+	// opens nothing, with the AEAD tag as its only diagnosis -- which is ruling 40's own defect
+	// with a restart in front of it. [Group.groupRecordLocked] builds both from one read.
+	if err := self.device.persistGroup(self.groupRecordLocked(true)); err != nil {
 		return fmt.Errorf(
 			"urmessage: this group entered epoch %d and its record could not be persisted, so a restart would come back at the epoch before: %w",
 			self.epoch, err)
@@ -1831,6 +1962,14 @@ func (self *Group) sendableLocked(kind ContentKind) (string, error) {
 	// record sealed under a reused (key, nonce) exists whatever this method then returns.
 	if self.identityInUse != nil {
 		return "", self.identityInUse
+	}
+	// AND BEFORE THE SEAL FOR THE SAME REASON, one epoch further on: a group with no pq_secret
+	// for the epoch it stands at seals under a storage_root no other member derives, so the
+	// server refuses the write_auth and no peer could have read the record anyway. Refused by
+	// the name of what actually happened -- [ErrNoWrapForEpoch], [ErrWrapUnreadable] or
+	// [ErrOrphanWrap] -- rather than by a reason code the caller would have to decode.
+	if self.wrapDark != nil {
+		return "", self.wrapDark
 	}
 	if !self.reconciled {
 		return "", fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
@@ -2160,13 +2299,29 @@ func (self *Group) sendSealedLocked(ctx context.Context, session *messagegroup.G
 // re-MAC" on every lost race. It is taken at both sites the clone check is, because a first
 // refusal that IS a nonce fact can be followed by a retry that meets the race.
 //
-// ONLY FOR A COMMIT. An application record answered EPOCH_STALE is a device that has not fetched
-// since the group moved, and what it owes is the same Receive -- but that record is a legal gap
-// and nothing of it is staged, so the plain [ErrSubmitRefused] it has always been answered stands.
-// [Group.publishCommitLocked] is the one caller that acts on this: it erases the staged epoch and
-// answers [ErrCommitLost], which wraps [ErrSubmitRefused] so the old reading still holds.
+// FOR A COMMIT, AND FOR THE WRAPS THAT TRAVEL WITH ONE. An application record answered EPOCH_STALE
+// is a device that has not fetched since the group moved, and what it owes is the same Receive --
+// but that record is a legal gap and nothing of it is staged, so the plain [ErrSubmitRefused] it
+// has always been answered stands. [Group.publishCommitLocked] is the one caller that acts on
+// this: it erases the staged epoch and answers [ErrCommitLost], which wraps [ErrSubmitRefused] so
+// the old reading still holds.
+//
+// THE WRAP ARM IS LEDGER ITEM 251's RULING 37 ARRIVING HERE, and it is a correction rather than a
+// widening: under that ruling the fan-out is submitted BEFORE the commit, at epoch n, so a
+// committer that has fallen behind now meets the race at its FIRST WRAP and never reaches the
+// commit record at all. The sentence is identical -- the epoch this device is building against has
+// already been closed by somebody else -- and answering it as a plain refusal would make a lost
+// race report itself differently depending on which record of the same publication happened to be
+// first on the wire. MEASURED as exactly that: cp3b's lost-race case, whose whole subject is that
+// the honest committer is left where it was and retries, went from ErrCommitLost to "an epoch wrap
+// was answered REASON_EPOCH_STALE" on the commit that moved the fan-out.
+//
+// A WRAP IS ONLY EVER SUBMITTED AS PART OF OPENING AN EPOCH, which is what makes the arm exact
+// rather than a guess: the two sites are [Group.Open]'s founding fan-out and
+// [Group.publishCommitLocked]'s, and in both a stale epoch means the group moved under this device
+// while it was publishing one.
 func epochRaceRefusal(reason protocol.Reason, record *message.Record, what string) error {
-	if !record.Header.IsCommit {
+	if !record.Header.IsCommit && !isEpochWrapRecord(record) {
 		return nil
 	}
 	if reason != protocol.Reason_REASON_COMMIT_LOST && reason != protocol.Reason_REASON_EPOCH_STALE {
@@ -2174,6 +2329,23 @@ func epochRaceRefusal(reason protocol.Reason, record *message.Record, what strin
 	}
 	return fmt.Errorf("%w: %w: %s at epoch %d was answered %v",
 		ErrCommitLost, ErrSubmitRefused, what, record.Header.Epoch, reason)
+}
+
+// isEpochWrapRecord is whether a record is one of an epoch fan-out's device wraps.
+//
+// IT READS THE OCTETS THAT WERE SEALED and not a flag beside them: the attachment is inside
+// AAD_head and inside the write_auth preimage, so this is the same answer the server computed when
+// it refused the record. A parse failure answers false, which is the safe direction -- a record
+// whose attachment this build cannot read is not one this build may reclassify as a lost race.
+func isEpochWrapRecord(record *message.Record) bool {
+	if len(record.Header.ServerAttachment) == 0 {
+		return false
+	}
+	attachment, err := message.ParseServerAttachment(record.Header.ServerAttachment)
+	if err != nil {
+		return false
+	}
+	return attachment.Kind == message.AttachmentWrap
 }
 
 // cloneRefusalLocked is the clone check ON THE SEAL PATH: §4.5's REASON_STREAM_INDEX_REUSED, read
@@ -2403,6 +2575,11 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 		reconciled:   self.reconciled,
 		unobtainable: map[uint64]bool{},
 	}
+	// THE PAGE THIS WALK ASKS FOR, WHICH IS NOT A CONSTANT. It starts at the server's own
+	// advertised bound -- §4.3.1 says a request for more, or for nothing in particular, gets that
+	// bound anyway -- and comes down only when a page is refused for its SIZE. See the
+	// REASON_OVERSIZE arm below for why a fixed number is the wrong answer in both directions.
+	pageLimit := uint32(defaultFetchLimit)
 	for page := 0; ; page += 1 {
 		if maxFetchPages <= page {
 			self.commitWalkLocked(walk)
@@ -2417,6 +2594,7 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 			GroupId:       self.id,
 			SinceRecordId: since,
 			ReadEpoch:     self.epoch,
+			Limit:         pageLimit,
 		}
 		if err := authorizeFetch(request, readKey, nonce); err != nil {
 			self.commitWalkLocked(walk)
@@ -2426,6 +2604,30 @@ func (self *Group) Receive(ctx context.Context) ([]*Message, error) {
 		if err != nil {
 			self.commitWalkLocked(walk)
 			return walk.opened, fmt.Errorf("urmessage: Fetch: %w", err)
+		}
+		if response.GetReason() == protocol.Reason_REASON_OVERSIZE && 1 < pageLimit {
+			// §4.3.1's TWO BOUNDS DO NOT AGREE, AND THE CLIENT IS THE PARTY THAT CAN SAY SO.
+			// `max_records_per_fetch` is a COUNT (512 by default) and `max_response_bytes` is a
+			// SIZE (1 MiB), and nothing relates them: a page of 512 records from the 4 KiB rung
+			// is 2.2 MiB, which the transport replaces wholesale with this refusal. It was
+			// unreachable in practice while the only large records were a user's own long
+			// messages; ledger item 251's device wrap makes it ORDINARY, because a rotating
+			// fan-out writes one 4 KiB PERMANENT record per member per epoch and a catch-up walk
+			// meets them in runs.
+			//
+			// HALVING AND RETRYING THE SAME `since` IS THE WHOLE REPAIR, and it is a fact about
+			// the transport rather than about the group: nothing was served, nothing was opened,
+			// the cursor has not moved, and §4.3.1 lets a client ask for fewer records than the
+			// advertised bound. A CONSTANT would have been the wrong shape -- the safe constant
+			// for the 64 KiB rung is sixteen records, which is a catch-up thirty times slower
+			// than it needs to be for every group that never writes one.
+			//
+			// IT DOES NOT COUNT AS A PAGE and it cannot loop: the limit strictly decreases and
+			// stops at one, and a single record the transport will not carry is a refusal this
+			// client cannot repair and answers by name.
+			pageLimit = pageLimit / 2
+			page -= 1
+			continue
 		}
 		if response.GetReason() != protocol.Reason_REASON_OK {
 			self.commitWalkLocked(walk)
@@ -2670,6 +2872,15 @@ func (self *Group) commitWalkLocked(walk *pageWalk) error {
 	if self.identityInUse != nil {
 		return self.identityInUse
 	}
+	// THEN THE WRAP THAT NEVER ARRIVED, ahead of walk.firstFailure and for the same reason the
+	// identity refusal is ahead of both: it is the CAUSE of most of what comes after it. A group
+	// with no pq_secret for its epoch fails to open every record of that epoch at the AEAD tag,
+	// so a walk that reported walk.firstFailure would report the symptom on some arbitrary record
+	// and lose the sentence about the wrap -- which is exactly the undiagnosable REASON_REJECTED
+	// ruling 38 exists to prevent. It is STICKY, so it is answered on every later walk too.
+	if self.wrapDark != nil {
+		return self.wrapDark
+	}
 	if walk.firstFailure != nil {
 		return walk.firstFailure
 	}
@@ -2831,11 +3042,33 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 		}
 		if len(header.ServerAttachment) != 0 {
 			// THE CEREMONY RECORDS AROUND A COMMIT: the epoch's wrap fan-out and the epoch-complete
-			// marker. They are STILL SKIPPED, deliberately. In the alpha a wrap carries no key
-			// material ([alphaWrapBody]) and the marker is the server's own step-(2) fence, so
-			// there is nothing in either for a receiving member to read: the epoch's key schedule
-			// comes off the MLS exporter the COMMIT moved, not off these. A joiner gets its material
-			// from the Welcome. So the ingest reads the commit and skips the fan-out around it.
+			// marker.
+			//
+			// THE WRAP IS NO LONGER SKIPPED, and that clause is the whole of item 243's receive
+			// leg. It used to be: "in the alpha a wrap carries no key material ([alphaWrapBody])
+			// ... so there is nothing in either for a receiving member to read: the epoch's key
+			// schedule comes off the MLS exporter the COMMIT moved, not off these." That is true
+			// of the founding fan-out and of every build before rotation, and it is false of every
+			// fan-out a rotating committer writes: those carry pq_secret[n+1] X-Wing-sealed to
+			// each leaf, and a member that reads past its own is a member that will not be able to
+			// open or write anything at the next epoch.
+			//
+			// THE ORDER IS THE WIRE'S AND NOT THIS LOOP'S. Ruling 37 puts the wraps on the server
+			// BEFORE the commit -- they must be, since a write is accepted only at the current
+			// epoch -- so they carry lower record ids and this branch meets them first, stages
+			// them, and the commit below judges them. A wrap that is not this device's, or is for
+			// an epoch already entered, falls through to the skip exactly as before and costs one
+			// handle derivation.
+			attachment, attachmentErr := message.ParseServerAttachment(header.ServerAttachment)
+			if attachmentErr == nil && attachment.Kind == message.AttachmentWrap {
+				self.ingestWrapLocked(walk, recordId, parsed, attachment)
+			}
+			// AND IT IS STILL A CEREMONY RECORD WHATEVER CAME OF THAT. A wrap is not a message,
+			// it delivers no [Message], and a wrap that did not open must NOT hold this group's
+			// cursor: the commit is what decides whether the epoch it is for was ever opened, and
+			// a fan-out for an epoch that never happened would otherwise block every later record
+			// behind three retries and an abandonment. The counters and [Group.wrapDark] are where
+			// a failure is said, not here.
 			self.stats.SkippedCeremony += 1
 			resolve(recordId)
 			continue
@@ -3447,6 +3680,23 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 		return fmt.Errorf("%w: the commit names sender_handle %x, which is no leaf of this group at epoch %d",
 			ErrCommitIngest, header.SenderHandle, self.epoch)
 	}
+	// (0a) THE EPOCH DIGEST, READ OFF THE RECORD BEFORE ANYTHING IS APPLIED. It is the only thing
+	// in this system that can say which pq_secret the epoch this commit opens actually runs on,
+	// and it arrives already authenticated twice over: LP(H(server_attachment)) is inside AAD_head
+	// and inside the write_auth preimage, so a bent digest is a record that does not open and a
+	// bent key is a digest that does not match. Parsed here rather than at (4a) so that a commit
+	// carrying no digest attachment at all is named as the thing it is before the group has moved.
+	//
+	// A KIND 0x0001 COMMIT ANSWERS nil AND THAT IS NOT AN ERROR YET. Spec B section 5.4's
+	// acceptance window is dated and open, so a commit sealed before ruling 27 is a record this
+	// build can still meet; it carries its epoch keys in the clear instead of a digest and nothing
+	// here can bind a wrap to it. Such a commit is followed on the compatibility path -- the
+	// secret this group already holds -- and the refusal below fires only if that path has been
+	// refuted, which is [Group.resolvePqSecretLocked]'s own arm.
+	commitDigest, err := epochDigestOf(header)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrCommitIngest, err)
+	}
 	if err := self.trackLocked(committerLeaf, header); err != nil {
 		return fmt.Errorf("%w: %w", ErrCommitIngest, err)
 	}
@@ -3496,10 +3746,46 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 		return fmt.Errorf("%w: applying the commit: %w", ErrCommitIngest, err)
 	}
 	newEpoch := self.handle.Epoch()
-	// (5) advance the session onto the epoch the handle is now at, reusing the lifetime pq_secret.
-	if err := self.session.AdvanceEpoch(self.pqSecret); err != nil {
+	// (4a) WHICH pq_secret THIS EPOCH RUNS ON, decided against the commit's own authenticated
+	// H(epoch_keys) and against nothing else. This is item 243's receive leg and item 132's
+	// detector in one call: the candidates are the wraps this device opened for this epoch --
+	// staged at (0a) below, because ruling 37 puts them on the wire AHEAD of the commit -- plus
+	// the secret this group already holds, which is the arm every group built before rotation
+	// takes. [Group.resolvePqSecretLocked] carries the argument and names the three failures.
+	//
+	// IT IS AFTER ApplyCommit BECAUSE IT NEEDS mls_secret[n+1], which is the exporter of an epoch
+	// the handle has to be standing in: the seam's PendingExport reads a handle's OWN staged
+	// commit and there is no exporter over a PROCESSED one. So the applied commit is not undone on
+	// a miss -- the epoch is open, the membership has changed, and pretending otherwise would
+	// leave the handle at n+1 and this group at n. What a miss costs is said out loud instead.
+	newMlsSecret, err := self.handle.Export(storageExporterLabel, nil, storageExporterBytes)
+	if err != nil {
+		return fmt.Errorf("%w: the exporter at epoch %d: %w", ErrCommitIngest, newEpoch, err)
+	}
+	pqNext, resolveErr := self.resolvePqSecretLocked(newMlsSecret, newEpoch, commitDigest)
+	zeroizeState(newMlsSecret)
+	if resolveErr != nil {
+		// THE EPOCH STILL MOVES, AND THE GROUP IS MARKED DARK BY NAME. A member with no
+		// pq_secret[n+1] is dark at n+1 whatever this function does -- read_key[n+1] and
+		// write_key[n+1] both hang off storage_root[n+1] -- so refusing to advance would not make
+		// it less dark, it would make it dark AND leave the handle one epoch ahead of the session
+		// and of the persisted record. The last secret this device holds is used so the three stay
+		// in step, and [Group.wrapDark] is what every later refusal says instead of the AEAD tag.
+		pqNext = self.pqSecretLocked()
+		if self.wrapDark == nil {
+			self.wrapDark = resolveErr
+		}
+	}
+	self.filePqSecretLocked(newEpoch, pqNext)
+	// (5) advance the session onto the epoch the handle is now at, with the epoch's own secret.
+	// The table above and this call take ONE value: connect's AdvanceEpoch refuses a differing one
+	// at an epoch already filed ([messagegroup.ErrPqSecretEpochConflict]), which is the refusal
+	// that replaced the silent destruction of exactly this wrap's secret.
+	if err := self.session.AdvanceEpoch(pqNext); err != nil {
 		return fmt.Errorf("%w: advancing the session to epoch %d: %w", ErrCommitIngest, newEpoch, err)
 	}
+	// Every candidate for this epoch and below has been judged; what is left is orphan material.
+	self.dropWrapCandidatesLocked(newEpoch)
 	// (6) A4: the ladder bookkeeping crosses the epoch here, in the same block as the install above.
 	if err := self.crossEpochLadderLocked(newEpoch); err != nil {
 		return err
@@ -3520,6 +3806,14 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 	}
 	walk.leaves = leaves
 	self.stats.Ingested += 1
+	// AND THE DIAGNOSIS IS RETURNED LAST, after everything this function CAN do has been done. It
+	// is returned rather than swallowed because a member that followed a commit into an epoch it
+	// holds no secret for has not really followed it, and the caller's own error channel is where
+	// the first sentence about it belongs. [Group.wrapDark] is the sticky copy, because this one
+	// is said once and the state is permanent for this process.
+	if resolveErr != nil {
+		return resolveErr
+	}
 	return nil
 }
 
@@ -4415,6 +4709,31 @@ func (self *Group) initTables() {
 	self.effects = map[[MessageIdBytes]byte]*contentEffect{}
 	self.effectsOn = map[[MessageIdBytes]byte][]*contentEffect{}
 	self.dirtyTargets = map[[MessageIdBytes]byte]struct{}{}
+	// THE ONE TABLE THIS FUNCTION MAY NOT CLEAR, AND THE ONE IT MUST TAKE OWNERSHIP OF.
+	//
+	// It may not clear it because every other map here is derived state a walk rebuilds, while
+	// pq_secrets holds values that ARRIVED and that nothing in this package can re-derive; each
+	// constructor fills it BEFORE calling this (the founder's draw, the joiner's invite, the
+	// restorer's record), so an unconditional assignment would erase a founded group's epoch-zero
+	// secret between the literal and the first seal.
+	//
+	// IT MUST COPY BECAUSE THE ENTRIES ARE ERASED IN PLACE. [Group.dropPqSecretsBelowWindowLocked]
+	// zeroizes an evicted entry rather than dropping it, and [Group.Close] zeroizes all of them --
+	// which is the right discipline for a retired epoch's post-quantum half and is a live grenade
+	// under any entry the constructor did not own. MEASURED, not imagined: a world that built
+	// three members' groups from ONE shared scalar had that scalar blanked, for every member at
+	// once, the moment the first member's window moved past its oldest epoch -- at epoch 34 of 35,
+	// so the symptom was two members disagreeing about the storage root thirty epochs after the
+	// value was shared, and the record that reported it was the one sealed at epoch 35. The copy
+	// here is what makes "an entry of this table is this group's to erase" true of every
+	// construction rather than of the three that remembered.
+	owned := make(map[uint64][]byte, len(self.pqSecrets))
+	for epoch, secret := range self.pqSecrets {
+		owned[epoch] = append([]byte(nil), secret...)
+	}
+	self.pqSecrets = owned
+	self.wrapsFor = map[uint64][]wrapCandidate{}
+	self.wrapsUnreadable = map[uint64]int{}
 }
 
 // advanceOwnLadderLocked moves the receiver ladder over this device's OWN leaf up to the position
@@ -4743,14 +5062,14 @@ func (self *Group) MemberWrapKeys() ([]MemberWrapKey, error) {
 		if err != nil {
 			return nil, fmt.Errorf("urmessage: the group's member %d: %w", at, err)
 		}
-		parsed, err := mls.ParseLeafKeysExtension(leafKeys)
+		parsed, err := parseLeafWrapKey(leafKeys)
 		if err != nil {
 			return nil, fmt.Errorf("urmessage: the group's member %d at leaf %d publishes a leaf keys body this build cannot read: %w",
 				at, leaf, err)
 		}
 		keys = append(keys, MemberWrapKey{
 			Leaf:     leaf,
-			XwingPub: append([]byte(nil), parsed.DeviceXwingPub...),
+			XwingPub: parsed,
 		})
 	}
 	return keys, nil
@@ -4848,6 +5167,13 @@ func (self *Group) Close() error {
 		return nil
 	}
 	self.closed = true
+	// THE POST-QUANTUM MATERIAL GOES FIRST AND IT GOES WHATEVER ELSE FAILS. The table is every
+	// epoch's pq_secret and the staged candidates are other epochs' -- key material this type
+	// holds in fields of its own, which is what connect/mls's erase gate refuses one package over
+	// -- and a Close that returned early on a session error would leave all of it in the heap for
+	// the collector to move around. Both erases are unconditional and neither can fail.
+	self.zeroizePqSecretsLocked()
+	self.zeroizeWrapCandidatesLocked()
 	var first error
 	if self.session != nil {
 		if err := self.session.Close(); err != nil && first == nil {

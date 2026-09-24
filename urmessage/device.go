@@ -697,6 +697,44 @@ func (self *Device) DecapsulateToOwnLeaf(ciphertext []byte) ([]byte, error) {
 	return shared, nil
 }
 
+// openWrapToOwnLeaf opens one MASTER section 7 wrap body addressed to the leaf THIS device
+// publishes, and answers its envelope and its payload.
+//
+// IT IS [Device.DecapsulateToOwnLeaf] ONE LAYER OUT AND IT IS NOT THAT METHOD WITH AN EXTRA STEP.
+// The KEM's answer is not the answer: X-Wing's ML-KEM-768 half uses implicit rejection, so a
+// ciphertext produced for some other leaf decapsulates SUCCESSFULLY to a pseudorandom secret --
+// which is what leaves no oracle to query and is why [messagegroup.XwingDecapsulate] returns a
+// secret and no verdict. Everything that tells "this wrap is mine" from "this wrap is not" happens
+// above the KEM, inside [messagegroup.OpenWrapBody]: the envelope comparison the opener states
+// with its own seven arguments, and then the Poly1305 tag. A caller that reached for the shared
+// secret here and derived its own key would be reimplementing MASTER section 7's nine-element info
+// on this side of the seam, which is the one thing a wrap format cannot survive two copies of.
+//
+// THE KEY IS RE-EXPANDED ON EVERY CALL, for [Device.DecapsulateToOwnLeaf]'s reason unchanged:
+// caching the pair would mean a `*messagegroup.XwingPrivateKey` in a field, which declares no
+// erase and which connect/mls's erase gate excuses precisely on the ground that nothing holds one.
+// A fan-out addresses this leaf a small fixed number of times per epoch.
+//
+// IT IS UNEXPORTED BECAUSE ITS CALLER IS THIS PACKAGE'S WALK. The exported surface for "can this
+// device open what is addressed to it" is DecapsulateToOwnLeaf, which is S2-26's measurement and
+// answers a secret; this one answers a wrap's payload and is only meaningful beside the record
+// that carried it.
+func (self *Device) openWrapToOwnLeaf(groupId []byte, contentEpoch uint64, targetType uint8,
+	targetId []byte, payloadType uint8, body []byte) (messagegroup.WrapEnvelope, []byte, error) {
+
+	// HELD ACROSS THE EXPANSION, exactly as above: [Device.Close] overwrites this array in place.
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if len(self.wrapSeed) == 0 {
+		return messagegroup.WrapEnvelope{}, nil, ErrNoDeviceWrapKey
+	}
+	private, err := messagegroup.XwingKeyGenFromSeed(self.wrapSeed)
+	if err != nil {
+		return messagegroup.WrapEnvelope{}, nil, fmt.Errorf("urmessage: this device's x-wing key: %w", err)
+	}
+	return messagegroup.OpenWrapBody(private, groupId, contentEpoch, targetType, targetId, payloadType, body)
+}
+
 // Groups is every group this device holds, in no particular order.
 func (self *Device) Groups() []*Group {
 	self.mutex.Lock()
