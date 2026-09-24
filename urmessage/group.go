@@ -676,8 +676,15 @@ type Group struct {
 	// It is persisted: see [GroupRecord.PqSecrets] and what an old store does.
 	pqSecrets map[uint64][]byte
 
-	// pqSecretWitness is SHA-256 of every pq_secret this group has EVER filed, keyed by the
+	// pqSecretWitness is SHA-256 of every pq_secret THIS DEVICE has EVER filed, keyed by the
 	// lowest epoch that value was filed at, AND IT IS NOT PRUNED BY THE WINDOW.
+	//
+	// THIS DEVICE'S HISTORY AND NOT THE GROUP'S, WHICH IS WHAT THE RULE ABOVE IT CAN PROMISE
+	// (ledger rulings 42-45). [Device.Join] files exactly one row, so this map is STRICTLY SMALLER
+	// on a member admitted later and the rule reading it refuses strictly less. The full residual
+	// -- including the case where nobody refuses at all -- is written out at
+	// [refuseRemovalOnHeldSecret]; what must not be written anywhere is a claim about what the
+	// GROUP holds, because no receiver can check one.
 	//
 	// WHY IT EXISTS, AND IT IS THE 2026-09-24 REPAIR. The removal rule's subject used to be
 	// `pqSecrets` alone -- the table above -- and that table is pruned at
@@ -699,10 +706,14 @@ type Group struct {
 	//
 	// WHAT IT DOES NOT REACH, NAMED AND NOT CLAIMED CLOSED: a device that never held the replayed
 	// epoch's row at all -- a member ADDED after it, or one restored from a record written before
-	// this field was persisted -- has no witness for it and follows. The only repair for THAT is
-	// on the wire: the wrap payload and the digest preimage authenticated as drawn FOR
-	// `opensEpoch`, so a replay of any earlier epoch's value is refused by construction whatever
-	// the receiver still holds. That is a `connect` change and is filed rather than taken here.
+	// this field was persisted -- has no witness for it and follows. That is not a defect in this
+	// map and no widening of it can reach the case: a receiver cannot answer a question about a
+	// history it does not have, so the false negative is a THEOREM. The only repair is on the
+	// wire: the wrap payload and the digest preimage authenticated as drawn FOR `opensEpoch`, so a
+	// replay of any earlier epoch's value is refused by construction whatever the receiver still
+	// holds. That is a `connect` change and is filed rather than taken here. Ruling 45 prices the
+	// cheaper half -- shipping this witness in the Welcome -- and records that it NARROWS rather
+	// than closes, because a late-joining inviter's own witness is already truncated.
 	// See [GroupRecord.PqSecretWitness].
 	pqSecretWitness map[uint64][sha256.Size]byte
 

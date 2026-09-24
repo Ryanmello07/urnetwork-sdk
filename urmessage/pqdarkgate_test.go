@@ -12,14 +12,23 @@
 // pq_secret table that reads as healthy -- pqSecretsShowRotation compares OCTETS and the fallback
 // wrote the same octets as the epoch below, so nothing in the table says anything is wrong.
 //
-// AND A REMOVAL MAY NOT BE FOLLOWED ON A SECRET THIS GROUP ALREADY HOLDS, which is item 243's own
+// AND A RECEIVER DOES NOT FOLLOW A REMOVAL ONTO A SECRET IT HAS HELD, which is item 243's own
 // property arriving inverted. It was written here as a rule about the two arms that return the
 // identifier `held`, and the arm that returns a WRAP CANDIDATE reaches the same value off the wire
-// and had no guard: a committer that removed a leaf and fanned out the secret the group already
+// and had no guard: a committer that removed a leaf and fanned out the secret every member already
 // had was followed by every survivor with a nil error and no dark state. The gate below was scoped
 // to the identifier, printed `candidate.secret` in its own complement, and passed. Both halves are
 // repaired here -- the rule is on the VALUE at one exit, and the gate is on the SHAPE of every
 // return that can carry one, asserted rather than printed.
+//
+// AND THE HEADING OF THIS FILE USED TO READ "A REMOVAL MAY NOT BE FOLLOWED ON A SECRET THIS GROUP
+// ALREADY HOLDS", WHICH IS A GROUP PROPERTY NOTHING HERE DELIVERS -- LEDGER RULINGS 42-45. The
+// subject that is actually checked is ONE RECEIVER's own history ([Group.pqSecretWitness]);
+// [Device.Join] files one row, so a member admitted later refuses strictly less, and if every
+// survivor joined after the reused epoch then NOBODY refuses. The rule is kept and the promise is
+// corrected: the three things it does not deliver are written out at [refuseRemovalOnHeldSecret]
+// and held there, as prose and by class, by
+// TestTheRemovalRuleIsDocumentedAsAReceiverPropertyAndNeverAsAGroupOne in section 7.
 //
 // AND ITEM 251's RULING 41: an unrotated removal is an INVALID COMMIT, refused the way an
 // unauthorized one is -- the receiver stays at epoch n and does NOT go dark. Refused-and-halted
@@ -66,6 +75,19 @@
 //     are in a deferred block now, and TestEveryCounterTheResolutionMovesIsMovedWhereItsSubjectIsFound
 //     is the gate for the RULE -- records counted where they are FOUND, epochs on the arm that
 //     decides them, held both ways.
+//
+// ── AND WHAT THE THIRD 2026-09-24 PASS FOUND: THE GUARD CLAUSE, AND THE PROMISE ──────────────
+//
+//  6. THE ONE-EXIT GATE ASKED WHETHER THE REFUSAL IS CALLED, NOT WHETHER IT IS RETURNED. An exit
+//     spelled `_ = refuseRemovalOnHeldSecret(...)` inside the same `if removesLeaves` passed it
+//     with the whole property gone -- reproduced before it was repaired, with the two behavioural
+//     cases red beside a green gate. [removalGuardDefect] holds the RETURNED value now, in four
+//     clauses, and two of its mutants (the refusal returned beside the secret, and the condition
+//     widened so `removesLeaves` is no longer what keys it) are caught by the gate and by NOTHING
+//     ELSE in this package, which is what it is for.
+//  7. AND THE PROMISE WAS A GROUP PROPERTY THE CODE CANNOT DELIVER -- ledger rulings 42-45. It is
+//     corrected everywhere it was written, and section 7's gate holds it by class rather than by
+//     banned phrase: the noun doing the holding, in every production sentence about this rule.
 package urmessage
 
 import (
@@ -388,7 +410,16 @@ func TestTheWrapDarkPartIsOptionalAndRefusesWhatThisBuildDidNotWrite(t *testing.
 	}
 }
 
-// ── 3. A REMOVAL MAY NOT BE FOLLOWED ON THE SECRET THE REMOVED MEMBER HOLDS ──────────────────
+// ── 3. THIS RECEIVER DOES NOT FOLLOW A REMOVAL ONTO A SECRET THIS RECEIVER HAS HELD ──────────
+
+// EVERY CASE IN THIS SECTION IS A RECEIVER THAT DID HOLD THE REPLAYED VALUE, AND THAT IS THE
+// PROPERTY'S SCOPE RATHER THAN A CONVENIENCE OF THE FIXTURE. [rotWorld] admits every member in the
+// founding commit, so every receiver below is as old as the group. A member admitted LATER holds a
+// strictly smaller history ([Device.Join] files one row) and answers *not held* for the same
+// octets; that is ledger ruling 43's residual, it is a theorem rather than a bug, and nothing here
+// drives it because this harness has no door that admits a member after the founding. Ruling 42's
+// clause (b) -- *a receiver that itself held the reused secret refuses and halts* -- is what this
+// section holds, and it is the whole of what it holds.
 
 // THE COMMIT SHAPE EVERY BUILD BEFORE THIS ONE EMITTED, REFUSED: a CommitRemove whose digest was
 // computed over the HELD secret.
@@ -1426,7 +1457,7 @@ func liveTableHolds(group *Group, value []byte) bool {
 //
 // BOTH DIRECTIONS, and the control is the whole point: with no removal the arm answers the
 // candidate, which is every honest rotation in this package; with one, and the candidate carrying
-// a value the group already holds, it refuses.
+// a value this receiver has held, it refuses.
 func TestTheWrapCandidateArmOfTheResolutionIsClosedToARemoval(t *testing.T) {
 	world := newRotWorld(t, "alice", "bob", "carol")
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
@@ -1741,7 +1772,7 @@ func TestADigestLessRemovalIsRefusedBeforeTheApplyAndOnlyANonRemovingOneReachesT
 	}
 }
 
-// AND THE COMPATIBILITY ARM: a removal whose DIGEST names the secret this group already holds.
+// AND THE COMPATIBILITY ARM: a removal whose DIGEST names a secret this receiver has held.
 //
 // IT IS DRIVEN DIRECTLY, AND THE REASON IS A MEASUREMENT RATHER THAN A CONVENIENCE. Mutation row
 // M5 -- the digest arm's guard deleted -- was killed by the structural gate below and by NOTHING
@@ -1841,8 +1872,10 @@ func TestTheCompatibilityArmOfTheResolutionIsClosedToARemoval(t *testing.T) {
 // because a case was added for one site.
 //
 // AND THE EXIT IS ASSERTED TO BE GUARDED, structurally: there is exactly one local function value
-// in the resolution, it is the one every secret leaves by, and its body refuses a removal with
-// [refuseRemovalOnHeldSecret] before it answers anything.
+// in the resolution, it is the one every secret leaves by, and its body RETURNS what
+// [refuseRemovalOnHeldSecret] builds -- nil in the secret position, the refusal in the error one,
+// above every answer -- before it answers anything. [removalGuardDefect] carries each clause and
+// why "a call of the refusal appears" was not one of them.
 //
 // ── AND WHY IT WAS REWRITTEN A SECOND TIME, 2026-09-24 ────────────────────────────────────────
 //
@@ -1870,6 +1903,18 @@ func TestTheCompatibilityArmOfTheResolutionIsClosedToARemoval(t *testing.T) {
 //     clause -- the sentence the refusal prints -- and held BOTH WAYS: an arm with no row is a
 //     refusal, a row naming no arm is a refusal. A hardcoded 3 is the per-site case this gate says
 //     it is not, and it could not tell a deleted arm from a renamed one.
+//
+// ── AND A THIRD TIME, THE SAME DAY: THE GUARD CLAUSE MEASURED A CALL AND NOT AN ANSWER ────────
+//
+// Everything above holds that every secret leaves by ONE exit. What decided whether that exit is
+// GUARDED asked only whether a call of [refuseRemovalOnHeldSecret] appears inside an
+// `if removesLeaves` -- never what becomes of the call's RESULT. So an exit that computes the
+// refusal and throws it away (`_ = refuseRemovalOnHeldSecret(...)`) passed this gate with the whole
+// property gone, and printed a HEALTHIER complement than the correct code does. That is ledger item
+// 254's "owed from this pass", it was reproduced before it was repaired, and it is the same class
+// as the two rewrites above: the subject was a spelling (*a call appears*) where the property is an
+// answer (*the refusal is what the exit returns*). [removalGuardDefect] is the repair and carries
+// its four clauses, the mutants that made each one necessary, and its own residual.
 func TestEveryReturnOfTheResolutionThatCanCarryAPqSecretGoesThroughTheGuardedExit(t *testing.T) {
 	// THE DISPOSITIONS, keyed by the SOURCE TEXT of the expression in the secret position. `why`
 	// is a sentence and not a label because a disposition nobody can disagree with is a row that
@@ -1897,8 +1942,8 @@ func TestEveryReturnOfTheResolutionThatCanCarryAPqSecretGoesThroughTheGuardedExi
 	arms := map[string]string{
 		"carries no epoch digest at all": "the kind 0x0001 arm, inside Spec B section 5.4's open " +
 			"acceptance window. Every group on the deployed alpha takes it.",
-		"delivered, in a device wrap this device opened, a pq_secret this group already holds": "the wrap-candidate arm, which reads the WIRE and is the one that had no guard at all.",
-		"opened its epoch with the pq_secret this group already held":                          "the compatibility arm, decided by the same digest comparison and not by a version flag.",
+		"delivered, in a device wrap this device opened, a pq_secret this device has held": "the wrap-candidate arm, which reads the WIRE and is the one that had no guard at all.",
+		"opened its epoch with a pq_secret this device has held":                           "the compatibility arm, decided by the same digest comparison and not by a version flag.",
 	}
 
 	declaration := parseFuncDecl(t, "pqepoch.go", "resolvePqSecretLocked")
@@ -1950,10 +1995,10 @@ func TestEveryReturnOfTheResolutionThatCanCarryAPqSecretGoesThroughTheGuardedExi
 			"the guarded exit %q. If the exit was inlined back into the arms, every arm needs the "+
 			"rule again and this gate has to be rewritten to find it there", len(exits), exit)
 	}
-	if !blockGuardsRemoval(exits[0].Body) {
-		t.Fatalf("%q does not refuse a removal with refuseRemovalOnHeldSecret before it answers. "+
+	if defect := removalGuardDefect(exits[0].Body); defect != "" {
+		t.Fatalf("%q does not refuse a removal with refuseRemovalOnHeldSecret before it answers: %s. "+
 			"Every secret this function returns leaves by it, so an unguarded exit is every arm "+
-			"unguarded at once", exit)
+			"unguarded at once", exit, defect)
 	}
 
 	// THE SUBJECT, COUNTED INDEPENDENTLY FIRST. This walk knows nothing about result lists or
@@ -2159,14 +2204,149 @@ func TestEveryReturnOfTheResolutionThatCanCarryAPqSecretGoesThroughTheGuardedExi
 	}
 }
 
-// blockGuardsRemoval is whether a block refuses a removal before it answers a secret: an
-// `if removesLeaves { ... refuseRemovalOnHeldSecret(...) ... }`.
+// removalGuardDefect says what is WRONG with a block's removal guard, in one clause, or "" when
+// nothing is. The property it holds is that the block refuses a removal BEFORE it answers a
+// secret: an `if removesLeaves { ... return nil, refuseRemovalOnHeldSecret(...) ... }`.
 //
-// IT LOOKS FOR THE CALL AND NOT ONLY FOR THE IDENTIFIER `removesLeaves`, because the condition is
-// the cheap half to fake and the refusal is the load-bearing one -- a block whose guard returned
-// nil, or returned some other error, would satisfy a check that only read the `if`.
-func blockGuardsRemoval(block *ast.BlockStmt) bool {
-	found := false
+// ── WHY THIS IS NOT A CALL COUNT, WHICH IS THE 2026-09-24 (THIRD PASS) REPAIR ─────────────────
+//
+// What stood here asked whether a CALL of `refuseRemovalOnHeldSecret` appears anywhere inside an
+// `if removesLeaves`. It never asked what happens to the call's RESULT. So the exit
+//
+//	answerSecret := func(secret []byte, how string) ([]byte, error) {
+//	    if removesLeaves {
+//	        if heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret); alreadyHeld {
+//	            _ = refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)
+//	        }
+//	    }
+//	    return secret, nil
+//	}
+//
+// -- which computes the refusal, throws it away and hands the held secret back -- PASSED this
+// gate, with the whole property gone and with the complement it prints looking healthier than
+// before (`nil x7` rather than `nil x8`). REPRODUCED before it was fixed: the gate logged PASS on
+// that body while TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch and
+// TestTheCompatibilityArmOfTheResolutionIsClosedToARemoval both went red on it. It is ledger item
+// 254's "owed from this pass", and it is the SAME class as the two rewrites above it: the gate
+// named a spelling (*a call appears*) where the property is an answer (*the refusal is what the
+// exit returns*).
+//
+// ── WHAT IT ASKS NOW, and every clause is here because a mutant defeated its absence ──────────
+//
+//  1. THE CALL'S RESULT IS RETURNED. Every call of the refusal in the block is counted, and so is
+//     every call that sits inside the ERROR position of a return statement; the two counts must
+//     agree. `_ = refuse(...)`, `err := refuse(...)` with no use, and a call handed to a logger
+//     are all one class -- a call whose value does not leave -- and they die on one clause rather
+//     than on three cases.
+//  2. THE RETURN CARRIES NO SECRET. The secret position of that return must be exactly `nil`, so
+//     `return secret, refuseRemovalOnHeldSecret(...)` -- which refuses and hands the value over
+//     anyway, and which a caller reading only the secret would follow -- is red.
+//  3. THE RETURN IS THE EXIT'S OWN. The walk does not descend into a nested function literal: a
+//     refusal returned from a closure the guard never calls is returned from THAT closure.
+//  4. THE REFUSAL COMES FIRST. Every guarded return must sit above every return in the block that
+//     carries something other than `nil`, because a guard below the answer is a guard nothing
+//     reaches.
+//
+// THE CONDITION IS STILL READ, and it still fails closed: `if !removesLeaves`, `if removesLeaves
+// && false` and `if somethingElse` are all not an [ast.Ident] named `removesLeaves`, so none of
+// them is accepted as the guard and the block ends with no guard at all.
+//
+// THE RESIDUAL, NAMED: this reads SHAPE and not REACHABILITY. A guard whose inner condition were
+// rewritten to something that cannot be true -- the `alreadyHeld` test replaced by a predicate
+// that always answers false -- satisfies every clause here. What holds that is the behaviour, and
+// it is driven by TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch,
+// TestTheCompatibilityArmOfTheResolutionIsClosedToARemoval and
+// TestTheWrapCandidateArmOfTheResolutionIsClosedToARemoval, one per arm.
+func removalGuardDefect(block *ast.BlockStmt) string {
+	const refusal = "refuseRemovalOnHeldSecret"
+
+	// inspect walks `node` without descending into a nested function literal, so that clause 3
+	// is a property of the walk rather than a case inside it.
+	inspect := func(node ast.Node, visit func(ast.Node) bool) {
+		ast.Inspect(node, func(child ast.Node) bool {
+			if child == nil {
+				return true
+			}
+			if literal, isLiteral := child.(*ast.FuncLit); isLiteral && ast.Node(literal) != node {
+				return false
+			}
+			return visit(child)
+		})
+	}
+	isRefusalCall := func(node ast.Node) bool {
+		call, isCall := node.(*ast.CallExpr)
+		if !isCall {
+			return false
+		}
+		name, isIdent := call.Fun.(*ast.Ident)
+		return isIdent && name.Name == refusal
+	}
+
+	// EVERY CALL OF THE REFUSAL IN THE BLOCK, wherever it is and whatever is done with it.
+	calls := 0
+	inspect(block, func(node ast.Node) bool {
+		if isRefusalCall(node) {
+			calls += 1
+		}
+		return true
+	})
+	if calls == 0 {
+		return "it never calls " + refusal + " at all"
+	}
+
+	// EVERY RETURN OF THE BLOCK, split by what it carries. `carrying` is the answer the guard has
+	// to sit above; `guarded` is a return whose error position carries the refusal.
+	carried, guarded, carrying := 0, []token.Pos{}, []token.Pos{}
+	inspect(block, func(node ast.Node) bool {
+		ret, isReturn := node.(*ast.ReturnStmt)
+		if !isReturn {
+			return true
+		}
+		if len(ret.Results) == 0 {
+			return true
+		}
+		if exprText(ret.Results[0]) != "nil" {
+			carrying = append(carrying, ret.Pos())
+		}
+		if len(ret.Results) < 2 {
+			return true
+		}
+		here := 0
+		inspect(ret.Results[1], func(child ast.Node) bool {
+			if isRefusalCall(child) {
+				here += 1
+			}
+			return true
+		})
+		if here == 0 {
+			return true
+		}
+		carried += here
+		if exprText(ret.Results[0]) == "nil" {
+			guarded = append(guarded, ret.Pos())
+		}
+		return true
+	})
+
+	// ── 1. THE RESULT IS RETURNED ───────────────────────────────────────────────────────────
+	if carried != calls {
+		return fmt.Sprintf("%d of its %d call(s) of %s put the refusal in the error position of a "+
+			"return; the rest compute it and drop it, which passes a gate that only looks for the "+
+			"call and leaves the removal following the secret the removed member holds",
+			carried, calls, refusal)
+	}
+	// ── 2. AND CARRIES NO SECRET ────────────────────────────────────────────────────────────
+	if len(guarded) != calls {
+		return fmt.Sprintf("%d of its %d refusal(s) are returned beside a non-nil secret; a guard "+
+			"that refuses AND hands the value over is a refusal the caller can read past",
+			calls-len(guarded), calls)
+	}
+	// ── 4. AND IT IS REACHED THROUGH `if removesLeaves` ─────────────────────────────────────
+	//
+	// The condition is read LAST, because a guarded return the conditional does not contain is a
+	// different defect from a conditional with no guarded return in it, and the clauses above name
+	// the first one precisely.
+	inConditional := 0
 	for _, statement := range block.List {
 		conditional, isIf := statement.(*ast.IfStmt)
 		if !isIf {
@@ -2175,18 +2355,27 @@ func blockGuardsRemoval(block *ast.BlockStmt) bool {
 		if name, ok := conditional.Cond.(*ast.Ident); !ok || name.Name != "removesLeaves" {
 			continue
 		}
-		ast.Inspect(conditional.Body, func(node ast.Node) bool {
-			call, isCall := node.(*ast.CallExpr)
-			if !isCall {
-				return true
+		for _, at := range guarded {
+			if conditional.Body.Pos() <= at && at <= conditional.Body.End() {
+				inConditional += 1
 			}
-			if name, ok := call.Fun.(*ast.Ident); ok && name.Name == "refuseRemovalOnHeldSecret" {
-				found = true
-			}
-			return true
-		})
+		}
 	}
-	return found
+	if inConditional != len(guarded) {
+		return fmt.Sprintf("%d of its %d refusal(s) are outside an `if removesLeaves` at the top "+
+			"level of the block, so what refuses is not keyed to the commit removing a leaf",
+			len(guarded)-inConditional, len(guarded))
+	}
+	// ── 3+4. AND IT COMES FIRST ─────────────────────────────────────────────────────────────
+	for _, answer := range carrying {
+		for _, at := range guarded {
+			if answer < at {
+				return "it answers a secret ABOVE its own refusal, so the guard is below the " +
+					"line it is supposed to guard and nothing reaches it"
+			}
+		}
+	}
+	return ""
 }
 
 // ── 4b. EVERY COUNTER THE RESOLUTION MOVES IS MOVED WHERE ITS SUBJECT IS FOUND ───────────────
@@ -2697,6 +2886,324 @@ func TestNoProductionCommentClaimsADarkGroupRepairsItself(t *testing.T) {
 			"fetches are refused before a row is read, and there is nowhere to put a later wrap.\n%s",
 			strings.Join(hits, "\n"))
 	}
+}
+
+// ── 7. THE PROMISE: THE RULE IS A RECEIVER PROPERTY AND IS NEVER WRITTEN AS A GROUP ONE ──────
+
+// NO PRODUCTION SENTENCE ATTRIBUTES THE REMOVAL RULE'S HOLDING TO THE GROUP, AND THE THREE THINGS
+// IT DOES NOT DELIVER ARE WRITTEN WHERE THE RULE IS.
+//
+// ── WHY THIS GATE EXISTS, AND IT IS RULING 44 RATHER THAN TIDINESS ────────────────────────────
+//
+// The rule was documented, in production comments and in the sentinel a caller reads, as
+//
+//	no removal may be followed on a secret this group already holds
+//
+// and it cannot deliver that. The subject it is CHECKED against is one receiver's own history
+// ([Group.pqSecretWitness], written by [Group.filePqSecretLocked] and by nothing else), and
+// [Device.Join] files exactly one row -- so a member admitted at epoch k answers *not held* for
+// octets a founder answers *held* for, and if every survivor joined after epoch k and the
+// committer reuses pq_secret[k] then NOBODY refuses. Ledger rulings 42-45 keep the rule and change
+// the claim to what is checkable: *this receiver does not follow a removal onto a secret THIS
+// RECEIVER has held.* The corpus had never written the honesty caveat for rotation although it had
+// written the analogous one for roles, which is the shape of defect this gate is for: a promise
+// that is FALSE rather than merely unmeasured, sitting in a block whose heading claims honesty.
+//
+// ── WHAT IT ASKS, IN THREE ARMS ───────────────────────────────────────────────────────────────
+//
+//  1. THE SUBJECT OF THE HOLDING, BY CLASS AND NOT BY BANNED PHRASE. Every production comment
+//     block that is ABOUT this rule -- it mentions a removal and a pq_secret and says something is
+//     held -- is read, and for each holding verb in it the NOUN DOING THE HOLDING is classified
+//     off the text immediately before it. A group subject is a refusal; a device or receiver
+//     subject is the claim this build can make. So a re-wording that says "the group still has it"
+//     is red for the same reason the old sentence was, without this gate carrying a list of the
+//     ways to spell it.
+//  2. AND A BLOCK MAY STATE THE OLD CLAIM IN ORDER TO CORRECT IT -- [refuseRemovalOnHeldSecret]'s
+//     own header does exactly that -- but only if the correction is IN THE SAME BLOCK. A denial
+//     with no receiver-scoped sentence beside it is the claim with an alibi.
+//  3. THE THREE THINGS THE RULE DOES NOT DELIVER ARE PRESENT WHERE THE RULE IS, keyed by a
+//     fragment of each and held against a written disposition: a clause deleted is a refusal. This
+//     is presence and NOT truth, which is this gate's residual and is stated rather than implied --
+//     what holds the truth of clause (a) is
+//     TestThreeMembersRotateAcrossTwoEpochsAndAMemberRemovedByThatCommitCannotFollow and what
+//     holds clause (b) is section 3 above. Clause (c) -- *against a hostile ADMIN or OWNER this
+//     rule delivers nothing, structurally* -- is held by NO test and can be held by none: it is the
+//     statement that there is no defence here, and a test of it could only assert a tautology.
+//     This gate is the only thing that holds it, and holding it as prose is the whole of ruling
+//     42's "stated plainly rather than implied".
+//
+// AND THE STRING LITERALS ARE IN THE SUBJECT AND NOT ONLY THE COMMENTS, because the sentinel is
+// what a caller and an operator actually meet: [ErrRemovalWithoutRotation]'s message and the two
+// refusals' formats said "this group" too.
+func TestTheRemovalRuleIsDocumentedAsAReceiverPropertyAndNeverAsAGroupOne(t *testing.T) {
+	// THE HOLDING VERBS. A sentence about this rule says the value is held; these are the ways to
+	// say it, and the gate does not care which -- what it reads is the noun in front of one.
+	holdings := []string{"already holds", "already held", "has already held", "has ever held",
+		"has held", "have held", "already has", "ever held", "still holds"}
+	// THE SUBJECT WINDOW: the text immediately before a holding verb, in which the noun doing the
+	// holding sits. Twenty-four octets covers "a pq_secret this group " and "value THIS DEVICE "
+	// with room to spare, and it is short enough that an unrelated noun two sentences back cannot
+	// reach into it.
+	const window = 24
+	// subjectsOf classifies every holding verb in a text as "group", "receiver" or "unattributed".
+	subjectsOf := func(text string) (group int, receiver int, loose int) {
+		lowered := strings.ToLower(text)
+		for _, holding := range holdings {
+			at := strings.Index(lowered, holding)
+			for 0 <= at {
+				from := at - window
+				if from < 0 {
+					from = 0
+				}
+				before := lowered[from:at]
+				switch {
+				case strings.Contains(before, "device") || strings.Contains(before, "receiver"):
+					receiver += 1
+				case strings.Contains(before, "group"):
+					group += 1
+				default:
+					loose += 1
+				}
+				next := strings.Index(lowered[at+len(holding):], holding)
+				if next < 0 {
+					break
+				}
+				at = at + len(holding) + next
+			}
+		}
+		return group, receiver, loose
+	}
+	// A BLOCK IS ABOUT THIS RULE when it says all three things. Anything narrower is a gate scoped
+	// to one file, and anything wider drags in every comment that mentions a group.
+	//
+	// "SECRET" AND NOT "pq_secret", WHICH IS A WIDENING TAKEN AFTER THE NARROW FORM MISSED ONE.
+	// [Group.resolvePqSecretLocked]'s wrap-candidate arm says "the value the commit's own digest
+	// NAMES is one this group has held" and never spells `pq_secret` in that block -- so under the
+	// narrower test the arm that had NO GUARD AT ALL was also the arm whose prose was outside this
+	// gate's subject, which is the same defect twice in one place.
+	about := func(text string) bool {
+		lowered := strings.ToLower(text)
+		if !strings.Contains(lowered, "remov") {
+			return false
+		}
+		if !strings.Contains(lowered, "secret") {
+			return false
+		}
+		group, receiver, loose := subjectsOf(text)
+		return 0 < group+receiver+loose
+	}
+	// A STRING LITERAL IS IN THE SUBJECT ON A WEAKER TEST, AND THE REASON IS THE `how` CLAUSES.
+	// [Group.resolvePqSecretLocked]'s refusal is assembled from two literals -- the format, which
+	// names the removal, and the ARM'S OWN CLAUSE, which does not. Under the comment test the arm
+	// clauses were outside the subject by construction while being half of the sentence an operator
+	// reads, which is the "a gate scoped to how the defect is spelled today" failure one level
+	// down. A literal is in the subject when it names a pq_secret and says something is held.
+	aboutLiteral := func(text string) bool {
+		lowered := strings.ToLower(text)
+		if !strings.Contains(lowered, "pq_secret") && !strings.Contains(lowered, "pqsecret") {
+			return false
+		}
+		group, receiver, loose := subjectsOf(text)
+		return 0 < group+receiver+loose
+	}
+	// A DENIAL is a block stating the old claim in order to correct it.
+	denials := []string{"used to claim", "used to say", "used to be", "cannot deliver",
+		"is false", "was false", "no longer", "rather than the group", "and not the group"}
+	denies := func(text string) bool {
+		lowered := strings.ToLower(text)
+		for _, denial := range denials {
+			if strings.Contains(lowered, denial) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// ── THE CONTROLS, FIRST, ON SYNTHETIC TEXT. The literals are COPIED from the ledger entry
+	// and from the source, not retyped from memory, which is the trap this corpus walked into
+	// with an en dash.
+	deleted := "The rule is \"no removal may be followed on a secret this group already holds\""
+	if group, _, _ := subjectsOf(deleted); group != 1 {
+		t.Fatalf("CONTROL FAILED: the classifier reads %d group-subject holding(s) in the sentence "+
+			"this gate exists to refuse, want 1: %q", group, deleted)
+	}
+	if !about(deleted + " pq_secret") {
+		t.Fatalf("CONTROL FAILED: the deleted sentence is not recognised as being about this rule")
+	}
+	corrected := "no removal may be followed on a secret THIS RECEIVER has held"
+	if group, receiver, _ := subjectsOf(corrected); group != 0 || receiver != 1 {
+		t.Fatalf("CONTROL FAILED: the corrected sentence reads as %d group / %d receiver "+
+			"subject(s), want 0 / 1: %q", group, receiver, corrected)
+	}
+	if about("// the pq_secret table is pruned at PastEpochWindow") {
+		t.Fatalf("CONTROL FAILED: a block that says nothing about a removal is in this gate's subject")
+	}
+	// AND THE ARM CLAUSE, WHICH IS HALF A REFUSAL AND NAMES NO REMOVAL, IS IN THE LITERAL SUBJECT.
+	// Copied from pqepoch.go rather than retyped: the clause is the sentence an operator reads.
+	arm := "opened its epoch with a pq_secret this device has held"
+	if !aboutLiteral(arm) {
+		t.Fatalf("CONTROL FAILED: an arm's own `how` clause is outside the literal subject, which "+
+			"is how half of every refusal this rule prints stayed invisible: %q", arm)
+	}
+	if about(arm) {
+		t.Fatalf("CONTROL FAILED: the arm clause names no removal, so it must not be in the " +
+			"COMMENT subject -- the two tests are different on purpose")
+	}
+	if denies(deleted) {
+		t.Fatalf("CONTROL FAILED: the bare claim reads as a correction of itself")
+	}
+
+	// ── THE WALK: production comment blocks and production string literals ──────────────────
+	root := moduleRoot(t)
+	scanned, blocks, literals := 0, 0, 0
+	hits := []string{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if name := info.Name(); name == ".git" || name == "testdata" || name == "vendor" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		source, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		scanned += 1
+		rel, _ := filepath.Rel(root, path)
+		name := filepath.ToSlash(rel)
+
+		lines := strings.Split(string(source), "\n")
+		for at := 0; at < len(lines); at += 1 {
+			if !strings.HasPrefix(strings.TrimSpace(lines[at]), "//") {
+				continue
+			}
+			from := at
+			block := []string{}
+			for at < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[at]), "//") {
+				block = append(block, strings.TrimSpace(lines[at]))
+				at += 1
+			}
+			joined := strings.Join(block, " ")
+			if !about(joined) {
+				continue
+			}
+			blocks += 1
+			group, receiver, _ := subjectsOf(joined)
+			if group == 0 {
+				continue
+			}
+			if denies(joined) && 0 < receiver {
+				// STATING THE OLD CLAIM IN ORDER TO CORRECT IT, with the correction in the
+				// same block. That is what [refuseRemovalOnHeldSecret]'s header does.
+				continue
+			}
+			hits = append(hits, fmt.Sprintf("%s:%d: %d holding(s) in this block are the GROUP's "+
+				"and %d are the receiver's, and nothing in it corrects the claim", name, from+1,
+				group, receiver))
+		}
+
+		// THE STRING LITERALS, off the syntax tree rather than off the text, so that a sentence
+		// split across a `+` is one literal and not two halves neither of which says anything.
+		fileSet := token.NewFileSet()
+		parsed, parseErr := parser.ParseFile(fileSet, path, source, 0)
+		if parseErr != nil {
+			return parseErr
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			literal, isLiteral := node.(*ast.BasicLit)
+			if !isLiteral || literal.Kind != token.STRING {
+				return true
+			}
+			text, unquoteErr := strconv.Unquote(literal.Value)
+			if unquoteErr != nil || !aboutLiteral(text) {
+				return true
+			}
+			literals += 1
+			group, receiver, loose := subjectsOf(text)
+			if group == 0 && loose == 0 {
+				return true
+			}
+			hits = append(hits, fmt.Sprintf("%s:%d: the string %q attributes %d holding(s) to the "+
+				"GROUP and leaves %d unattributed (%d name the receiver). A sentinel is what an "+
+				"operator reads, and this rule is one receiver's own history",
+				name, fileSet.Position(literal.Pos()).Line, text, group, loose, receiver))
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+
+	// ── THE WALK'S OWN CONTROLS. An absence proves nothing without them ─────────────────────
+	if scanned < 20 {
+		t.Fatalf("CONTROL FAILED: this gate scanned %d production file(s) under %s, which is not "+
+			"this module", scanned, root)
+	}
+	if blocks < 5 || literals < 2 {
+		t.Fatalf("CONTROL FAILED: the subject is %d comment block(s) and %d string literal(s). "+
+			"This rule is documented in more places than that, so a clean result here would mean "+
+			"the matcher stopped finding the prose rather than that the prose is right",
+			blocks, literals)
+	}
+	t.Logf("CONTROLS HELD: %d production files, %d comment block(s) and %d string literal(s) about "+
+		"this rule; the classifier reads the deleted sentence as the GROUP's and the corrected one "+
+		"as the receiver's", scanned, blocks, literals)
+	if 0 < len(hits) {
+		t.Fatalf("the removal rule is documented as a GROUP property and it cannot deliver one: "+
+			"its subject is ONE RECEIVER's own history, [Device.Join] files one row, and if every "+
+			"survivor joined after the reused epoch then nobody refuses (ledger rulings 42-45).\n%s",
+			strings.Join(hits, "\n"))
+	}
+
+	// ── ARM 3: THE THREE THINGS IT DOES NOT DELIVER, WHERE THE RULE IS ──────────────────────
+	//
+	// Keyed by a fragment of each clause and held against a written disposition. A clause that is
+	// deleted is a refusal; this reads PRESENCE and not truth, which is said out loud in this
+	// gate's header beside what does hold each clause's truth.
+	owed := map[string]string{
+		"THIS RECEIVER DOES NOT FOLLOW A REMOVAL ONTO A SECRET THIS RECEIVER HAS HELD": "" +
+			"the claim itself, in the terms it is checked in",
+		"STRICTLY SMALLER": "residual 1 -- a late joiner's history is smaller than a founder's, " +
+			"so its false negative is a theorem and not a bug",
+		"NOBODY REFUSES": "residual 2 -- every survivor joined after the reused epoch and the " +
+			"committer is not a receiver of its own commit",
+		"PARTITION BY JOIN EPOCH": "residual 2's group-level effect, which item 242 prices as " +
+			"a hostile committer can HALT a group and cannot TAKE it",
+		"HOSTILE ADMIN OR OWNER COMMITTER THIS RULE DELIVERS NOTHING": "ruling 42's clause (c), " +
+			"which is held by no test and can be held by none",
+		"IN ITS OWN PROCESS": "why clause (c) is structural: the committer must hold " +
+			"storage_root[n+1] to build the digest at all",
+	}
+	source, err := os.ReadFile(filepath.Join(root, "urmessage", "pqepoch.go"))
+	if err != nil {
+		t.Fatalf("reading pqepoch.go: %v", err)
+	}
+	where := parseFuncDecl(t, "pqepoch.go", "refuseRemovalOnHeldSecret")
+	if where.Doc == nil {
+		t.Fatalf("refuseRemovalOnHeldSecret carries no doc comment, so the rule has nowhere to " +
+			"be written down where a reader meets it")
+	}
+	rule := where.Doc.Text()
+	if !strings.Contains(string(source), "refuseRemovalOnHeldSecret") {
+		t.Fatalf("CONTROL FAILED: pqepoch.go does not name the refusal, so this arm is reading " +
+			"the wrong file")
+	}
+	for fragment, why := range owed {
+		if !strings.Contains(rule, fragment) {
+			t.Fatalf("refuseRemovalOnHeldSecret's header does not say %q (%s). The rule is written "+
+				"down where a reader meets it or it is not written down: a residual named in a "+
+				"ledger entry and not in the code is a decision that lives only in a commit message",
+				fragment, why)
+		}
+	}
+	t.Logf("the rule's own header carries all %d dispositioned clauses of what it does NOT deliver", len(owed))
 }
 
 // isWordOctet is whether an octet can be part of a word, for the boundary the claim match needs.

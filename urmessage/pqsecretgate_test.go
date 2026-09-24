@@ -926,7 +926,7 @@ var pqSecretCountedNotCarriedSites = map[string]string{
 	"sortEpochPqSecretWitness|len rows": "the witness sort's bound.",
 	"witnessPqSecretLocked|len pqSecret": "the witness's own emptiness guard: an empty value is not witnessed, because " +
 		"[Group.pqSecretHeldAtLocked] answers false for an empty candidate and a witness row of " +
-		"H(nothing) would make 'this group holds nothing' read as 'this group already holds it'.",
+		"H(nothing) would make 'this device holds nothing' read as 'this device has already held it'.",
 	"encodeStateRecord|len part": "the framing's per-part width. On a group record this is the length of the pq_secret and " +
 		"of each table row, and the refusal beside it formats that length.",
 	"encodeStateRecord|len parts": "the framing's own arity: the 255 refusal, and the part count written into the frame's " +

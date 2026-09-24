@@ -115,7 +115,7 @@
 // The pre-apply refusal used to fire on an ABSENCE of wrap candidates, and an absence is exactly
 // what an honest rotated removal looks like to a member whose own wrap was omitted or did not open
 // -- so for a REMOVAL, valid-and-dark was unreachable and every delivery failure came back under a
-// sentinel whose sentence ("opened its epoch with the pq_secret this group already held") was false
+// sentinel whose sentence ("opened its epoch with a pq_secret this device has held") was false
 // about what had happened. The two fields the outcomes write are [Group.halted] and
 // [Group.wrapDark] -- two fields, not one, so nothing has to decide later which of the two a single
 // value meant.
@@ -225,8 +225,14 @@ func (self *Group) pqSecretAtLocked(epoch uint64) ([]byte, bool) {
 	return secret, true
 }
 
-// pqSecretHeldAtLocked is the lowest epoch this group has EVER held `candidate` at, and whether it
+// pqSecretHeldAtLocked is the lowest epoch THIS DEVICE has EVER held `candidate` at, and whether it
 // has held it at all.
+//
+// THE SUBJECT IS THIS DEVICE'S OWN HISTORY AND IT IS NOT THE GROUP'S, which is the whole of what
+// the removal rule above it can promise (ledger rulings 42-45; the residual is written out at
+// [refuseRemovalOnHeldSecret]). [Device.Join] files exactly one row, so a member admitted at epoch
+// k answers *not held* for octets a founder answers *held* for, and no amount of care in this
+// function can widen that: a receiver cannot answer a question about a history it does not have.
 //
 // ITS SUBJECT IS THE WITNESS AND NOT THE LIVE TABLE, AND THAT IS THE 2026-09-24 REPAIR. The rule
 // item 243 is about is "the removed member must not keep the post-quantum half of any epoch it is
@@ -238,7 +244,7 @@ func (self *Group) pqSecretAtLocked(epoch uint64) ([]byte, bool) {
 // adversary's did not, and a removal fanned out on an EVICTED epoch's secret was followed with a
 // nil error -- reproduced, after 33 honest rotations, by
 // TestARemovalFannedOutOnAnEvictedEpochsSecretIsRefusedToo. [Group.pqSecretWitness] is the set that
-// does not shrink, and the live table is consulted beside it only so that a group whose witness was
+// does not shrink, and the live table is consulted beside it only so that a device whose witness was
 // seeded from a record written before that field existed still answers for the rows it does hold.
 //
 // IT IS THE OCTETS AND NEVER AN EPOCH NUMBER, for [pqSecretsShowRotation]'s reason from the other
@@ -249,8 +255,8 @@ func (self *Group) pqSecretAtLocked(epoch uint64) ([]byte, bool) {
 // CONSTANT TIME AND NO EARLY EXIT: guardrail G8 sends every comparison over key-derived material
 // through [subtle.ConstantTimeCompare], and both loops run to the end so the answer costs the same
 // whichever row matched. An empty candidate is answered false rather than being allowed to match an
-// empty row, because ConstantTimeCompare answers 1 for two zero-length inputs and "this group holds
-// nothing at that epoch" must not read as "this group already holds it".
+// empty row, because ConstantTimeCompare answers 1 for two zero-length inputs and "this device holds
+// nothing at that epoch" must not read as "this device has already held it".
 func (self *Group) pqSecretHeldAtLocked(candidate []byte) (uint64, bool) {
 	if len(candidate) == 0 {
 		return 0, false
@@ -704,13 +710,20 @@ func (self *Group) matchesEpochDigestLocked(mlsSecret []byte, digest *message.Ep
 //     compatibility path and it is decided by the SAME digest comparison, not by a version flag:
 //     if the committer did rotate, this candidate simply fails to reproduce the digest.
 //
-// AND NO ARM MAY ANSWER A SECRET THIS GROUP ALREADY HOLDS WHEN THE COMMIT REMOVES A LEAF. That is
+// AND NO ARM MAY ANSWER A SECRET THIS DEVICE HAS HELD WHEN THE COMMIT REMOVES A LEAF. That is
 // `removedLeaves`, and it is the one rule here that is not about telling secrets apart. A removal
 // followed on a held secret is item 243's entire subject arriving inverted: the removed member
 // holds that value BY CONSTRUCTION, so it reproduces the survivors' storage_root at the epoch it
-// was removed at, every survivor follows along, and nothing anywhere is set. Spec B section 5.4's
-// acceptance window still admits such a commit and it is the shape every build before this one
-// emitted, so it has to be REFUSED rather than merely not produced. [ErrRemovalWithoutRotation].
+// was removed at, this receiver would follow along, and nothing anywhere is set. Spec B section
+// 5.4's acceptance window still admits such a commit and it is the shape every build before this
+// one emitted, so it has to be REFUSED rather than merely not produced. [ErrRemovalWithoutRotation].
+//
+// THE SUBJECT IS THIS RECEIVER AND NOT THE GROUP, WHICH IS RULING 43 AND IS NOT A HEDGE. What this
+// rule can deliver is *this receiver does not follow a removal onto a secret THIS RECEIVER has
+// held*; a group-level claim is not derivable from it by any amount of care in this function. The
+// three shapes that fall outside it are written out, each with what does hold it instead, at
+// [refuseRemovalOnHeldSecret] -- which is the one sentence this rule answers with and is where a
+// reader meets it.
 //
 // THE RULE IS ON THE VALUE AND NOT ON THE ARM, WHICH IS THE 2026-09-24 REPAIR AND THE REASON THERE
 // IS ONE EXIT. It used to be written twice, in the two arms that return the identifier `held` --
@@ -724,7 +737,7 @@ func (self *Group) matchesEpochDigestLocked(mlsSecret []byte, digest *message.Ep
 // refusal. So the guard is now on the ANSWER -- every secret this function can return leaves
 // through [answerSecret] and is compared against the WHOLE table by
 // [Group.pqSecretHeldAtLocked] -- and a fourth arm added later inherits it instead of having to
-// remember it. The rule is "no removal may be followed on a secret this group already holds", not
+// remember it. The rule is "no removal may be followed on a secret THIS RECEIVER has held", not
 // "no removal may be followed", which is why the guard is at the exit and not at the top: a
 // removal that DID rotate is answered normally and is the case this whole file exists to serve.
 //
@@ -856,19 +869,19 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 	}
 	if 0 <= winner {
 		// THE WRAP-CANDIDATE ARM, AND IT IS A HELD-SECRET ARM TOO. It reads the wire and can
-		// still reach a value this group already has -- a committer that removes a leaf and
-		// fans out the secret the group already holds -- so it leaves by the same exit as the
+		// still reach a value THIS DEVICE already has -- a committer that removes a leaf and
+		// fans out a secret this device has held -- so it leaves by the same exit as the
 		// other two. Until 2026-09-24 it returned `candidate.secret, nil` directly and that
 		// removal removed nothing.
 		//
 		// AND THIS IS WHERE THE PRE-APPLY REFUSAL'S FAN-OUT CLAUSE WENT. That clause asked whether
 		// every staged candidate carried a held value; this asks whether the value the commit's own
-		// authenticated digest NAMES is one this group has held, which no decoy can move in either
+		// authenticated digest NAMES is one THIS DEVICE has held, which no decoy can move in either
 		// direction. See [Group.refuseUnrotatedRemovalLocked].
 		orphans -= 1
 		candidate := candidates[winner]
 		return answerSecret(candidate.secret,
-			"delivered, in a device wrap this device opened, a pq_secret this group already holds")
+			"delivered, in a device wrap this device opened, a pq_secret this device has held")
 	}
 	if isHeld {
 		matches, err := self.matchesEpochDigestLocked(mlsSecret, digest, held)
@@ -882,7 +895,7 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 			// removal on the SAME measurement rather than on a guess: the digest has just said, in
 			// this epoch's own authenticated H(epoch_keys), that the epoch runs on the value the
 			// member this commit removes also holds.
-			return answerSecret(held, "opened its epoch with the pq_secret this group already held")
+			return answerSecret(held, "opened its epoch with a pq_secret this device has held")
 		}
 	}
 	// no candidate reproduced the digest. Which of the three states this is depends on what
@@ -914,16 +927,82 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 // exit answers a removal with, whichever arm reached it.
 //
 // `how` is what the commit did, in the arm's own words, because the arms are reached by different
-// records and an operator reading this needs to know which. `heldAt` is the epoch this group
-// already holds that value at, which is the difference between "the committer did not rotate" and
-// "the committer replayed an OLDER epoch's secret" -- two different clients, both refused, and the
+// records and an operator reading this needs to know which. `heldAt` is the epoch THIS DEVICE has
+// held that value at, which is the difference between "the committer did not rotate" and "the
+// committer replayed an OLDER epoch's secret" -- two different clients, both refused, and the
 // number is the only thing in the sentence that tells them apart.
 //
 // THE VALUE ITSELF IS NEVER IN THE SENTENCE. What is printed is an epoch, a leaf list and a
 // clause; guardrail G8's rule is that a diagnosis names what happened and never the material it
 // happened to, and this error reaches a log.
+//
+// ── WHAT THIS RULE DELIVERS, AND THE THREE SHAPES IT DOES NOT: LEDGER RULINGS 42-45 ───────────
+//
+// THIS DOCUMENTATION USED TO CLAIM A GROUP PROPERTY -- *no removal may be followed on a secret this
+// group already holds* -- AND THE CODE CANNOT DELIVER ONE. Three adversarial rounds attacked that
+// sentence and the third found the defect is in its SUBJECT, not in its enforcement. What is
+// checked here, and the only thing that is:
+//
+//	THIS RECEIVER DOES NOT FOLLOW A REMOVAL ONTO A SECRET THIS RECEIVER HAS HELD.
+//
+// The rule is KEPT (ruling 43) and only its claim changes. It is the one detector that still
+// exists from the day Remove ships: the no-digest refusal at [Group.refuseUnrotatedRemovalLocked]
+// covers the class *removals on the 0x0001 wire format*, and Spec B section 5.4's acceptance
+// window dates that class out on 2026-11-03 OR the day Remove ships, whichever is earlier -- so on
+// that day the pre-apply door covers the EMPTY SET and this one covers a client whose rotation
+// regresses. The two doors do not overlap in time, which is why keeping both is not redundancy.
+//
+//  1. THE SUBJECT IS THE RECEIVER'S OWN HISTORY, SO A LATE JOINER REFUSES LESS, AND ITS FALSE
+//     NEGATIVE IS A THEOREM AND NOT A BUG. [Group.pqSecretHeldAtLocked] answers over
+//     [Group.pqSecretWitness], which is every pq_secret THIS DEVICE has filed. [Device.Join] files
+//     exactly ONE row -- `pqSecrets: {handle.Epoch(): invite.PqSecret}` and nothing else -- so a
+//     member admitted at epoch k has a history STRICTLY SMALLER than a founder's and answers *not
+//     held* for octets a founder answers *held* for. Measured for ledger item 254 at
+//     `connect 74abe029` / `sdk 8b59a96`: after two honest rotations a founder holds 3 live rows
+//     and 3 witness rows and answers *held* for pq_secret[1]; a member admitted at epoch 3 holds
+//     one row of each and answers *not held* for the same octets, with the control firing for its
+//     own reason -- the joiner does recognise its OWN row. A receiver cannot check a property
+//     about a history it does not have. NAMED RATHER THAN HELD: that measurement was a probe and
+//     no test in this package drives it, because [rotWorld] admits every member in the founding
+//     commit and has no door that admits one later. What IS held here is the founder's side --
+//     every case in pqdarkgate_test.go section 3 is a receiver that did hold the replayed value.
+//
+//  2. IF EVERY SURVIVOR JOINED AFTER EPOCH k AND THE COMMITTER REUSES pq_secret[k], NOBODY REFUSES.
+//     Not "the check is weaker" -- there is no refuser left. The committer never runs the receive
+//     path against its OWN commit, so it is not a receiver of it; every other survivor is a late
+//     joiner by (1). In a long-lived group with churn that is reachable. The group-level effect is
+//     a PARTITION BY JOIN EPOCH, and item 242 has already priced exactly that: *a hostile committer
+//     can HALT a group; it cannot TAKE it.* The repair, if it is ever wanted, is on the wire and
+//     not here -- the wrap payload and the digest preimage authenticated as DRAWN FOR `opensEpoch`,
+//     so a replay of an earlier value is refused by construction whatever the receiver still holds.
+//     Ruling 45 prices shipping the witness with the Welcome instead and records that it NARROWS
+//     rather than closes, because a late-joining inviter's own witness is already truncated.
+//
+//  3. AGAINST A HOSTILE ADMIN OR OWNER COMMITTER THIS RULE DELIVERS NOTHING, STRUCTURALLY, AND
+//     THAT IS NOT A GAP TO BE CLOSED LATER. Only an ADMIN or the OWNER may commit a removal at all
+//     (MASTER section 11). To build the epoch digest at all, that party must hold read_key[n+1] and
+//     write_key[n+1] -- therefore storage_root[n+1] -- IN ITS OWN PROCESS. It can hand over the
+//     ROOT itself rather than the secret, and no receiver-side check on the VALUE can ever
+//     constrain it. This is a strictly STRONGER adversary than item 243's, which is an ex-member
+//     holding an independent archive who later acquires a quantum computer; it takes the keys
+//     directly and needs no quantum computer, and it defeats MLS, Signal and every group protocol
+//     with a privileged committer equally. Nothing in this package is a defence against it, and
+//     nothing here should be read as one.
+//
+// WHAT IS LEFT AFTER ALL THREE IS STILL THE POINT OF THE FILE (ruling 42's clause (a)): against a
+// committer that FOLLOWS the protocol, a removal at epoch n denies the removed member
+// storage_root[n+1], including against a future adversary who breaks X25519 and holds an archive.
+// That clause is held by
+// TestThreeMembersRotateAcrossTwoEpochsAndAMemberRemovedByThatCommitCannotFollow, which GRANTS the
+// removed member the epoch-n+1 exporter outright -- strictly more than MLS gives it -- so the
+// post-quantum half is the only variable in it, and which asserts the counterfactual both ways.
+// Clause (b), *a receiver that itself held the reused secret refuses and halts*, is this function
+// and is held by pqdarkgate_test.go section 3, one case per arm plus the halt's own case. Clause
+// (c) is held by NO TEST AND CANNOT BE: it is the statement that nothing here defends against that
+// adversary, and a test of it could only assert a tautology. It is held as prose, by
+// TestTheRemovalRuleIsDocumentedAsAReceiverPropertyAndNeverAsAGroupOne.
 func refuseRemovalOnHeldSecret(opensEpoch uint64, removedLeaves []uint32, heldAt uint64, how string) error {
-	return fmt.Errorf("%w: the commit that opens epoch %d removes leaf/leaves %v and %s -- a value this group already holds at epoch %d",
+	return fmt.Errorf("%w: the commit that opens epoch %d removes leaf/leaves %v and %s -- a value THIS DEVICE has held at epoch %d",
 		ErrRemovalWithoutRotation, opensEpoch, removedLeaves, how, heldAt)
 }
 
@@ -962,7 +1041,7 @@ func refuseRemovalOnHeldSecret(opensEpoch uint64, removedLeaves []uint32, heldAt
 //
 //   - A COMMIT CARRYING NO EPOCH DIGEST AT ALL. Nothing it delivers can be judged -- there is no
 //     authenticator to judge it against -- so the epoch it opens could only ever be followed on the
-//     secret this group already has. That is a positive fact about the RECORD: the digest sits
+//     secret THIS DEVICE already has. That is a positive fact about the RECORD: the digest sits
 //     inside server_attachment, LP(H(server_attachment)) is inside AAD_head and inside the
 //     write_auth preimage, so "this commit carries no digest" is authenticated and no third party
 //     can manufacture it for somebody else's commit.
@@ -1013,7 +1092,7 @@ func (self *Group) refuseUnrotatedRemovalLocked(digest *message.EpochDigestAttac
 		// can write.
 		return nil
 	}
-	return fmt.Errorf("%w: the commit that would open epoch %d removes %d leaf/leaves and carries no epoch digest at all, so nothing it delivers can be judged and the epoch it opens could only be followed on a pq_secret this group already holds; the group has not followed it",
+	return fmt.Errorf("%w: the commit that would open epoch %d removes %d leaf/leaves and carries no epoch digest at all, so nothing it delivers can be judged and the epoch it opens could only be followed on a pq_secret THIS DEVICE already holds; this device has not followed it",
 		ErrRemovalWithoutRotation, self.epoch+1, len(removedLeaves))
 }
 

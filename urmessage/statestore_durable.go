@@ -323,14 +323,20 @@ type GroupRecord struct {
 	// apart without a version octet: see [DurableStateStore.GroupRecords].
 	PqSecrets []EpochPqSecret
 
-	// SHA-256 OF EVERY pq_secret THIS GROUP HAS EVER FILED, keyed by the lowest epoch it was
+	// SHA-256 OF EVERY pq_secret THIS DEVICE HAS EVER FILED, keyed by the lowest epoch it was
 	// filed at, and NOT bounded by [messagegroup.PastEpochWindow].
+	//
+	// THIS DEVICE'S AND NOT THE GROUP'S, WHICH IS THE RULE'S WHOLE SCOPE (ledger rulings 42-45).
+	// [Device.Join] files exactly one row, so this table is strictly smaller on a member admitted
+	// later, and the rule spelled against it is "this receiver does not follow a removal onto a
+	// secret THIS RECEIVER has held" -- never a statement about what the group holds. What follows
+	// from that is written out where the rule is, at [Group.resolvePqSecretLocked]'s refusal.
 	//
 	// WHY A SECOND TABLE INSTEAD OF WIDENING THE FIRST. [GroupRecord.PqSecrets] is bounded on
 	// purpose: an entry further behind than the window can serve no open any schedule on this
 	// device would admit, so keeping the SECRET is keeping a retired epoch's post-quantum half for
 	// nothing. But the rule item 243 is about -- a removal may not be followed on a value the
-	// removed member also holds -- needs to know whether this group has EVER held a value, and the
+	// removed member also holds -- needs to know whether this device has EVER held a value, and the
 	// removed member's set does not shrink when this device's window moves. Measured: after 33
 	// honest rotations a removal fanned out on pq_secret[1] was followed with a nil error, and the
 	// removed member's retained value was the post-quantum half of the survivors' storage_root at
@@ -424,7 +430,7 @@ type EpochPqSecret struct {
 }
 
 // EpochPqSecretWitness is one row of [GroupRecord.PqSecretWitness]: an epoch and SHA-256 of the
-// pq_secret this group filed at it.
+// pq_secret THIS DEVICE filed at it.
 //
 // IT IS A DIGEST AND NEVER A SECRET, and the type is separate from [EpochPqSecret] for exactly that
 // reason: one field named PqSecret that sometimes holds a hash is one erase discipline away from a

@@ -142,24 +142,36 @@ var (
 
 	// A COMMIT THAT REMOVES A LEAF AND DOES NOT ROTATE pq_secret, refused on ingest.
 	//
-	// IT IS ITEM 243 ARRIVING INVERTED. Following a commit on a secret this group already holds
+	// IT IS ITEM 243 ARRIVING INVERTED. Following a commit on a secret this device already holds
 	// is right for every group built before rotation and is exactly wrong when the commit
 	// REMOVES somebody: the removed member holds that same value by construction, so it
 	// reproduces the survivors' storage root at the epoch it was removed at and the removal
 	// removed nothing.
 	//
+	// WHAT IT CHECKS IS ONE RECEIVER'S OWN HISTORY, AND THE PROMISE SAYS SO NOW -- LEDGER RULINGS
+	// 42-45. This sentinel used to be documented, and worded, as a GROUP property: *no removal may
+	// be followed on a secret this group already holds*. It cannot deliver one. What it delivers is
+	//
+	//	THIS RECEIVER DOES NOT FOLLOW A REMOVAL ONTO A SECRET THIS RECEIVER HAS HELD
+	//
+	// and the three shapes that fall outside that -- a late joiner whose history is strictly
+	// smaller, a group in which every survivor joined after the reused epoch and NOBODY refuses,
+	// and a hostile ADMIN or OWNER committer against which this delivers nothing structurally --
+	// are written out with what holds each at [refuseRemovalOnHeldSecret]. A caller that acts on
+	// this error is holding a statement about ITS OWN device and not about the group.
+	//
 	// THE RULE IS ON THE VALUE AND NOT ON ONE ARM, which is the 2026-09-24 repair. It was
 	// written as a rule about the two arms of [Group.resolvePqSecretLocked] that return the
-	// secret the group HOLDS, and the arm that returns a WRAP CANDIDATE reaches the same value
+	// secret this device HOLDS, and the arm that returns a WRAP CANDIDATE reaches the same value
 	// off the wire: a committer that removed a leaf and fanned out the held secret was followed
 	// with a nil error, no dark state and no refusal. Every secret that resolution answers now
-	// leaves by one exit and is compared against every value this group HAS EVER HELD.
+	// leaves by one exit and is compared against every value this device HAS EVER HELD.
 	//
 	// AND "EVER HELD" IS NOT "STILL HOLDS", WHICH IS THE SECOND HALF OF THAT REPAIR. The subject
 	// was the live pq_secret table, and that table is pruned at [messagegroup.PastEpochWindow] --
 	// so the rule's set shrank while the removed member's did not, and a removal fanned out on an
 	// EVICTED epoch's secret was followed with a nil error after 33 honest rotations.
-	// [Group.pqSecretWitness] is a digest of every value this group has filed, kept for ever and
+	// [Group.pqSecretWitness] is a digest of every value this device has filed, kept for ever and
 	// persisted, and it is what the rule is spelled against now.
 	//
 	// RULING 41: IT IS AN INVALID COMMIT AND NOT A DARK STATE. It is refused the way an
@@ -189,9 +201,9 @@ var (
 	// "opened its epoch with the pq_secret this group already held", and one of the three arms
 	// that reach this cannot know that: a commit carrying NO epoch digest carries no
 	// authenticator to open anything against, and what is true of it is that there is no way to
-	// follow it other than on a value this group already has. "Could only be followed on" is true
+	// follow it other than on a value this device already has. "Could only be followed on" is true
 	// of all three arms; the arm's own clause, carried in the wrapped message, says which.
-	ErrRemovalWithoutRotation = errors.New("urmessage: a commit that removes a member could only be followed on a pq_secret this group has already held, so the removed member keeps the post-quantum half of that epoch's storage root and has not been removed from a quantum adversary at all; this group has refused the commit and is halted at the epoch it was at")
+	ErrRemovalWithoutRotation = errors.New("urmessage: a commit that removes a member could only be followed on a pq_secret THIS DEVICE has already held, so the removed member keeps the post-quantum half of that epoch's storage root and has not been removed from a quantum adversary at all; this device has refused the commit and is halted at the epoch it was at -- this is a statement about this receiver's own history and not about the group, and a member admitted later would not have refused")
 
 	// The role model refused a commit, on either arm: MASTER §11's "refused by the committing
 	// client, and rejected by every receiving client on validation". On RECEIPT it is an ingested
