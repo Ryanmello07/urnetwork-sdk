@@ -110,6 +110,9 @@ func newKindWalk(t *testing.T) *kindWalk {
 		epoch:          bobHandle.Epoch(),
 		opened:         true,
 		reconciled:     true,
+		// this member is named in the FOUNDING commit, so no leaf here was ever occupied by
+		// anybody else and its stream floor is known without asking the server.
+		ownFloorHeld: true,
 	}
 	bobGroup.initTables()
 	return &kindWalk{t: t, groupId: groupId, alice: aliceSession, bob: bobGroup, nextRecordId: 1}

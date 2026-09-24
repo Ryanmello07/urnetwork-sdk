@@ -445,10 +445,15 @@ type LeafOccupancy struct {
 	// The leaf index.
 	Leaf uint32
 
-	// DepartedEpoch is the epoch the commit that REMOVED this leaf's occupant OPENED: the leaf
-	// stood at every epoch strictly BELOW it and at none above. ZERO means "not departed", which
-	// is not ambiguous -- no commit opens epoch zero, because epoch zero is where a group is
-	// founded.
+	// DepartedEpoch is the epoch the LAST commit that REMOVED an occupant of this leaf OPENED: no
+	// occupant stood at any epoch at or above it. ZERO means "not departed", which is not
+	// ambiguous -- no commit opens epoch zero, because epoch zero is where a group is founded.
+	//
+	// A LEAF THAT CHANGED HANDS TWICE IS STILL ONE ROW, and the row carries the LAST departure
+	// rather than the first. What the reader asks of it is whether a record sealed at some epoch
+	// may carry this leaf's handle, which is true of every occupant it ever had; keeping the FIRST
+	// departure answered `false` for the middle occupant's own records and abandoned them. See
+	// [Group.noteDepartedLeavesLocked].
 	DepartedEpoch uint64
 
 	// Own is whether THIS DEVICE has stood at this leaf, and therefore whether the handle it

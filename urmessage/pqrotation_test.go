@@ -141,7 +141,13 @@ func (self *rotWorld) rootOf(name string) string {
 // device that cannot open its own wrap rather than a wrap that is wrong.
 func (self *rotWorld) enroll(name string, dev *crossProcessDevice, handle messagegroup.GroupHandle) *rotMember {
 	self.t.Helper()
-	return self.enrollAt(name, dev, handle, self.founding)
+	member := self.enrollAt(name, dev, handle, self.founding)
+	// AND THE FOUNDING COHORT'S OWN STREAM FLOOR IS KNOWN. Every member of a world built by
+	// [newRotWorld] is named in the FOUNDING commit, so no leaf here has ever been occupied
+	// by anybody else and there is no previous occupant's claim to hold a floor against. A
+	// member admitted LATER, through [rotWorld.admit], is the one that cannot say that.
+	member.group.ownFloorHeld = true
+	return member
 }
 
 // enrollAt is enroll with the ONE pq_secret row this member starts life holding, and that row is
@@ -175,6 +181,11 @@ func (self *rotWorld) enrollAt(name string, dev *crossProcessDevice, handle mess
 		epoch:          handle.Epoch(),
 		opened:         true,
 		reconciled:     true,
+		// FALSE, BECAUSE THIS DOOR MODELS [Device.Join] AND A JOINER CANNOT KNOW WHOSE LEAF IT
+		// LANDED ON. [rotWorld.enroll] raises it for the FOUNDING cohort, whose leaves were never
+		// anybody else's; a member admitted through [rotWorld.admit] keeps it false, which is
+		// what production does and what [Group.ownFloorHeld] is for.
+		ownFloorHeld: false,
 	}
 	group.initTables()
 	if err := session.InstallPastEpochLoader(group.device.pastEpochLoader(group.id)); err != nil {

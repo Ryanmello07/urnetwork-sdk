@@ -455,7 +455,16 @@ int32_t urnet_message_list_count(uint64_t self);
  * REMOVED member's leaf carries the removed member's sender_handle byte for byte -- two people,
  * one label, for ever (msgrepo ledger item 245). JOIN A LINE TO A ROSTER ROW ON sender_identity,
  * which is what MLS signs and is the same value urnet_message_group_members answers as
- * identity_pub; it is "" only on a record that did not open.
+ * identity_pub; it is "" only on a record that did not open and that this device did not seal.
+ *
+ * mine is decided ON sender_identity OR ON OCTETS THIS DEVICE PRODUCED, and NEVER on
+ * sender_handle. a record that opened is mine when its sender_identity is this device's own; a
+ * record that did NOT open is mine only when this device sealed at that stream index and the
+ * record carries the body_hash it sealed there -- and such a record carries this device's
+ * sender_identity too. so mine and sender_identity agree on every line, and a caller that keys
+ * its rows on sender_identity may read mine beside them. a build that took mine off
+ * sender_handle showed a REMOVED member's whole history as this device's own the day this device
+ * landed on that member's leaf.
  *
  * sender_role_at_send is the role the SENDER HELD AT THE EPOCH THIS RECORD WAS SEALED AT --
  * "owner", "admin", "member", "observer" -- and "" on a record that did not open. IT IS A FACT

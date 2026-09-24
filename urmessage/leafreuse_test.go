@@ -16,20 +16,28 @@
 // that has never removed anybody. What is left that is unique to this item is state, and it is
 // what this file drives:
 //
-//  1. THE RESERVER SEED. The newcomer's durable reserver has never allocated for that stream, so
-//     its first send seals at index 1 -- an index the server already holds a claim at -- is
-//     answered REASON_STREAM_INDEX_REUSED, and [ErrIdentityInUse] latches for the life of the
-//     process. [Group.seedOwnStreamLocked].
-//  2. THE LADDER PRUNE. [Group.peerHeads] is kept across epochs by design and nothing pruned it,
-//     so [Group.crossEpochLadderLocked] re-tracked the removed leaf's ladder at the removed
-//     member's head -- and [ladderKey] is keyed on the LEAF, so that is the ladder the NEWCOMER's
-//     first record meets. [Group.pruneRemovedLaddersLocked].
+//  1. THE RESERVER SEED, AND THE GATE THAT MAKES IT A RULE. The newcomer's durable reserver has
+//     never allocated for that stream, so its first send seals at index 1 -- an index the server
+//     already holds a claim at -- is answered REASON_STREAM_INDEX_REUSED, and [ErrIdentityInUse]
+//     latches for the life of the process. [Group.seedOwnStreamLocked] moves the floor on the
+//     first walk; [Group.ownFloorHeld] is what refuses a Send that would happen before it, and it
+//     is driven over a real server in cp3b.
+//  2. THE LADDER, AND THE INDEX SPACE IS ONE RUN ACROSS BOTH OCCUPANTS. The stream index is
+//     allocated per (group_id, sender_handle) and the server refuses every index the removed
+//     member spent, so the newcomer's first ACCEPTED record continues that numbering. The
+//     survivor's ladder must therefore stand at the removed member's head and not at 0 --
+//     [Group.leafStreamFloorLocked] -- while the re-track row that would install a ladder at
+//     every future epoch for a leaf nobody occupies is dropped, [Group.pruneRemovedLaddersLocked].
 //  3. THE PER-RECORD-EPOCH HANDLE TABLE. [Group.leavesLocked] built the table at the CURRENT epoch
 //     only, so every record the removed leaf sealed BELOW the commit resolved to no leaf and was
-//     abandoned after [maxRecordAttempts]. [Group.leavesAtLocked].
-//  4. ATTRIBUTION OFF THE SIGNED LEAF. `mine := header.SenderHandle == walk.own` was true of every
-//     record the previous occupant of this device's leaf ever wrote. [Group.recordIsOwnLocked] and
-//     [Message.SenderIdentity].
+//     abandoned after [maxRecordAttempts]. [Group.leavesAtLocked], with [Group.departedAt]
+//     carrying the LAST departure so a leaf that changed hands twice keeps the middle occupant's
+//     records too.
+//  4. ATTRIBUTION OFF THE SIGNED LEAF, AND OFF OCTETS THIS DEVICE SEALED WHERE NOTHING SIGNS.
+//     `mine := header.SenderHandle == walk.own` was true of every record the previous occupant of
+//     this device's leaf ever wrote. [Group.recordIsOwnLocked] and [Message.SenderIdentity] decide
+//     it on the identity the open authenticated; [Group.noteEpochGapLocked] -- the road EVERY one
+//     of those records actually takes -- decides it on the index and body_hash this device sealed.
 //
 // ── THE CLAIM THIS FILE WAS SENT TO VERIFY RATHER THAN REPEAT ────────────────────────────────
 //
@@ -60,7 +68,19 @@
 // THE MUTANT THAT DOES DIE IS THE FAITHFUL SPELLING OF "ATTRIBUTION BACK TO THE HANDLE":
 // [Message.SenderIdentity] filled from `header.SenderHandle` instead of from the signed leaf turns
 // three cases here RED, because that is the value a reader attributes by and it is the one the two
-// occupants of a leaf share.
+// occupants of a leaf share. And since [TestANewcomerDoesNotShowTheRemovedMembersHistoryAsItsOwn]
+// the SAME spelling on the road those records really take -- `mine := walk.own[SenderHandle]` in
+// [Group.noteEpochGapLocked] -- dies too, which is the half the theorem above could never reach.
+//
+// AND ONE MORE MUTANT SURVIVES, WHICH IS ITSELF A FINDING AND IS RECORDED HERE RATHER THAN IN A
+// REPORT. A review of the previous commit asked [Group.pastHeadLocked] to SKIP the rows of a
+// previous occupant of a leaf. Applied in full -- both of its loops -- that mutant leaves every
+// case of this package GREEN, and the probe says why: at the newcomer's epoch it takes
+// pastHeadLocked from 1,024 to 0 while [Group.leafStreamFloorLocked] answers 1,024 from the same
+// two tables with the class dropped out of the key, so the head the ladder is installed at does
+// not move. WITHOUT that floor the same change is not inert: it is the difference between opening
+// the newcomer's record and answering "index 1025 is 1025 ahead of head 0, and the window is
+// 1024". The skip is refused for that reason and the reason is written at the function.
 package urmessage
 
 import (
@@ -125,8 +145,36 @@ func (self *rotWorld) sealDurable(who *rotMember, body string) *sealed {
 // measures.
 func newReuseWorld(t *testing.T, bobLines int) *reuseWorld {
 	t.Helper()
+	return newReuseWorldAbove(t, bobLines, 0)
+}
+
+// newReuseWorldAbove is [newReuseWorld] with the leaving member's own stream floor moved first, so
+// that a cohort can put its history AT A CHOSEN INDEX rather than at 1, 2, 3.
+//
+// IT MOVES THE FLOOR THROUGH THE PRODUCTION DOOR, [StreamIndexSeeder], which is the same door
+// [Group.seedOwnStreamLocked] uses -- a reserver row on a real disk, not a header written by hand.
+// A world built at floor 1,023 gives bob one line at stream index 1,024 instead of 1,024 lines,
+// which is the whole of why the window case below costs one seal rather than a thousand.
+func newReuseWorldAbove(t *testing.T, bobLines int, bobFloor uint64) *reuseWorld {
+	t.Helper()
 	world := newRotWorld(t, "alice", "bob", "carol")
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
+
+	if bobFloor != 0 {
+		handle, err := bob.group.session.SenderHandle()
+		if err != nil {
+			t.Fatalf("bob's sender handle: %v", err)
+		}
+		key := messagegroup.StreamKey{SenderHandle: handle}
+		copy(key.GroupId[:], world.groupId)
+		seeder, canSeed := bob.dev.reserver.(StreamIndexSeeder)
+		if !canSeed {
+			t.Fatalf("bob's reserver cannot seed, so this world cannot place his history")
+		}
+		if _, err := seeder.SeedTo(key, bobFloor); err != nil {
+			t.Fatalf("seeding bob's own stream floor to %d: %v", bobFloor, err)
+		}
+	}
 
 	// (1) BOB WRITES, AT EPOCH 1, UNDER THE HANDLE THAT IS ABOUT TO CHANGE HANDS. These are the
 	// records every later clause is about: the newcomer's stream collides with their indices, the
@@ -140,9 +188,10 @@ func newReuseWorld(t *testing.T, bobLines int) *reuseWorld {
 		ids = append(ids, one.messageId)
 	}
 	for at, one := range records {
-		if one.record.Header.StreamIndex != uint64(at+1) {
+		if one.record.Header.StreamIndex != bobFloor+uint64(at+1) {
 			t.Fatalf("bob's line %d is at stream index %d, want %d: this file's whole subject is "+
-				"which indices that stream has spent", at+1, one.record.Header.StreamIndex, at+1)
+				"which indices that stream has spent", at+1, one.record.Header.StreamIndex,
+				bobFloor+uint64(at+1))
 		}
 	}
 	// AND ALICE WRITES ONE LINE TOO, which is the fixture for the prune's own control rather
@@ -212,6 +261,45 @@ func newReuseWorld(t *testing.T, bobLines int) *reuseWorld {
 		rotWorld: world, alice: alice, bob: bob, carol: carol, eve: eve,
 		leaf: bob.leaf, handle: eveHandle,
 		bobRecords: records, bobIds: ids, aliceRecord: aliceLine, published: published,
+	}
+}
+
+// restart closes one member's process and opens a second over the same directories, and hands back
+// the member the restore produced. It is [restoredRotDevice] plus [Device.restoreOne], which is the
+// door a real restart goes through.
+//
+// IT REPLACES A FIXTURE THAT CLEARED THREE MAPS, AND THE DIFFERENCE IS EXACTLY WHAT THIS FILE
+// MEASURES. Three cases here used to model a restart by emptying `log`, `logIndex` and `delivered`
+// on the live group -- which leaves [Group.peerHeads], [Group.peerHeadsAt] and [Group.tracked]
+// POPULATED, and a restart empties all three because they are fields of a process that has ended.
+// The only tables a restarted device really has are [Group.persistedHeads], read back off the disk,
+// and what [Device.restoreOne] rebuilds from the group record. A fake restart that keeps a
+// process's in-memory heads is a fake restart that cannot see a head the disk would not have had,
+// and both directions of the ladder repair below live in that gap.
+func (self *rotWorld) restart(member *rotMember) *rotMember {
+	self.t.Helper()
+	revived := restoredRotDevice(self.t, member)
+	records, err := revived.store.GroupRecords()
+	if err != nil {
+		self.t.Fatalf("%s's GroupRecords after the restart: %v", member.name, err)
+	}
+	if len(records) != 1 {
+		self.t.Fatalf("%s's disk holds %d group record(s) after the restart, want 1",
+			member.name, len(records))
+	}
+	restored, err := revived.device.restoreOne(revived.store, records[0], restoreTestNonce(), 1)
+	if err != nil {
+		self.t.Fatalf("restoring %s: %v", member.name, err)
+	}
+	self.t.Cleanup(func() { restored.Close() })
+	return &rotMember{
+		name:    member.name + " (restarted)",
+		root:    member.root,
+		dev:     member.dev,
+		handle:  restored.handle,
+		session: restored.session,
+		group:   restored,
+		leaf:    member.leaf,
 	}
 }
 
@@ -344,26 +432,40 @@ func TestANewcomerOnAReusedLeafCanSendAndItsMessageIdsAreDisjoint(t *testing.T) 
 
 // ── 2. THE SURVIVOR DOES NOT RE-TRACK THE REUSED LEAF AT THE REMOVED MEMBER'S HEAD ───────────
 
-// A SURVIVOR PRUNES THE REMOVED LEAF'S LADDER, AND THE NEWCOMER'S FIRST RECORD OPENS.
+// A SURVIVOR DROPS THE REMOVED LEAF'S RE-TRACK ROW AND KEEPS ITS HEAD, AND THE NEWCOMER'S FIRST
+// RECORD OPENS.
 //
-// WHY THE HARM IS NOT A WASTED LADDER. [Group.peerHeads] is the head each peer's receiver ratchet
-// is re-tracked at after an epoch change, and it is kept across epochs BY DESIGN -- a ladder
-// re-tracked at 0 answers [messagegroup.DefaultRecordWindowSize] rungs and then ErrOutOfWindow, so
-// a busy peer would go silent at every commit. Nothing pruned it by RemovedLeaves. [ladderKey] is
-// keyed on the LEAF, and §7.7 puts the newcomer on the removed member's leaf: so the survivor met
-// the newcomer's very first record -- stream index 1 of a stream that starts here -- against a
-// ratchet standing at the head somebody ELSE left behind, and a receiver ratchet does not rewind.
+// WHAT THE PRUNE IS FOR. [Group.peerHeads] is the table [Group.crossEpochLadderLocked] walks at
+// every epoch change to RE-TRACK each peer's ratchet eagerly, and nothing pruned it by
+// RemovedLeaves -- so a leaf whose occupant had been removed got a ladder installed at every
+// future epoch, in a schedule nobody can write to. That is the row this case asserts is gone.
+//
+// AND WHAT THE PRUNE MUST NOT TAKE WITH IT, which is this case's correction to itself. It used to
+// assert that the two PER-EPOCH tables were emptied too, on the argument that the newcomer's
+// ladder is then "installed lazily at 0, which is the correct head for a stream that starts here".
+// The newcomer's stream does not start here: a stream index is per (group_id, sender_handle), the
+// server refuses every index the previous occupant spent, and [Group.seedOwnStreamLocked] is this
+// device's own half of that fact -- so the newcomer's first ACCEPTED index is the previous
+// occupant's high water plus one. A survivor at 0 is therefore too low by that whole history, and
+// [TestASurvivorOpensANewcomerWhoseStreamStartsPastTheRatchetWindow] drives what that costs. The
+// head is kept in [Group.peerHeadsAt] and read back by [Group.leafStreamFloorLocked].
 //
 // THE CONTROL FIRES FOR ITS OWN REASON: alice's ladder, in the same table, at the same moment, is
 // KEPT. Without it "the removed leaf's head is gone" would be satisfied by a prune that emptied
 // the whole table -- which is the D3 starvation [Group.peerHeads] exists to prevent, arriving as
 // the repair for this one.
 //
-// WHAT WOULD GO RED: delete [Group.pruneRemovedLaddersLocked]; call it AFTER
-// [Group.crossEpochLadderLocked] instead of before it (the re-track has already installed the
-// stale ladder by then); prune [Group.peerHeads] and not [Group.peerHeadsAt] and
-// [Group.persistedHeads] (the table is written back as the UNION of the disk's and this process's,
-// so a row left in either comes back at the next restart).
+// AND THE NEWCOMER IS SEEDED BEFORE IT SEALS, which is the second correction. This case used to
+// seal eve's first line on a fresh reserver, at stream index 1 -- the state
+// [TestANewcomerOnAReusedLeafCanSendAndItsMessageIdsAreDisjoint] drives as THE BRICK and names as
+// REASON_STREAM_INDEX_REUSED on the server. A record at that index cannot exist on the wire, so a
+// case that opened one was measuring a state no survivor can meet.
+//
+// WHAT WOULD GO RED: delete the [Group.peerHeads] loop in [Group.pruneRemovedLaddersLocked]; call
+// it AFTER [Group.crossEpochLadderLocked] instead of before it (the re-track has already installed
+// the stale ladder by then); prune [Group.peerHeadsAt] as well (the floor loses the previous
+// occupant's head and the newcomer's record is out of window as soon as that history passes
+// [messagegroup.DefaultRecordWindowSize]).
 func TestASurvivorDoesNotReTrackAReusedLeafAtTheRemovedMembersHead(t *testing.T) {
 	world := newReuseWorld(t, 3)
 	carol, eve := world.carol, world.eve
@@ -403,12 +505,21 @@ func TestASurvivorDoesNotReTrackAReusedLeafAtTheRemovedMembersHead(t *testing.T)
 			"the new epoch, so this row is a ladder installed at the REMOVED member's head for a "+
 			"leaf the NEWCOMER now stands at", head, removed.leaf)
 	}
-	for key := range carol.group.peerHeadsAt {
-		if key.leaf == world.leaf {
-			t.Fatalf("carol still holds a per-epoch head for the removed leaf %d at epoch %d; it "+
-				"is what [Group.persistPeerHeadsLocked] writes back to the disk, so a restart "+
-				"would restore the stale ladder this prune exists to remove", key.leaf, key.epoch)
+	// AND THE PER-EPOCH HEAD IS STILL THERE, WHICH IS THE OTHER HALF OF THE PROPERTY AND NOT AN
+	// OMISSION. It is the number [Group.leafStreamFloorLocked] answers the newcomer's ladder with,
+	// and a build that pruned it would put that ladder at 0 -- see the case named in this test's
+	// header for what that costs once the previous occupant's history is longer than the window.
+	floor := uint64(0)
+	for key, head := range carol.group.peerHeadsAt {
+		if key.leaf == world.leaf && floor < head {
+			floor = head
 		}
+	}
+	if floor != 3 {
+		t.Fatalf("carol's per-epoch head for the reused leaf %d is %d and want 3: the removed "+
+			"member's high water is the floor the NEWCOMER's ladder stands at, because the stream "+
+			"index space is per (group_id, sender_handle) and the server refuses every index that "+
+			"member spent", world.leaf, floor)
 	}
 	// AND NO MEMO SURVIVES FOR IT EITHER -- which is [Group.crossEpochLadderLocked]'s wholesale
 	// clear and NOT the prune's doing, measured: a fourth loop over [Group.tracked] inside
@@ -428,19 +539,24 @@ func TestASurvivorDoesNotReTrackAReusedLeafAtTheRemovedMembersHead(t *testing.T)
 	}
 
 	// ── AND THE NEWCOMER'S FIRST RECORD OPENS AT THE SURVIVOR ───────────────────────────────
-	// This is the harm itself, driven end to end: eve seals at stream index 1 of a stream that
-	// starts at this epoch, and carol opens it. Against an unpruned table the ladder would be
-	// standing at 3 and a receiver ratchet does not rewind.
+	// Driven end to end from the state the wire can produce: eve walks the page that is already
+	// on the server, her floor moves past every index bob spent, and her first seal is at 4.
+	if err := world.deliver(eve, append(append([]*sealed{}, world.bobRecords...),
+		world.published.page()...)...); err != nil {
+		t.Fatalf("eve's own first walk answered %v", err)
+	}
 	first := world.sealDurable(eve, "eve's first line to the survivor")
-	if first.record.Header.StreamIndex != 1 {
-		t.Fatalf("eve's first record is at index %d; this clause is about index 1",
+	if first.record.Header.StreamIndex != 4 {
+		t.Fatalf("eve's first record is at index %d and want 4: three is what bob spent, and an "+
+			"index at or below it is REASON_STREAM_INDEX_REUSED on the server, so a case that "+
+			"opened one would be measuring a record that cannot exist",
 			first.record.Header.StreamIndex)
 	}
 	opened, err := carol.group.receiveForTest(world.rotWorld, carol, first)
 	if err != nil {
-		t.Fatalf("carol's walk over the newcomer's first record answered %v. It is stream index 1 "+
-			"of a stream that starts at this epoch, and a ladder left standing at the removed "+
-			"member's head refuses every index below it", err)
+		t.Fatalf("carol's walk over the newcomer's first record answered %v. It is the first "+
+			"record of a stream that CONTINUES bob's numbering, and the ladder it meets has to "+
+			"stand at bob's head rather than at 0 or at anything above 4", err)
 	}
 	if len(opened) != 1 {
 		t.Fatalf("carol opened %d message(s) from the newcomer's first record, want 1", len(opened))
@@ -449,8 +565,9 @@ func TestASurvivorDoesNotReTrackAReusedLeafAtTheRemovedMembersHead(t *testing.T)
 		t.Fatalf("carol attributed the newcomer's record to identity %x, want eve's %x",
 			opened[0].SenderIdentity, eve.dev.identityPub)
 	}
-	t.Logf("the newcomer's first record, at stream index 1 of the reused leaf, opened at the " +
-		"survivor and was attributed to eve")
+	t.Logf("the reused leaf's re-track row is gone and its head of 3 is kept; the newcomer's " +
+		"first record, at stream index 4 of a stream that continues bob's numbering, opened at " +
+		"the survivor and was attributed to eve")
 }
 
 // receiveForTest is [rotWorld.deliver] with the opened messages handed back, which `deliver`
@@ -485,19 +602,17 @@ func (self *Group) receiveForTest(world *rotWorld, who *rotMember, page ...*seal
 // ARE equal, so that the identities differing is a statement about the repair and not about the
 // fixture.
 //
-// AND IT DRIVES THE RESTART HALF OF THE LADDER PRUNE, which is the order
-// [TestASurvivorDoesNotReTrackAReusedLeafAtTheRemovedMembersHead] cannot reach: the removed
-// member's records are re-opened by a survivor ALREADY STANDING at the epoch above, which is
-// exactly what a restart does (the cursor is not persisted, and the commit is met again at an
-// epoch this device has left and skipped as ceremony, so it does not prune a second time).
-// [Group.notePeerHeadLocked] refuses to raise the CURRENT head off a previous occupant's record,
-// and without that clause the newcomer's line below is refused "index 1 is below this receiver's
-// head 3" -- the very starvation the prune exists to stop, arriving through the re-walk.
+// AND IT DRIVES THE RESTART, THROUGH THE DOOR A RESTART REALLY GOES THROUGH: the survivor's
+// process ENDS and a second one opens over the same directories ([reuseWorld.restart]), so the
+// removed member's records are re-opened by a device ALREADY STANDING at the epoch above and
+// holding only what the disk kept. This used to be three maps emptied on the live group, which
+// leaves every in-memory head table populated -- and both directions of the ladder repair live in
+// exactly that gap.
 //
 // WHAT WOULD GO RED: put [Group.leavesAtLocked] back to the current epoch (the record is abandoned);
 // take [Message.SenderIdentity] off the header's sender_handle instead of the signed leaf (bob's
-// line and eve's line come back under one identity); delete the previous-occupant clause in
-// [Group.notePeerHeadLocked] (the newcomer's line is starved).
+// line and eve's line come back under one identity); make [Group.pastHeadLocked] skip the rows of
+// a previous occupant of the leaf (the newcomer's line below is then met by a ladder at 0).
 func TestARecordFromARemovedLeafResolvesAtItsOwnEpochAndIsAttributedToTheRemovedMember(t *testing.T) {
 	world := newReuseWorld(t, 3)
 	carol, eve := world.carol, world.eve
@@ -513,13 +628,12 @@ func TestARecordFromARemovedLeafResolvesAtItsOwnEpochAndIsAttributedToTheRemoved
 		}
 	}
 
-	// THE RE-WALK. carol's log is emptied first, so what comes back is what THIS walk delivered
-	// and not what she read before the commit -- the state a restart leaves, with no cursor.
-	carol.group.mutex.Lock()
-	carol.group.log = nil
-	carol.group.logIndex = map[[MessageIdBytes]byte]int{}
-	carol.group.delivered = map[uint64]bool{}
-	carol.group.mutex.Unlock()
+	// THE RESTART. The cursor is not persisted, so the second process re-walks the whole history.
+	carol = world.restart(carol)
+	if carol.group.epoch != world.published.opens {
+		t.Fatalf("the restarted survivor came back at epoch %d and the commit opened %d",
+			carol.group.epoch, world.published.opens)
+	}
 
 	delivered, err := carol.group.receiveForTest(world.rotWorld, carol, world.bobRecords...)
 	if err != nil {
@@ -543,24 +657,27 @@ func TestARecordFromARemovedLeafResolvesAtItsOwnEpochAndIsAttributedToTheRemoved
 		}
 	}
 
-	// AND THE RE-WALK RAISED NO CURRENT HEAD FOR THE REUSED LEAF. Three records of the previous
-	// occupant just opened at their own epoch; if each had raised [Group.peerHeads] the newcomer's
-	// ladder would now stand at 3 and its first record would be starved.
+	// AND THE RE-WALK LEFT THE REUSED LEAF'S HEAD AT THE PREVIOUS OCCUPANT'S HIGH WATER, WHICH IS
+	// WHERE THE NEWCOMER'S LADDER HAS TO STAND. Three records of the previous occupant just opened
+	// at their own epoch; the index space is per (group_id, sender_handle) and the server refuses
+	// every index that occupant spent, so the newcomer's stream CONTINUES this numbering and a
+	// head of 0 would be three rungs -- and, on a longer history, a whole window -- too low.
 	wire, err := message.RetentionClassWire(message.RetentionDurable, 0)
 	if err != nil {
 		t.Fatalf("the durable retention wire byte: %v", err)
 	}
 	reused := ladderKey{leaf: world.leaf, retentionWire: wire, ephWindow: 0}
-	if head := carol.group.peerHeads[reused]; head != 0 {
+	if head := carol.group.peerHeads[reused]; head != uint64(len(delivered)) {
 		t.Fatalf("after re-opening the removed member's %d records, carol's CURRENT head for leaf "+
-			"%d stands at %d. A previous occupant's indices are not the newcomer's stream: the "+
-			"newcomer starts at 1 and a ladder positioned at %d refuses every record it writes "+
-			"until it has caught up with a history it had no part in",
-			len(delivered), reused.leaf, head, head)
+			"%d stands at %d and want %d", len(delivered), reused.leaf, head, len(delivered))
+	}
+	if floor := carol.group.leafStreamFloorLocked(world.leaf, world.published.opens); floor != uint64(len(delivered)) {
+		t.Fatalf("the floor a ladder over leaf %d is installed at, at epoch %d, is %d and want %d",
+			world.leaf, world.published.opens, floor, len(delivered))
 	}
 	// AND THE CONTROL IN THE SAME QUERY: the PER-EPOCH head for that leaf at the epoch the
-	// records were sealed at DID rise. Without it "the head is 0" would be satisfied by a build
-	// that stopped recording heads at all, which is the D3 starvation arriving as the repair.
+	// records were sealed at DID rise. Without it "the floor is 3" would be satisfiable by a
+	// current head alone, and it is the per-epoch table the floor and the next restart read.
 	rose := false
 	for key, head := range carol.group.peerHeadsAt {
 		if key.leaf == world.leaf && key.epoch == world.published.opens-1 && head == uint64(len(delivered)) {
@@ -569,12 +686,18 @@ func TestARecordFromARemovedLeafResolvesAtItsOwnEpochAndIsAttributedToTheRemoved
 	}
 	if !rose {
 		t.Fatalf("CONTROL FAILED: carol recorded no per-epoch head of %d for leaf %d at epoch %d. "+
-			"The clause above must suppress the CURRENT head only; a build that recorded no head "+
-			"anywhere would pass it and would starve every peer at every epoch change",
+			"That is the table [Group.leafStreamFloorLocked] reads and the one the disk gets, so a "+
+			"build that recorded no head there would starve the newcomer at the next restart",
 			len(delivered), world.leaf, world.published.opens-1)
 	}
 
 	// ── THE CONTROL, AT THE SAME SURVIVOR AND UNDER THE SAME SIXTEEN OCTETS ─────────────────
+	// eve's floor is seeded off the same page first, so her line is at an index the server would
+	// accept rather than at one bob already spent.
+	if err := world.deliver(eve, append(append([]*sealed{}, world.bobRecords...),
+		world.published.page()...)...); err != nil {
+		t.Fatalf("eve's own first walk answered %v", err)
+	}
 	eveLine := world.sealDurable(eve, "eve's line, same handle, different person")
 	if eveLine.record.Header.SenderHandle != world.bobRecords[0].record.Header.SenderHandle {
 		t.Fatalf("CONTROL FAILED: eve's record and bob's carry different sender_handles, so " +
@@ -772,11 +895,9 @@ func TestARemovedLeafThatIsNeverRefilledStillResolvesItsOwnRecords(t *testing.T)
 		bobHandle, carol.group.epoch, len(current))
 
 	// ── THE PROPERTY: the re-walk still resolves them, opens them, and names bob ────────────
-	carol.group.mutex.Lock()
-	carol.group.log = nil
-	carol.group.logIndex = map[[MessageIdBytes]byte]int{}
-	carol.group.delivered = map[uint64]bool{}
-	carol.group.mutex.Unlock()
+	// THE RESTART GOES THROUGH THE DOOR A RESTART GOES THROUGH. Emptying three maps on the live
+	// group leaves every in-memory head table standing, which is not what a second process holds.
+	carol = world.restart(carol)
 
 	delivered, err := carol.group.receiveForTest(world, carol, lines...)
 	if err != nil {
@@ -909,4 +1030,345 @@ func TestARestoredGroupDoesNotSeedItsFloorOverADirtyWalk(t *testing.T) {
 	}
 	t.Logf("the dirty walk left eve's floor at 0 with the clone check unconcluded, and the clean " +
 		"walk that followed reconciled first and then moved it to 3")
+}
+
+// ── 7. THE NEWCOMER'S STREAM STARTS WHERE THE PREVIOUS OCCUPANT'S ENDED ──────────────────────
+
+// A SURVIVOR OPENS A NEWCOMER WHOSE FIRST INDEX IS PAST THE RATCHET WINDOW, AND THAT IS THE STATE
+// THE FIRST TWO PIECES OF THIS ITEM PRODUCE BETWEEN THEM.
+//
+// THE TWO PIECES DISAGREED ABOUT ONE FACT AND ONLY ONE OF THEM COULD BE RIGHT. The SEED
+// ([Group.seedOwnStreamLocked]) moves the newcomer's own reserver past every index the removed
+// member spent, because the server's stream monotonicity is keyed on (group_id, sender_handle)
+// with no epoch and refuses anything at or below its last index there -- so the newcomer's first
+// ACCEPTED record is at the previous occupant's high water plus one. The PRUNE
+// ([Group.pruneRemovedLaddersLocked]) then dropped the survivor's head for that leaf on the
+// argument that the newcomer's ladder belongs "at 0, which is the correct head for a stream that
+// starts here". Both cannot hold: a stream that starts at prev+1 met by a ladder at 0 is
+// prev+1 rungs ahead of its head, and [messagegroup.ReceiverRatchet] refuses anything more than
+// [messagegroup.DefaultRecordWindowSize] ahead.
+//
+// MEASURED BEFORE THE REPAIR, with a previous occupant of 1,025 lines: the newcomer's first record
+// is at index 1,026 and every survivor answered "index 1026 is 1026 ahead of head 0, and the
+// window is 1024", three times, and then ABANDONED it -- the newcomer's whole history, gone from
+// every member that watched the commit, with [ErrRecordAbandoned] as the only sign. A restart
+// repaired it by accident, because a restored device seeds its current heads off the disk's
+// per-epoch table instead.
+//
+// THIS CASE IS THAT COHORT AT ONE SEAL RATHER THAN A THOUSAND. The leaving member's own floor is
+// moved through the production seeder first ([newReuseWorldAbove]), so its single line sits at
+// exactly the window's edge and the newcomer's first line sits one past it. The arithmetic is
+// asserted rather than assumed, so a build whose window moved does not turn this case vacuous.
+//
+// THE CONTROL FIRES FOR ITS OWN REASON, IN THE SAME QUERY: the survivor's PER-LADDER row for that
+// leaf is 0 -- the prune really did take it -- so what opens the record is
+// [Group.leafStreamFloorLocked] reading the per-epoch table, and not a row the prune left behind.
+//
+// WHAT WOULD GO RED: delete the floor in [Group.trackLocked]; prune [Group.peerHeadsAt] or
+// [Group.persistedHeads] with [Group.peerHeads] (the floor has nothing to read); make
+// [Group.pastHeadLocked] skip a previous occupant's rows (the restart half below).
+func TestASurvivorOpensANewcomerWhoseStreamStartsPastTheRatchetWindow(t *testing.T) {
+	window := uint64(messagegroup.DefaultRecordWindowSize)
+	world := newReuseWorldAbove(t, 1, window-1)
+	carol, eve := world.carol, world.eve
+
+	if at := world.bobRecords[0].record.Header.StreamIndex; at != window {
+		t.Fatalf("the leaving member's one line is at stream index %d and this case needs it at "+
+			"the window's edge, %d", at, window)
+	}
+
+	// ── THE NEWCOMER'S FIRST ACCEPTED INDEX, THROUGH THE SEED ───────────────────────────────
+	page := append([]*sealed{}, world.bobRecords...)
+	page = append(page, world.published.page()...)
+	if err := world.deliver(eve, page...); err != nil {
+		t.Fatalf("eve's first walk answered %v", err)
+	}
+	if high := world.highWater(eve); high != window {
+		t.Fatalf("eve's floor stands at %d after the walk, want %d", high, window)
+	}
+	line := world.sealDurable(eve, "the newcomer's first line, one past the window's edge")
+	if at := line.record.Header.StreamIndex; at != window+1 {
+		t.Fatalf("eve's first seal took index %d, want %d", at, window+1)
+	}
+
+	// ── THE CONTROL: THE PER-LADDER ROW IS GONE, SO THE FLOOR IS WHAT ANSWERS ───────────────
+	wire, err := message.RetentionClassWire(message.RetentionDurable, 0)
+	if err != nil {
+		t.Fatalf("the durable retention wire byte: %v", err)
+	}
+	reused := ladderKey{leaf: world.leaf, retentionWire: wire, ephWindow: 0}
+	if head := carol.group.peerHeads[reused]; head != 0 {
+		t.Fatalf("CONTROL FAILED: the survivor still holds a per-ladder head of %d for the reused "+
+			"leaf, so this case would pass on a build with no floor at all", head)
+	}
+	floor := carol.group.leafStreamFloorLocked(world.leaf, carol.group.epoch)
+	if floor != window {
+		t.Fatalf("the floor a ladder over the reused leaf is installed at is %d, want %d", floor, window)
+	}
+	if line.record.Header.StreamIndex <= window {
+		t.Fatalf("this cohort does not reach past the window, so the refusal it exists to drive " +
+			"cannot happen and the case is vacuous")
+	}
+	t.Logf("the newcomer's first index is %d, the survivor's per-ladder row is 0, and a ladder at "+
+		"0 is %d ahead of its head against a window of %d",
+		line.record.Header.StreamIndex, line.record.Header.StreamIndex, window)
+
+	// ── THE PROPERTY, IN PROCESS ────────────────────────────────────────────────────────────
+	opened, err := carol.group.receiveForTest(world.rotWorld, carol, line)
+	if err != nil {
+		t.Fatalf("the survivor's walk over the newcomer's first record answered %v. That is the "+
+			"newcomer's whole history abandoned at every member that watched the commit", err)
+	}
+	if len(opened) != 1 {
+		t.Fatalf("the survivor opened %d message(s) from the newcomer's first record, want 1", len(opened))
+	}
+	if !bytes.Equal(opened[0].SenderIdentity, eve.dev.identityPub) {
+		t.Fatalf("the newcomer's record is attributed to %x, want eve's %x",
+			opened[0].SenderIdentity, eve.dev.identityPub)
+	}
+
+	// ── AND AFTER A RESTART, WHICH READS THE FLOOR OFF THE DISK ─────────────────────────────
+	carol = world.restart(carol)
+	delivered, err := carol.group.receiveForTest(world.rotWorld, carol,
+		append(append([]*sealed{}, world.bobRecords...), line)...)
+	if err != nil {
+		t.Fatalf("the restarted survivor's walk over the previous occupant's line and then the "+
+			"newcomer's answered %v", err)
+	}
+	if len(delivered) != 2 {
+		t.Fatalf("the restarted survivor delivered %d record(s), want 2", len(delivered))
+	}
+	if len(carol.group.unopened) != 0 {
+		t.Fatalf("the restarted survivor gave up on %d record(s)", len(carol.group.unopened))
+	}
+	t.Logf("one leaf, two occupants, one run of stream indices: %d then %d, opened at the survivor "+
+		"in process and again after a restart", window, window+1)
+}
+
+// ── 8. A LEAF THAT CHANGES HANDS TWICE, WHICH IS THE ONE NUMBER THE DEPARTED TABLE HOLDS ─────
+
+// THE MIDDLE OCCUPANT'S OWN RECORDS STILL RESOLVE, AND THE TABLE THAT ANSWERS THAT IS ONE ROW WIDE.
+//
+// [Group.departedAt] is one uint64 per LEAF, and a leaf can be removed, refilled and removed again.
+// The row therefore has to choose which departure it carries, and the choice decides whose records
+// can still be resolved: the handle table [Group.leavesAtLocked] builds is the PRE-FILTER every
+// record of a leaf the current tree no longer carries has to pass, and a record that does not pass
+// it answers "which is no leaf of this group at epoch n", is retried [maxRecordAttempts] times and
+// is ABANDONED.
+//
+// THE OLD ROW CARRIED THE FIRST DEPARTURE, on the argument that "an entry raised to the second
+// removal's epoch would claim the leaf stood continuously between them". It did not stand
+// continuously -- and that claim costs nothing, because the table is a pre-filter that ALREADY
+// over-claims for a leaf added later, and what decides that a record was really written by the leaf
+// it names is MASTER section 8.4.3's R1 inside the open. What the first departure costs is this
+// case: with a leaf removed at epoch 2 and again at epoch 3, every record the MIDDLE occupant
+// sealed at epoch 2 fails the filter and is abandoned at every survivor, on every restart.
+//
+// THE CONTROL IS IN THE SAME WALK AND FIRES FOR ITS OWN REASON: the FIRST occupant's records, at
+// the epoch below, resolve too -- so "the filter passed" cannot be satisfied by a build that
+// stopped filtering, and the two occupants come back under two different identities out of one
+// sixteen-octet handle.
+//
+// WHAT WOULD GO RED: file the LOWEST departure epoch instead of the highest in
+// [Group.noteDepartedLeavesLocked] (the middle occupant's line is abandoned); delete the
+// departed-leaf half of [Group.leavesAtLocked] (both occupants' lines are).
+func TestALeafThatChangesHandsTwiceStillResolvesTheMiddleOccupantsRecords(t *testing.T) {
+	world := newReuseWorld(t, 3)
+	alice, carol, eve := world.alice, world.carol, world.eve
+
+	// (1) THE MIDDLE OCCUPANT WRITES, at the epoch the first removal opened, on a floor seeded
+	// past everything the first occupant spent.
+	page := append([]*sealed{}, world.bobRecords...)
+	page = append(page, world.published.page()...)
+	if err := world.deliver(eve, page...); err != nil {
+		t.Fatalf("eve's first walk answered %v", err)
+	}
+	middle := world.sealDurable(eve, "the middle occupant's only line")
+	if middle.record.Header.Epoch != world.published.opens {
+		t.Fatalf("the middle occupant's line is at epoch %d and it was admitted at %d",
+			middle.record.Header.Epoch, world.published.opens)
+	}
+	if err := world.deliver(carol, middle); err != nil {
+		t.Fatalf("carol's walk over the middle occupant's line answered %v", err)
+	}
+
+	// (2) AND IS REMOVED IN ITS TURN, with nobody added, so the leaf is out of the tree for good.
+	second := world.rotate(alice, []uint32{world.leaf}, func() ([]byte, []byte, []byte, error) {
+		return alice.handle.CommitRemove([]uint32{world.leaf})
+	})
+	if err := world.deliver(carol, second.page()...); err != nil {
+		t.Fatalf("carol's walk over the commit that removes the middle occupant: %v", err)
+	}
+	carol.group.mutex.Lock()
+	departed := carol.group.departedAt[world.leaf]
+	carol.group.mutex.Unlock()
+	if departed != second.opens {
+		t.Fatalf("the survivor's departed row for leaf %d carries epoch %d and the LAST removal "+
+			"opened %d. A row carrying the FIRST departure (%d) answers `not standing` for the "+
+			"middle occupant's own epoch", world.leaf, departed, second.opens, world.published.opens)
+	}
+
+	// AND THE CONTROL FOR THE FIXTURE: the leaf really is out of the CURRENT membership, so the
+	// filter below is the departed table's answer and not the tree's.
+	carol.group.mutex.Lock()
+	standing := false
+	for at := 0; at < carol.group.handle.MemberCount(); at += 1 {
+		leaf, _, _, memberErr := carol.group.handle.MemberAt(at)
+		if memberErr != nil {
+			carol.group.mutex.Unlock()
+			t.Fatalf("carol's member %d: %v", at, memberErr)
+		}
+		if leaf == world.leaf {
+			standing = true
+		}
+	}
+	carol.group.mutex.Unlock()
+	if standing {
+		t.Fatalf("CONTROL FAILED: leaf %d is still in the survivor's current membership, so the "+
+			"tree resolves its handle anyway and this case measures nothing", world.leaf)
+	}
+
+	// (3) THE RESTART, AND BOTH OCCUPANTS' RECORDS COME BACK.
+	carol = world.restart(carol)
+	delivered, err := carol.group.receiveForTest(world.rotWorld, carol,
+		append(append([]*sealed{}, world.bobRecords...), middle)...)
+	if err != nil {
+		t.Fatalf("the restarted survivor's walk over both occupants' records answered %v", err)
+	}
+	if len(delivered) != len(world.bobRecords)+1 {
+		t.Fatalf("the restarted survivor delivered %d record(s), want %d",
+			len(delivered), len(world.bobRecords)+1)
+	}
+	if len(carol.group.unopened) != 0 {
+		t.Fatalf("the restarted survivor gave up on %d record(s)", len(carol.group.unopened))
+	}
+	for at, one := range delivered[:len(world.bobRecords)] {
+		if !bytes.Equal(one.SenderIdentity, world.bob.dev.identityPub) {
+			t.Fatalf("the first occupant's line %d is attributed to %x, want bob's %x",
+				at+1, one.SenderIdentity, world.bob.dev.identityPub)
+		}
+	}
+	last := delivered[len(delivered)-1]
+	if last.Gap != "" {
+		t.Fatalf("the middle occupant's line came back as a %q gap", last.Gap)
+	}
+	if !bytes.Equal(last.SenderIdentity, eve.dev.identityPub) {
+		t.Fatalf("the middle occupant's line is attributed to %x, want eve's %x",
+			last.SenderIdentity, eve.dev.identityPub)
+	}
+	t.Logf("leaf %d held two occupants and then nobody: both removals are one row carrying epoch "+
+		"%d, and all %d records survive the restart under two identities out of one handle %x",
+		world.leaf, departed, len(delivered), world.handle)
+}
+
+// ── 9. THE NEWCOMER DOES NOT SHOW THE REMOVED MEMBER'S HISTORY AS ITS OWN ────────────────────
+
+// EVERY RECORD OF THE PREVIOUS OCCUPANT REACHES THE NEWCOMER ON THE ONE ROAD THAT CANNOT OPEN
+// ANYTHING, AND IT USED TO COME BACK `mine`.
+//
+// WHY THIS ROAD AND NO OTHER, WHICH IS WHY THE FOURTH PIECE'S OWN REPAIR COULD NOT REACH IT.
+// [Group.recordIsOwnLocked] decides `mine` on the credential identity the OPEN authenticated --
+// and a newcomer on a reused leaf can open not one record the previous occupant wrote: every one
+// of them is below its admission, so the session holds no state for their epoch and the walk
+// delivers them as [GapOutOfWindow] gaps. [Group.noteEpochGapLocked] is that road, it is reached
+// before the open, and its `mine` was `walk.own[header.SenderHandle]` -- the sixteen octets. So
+// the repair covered the records a newcomer CAN open, which is none of them, and the records it
+// cannot were exactly the removed member's whole history.
+//
+// MEASURED BEFORE THE REPAIR: three records, `gap="out_of_window" mine=true senderIdentity=`, all
+// carrying the removed member's message_ids, at the newcomer -- which is verbatim the harm
+// [Message.Mine]'s own doc says this item prevents, and it reached the C ABI as `"mine": true`.
+//
+// THE PRE-FILTER IS ASSERTED TO FIRE, which is what makes `mine == false` a statement about the
+// repair rather than about the fixture: the handle on every one of these records IS in the
+// newcomer's own handle set, so the build this replaces answered `true` for all three.
+//
+// AND THE POSITIVE CONTROL IS ON THE SAME ROAD, THROUGH THE SAME FUNCTION. A device cannot reach
+// the out-of-window road for a record of its OWN inside [messagegroup.PastEpochWindow] epochs --
+// the reason a record lands there is that no schedule on this device reaches its epoch, and its
+// own records are at epochs it holds state for -- so the control hands [Group.noteEpochGapLocked]
+// the header of a record this device really sealed, with the own-index row [Group.Send] writes,
+// on a walk built as [rotWorld.deliver] builds one. Without it, "mine is false" would be
+// satisfied by a build that answered false for everything on this road.
+//
+// WHAT WOULD GO RED: put `mine := walk.own[header.SenderHandle]` back (all three of the removed
+// member's lines come back as the newcomer's own); drop the body_hash half of the test (the
+// control still passes and a previous occupant's record at a coincident index would too).
+func TestANewcomerDoesNotShowTheRemovedMembersHistoryAsItsOwn(t *testing.T) {
+	world := newReuseWorld(t, 3)
+	eve := world.eve
+
+	delivered, err := eve.group.receiveForTest(world.rotWorld, eve, world.bobRecords...)
+	if err != nil {
+		t.Fatalf("the newcomer's walk over the previous occupant's records answered %v. They are "+
+			"below its admission, which is a GAP and not a failure", err)
+	}
+	if len(delivered) != len(world.bobRecords) {
+		t.Fatalf("the newcomer delivered %d of the previous occupant's %d records",
+			len(delivered), len(world.bobRecords))
+	}
+	for at, one := range delivered {
+		if one.Gap != GapOutOfWindow {
+			t.Fatalf("the previous occupant's line %d came back as %q and want %q",
+				at+1, one.Gap, GapOutOfWindow)
+		}
+		// THE PRE-FILTER FIRES: these records carry THIS device's own sixteen octets.
+		if [16]byte(one.SenderHandle) != world.handle {
+			t.Fatalf("CONTROL FAILED: the previous occupant's line %d carries sender_handle %x and "+
+				"the newcomer derives %x, so this case is not about a reused leaf",
+				at+1, one.SenderHandle, world.handle)
+		}
+		if !eve.group.ownHandles[world.handle] {
+			t.Fatalf("CONTROL FAILED: the newcomer does not hold %x in its own handle set, so the "+
+				"road below never took the handle at face value and `mine == false` says nothing",
+				world.handle)
+		}
+		if one.Mine {
+			t.Fatalf("the newcomer reads the previous occupant's line %d as its OWN. The handle is "+
+				"SenderHandle(group_handle_key, leaf) and takes no identity, so a device that "+
+				"concludes `mine` from it shows a removed member's whole history as its own",
+				at+1)
+		}
+		if len(one.SenderIdentity) != 0 {
+			t.Fatalf("the previous occupant's line %d carries sender_identity %x on a record that "+
+				"did not open", at+1, one.SenderIdentity)
+		}
+		if !bytes.Equal(one.MessageId, world.bobIds[at]) {
+			t.Fatalf("the newcomer named the previous occupant's line %d %x and it is %x",
+				at+1, one.MessageId, world.bobIds[at])
+		}
+	}
+	t.Logf("all %d of the previous occupant's records reached the newcomer under the newcomer's "+
+		"OWN handle %x, as out_of_window gaps, and not one of them is `mine`",
+		len(delivered), world.handle)
+
+	// ── THE POSITIVE CONTROL, ON THE SAME ROAD ──────────────────────────────────────────────
+	own := world.sealDurable(eve, "a line this device really sealed")
+	eve.group.mutex.Lock()
+	eve.group.ownIndices[own.record.Header.StreamIndex] = &ownSealed{
+		bodyHash: own.record.Header.BodyHash,
+		hasCopy:  true,
+		body:     []byte{byte(KindText), 'x'},
+		sentAtMs: time.Now().UnixMilli(),
+	}
+	walk := &pageWalk{own: eve.group.ownHandles, ownNow: world.handle, opened: []*Message{},
+		leaves: map[uint64]map[[16]byte]uint32{}, unobtainable: map[uint64]bool{}, reconciled: true}
+	eve.group.noteEpochGapLocked(walk, 9_000, &own.record.Header)
+	eve.group.mutex.Unlock()
+	if len(walk.opened) != 1 {
+		t.Fatalf("CONTROL FAILED: the same road delivered %d message(s) for a record this device "+
+			"sealed, want 1", len(walk.opened))
+	}
+	if !walk.opened[0].Mine {
+		t.Fatalf("CONTROL FAILED: a record this device sealed, at an index and a body_hash it " +
+			"holds, is not `mine` on this road -- so the property above is a build that answers " +
+			"false for everything and not one that can tell two occupants of a leaf apart")
+	}
+	if !bytes.Equal(walk.opened[0].SenderIdentity, eve.dev.identityPub) {
+		t.Fatalf("CONTROL FAILED: the same record carries sender_identity %x and want this "+
+			"device's %x -- the two fields must agree on every record of this road",
+			walk.opened[0].SenderIdentity, eve.dev.identityPub)
+	}
+	t.Logf("CONTROL: a record this device sealed, met on the SAME out_of_window road, is `mine` "+
+		"and carries this device's own sender_identity %x", eve.dev.identityPub[:4])
 }

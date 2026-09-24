@@ -77,6 +77,9 @@ func TestAfterAnEpochChangeEveryTrackedKeyNamesTheNewEpochAndTheOldOnesArePrinte
 		epoch:          1,
 		opened:         true,
 		reconciled:     true,
+		// this member is named in the FOUNDING commit, so no leaf here was ever occupied by
+		// anybody else and its stream floor is known without asking the server.
+		ownFloorHeld: true,
 	}
 	group.initTables()
 	defer session.Close()

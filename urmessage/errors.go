@@ -519,4 +519,23 @@ var (
 	// before it listens has already produced the two-time pad whatever the server then does
 	// with the record.
 	ErrNotReconciled = errors.New("urmessage: this restored group has not reconciled its stream position against the server yet; Receive once before Send")
+
+	// A GROUP THIS DEVICE JOINED HAS NOT YET HELD ITS OWN STREAM FLOOR AGAINST THE SERVER'S
+	// CLAIMS. Ledger item 245's first piece, and the half that made it a GATE rather than a
+	// repair that runs when it happens to run.
+	//
+	// A joiner lands on whatever leaf RFC 9420 section 7.7 gives it, which is the LEFTMOST BLANK
+	// -- a leaf a removed member may have stood at. Its sender_handle is
+	// SenderHandle(group_handle_key, leaf), so it inherits that member's sixteen octets byte for
+	// byte, and the server holds a stream claim at every index that member spent. A first Send
+	// with no walk behind it therefore seals at index 1 of a stream that is already spent to N,
+	// is answered REASON_STREAM_INDEX_REUSED, and latches [ErrIdentityInUse] for the life of the
+	// process: a member that has just joined can never send in the group it just joined.
+	//
+	// [Group.seedOwnStreamLocked] moves the floor past those claims ON THE FIRST WALK -- the
+	// ruling's own words -- and this is what refuses a Send that would happen BEFORE that walk.
+	// It is not sticky and it is not a diagnosis: one [Group.Receive] that completes cleanly
+	// clears it, exactly as [ErrNotReconciled] is cleared, and a group FOUNDED in this process
+	// never has it, because a group id drawn here has no claim under any handle of it.
+	ErrStreamFloorUnheld = errors.New("urmessage: this group was joined on a leaf that may carry a previous occupant's stream claims and its own floor has not been held against them yet; Receive once before Send")
 )

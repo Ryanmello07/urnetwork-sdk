@@ -101,10 +101,19 @@ type Message struct {
 	// record's own epoch through the same door [Message.SenderRoleAtSend] is, so a removed member's
 	// line stays the removed member's after a newcomer has taken its leaf and its handle.
 	//
-	// IT IS EMPTY EXACTLY WHEN THE OPEN DID NOT HAPPEN OR THE EPOCH CANNOT BE ASKED: a
-	// [GapOutOfWindow] gap carries none, for the reason [Message.SenderRoleAtSend] carries none,
-	// and the residual where the role is undeterminable ([Stats.RoleUndeterminable]) carries none
-	// either -- the two are one ask and cannot disagree.
+	// IT IS EMPTY WHEN THE OPEN DID NOT HAPPEN OR THE EPOCH CANNOT BE ASKED: a [GapOutOfWindow]
+	// gap carries none, for the reason [Message.SenderRoleAtSend] carries none, and the residual
+	// where the role is undeterminable ([Stats.RoleUndeterminable]) carries none either -- the two
+	// are one ask and cannot disagree.
+	//
+	// THE ONE EXCEPTION IS THIS DEVICE'S OWN, AND IT IS NOT AN OPEN THAT FILLS IT. Two roads set
+	// this field to this device's own identity with nothing signed: [Group.openOwnFromCopyLocked],
+	// which shows a line from the copy [Group.Send] kept, and the [GapOutOfWindow] road for a
+	// record whose stream index and body_hash are ones THIS DEVICE sealed
+	// ([Group.noteEpochGapLocked]). Both rest on the same statement -- "nobody can produce a
+	// second ct_body under one SHA-256" -- which is about this device and not about a leaf, and
+	// both are why [Message.Mine] can be true on a record that never opened without ever being
+	// read off the handle.
 	SenderIdentity []byte
 
 	// True when this device sealed it.
@@ -117,6 +126,15 @@ type Message struct {
 	// the open authenticated. The residual is named where it is taken
 	// ([Group.recordIsOwnLocked]): a record that opened at an epoch whose membership this device
 	// can no longer ask falls back to the handle, which is what every build before this one did.
+	//
+	// AND ON THE ROAD WHERE NOTHING OPENS AT ALL IT IS DECIDED ON OCTETS THIS DEVICE PRODUCED.
+	// A [GapOutOfWindow] record is one no key on this device reaches, so there is no open to read
+	// an identity off -- and this field used to be the sixteen-octet handle there, which is the
+	// whole of the harm above arriving through the one road that cannot open anything. It is now
+	// the copy road's own test, one clause of it: this device sealed at that stream index and the
+	// record carries the body_hash it sealed there. Its residual, stated: a record of this
+	// device's own whose index it no longer holds -- one sealed by a build that kept no copies,
+	// or by another copy of this folder -- is `false` here, and carries no identity either.
 	Mine bool
 
 	// THE ROLE THE SENDER HELD AT THE EPOCH THIS RECORD WAS SEALED AT, as the wire stable name:
@@ -957,8 +975,12 @@ type Group struct {
 	// [Group.recordIsOwnLocked] carries the mutant that says so.
 	ownHandles map[[16]byte]bool
 
-	// departedAt is, for every leaf this group has watched a commit REMOVE, the epoch that commit
-	// OPENED. The leaf stood at every epoch strictly BELOW that number and at none above it.
+	// departedAt is, for every leaf this group has watched a commit REMOVE, the epoch the LAST such
+	// commit OPENED. No occupant of that leaf stood at any epoch at or above that number; below it
+	// the table over-claims, because it says nothing about the gaps between two occupancies when
+	// the leaf stood blank. It is a PRE-FILTER and is deliberately not exact; see
+	// [Group.leavesAtLocked], and [Group.noteDepartedLeavesLocked] for why the LAST departure is
+	// the one that is kept.
 	//
 	// WHY THE TABLE EXISTS, and it is ledger item 245's third piece. [Group.leavesLocked] built
 	// the handle table from the membership at the CURRENT epoch only, so a record sealed at epoch
@@ -1021,6 +1043,23 @@ type Group struct {
 	// reconciled by construction -- its identity was drawn here and nothing else holds it. A
 	// RESTORED group is not, and [Group.Send] refuses until [Group.Receive] has run once.
 	reconciled bool
+
+	// ownFloorHeld is whether this group's own durable stream floor has been held against the
+	// claims the server holds under this device's sender_handle. Ledger item 245's first piece.
+	//
+	// IT IS A DIFFERENT QUESTION FROM [Group.reconciled] AND THE TWO MUST NOT BE ONE FIELD.
+	// `reconciled` asks "is another copy of this folder writing my stream"; this asks "did
+	// somebody ELSE stand at my leaf before me and spend indices under the sixteen octets I now
+	// derive". A group JOINED in this process answers the first by construction -- its identity
+	// was drawn here -- and CANNOT answer the second without looking at the server, because
+	// SenderHandle(group_handle_key, leaf) takes no epoch and no identity and RFC 9420 section
+	// 7.7 hands a joiner the leftmost BLANK leaf.
+	//
+	// TRUE AT A FOUNDING, FALSE AT A JOIN, FALSE AT A RESTORE. A founder drew the group id here,
+	// so the server holds no claim under any handle of that group. A joiner and a restored group
+	// both wait for one complete, clean walk -- the same walk [Group.seedOwnStreamLocked] moves
+	// the floor on -- and [Group.Send] answers [ErrStreamFloorUnheld] until then.
+	ownFloorHeld bool
 
 	// identityInUse is sticky and is the whole of the clone refusal. Once set, every Send is
 	// refused with it. See [Group.Receive].
@@ -1165,6 +1204,11 @@ func (self *Device) CreateGroup(ctx context.Context, groupId []byte) (*Group, er
 		// a group founded in THIS process holds an identity drawn in this process. There is
 		// no earlier writer of its stream to reconcile against.
 		reconciled: true,
+		// AND NO EARLIER OCCUPANT OF ITS LEAF EITHER, which is the other question and is
+		// answered here for a different reason: the group id was drawn in this process, so
+		// the server holds no stream claim under ANY handle of this group. A JOINED group
+		// cannot say that about the leaf it lands on. See [Group.ownFloorHeld].
+		ownFloorHeld: true,
 	}
 	group.initTables()
 	self.hold(group)
@@ -1233,8 +1277,33 @@ func (self *Device) Join(ctx context.Context, invite *Invite) (*Group, error) {
 		// The founder opened it. A joiner cannot observe that and does not pretend to: if it
 		// has not, every send below is refused by the server and the refusal is returned.
 		opened: true,
-		// as for a founded group: this device's stream in this group starts here.
+		// as for a founded group: no OTHER COPY OF THIS FOLDER holds this device's identity in
+		// this group, because the identity was drawn here. That is the clone question and it is
+		// the only one this flag answers.
 		reconciled: true,
+		// AND THE OTHER QUESTION IS ANSWERED THE OTHER WAY, WHICH IS LEDGER ITEM 245's FIRST
+		// PIECE MADE INTO A GATE. This device's stream in this group does NOT start here: it
+		// lands on the leftmost BLANK leaf (RFC 9420 section 7.7), a leaf a removed member may
+		// have stood at, and it derives that member's sender_handle byte for byte -- so the
+		// server may already hold claims at the indices this device is about to seal at. It
+		// cannot know without looking. [Group.seedOwnStreamLocked] looks, on the first walk;
+		// until that walk has completed cleanly [Group.Send] answers [ErrStreamFloorUnheld],
+		// because a seal is the irreversible half and the refusal that follows one
+		// ([ErrIdentityInUse], through REASON_STREAM_INDEX_REUSED) is STICKY for the life of the
+		// process.
+		//
+		// EXCEPT AT EPOCH ONE, WHERE THE LEAF IS FRESH BY CONSTRUCTION AND THE GATE WOULD BE A
+		// FALSE POSITIVE ON EVERY GROUP THIS BUILD MAKES. A commit that OPENS epoch one is
+		// committed against epoch zero, and [Device.CreateGroup] makes epoch zero with exactly
+		// ONE member -- so the only leaf that commit could have removed is the committer's own,
+		// which RFC 9420 section 12.4 forbids (mls.ErrRemoveCommitter). There is no blank leaf
+		// for section 7.7 to refill, so a device admitted at epoch one is on a leaf nobody has
+		// ever stood at and no claim can exist under its handle. Above epoch one that argument
+		// is gone: any earlier commit may have removed somebody, and this device cannot see
+		// which from a tree snapshot. The narrowing is DRIVEN in both directions rather than
+		// asserted -- see the removal suite's gate case -- so a build whose epoch zero ever
+		// holds two members turns it red rather than shipping a silent false negative.
+		ownFloorHeld: handle.Epoch() <= 1,
 	}
 	group.initTables()
 	if err := self.persistGroup(group.groupRecordLocked(true)); err != nil {
@@ -1655,6 +1724,14 @@ func (self *Group) committableLocked() error {
 	}
 	if !self.reconciled {
 		return fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
+	}
+	// AND A COMMIT IS A RECORD LIKE ANY OTHER: it is sealed through
+	// [messagegroup.GroupSession.SealRecord] and spends a stream index under this device's own
+	// sender_handle, so a committer whose floor has not been held collides exactly as a sender
+	// does -- and the group it was trying to change is the one it can then never write to. See
+	// [Group.ownFloorHeld].
+	if !self.ownFloorHeld {
+		return fmt.Errorf("%w: group %x", ErrStreamFloorUnheld, self.id)
 	}
 	return nil
 }
@@ -2247,6 +2324,16 @@ func (self *Group) sendableLocked(kind ContentKind) (string, error) {
 	}
 	if !self.reconciled {
 		return "", fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
+	}
+	// AND THE SEVENTH CLAUSE, BESIDE THE SIXTH AND FOR THE SAME KIND OF REASON. A group JOINED in
+	// this process is reconciled by construction and still cannot say that the leaf it landed on
+	// is one nobody stood at before: that is [Group.ownFloorHeld], and until one clean walk has
+	// held this device's floor against the server's claims a seal here is the collision item
+	// 245's first piece exists to prevent -- sticky, for the life of the process. It is ABOVE the
+	// role ask for the sixth clause's reason: a group that is not yet safe to seal in must say
+	// THAT rather than report a fact about the caller's permissions.
+	if !self.ownFloorHeld {
+		return "", fmt.Errorf("%w: group %x", ErrStreamFloorUnheld, self.id)
 	}
 	role, err := self.myRoleAtSendLocked()
 	if err != nil {
@@ -3217,6 +3304,16 @@ func (self *Group) commitWalkLocked(walk *pageWalk, fetchErr error) error {
 	if seedErr != nil {
 		return seedErr
 	}
+	// AND THE GATE THAT SEED IS OWED, WHICH IS WHAT MAKES IT A RULE RATHER THAN A REPAIR THAT RUNS
+	// WHEN IT HAPPENS TO RUN. Until this line has been reached over a walk that saw the whole
+	// history, [Group.Send] and every commit door answer [ErrStreamFloorUnheld] -- because a
+	// JOINED group cannot know whether the leaf it landed on carries a previous occupant's claims
+	// without looking, and the refusal a collision produces is sticky for the life of the process.
+	// The walk must be the same one the clone check would conclude from: a page short of records
+	// is a page whose missing record could be the claim this seed exists to clear.
+	if self.walkSawTheWholeHistoryLocked(walk) {
+		self.ownFloorHeld = true
+	}
 	// THEN THE WRAP THAT NEVER ARRIVED, ahead of the fetch refusal and of walk.firstFailure, and
 	// for the same reason the identity refusal is ahead of all three: it is the CAUSE of what
 	// comes after it. A group with no pq_secret for its epoch has the wrong read_key AND the wrong
@@ -3294,7 +3391,21 @@ func (self *Group) commitWalkLocked(walk *pageWalk, fetchErr error) error {
 // the case that stays refused, and that is the intended reading: this device cannot check itself
 // against a server that will not show it its own history.
 func (self *Group) walkReconcilesLocked(walk *pageWalk) bool {
-	return walk.complete && walk.omitted == nil && walk.firstFailure == nil && !self.reconciled
+	return self.walkSawTheWholeHistoryLocked(walk) && !self.reconciled
+}
+
+// walkSawTheWholeHistoryLocked is the three clauses above without the fourth: did this walk see
+// everything the server holds for this group.
+//
+// IT IS ONE FUNCTION BECAUSE TWO GATES ASK IT AND THEY MUST NOT DRIFT APART. The clone check
+// ([Group.walkReconcilesLocked]) and this device's own stream floor ([Group.ownFloorHeld]) are
+// different questions -- "is another copy writing my stream" and "did somebody else spend indices
+// under my sixteen octets before me" -- but the evidence either may conclude from is the same
+// walk, and the argument is the one written above: a walk with a hole in it is a walk whose
+// missing record could be the one the gate exists to find. A page the server called complete
+// while naming a higher high_water, or a record that did not open, are both such holes.
+func (self *Group) walkSawTheWholeHistoryLocked(walk *pageWalk) bool {
+	return walk.complete && walk.omitted == nil && walk.firstFailure == nil
 }
 
 // ownHighWaterLocked is the highest stream index this device's DURABLE reserver has ever allocated
@@ -4637,27 +4748,60 @@ func roleNameIn(policy *mls.GroupPolicyExtension, identity []byte) string {
 // still NAMED. A record whose id cannot be derived is counted and resolved past rather than retried:
 // the epoch will not come back, so there is nothing a re-fetch repairs.
 //
-// AND IT READS NO ROLE EITHER, WHICH IS A RULE AND NOT AN OMISSION (item 242's R4). This is the one
-// site of the walk that attributes a record to the header's UNAUTHENTICATED SenderHandle: nothing
-// opened, so nothing signed, and the handle is the sender's own claim. A role tag here would be a
-// role read off a forgeable claim -- and there is no epoch to read it at, because the whole reason
-// this record is a gap is that no schedule on this device reaches the epoch it was sealed at.
-// [Message.SenderRoleAtSend] is "" here, which is the value that says so, and
-// [Stats.RoleUndeterminable] does NOT move: nothing was asked.
+// AND IT READS NO ROLE, WHICH IS A RULE AND NOT AN OMISSION (item 242's R4). Nothing opened, so
+// nothing signed, and the only thing this record says about its sender is the handle it wrote into
+// its own plaintext header. A role tag here would be a role read off a forgeable claim -- and there
+// is no epoch to read it at, because the whole reason this record is a gap is that no schedule on
+// this device reaches the epoch it was sealed at. [Message.SenderRoleAtSend] is "" here, which is
+// the value that says so, and [Stats.RoleUndeterminable] does NOT move: nothing was asked.
+//
+// AND IT DOES NOT ATTRIBUTE THE RECORD TO THE HANDLE EITHER, which is this function's own half of
+// ledger item 245's fourth piece and is argued at the line that decides it below.
 func (self *Group) noteEpochGapLocked(walk *pageWalk, recordId uint64, header *message.RecordHeader) {
 	self.stats.GapOutOfWindow += 1
 	messageId, err := self.session.MessageIdOf(header)
 	if err != nil {
 		return
 	}
-	// AND NO IDENTITY EITHER, FOR THE SAME REASON THE ROLE IS EMPTY. Nothing opened, so nothing
-	// signed, and the only thing this record says about its sender is the handle it wrote into its
-	// own plaintext header. `mine` here is that claim taken at face value -- it is the pre-filter
-	// and not an attribution, exactly as it is on the roads above, and it is the honest answer for
-	// a record this device can say nothing else about.
-	mine := walk.own[header.SenderHandle]
+	// AND `mine` IS DECIDED ON AN OCTET-FOR-OCTET MATCH AGAINST WHAT THIS DEVICE SEALED, NEVER ON
+	// THE HANDLE. This used to be `walk.own[header.SenderHandle]` -- the sixteen octets, taken at
+	// face value -- and that is exactly the harm [Message.Mine]'s own doc says this item's repair
+	// prevents: SenderHandle(group_handle_key, leaf) takes no epoch and no identity, so every
+	// record the PREVIOUS OCCUPANT of this device's leaf ever wrote carries this device's own
+	// handle, and a newcomer on a reused leaf showed that member's whole history as its own. Every
+	// one of those records reaches this road and no other, because they are all below the
+	// newcomer's admission: measured, three records of the removed member came back at the
+	// newcomer as gaps with `mine` true and an empty sender_identity.
+	//
+	// WHAT DECIDES IT INSTEAD IS THE EVIDENCE THE COPY ROAD ALREADY USES, one clause of it: this
+	// device sealed at this stream index, and the record in hand carries the body_hash it sealed
+	// there. Nobody can produce a second ct_body under one SHA-256, and a previous occupant's
+	// record matches neither the index -- the index space is one run per (group_id, sender_handle)
+	// and the newcomer's floor is seeded past everything that occupant spent -- nor the hash.
+	// [Group.openOwnFromCopyLocked] is the road that SHOWS such a record when the epoch is still
+	// reachable and the copy is still held; this is the same question asked where neither is true.
+	//
+	// AND THE IDENTITY GOES WITH IT, FOR THE COPY ROAD'S REASON. That road sets
+	// [Message.SenderIdentity] to this device's own without an open, because "the record's
+	// body_hash is one this device sealed" is a statement about THIS DEVICE and not about a leaf.
+	// The same statement is what was just checked here. A gap that is NOT this device's still
+	// carries no identity, which is what [Message.SenderIdentity]'s doc says of this road, and
+	// `mine` is false there -- so [Message.Mine] and that field agree on every record of this road
+	// rather than disagreeing on a whole member's history.
+	// AND THE HANDLE IS NOT EVEN A PRE-FILTER HERE, WHICH WAS MEASURED RATHER THAN ARGUED. A
+	// first draft asked `walk.own[header.SenderHandle]` first, as the roads above do. Mutating
+	// that clause to `true` left all of this package green, and it cannot be otherwise: a
+	// body_hash is SHA-256(ct_body), a ct_body is sealed under a key derived from the SENDER's
+	// leaf, and a record from any other leaf therefore hashes to something no row of this
+	// device's own table holds. The octet test already implies the handle test, so the handle is
+	// gone from this road entirely rather than kept as a line no input can distinguish.
+	mine := false
+	var senderIdentity []byte
+	if sealed, found := self.ownIndices[header.StreamIndex]; found && sealed.bodyHash == header.BodyHash {
+		mine, senderIdentity = true, self.device.identityPub
+	}
 	entry := &Content{}
-	received := newGap(GapOutOfWindow, entry, recordId, header.SenderHandle[:], nil, mine, 0,
+	received := newGap(GapOutOfWindow, entry, recordId, header.SenderHandle[:], senderIdentity, mine, 0,
 		messageId[:], "")
 	if self.deliverLocked(received, entry) {
 		walk.opened = append(walk.opened, received)
@@ -5573,6 +5717,17 @@ func (self *Group) pastEpochOpenableLocked(walk *pageWalk, epoch uint64) bool {
 // It never reads [Group.peerHeads], which a later epoch's records may have raised above every
 // record of this one. A member never seen at or before this epoch answers 0, which is where a
 // stream a member just started stands.
+//
+// IT SPANS BOTH OCCUPANTS OF A LEAF THAT CHANGED HANDS, AND THAT IS REQUIRED RATHER THAN A BUG.
+// A review of the commit that added this function read the span as a defect and asked for rows
+// below the leaf's departure to be skipped. They must not be. A stream index is allocated per
+// (group_id, sender_handle) and the server refuses any index the previous occupant spent, so the
+// NEWCOMER's first accepted index is that occupant's high water plus one -- and a ladder that
+// skipped the previous occupant's rows would stand at 0 and answer ErrOutOfWindow for every
+// record the newcomer wrote, the moment the previous occupant got past
+// [messagegroup.DefaultRecordWindowSize]. Measured both ways; see
+// [Group.pruneRemovedLaddersLocked] and [Group.leafStreamFloorLocked], which is this same read
+// with the class dropped out of the key.
 func (self *Group) pastHeadLocked(ladder ladderKey, epoch uint64) uint64 {
 	head := uint64(0)
 	for key, at := range self.peerHeadsAt {
@@ -5586,6 +5741,49 @@ func (self *Group) pastHeadLocked(ladder ladderKey, epoch uint64) uint64 {
 		}
 	}
 	return head
+}
+
+// leafStreamFloorLocked is the lowest head a ladder over `leaf` may be installed at for a record
+// sealed at `epoch`: the highest stream index this device has AUTHENTICATED under that leaf's
+// sender_handle, on any ladder, at or below that epoch. Ledger item 245's second piece, corrected.
+//
+// WHY IT IS A FACT ABOUT THE LEAF AND NOT ABOUT THE LADDER, which is the whole of it. A receiver
+// ratchet is one per (leaf, retention class, eph window) and its head is an index; the INDEX
+// SPACE is one per (group_id, sender_handle) and a sender_handle is
+// SenderHandle(group_handle_key, leaf) with no epoch and no identity. So every ladder over one
+// leaf, at every epoch, under every occupant, allocates out of ONE run of numbers -- and the
+// server enforces that: MASTER section 8's monotonicity is keyed on (group_id, sender_handle) and
+// refuses an index at or below the last one it accepted there, whoever wrote it.
+//
+// WHAT THAT BUYS, AND IT IS THE REPAIR FOR A BLOCKER THIS ITEM'S OWN SECOND PIECE OPENED. A leaf
+// that changes hands gives the newcomer a stream that CONTINUES the removed member's numbering --
+// [Group.seedOwnStreamLocked] is the client half of the same fact -- so a survivor that positions
+// the newcomer's ladder at 0 is positioning it however far the previous occupant got below the
+// truth, and [messagegroup.ReceiverRatchet] refuses anything more than
+// [messagegroup.DefaultRecordWindowSize] ahead of its head. With a previous occupant of 1,025
+// lines the newcomer's first record is at 1,026 and every survivor answered "index 1026 is 1026
+// ahead of head 0, and the window is 1024" until it abandoned it.
+//
+// IT IS A FLOOR AND NEVER A CEILING. [Group.trackLocked] takes the MAXIMUM of this and the head it
+// already had, so it can only move a ladder UP and only to an index this device has already
+// authenticated -- never past a record it has not seen, which is the property that keeps a peer
+// from choosing how far this device walks.
+//
+// THE TWO INEQUALITIES ARE [Group.pastHeadLocked]'s, for its reasons, and they are not repeated
+// here: this is that function with the class and the eph window dropped out of the key.
+func (self *Group) leafStreamFloorLocked(leaf uint32, epoch uint64) uint64 {
+	floor := uint64(0)
+	for key, at := range self.peerHeadsAt {
+		if key.leaf == leaf && key.epoch <= epoch && floor < at {
+			floor = at
+		}
+	}
+	for key, at := range self.persistedHeads {
+		if key.leaf == leaf && key.epoch < epoch && floor < at {
+			floor = at
+		}
+	}
+	return floor
 }
 
 // crossEpochLadderLocked carries this group's receiver-ladder bookkeeping across an epoch change.
@@ -5620,6 +5818,27 @@ func (self *Group) crossEpochLadderLocked(newEpoch uint64) error {
 		if err != nil {
 			return fmt.Errorf("%w: re-tracking leaf %d across the change to epoch %d: %w",
 				ErrRecordOpen, ladder.leaf, newEpoch, err)
+		}
+		// THE SAME FLOOR [Group.trackLocked] TAKES, AND IT IS HERE FOR THE REASON THE MEMO
+		// EXISTS: this re-track sets [Group.tracked], so a ladder installed too low here is one
+		// trackLocked will not re-position on first sight. A leaf whose occupant has just been
+		// removed has no row in this table at all (it was pruned two statements ago) and is
+		// tracked lazily; a leaf that was REFILLED at some earlier commit has a row whose head is
+		// this occupant's, which the floor can only agree with or raise.
+		//
+		// IT CANNOT RAISE ANYTHING IN THIS BUILD, AND THAT IS A THEOREM AND A MEASUREMENT RATHER
+		// THAN A HOPE. The mutant that disables this clause leaves every case of this package
+		// GREEN, because [Group.notePeerHeadLocked] raises the per-ladder head and the per-epoch
+		// head from the same index in the same call, and [Group.openPageLocked] opens DURABLE
+		// records ONLY -- so a leaf has exactly one ladder here and its head IS the leaf's floor.
+		// The two separate the day this walk opens a second retention class: the index space is
+		// one run per (group_id, sender_handle) across classes, so a leaf's first record in a new
+		// class would meet a ladder at 0 while its stream stood at N, and N past
+		// [messagegroup.DefaultRecordWindowSize] is the same abandonment this floor exists to
+		// stop. It is written rather than deleted for that day, with what is claimed for it today
+		// stated exactly: it is correct, it is unmeasurable, and the mutant that says so survives.
+		if floor := self.leafStreamFloorLocked(ladder.leaf, newEpoch); head < floor {
+			head = floor
 		}
 		if err := self.session.TrackSender(ladder.leaf, class, ephBucket, ladder.ephWindow, head); err != nil {
 			return fmt.Errorf("%w: re-tracking leaf %d at head %d across the change to epoch %d: %w",
@@ -5670,6 +5889,16 @@ func (self *Group) trackLocked(leaf uint32, header *message.RecordHeader) error 
 	if header.Epoch < self.epoch {
 		head = self.pastHeadLocked(ladder, header.Epoch)
 	}
+	// AND THE FLOOR UNDER BOTH OF THEM, WHICH IS WHAT A LADDER OVER A LEAF THAT CHANGED HANDS
+	// STANDS AT. Neither number above knows about the OTHER OCCUPANT of this leaf: the first is
+	// pruned when a commit removes one ([Group.pruneRemovedLaddersLocked]) and the second is a
+	// per-ladder read. The index space is per (group_id, sender_handle) and the server refuses
+	// every index the previous occupant spent, so a newcomer's first record is above all of them
+	// and a ladder at 0 is out of window as soon as that occupant passed
+	// [messagegroup.DefaultRecordWindowSize]. See [Group.leafStreamFloorLocked].
+	if floor := self.leafStreamFloorLocked(leaf, header.Epoch); head < floor {
+		head = floor
+	}
 	if err := self.trackSessionLadderLocked(header.Epoch, leaf, header, head); err != nil {
 		if errors.Is(err, messagegroup.ErrEpochOutOfWindow) || errors.Is(err, messagegroup.ErrPastEpochUnobtainable) {
 			return err
@@ -5696,31 +5925,18 @@ func (self *Group) notePeerHeadLocked(leaf uint32, header *message.RecordHeader)
 		return
 	}
 	ladder := ladderKey{leaf: leaf, retentionWire: retentionWire, ephWindow: header.EphWindow}
-	// A RECORD FROM A PREVIOUS OCCUPANT OF THIS LEAF RAISES NO CURRENT HEAD, WHICH IS THE OTHER
-	// HALF OF LEDGER ITEM 245's SECOND PIECE AND THE HALF A RESTART REACHES.
-	//
-	// [Group.peerHeads] is the head the CURRENT occupant's ladder is positioned at -- the field's
-	// own doc says so -- and the stream index is continuous across epochs for ONE sender, which is
-	// why a past-epoch record may raise it at all. It is not continuous across two OCCUPANTS of one
-	// leaf: they are two streams that happen to share a name. [Group.pruneRemovedLaddersLocked]
-	// takes the removed member's head at the commit, and that is enough inside one walk because the
-	// commit that removes a leaf carries a HIGHER record id than everything its occupant ever wrote
-	// (a write at a stale epoch is refused by the server, item 244's refutation). It is NOT enough
-	// across a RESTART: the cursor is not persisted, so the whole history is re-walked, the removed
-	// member's records are re-opened at their own epoch -- correctly, they are still that member's
-	// lines -- and without this clause each one would raise the head of the ladder the NEWCOMER now
-	// stands on, above every index the newcomer has written. The commit is met again in that walk
-	// and does NOT prune a second time: it is at an epoch this device has left and is skipped as
-	// ceremony.
-	//
-	// THE PER-EPOCH HEAD IS STILL RAISED, and that is the point of the split rather than an
-	// omission. [Group.peerHeadsAt] is keyed BY EPOCH and positions that epoch's own ladder
-	// ([Group.pastHeadLocked]), where the record and the head belong to the same occupant.
-	previousOccupant := false
-	if departed, filed := self.departedAt[leaf]; filed && header.Epoch < departed {
-		previousOccupant = true
-	}
-	if !previousOccupant && self.peerHeads[ladder] < header.StreamIndex {
+	// A RECORD FROM A PREVIOUS OCCUPANT OF THIS LEAF RAISES THIS HEAD LIKE ANY OTHER, AND THE
+	// CLAUSE THAT USED TO REFUSE IT IS DELETED. It said the stream index "is not continuous across
+	// two OCCUPANTS of one leaf: they are two streams that happen to share a name", and that
+	// sentence is measurably false. An index is allocated per (group_id, sender_handle), a
+	// sender_handle is SenderHandle(group_handle_key, leaf), and the server's monotonicity refuses
+	// any index the previous occupant spent -- so the two occupants are ONE run of numbers, which
+	// is the same fact [Group.seedOwnStreamLocked] makes the newcomer's own reserver obey. Holding
+	// this head down left a survivor's ladder for a refilled leaf at 0, and a ladder at 0 is out of
+	// window for every record the newcomer writes once the previous occupant passed
+	// [messagegroup.DefaultRecordWindowSize] lines. See [Group.leafStreamFloorLocked], which is
+	// where that floor is read back, and [Group.pruneRemovedLaddersLocked] for the measurement.
+	if self.peerHeads[ladder] < header.StreamIndex {
 		self.peerHeads[ladder] = header.StreamIndex
 	}
 	// AND THE PER-EPOCH HEAD, under the RECORD's epoch: a prior-epoch open raises the head of the
@@ -5796,10 +6012,13 @@ func (self *Group) leavesLocked() (map[[16]byte]uint32, error) {
 //
 // THE TWO SOURCES, AND EACH SAYS SOMETHING THE OTHER CANNOT. The current membership is the tree
 // this device holds and is exact for the epoch it stands at. [Group.departedAt] is what this
-// device watched leave, with the epoch the removing commit OPENED, so a leaf whose occupant was
-// removed at `departed` stood at every epoch strictly below it -- which is the only fact about a
-// leaf that is no longer in the tree that a receiver can hold without asking a party that could
-// lie about it.
+// device watched leave, with the epoch the LAST removing commit OPENED, so a leaf whose occupants
+// ended at `departed` had one of them standing at some epochs strictly below it -- which is the
+// only fact about a leaf that is no longer in the tree that a receiver can hold without asking a
+// party that could lie about it. A leaf that changed hands twice has one row and it carries the
+// LAST departure, because the question here is "may a record at epoch e carry this leaf's handle"
+// and that is true of every occupant, not only of the first
+// ([Group.noteDepartedLeavesLocked]).
 //
 // WHAT IT IS AND WHAT IT IS NOT, because the difference is what keeps this cheap. It is a
 // PRE-FILTER: it answers which leaf a handle names, and a handle for no leaf this group knows is
@@ -5870,14 +6089,29 @@ func (self *Group) noteOwnLeafLocked() {
 // noteDepartedLeavesLocked files every leaf one commit REMOVED against the epoch that commit
 // OPENED, so [Group.leavesAtLocked] can still resolve the records those leaves sealed BELOW it.
 //
-// THE LOWEST EPOCH WINS AND A SECOND FILING DOES NOT RAISE IT. A leaf can be removed, refilled and
-// removed again; the records at stake are the ones sealed by the FIRST occupant, and an entry
-// raised to the second removal's epoch would claim the leaf stood continuously between them. It
-// did not, and the table's one sentence -- "this leaf stood at every epoch strictly below this
-// number" -- has to stay true of the number it holds.
+// THE HIGHEST EPOCH WINS, AND THE REASON IS WHAT THIS TABLE IS ASKED. A leaf can be removed,
+// refilled and removed again, and the question [Group.leavesAtLocked] puts to it is "may a record
+// sealed at epoch e carry this leaf's handle" -- which is TRUE for every occupant of it, not only
+// the first. Keeping the LOWEST epoch, which this function used to do, answered `false` for the
+// records the SECOND occupant sealed: with a leaf removed at epoch 2 and again at epoch 3, the
+// middle occupant's own lines resolved to no leaf at all, took the fail() road and were abandoned
+// after [maxRecordAttempts] at every survivor whose tree no longer carries that leaf.
+//
+// WHAT THE ENTRY MEANS, STATED AS THE ONE SENTENCE IT HAS TO KEEP TRUE: no occupant of this leaf
+// stood at any epoch AT OR ABOVE this number, so a record above it cannot carry this leaf's
+// handle unless the tree says the leaf is filled again. Below it the table over-claims -- it says
+// nothing about the gaps between occupancies, when the leaf was blank -- and over-claiming is
+// what this table already does for a leaf ADDED later ([Group.leavesAtLocked] says so in as many
+// words): it is a PRE-FILTER, and what decides that a record was really written by the leaf it
+// names is MASTER section 8.4.3's R1 inside the open.
+//
+// AND IT HAS EXACTLY ONE READER NOW. It used to have two, asking OPPOSITE questions of one number
+// -- [Group.leavesAtLocked] wanted the first departure and [Group.notePeerHeadLocked] wanted the
+// last -- and a single uint64 can only answer one of them. That second reader is deleted, for its
+// own reasons; see [Group.notePeerHeadLocked].
 func (self *Group) noteDepartedLeavesLocked(removed []uint32, opensEpoch uint64) {
 	for _, leaf := range removed {
-		if at, filed := self.departedAt[leaf]; filed && at <= opensEpoch {
+		if at, filed := self.departedAt[leaf]; filed && opensEpoch <= at {
 			continue
 		}
 		self.departedAt[leaf] = opensEpoch
@@ -5894,23 +6128,35 @@ func (self *Group) noteDepartedLeavesLocked(removed []uint32, opensEpoch uint64)
 // no longer stands in the group, at the removed member's head, in a schedule that exists only to
 // open records nobody can write any more.
 //
-// AND THE HARM IS NOT THE WASTED LADDER. RFC 9420 section 7.7 refills the LEFTMOST BLANK leaf, so
-// the next Add lands a NEWCOMER on the removed member's leaf -- and [ladderKey] is keyed on the
-// LEAF. The survivor then meets the newcomer's very first record, at stream index 1 of a stream
-// that has just started, against a ladder standing at the head the REMOVED member left behind.
-// [messagegroup.ReceiverRatchet] does not rewind, so every record the newcomer writes below that
-// head is refused, and a member who has just joined is silent to every survivor until it has
-// written its way back past somebody else's history.
-//
 // THE KEY STAYS THE LEAF AND THE HANDLE IS NOT ADDED TO IT, which is this item's own correction to
 // its own text: [ladderKey] names a RECEIVER RATCHET, the session keys one per leaf, and a ladder
-// key carrying a handle would be a second name for a thing that has one. Pruning is the right edit
-// and it is sufficient -- the newcomer's ladder is then absent, and [Group.trackLocked] installs it
-// lazily at 0, which is the correct head for a stream that starts here.
+// key carrying a handle would be a second name for a thing that has one.
 //
-// THREE TABLES GO, AND THE THIRD IS THE ONE THAT WOULD OTHERWISE SURVIVE A RESTART:
-// [Group.persistedHeads] is the disk's copy, and [Group.persistPeerHeadsLocked] writes the UNION of
-// it and this process's, so a row left in it is a row written back out for ever.
+// ── ONE TABLE GOES AND TWO STAY, AND THAT CORRECTION IS MEASURED ─────────────────────────────
+//
+// THIS FUNCTION DROPPED THREE TABLES, AND DROPPING THE OTHER TWO ABANDONED THE NEWCOMER'S WHOLE
+// HISTORY AT EVERY SURVIVOR. Its argument for them was that the newcomer's ladder is then
+// "installed lazily at 0, which is the correct head for a stream that starts here". THE NEWCOMER'S
+// STREAM DOES NOT START HERE. A stream index is allocated per (group_id, sender_handle), and
+// MASTER section 8's monotonicity -- enforced by the server, per (group_id, sender_handle), with
+// no epoch -- refuses every index the PREVIOUS OCCUPANT of this leaf already spent. So the
+// newcomer's first ACCEPTED index is that occupant's high water plus one, which is exactly what
+// [Group.seedOwnStreamLocked] makes the newcomer's own reserver agree to. A ladder at 0 is then
+// not merely stale: it is too low by however far that occupant got, and
+// [messagegroup.ReceiverRatchet] refuses an index more than
+// [messagegroup.DefaultRecordWindowSize] ahead of its head. MEASURED, with a previous occupant of
+// 1,025 lines: the newcomer's first record is at index 1,026 and the survivor answers "index 1026
+// is 1026 ahead of head 0, and the window is 1024" -- three times, and then abandons it.
+// [Group.leafStreamFloorLocked] is where a new occupant's ladder now takes its head from, and it
+// reads [Group.peerHeadsAt] and [Group.persistedHeads]: which is why those two are no longer
+// dropped here.
+//
+// WHAT IS STILL DROPPED, AND WHY. [Group.peerHeads] is the table [Group.crossEpochLadderLocked]
+// iterates to RE-TRACK a ladder eagerly at every epoch change, and a row for a leaf whose occupant
+// has left is a ratchet installed at every future epoch in a schedule nobody can write to. That is
+// the cost this item's second piece names, and "prune `peerHeads` by `RemovedLeaves` at
+// ApplyCommit" is the rule in its own words. The HEAD is not lost with the row: the per-epoch
+// tables hold the same number and [Group.leafStreamFloorLocked] is what reads it back.
 //
 // AND [Group.tracked] IS NOT ONE OF THEM, WHICH WAS MEASURED RATHER THAN REASONED. This function
 // had a fourth loop over that map, and it was UNDRIVEN: [Group.crossEpochLadderLocked] runs two
@@ -5918,11 +6164,6 @@ func (self *Group) noteDepartedLeavesLocked(removed []uint32, opensEpoch uint64)
 // `clear(self.tracked)`. Deleting the loop left all 177 cases of this package green, including the
 // one that asserts no memo survives for the removed leaf -- because the clear is what empties it.
 // A line no mutation can kill is a line that says something the code does not do.
-//
-// AND THE HALF THIS FUNCTION CANNOT REACH IS NAMED WHERE IT IS: a RESTART re-walks the removed
-// member's own records, at their own epoch, and each one would raise the CURRENT head of the ladder
-// the newcomer now stands on. The commit is met again in that walk and does not prune a second
-// time, so the clause that holds it is in [Group.notePeerHeadLocked].
 func (self *Group) pruneRemovedLaddersLocked(removed []uint32) {
 	if len(removed) == 0 {
 		return
@@ -5934,18 +6175,6 @@ func (self *Group) pruneRemovedLaddersLocked(removed []uint32) {
 	for ladder := range self.peerHeads {
 		if gone[ladder.leaf] {
 			delete(self.peerHeads, ladder)
-		}
-	}
-	for key := range self.peerHeadsAt {
-		if gone[key.leaf] {
-			delete(self.peerHeadsAt, key)
-			self.headsDirty = true
-		}
-	}
-	for key := range self.persistedHeads {
-		if gone[key.leaf] {
-			delete(self.persistedHeads, key)
-			self.headsDirty = true
 		}
 	}
 }

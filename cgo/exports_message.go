@@ -1422,7 +1422,14 @@ type messageInfo struct {
 	// attributes each to the other. sender_identity is what MLS signs and is the only value here
 	// that separates them.
 	SenderIdentity string `json:"sender_identity"`
-	Mine           bool   `json:"mine"`
+	// WHETHER THIS DEVICE SEALED THE RECORD, AND IT IS DECIDED ON sender_identity OR ON OCTETS
+	// THIS DEVICE PRODUCED -- NEVER ON sender_handle, for the reason one field up. A record that
+	// opened is `mine` when its sender_identity is this device's; a record that did NOT open is
+	// `mine` only when this device sealed at that stream index and the record carries the
+	// body_hash it sealed there, and such a record carries this device's sender_identity too. So
+	// a caller may key a row on sender_identity and read `mine` beside it: the two agree on every
+	// line, and neither of them is the sixteen octets two occupants of one leaf share.
+	Mine bool `json:"mine"`
 	// THE ROLE THE SENDER HELD AT THE EPOCH THIS RECORD WAS SEALED AT: "owner", "admin", "member"
 	// or "observer", and "" on a record that did not open. Spec C §5.6's SenderRoleAtSend.
 	//

@@ -146,6 +146,10 @@ func (self *roleWorld) enroll(name string, dev *crossProcessDevice, handle messa
 		epoch:          handle.Epoch(),
 		opened:         true,
 		reconciled:     true,
+		// every member of this world is named in the FOUNDING commit, so no leaf here was
+		// ever occupied by anybody else and this device's stream floor is known without
+		// asking the server. See [Group.ownFloorHeld].
+		ownFloorHeld: true,
 	}
 	group.initTables()
 	// AND THE PAST EPOCH LOADER, WHICH PRODUCTION INSTALLS ON EVERY SESSION A GROUP RECEIVES
