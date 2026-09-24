@@ -144,10 +144,22 @@ var pqSecretProducerSites = map[string]string{
 	"dropPqSecretsBelowWindowLocked|self.pqSecrets": "the window's own pass: every entry PastEpochWindow behind is erased and dropped.",
 	"dropWrapCandidatesLocked|candidate.secret":     "every staged candidate for a resolved epoch, on its way to the erase.",
 	"encodePqSecretTable|parameter rows":            "the rows arriving at the encoder.",
-	"encodePqSecretTable|result encoded":            "the assembled octet string, which IS the secrets.",
-	"encodePqSecretTable|row.PqSecret":              "one row's octets, counted and then appended.",
-	"encodeStateRecord|parameter parts":             "THE SECOND, and the last place the record is a Go value before it is octets in a frame.",
-	"filePqSecretLocked|parameter pqSecret":         "THE TABLE'S WRITE PATH: the value arrives with a name and is COPIED in.",
+	"encodePqSecretWitness|parameter rows": "THE WITNESS'S ROWS, AND THEY CARRY DIGESTS AND NOT SECRETS. They are in this census " +
+		"because the producer net seeds any parameter named `rows`, which is an " +
+		"over-approximation and is the correct one to keep: the day somebody writes a witness " +
+		"encoder that takes secrets, it is already inside this gate. What these rows hold is " +
+		"[sha256.Size] octets of SHA-256 per epoch -- see [GroupRecord.PqSecretWitness] for why " +
+		"the answer to 'have I ever held this' is kept for ever while the secret is not.",
+	"sortEpochPqSecretWitness|parameter rows": "the same rows arriving at the sort, seeded for the same reason and carrying the same " +
+		"digests.",
+	"witnessPqSecretLocked|parameter pqSecret": "THE SECRET ARRIVING AT THE WITNESS, and this one IS a pq_secret: the whole point of the " +
+		"function is that a value is hashed here and the hash is what is kept. It arrives from " +
+		"[Group.filePqSecretLocked] -- the one door a row goes in by -- so there is no site that " +
+		"can file a secret without leaving a witness of it.",
+	"encodePqSecretTable|result encoded":    "the assembled octet string, which IS the secrets.",
+	"encodePqSecretTable|row.PqSecret":      "one row's octets, counted and then appended.",
+	"encodeStateRecord|parameter parts":     "THE SECOND, and the last place the record is a Go value before it is octets in a frame.",
+	"filePqSecretLocked|parameter pqSecret": "THE TABLE'S WRITE PATH: the value arrives with a name and is COPIED in.",
 	"filePqSecretLocked|self.pqSecrets": "the entry about to be replaced, read so that it can be ERASED rather than merely " +
 		"overwritten.",
 	"groupRecordLocked|self.pqSecretLocked": "the CURRENT epoch's secret, which is part two of the record and what a build from before " +
@@ -186,9 +198,10 @@ var pqSecretProducerSites = map[string]string{
 		"values.",
 	"pqSecretsShowRotation|table.secret":  "the two octet strings the constant-time comparison is over.",
 	"publishCommitLocked|staged.pqSecret": "the staged rotation's secret, taken off the [stagedRotation] this commit was built with.",
-	"pqSecretHeldAtLocked|self.pqSecrets": "the whole table, read row by row by the removal rule's comparison. It is the WHOLE table " +
-		"and not the current epoch's row because the member a commit removes keeps every row of " +
-		"the window it was a member for.",
+	"pqSecretHeldAtLocked|self.pqSecrets": "the whole LIVE table, read row by row by the removal rule's comparison, beside the " +
+		"witness that the window does not prune. It is not the current epoch's row, and it is not " +
+		"the live table alone either: the member a commit removes keeps every row it ever SAW, and " +
+		"this device's window throws rows away. See [Group.pqSecretWitness].",
 	"refuseUnrotatedRemovalLocked|candidate.secret": "one staged wrap payload, read BEFORE ApplyCommit by ruling 41's refusal -- which is the " +
 		"only place in this package a candidate is read while the group can still stay at the " +
 		"epoch it is at.",
@@ -403,6 +416,79 @@ var pqSecretSinks = map[string]pqSecretSink{
 		carries: []string{"encoded", "row"},
 		why:     "the assembled octet string, or that refusal.",
 	},
+	"encodePqSecretWitness|call append": {
+		carries: []string{"encoded", "row"},
+		why: "THE WITNESS FRAME being assembled: the epoch, then 32 octets of SHA-256. What is NOT " +
+			"in this list is a pq_secret, and that is the whole difference between this encoder and " +
+			"the one above it -- `row.Digest` is a digest of a secret and never the secret.",
+	},
+	"encodePqSecretWitness|call binary.BigEndian.PutUint64": {
+		carries: []string{"row"},
+		why:     "the row's EPOCH being written into the frame, for its twin's reason one entry up.",
+	},
+	"encodePqSecretWitness|call fmt.Errorf": {
+		carries: []string{"row"},
+		why: "THE WITNESS ENCODER'S WIDTH REFUSAL, and the operands are `row.Epoch` and " +
+			"`len(row.Digest)` -- a number and a count, which is why that length is in the counted " +
+			"census below and not here.",
+	},
+	"encodePqSecretWitness|return": {
+		carries: []string{"encoded", "row"},
+		why:     "the assembled witness, or that refusal.",
+	},
+	"sortEpochPqSecretWitness|assign rows[?]": {
+		carries: []string{"row", "rows"},
+		why: "the witness sort's own moves, for [sortEpochPqSecrets]'s reason: order is part of the " +
+			"value, because the part is written by appending each row in turn and a map's iteration " +
+			"order would make two writes of one unchanged witness two different files.",
+	},
+	"witnessPqSecretLocked|call sha256.Sum256": {
+		carries: []string{"pqSecret"},
+		why: "THE ONE PLACE THE SECRET STOPS BEING ONE. Everything downstream of this call carries a " +
+			"digest, which is what makes keeping it for ever acceptable and is why " +
+			"[Group.pqSecretWitness] is not inside the window's erase discipline.",
+	},
+	"witnessPqSecretLocked|call subtle.ConstantTimeCompare": {
+		carries: []string{"digest"},
+		why: "the already-witnessed check, over DIGESTS. It is ConstantTimeCompare and not " +
+			"bytes.Equal for guardrail G8's reason -- these are derived from key material -- even " +
+			"though what is compared is a hash.",
+	},
+	"witnessPqSecretLocked|assign self.pqSecretWitness[epoch]": {
+		carries: []string{"digest"},
+		why: "THE WITNESS ENTRY ITSELF. This is the assignment the removal rule's subject is read " +
+			"from, and it is a hash: a table of these survives the window that the table of secrets " +
+			"beside it does not.",
+	},
+	"filePqSecretLocked|call self.witnessPqSecretLocked": {
+		carries: []string{"pqSecret"},
+		why: "the secret being witnessed BEFORE the drop below it. The order is load-bearing: a " +
+			"witness written after [Group.dropPqSecretsBelowWindowLocked] would miss the value the " +
+			"drop just evicted.",
+	},
+	"initTables|call self.witnessPqSecretLocked": {
+		carries: []string{"epoch", "secret"},
+		why: "the constructor's seeding: every row a constructor filled is a value this group has " +
+			"held, so it is a value a removal may not be followed on. [Device.restoreOne] adds the " +
+			"rows the record carries for epochs the table no longer covers.",
+	},
+	"groupRecordOf|call decodePqSecretWitness": {
+		carries: []string{"parts"},
+		why: "part eight going to the witness decoder, which is in this census for " +
+			"`groupRecordOf|parameter parts`'s reason -- the record's parts are seeded whole and " +
+			"this walk does not tell one part from another.",
+	},
+	"groupRecordOf|assign record.PqSecretWitness": {
+		carries: []string{"witness"},
+		why:     "that decoded witness landing on the record.",
+	},
+	"restoreOne|call copy": {
+		carries: []string{"row"},
+		why: "THE RESTORED WITNESS ROW being copied into its fixed-width array. `row` is tainted " +
+			"because the restore's loop variables are seeded by this census's `rows` net; what is " +
+			"copied is `row.Digest`, 32 octets of SHA-256, and the width is refused by name one line " +
+			"above rather than truncated here.",
+	},
 	"encodeStateRecord|call body.Write": {
 		carries: []string{"part"},
 		why: "each part, the secrets among them, going into the *bytes.Buffer the record is assembled " +
@@ -505,6 +591,13 @@ var pqSecretSinks = map[string]pqSecretSink{
 	"ingestCommitLocked|call self.session.AdvanceEpoch": {
 		carries: []string{"pqNext"},
 		why:     "the same one value into connect's table, for publishCommitLocked's reason.",
+	},
+	"ingestCommitLocked|call self.haltLocked": {
+		carries: []string{"resolveErr"},
+		why: "RULING 41's REFUSAL going to the one place that records and persists it. It carries the " +
+			"resolution's ERROR and nothing else -- the halt's whole content is a sentence, an epoch " +
+			"and a kind octet, and [refuseRemovalOnHeldSecret]'s own header is why no pq_secret is in " +
+			"it: a diagnosis names what happened and never the material it happened to.",
 	},
 	"ingestCommitLocked|return": {
 		carries: []string{"resolveErr"},
@@ -835,6 +928,14 @@ var pqSecretCountedNotCarriedSites = map[string]string{
 		"the site the ADV-M1 shape would attack from: one edit turns the count into the value, " +
 		"and the sink census refuses it.",
 	"encodePqSecretTable|len rows": "the capacity hint for the frame.",
+	"encodePqSecretWitness|len row.Digest": "THE WITNESS ENCODER'S FIXED WIDTH, which is the one place this part is spelled " +
+		"differently from the table beside it: a digest's width is this package's own, so a row of " +
+		"any other width is refused rather than length-prefixed.",
+	"encodePqSecretWitness|len rows":    "the capacity hint for the witness frame.",
+	"sortEpochPqSecretWitness|len rows": "the witness sort's bound.",
+	"witnessPqSecretLocked|len pqSecret": "the witness's own emptiness guard: an empty value is not witnessed, because " +
+		"[Group.pqSecretHeldAtLocked] answers false for an empty candidate and a witness row of " +
+		"H(nothing) would make 'this group holds nothing' read as 'this group already holds it'.",
 	"encodeStateRecord|len part": "the framing's per-part width. On a group record this is the length of the pq_secret and " +
 		"of each table row, and the refusal beside it formats that length.",
 	"encodeStateRecord|len parts": "the framing's own arity: the 255 refusal, and the part count written into the frame's " +
@@ -856,6 +957,9 @@ var pqSecretCountedNotCarriedSites = map[string]string{
 	"publishCommitLocked|len targets": "expected_wrap_count and the marker's wrap_count, which item 132's client half makes ONE " +
 		"expression. `targets` is tainted only because it is bound in the same statement as " +
 		"`staged.pqSecret`; what is counted is a list of leaves.",
+	"restoreOne|len row.Digest": "THE RESTORED WITNESS ROW'S WIDTH, refused by name before the copy below it. A short " +
+		"digest copied into a fixed array would leave zero octets in the tail and make one witness " +
+		"row match a value nobody ever held; the refusal formats that COUNT and never the row.",
 	"restoredPqSecrets|len record.PqSecret": "the five-part arm's 'neither a table nor a scalar' refusal.",
 	"restoredPqSecrets|len record.PqSecrets": "the six-part arm's row count, and the refusal text for a table that does not cover its " +
 		"own epoch.",
@@ -877,6 +981,11 @@ var pqSecretAccumulatorSites = map[string]string{
 		"walk does not follow it into the buffer -- so `body.Bytes()` reads back a value this " +
 		"census does not know carries the secret. The value comes back out as `writeRecord`'s " +
 		"`record`, which IS censused, so the blindness is bounded by one function body.",
+	"ingestCommitLocked|accumulate self.haltLocked": "RULING 41's REFUSAL, and it is a horizon by the letter of the rule -- a method on this " +
+		"same group -- rather than a blind spot in fact. [Group.haltLocked] is in this census's own " +
+		"sources: its whole body sets two fields from the ERROR it was handed and writes the group " +
+		"record through [Group.groupRecordLocked], which is censused above. What crosses this call " +
+		"is a sentence, never a secret.",
 	"ingestCommitLocked|accumulate self.session.AdvanceEpoch": "the same door on the receive leg.",
 	"publishCommitLocked|accumulate self.session.AdvanceEpoch": "CONNECT'S OWN TABLE. The secret enters [messagegroup.GroupSession], which holds it under " +
 		"its own erase discipline and its own gates. This package cannot see inside it and does " +

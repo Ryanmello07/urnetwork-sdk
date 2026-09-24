@@ -980,6 +980,59 @@ func TestAnOrphanThatLosesToALaterCandidateIsStillCounted(t *testing.T) {
 			"in either would mean the page failed for a reason this case is not measuring",
 			stats.WrapMissing, stats.WrapUnreadable)
 	}
+	t.Logf("CONTROL HELD, loser first: WrapOpened=%d WrapOrphaned=%d", stats.WrapOpened, stats.WrapOrphaned)
+
+	// ── AND THE OTHER ORDERING, WHICH IS HALF OF THE RACE AND READ ZERO ─────────────────────
+	//
+	// WHY IT IS A SECOND CASE AND NOT A SECOND ASSERTION. [rotation.page] builds the loser's row
+	// FIRST, because a losing committer's fan-out is written before the winner's commit is
+	// accepted -- which is true of one of the two orderings and arbitrary between them. With the
+	// counter inside the candidate loop the loop RETURNED at the winner, so an orphan numbered
+	// AFTER it was never reached and read as 0: exactly the reading [Stats.WrapOrphaned]'s own doc
+	// calls healthy, missing on half the race orderings, with the case above green the whole time.
+	// The repair is that every candidate is judged before any is answered, so this page is
+	// delivered winner-first and must report the same number.
+	second := newRotWorld(t, "alice", "bob")
+	secondAlice, secondBob := second.member("alice"), second.member("bob")
+	secondLoser := make([]byte, messagegroup.PqSecretBytes)
+	for at := range secondLoser {
+		secondLoser[at] = 0xA5
+	}
+	secondPublished := second.rotate(secondAlice, nil, func() ([]byte, []byte, []byte, error) {
+		return secondAlice.handle.Commit(nil)
+	}, rotBend{leaf: secondBob.leaf, payload: secondLoser, decoy: true})
+	if len(secondPublished.decoys) != 1 || len(secondPublished.wraps) == 0 {
+		t.Fatalf("CONTROL FAILED: the fixture built %d decoy(s) and %d wrap(s), want 1 and at least 1",
+			len(secondPublished.decoys), len(secondPublished.wraps))
+	}
+	if bytes.Equal(secondLoser, secondPublished.pqSecret) {
+		t.Fatalf("CONTROL FAILED: the decoy carries the epoch's own secret, so nothing in this page loses")
+	}
+	// THE WINNER FIRST, THE LOSER SECOND, THE COMMIT LAST -- spelled here rather than through
+	// [rotation.page], which hardcodes the other order and is the reason this could not be seen.
+	winnerFirst := []*sealed{}
+	winnerFirst = append(winnerFirst, secondPublished.wraps...)
+	winnerFirst = append(winnerFirst, secondPublished.decoys...)
+	winnerFirst = append(winnerFirst, secondPublished.commit)
+	if err := second.deliver(secondBob, winnerFirst...); err != nil {
+		t.Fatalf("bob's walk over a winner-first page answered %v; this is the same HEALTHY reading "+
+			"in the other order", err)
+	}
+	secondStats := secondBob.group.Stats()
+	if secondStats.WrapOpened != 2 {
+		t.Fatalf("CONTROL FAILED: bob opened %d wrap(s) in the winner-first ordering and this case "+
+			"needs 2, or a zero below would mean the loser's row never opened", secondStats.WrapOpened)
+	}
+	if secondBob.group.epoch != secondPublished.opens || secondBob.group.wrapDark != nil {
+		t.Fatalf("bob stands at epoch %d dark=%v after a winner-first page",
+			secondBob.group.epoch, secondBob.group.wrapDark)
+	}
+	if secondStats.WrapOrphaned != 1 {
+		t.Fatalf("Stats.WrapOrphaned is %d in the WINNER-FIRST ordering and %d in the loser-first "+
+			"one, want 1 in both. Which of two racing committers wrote its fan-out first is "+
+			"arbitrary, so a counter that only sees the loser when it is numbered BEFORE the winner "+
+			"reads zero on half the races", secondStats.WrapOrphaned, stats.WrapOrphaned)
+	}
 }
 
 // ── 3. THE RESTART ───────────────────────────────────────────────────────────────────────────
@@ -1547,6 +1600,120 @@ func TestThePqSecretTableIsBoundedByTheWindowAndAnEvictedEntryIsErased(t *testin
 		t.Fatalf("the entry at the window's edge was erased while it was still held")
 	}
 	_ = fmt.Sprint(evicted)
+}
+
+// THE WITNESS THE WINDOW DOES NOT PRUNE SURVIVES A RESTART, AND THE RECORD THAT CARRIES NO WITNESS
+// IS THE RESIDUAL, MEASURED RATHER THAN NAMED.
+//
+// WHY IT IS A SEPARATE CASE FROM THE TABLE'S OWN RESTART. [GroupRecord.PqSecrets] is bounded on
+// purpose and must stay bounded -- a secret further behind than [messagegroup.PastEpochWindow] can
+// serve no open, so persisting it is persisting a retired epoch's post-quantum half for nothing.
+// The removal rule needs the opposite thing: whether this group has EVER held a value, which the
+// removed member's own copy does not forget. So the answer is persisted and the secret is not, and
+// this case asserts the two DISAGREE on the disk -- the witness names an epoch whose secret the
+// table no longer carries.
+//
+// THE CONTROL IS A VALUE NOBODY EVER HELD, inline: it answers false through the same call. Without
+// it a witness that answered true to everything would pass this, which is the failure mode that
+// would refuse every honest rotation in the package.
+//
+// AND THE RESIDUAL IS THE SAME RECORD WITH THE WITNESS PART TAKEN OFF -- a store written by a build
+// before that part existed. It comes back witnessing only what its table carries, and that device
+// follows a removal fanned out on a secret it once held, evicted and forgot. The only repair is on
+// the wire: the wrap payload authenticated as drawn FOR the epoch it opens. That is a `connect`
+// change and is filed rather than taken here, so what this case does is MEASURE the hole instead of
+// claiming it closed.
+func TestARestartKeepsThePqSecretWitnessTheWindowDoesNotPrune(t *testing.T) {
+	world := newRotWorld(t, "alice", "bob")
+	alice, bob := world.member("alice"), world.member("bob")
+	retained := append([]byte(nil), bob.group.pqSecretLocked()...)
+
+	const rotations = int(messagegroup.PastEpochWindow) + 1
+	for at := 0; at < rotations; at += 1 {
+		published := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+			return alice.handle.Commit(nil)
+		})
+		if err := world.deliver(bob, published.page()...); err != nil {
+			t.Fatalf("CONTROL FAILED: bob's walk over honest rotation %d answered %v", at+1, err)
+		}
+	}
+
+	records, err := bob.dev.store.GroupRecords()
+	if err != nil {
+		t.Fatalf("bob's GroupRecords: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("bob's disk holds %d group record(s), want 1", len(records))
+	}
+	record := records[0]
+	// ── THE DISK DISAGREES WITH ITSELF, ON PURPOSE ──────────────────────────────────────────
+	for _, row := range record.PqSecrets {
+		if bytes.Equal(row.PqSecret, retained) {
+			t.Fatalf("CONTROL FAILED: the persisted TABLE still carries epoch 1's secret at epoch "+
+				"%d after %d rotations, so the witness is not carrying anything the table does not",
+				row.Epoch, rotations)
+		}
+	}
+	witnessed := sha256.Sum256(retained)
+	found := false
+	for _, row := range record.PqSecretWitness {
+		if bytes.Equal(row.Digest, witnessed[:]) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the persisted witness holds %d row(s) and none of them is epoch 1's; a restart "+
+			"would put the removal rule's subject back inside the window that defeated it",
+			len(record.PqSecretWitness))
+	}
+	t.Logf("the record carries %d secret row(s) and %d witness row(s): the secrets are bounded by "+
+		"the window and the answer to 'have I ever held this' is not",
+		len(record.PqSecrets), len(record.PqSecretWitness))
+
+	// ── THE RESTART ─────────────────────────────────────────────────────────────────────────
+	revived := restoredRotDevice(t, bob)
+	restored, err := revived.device.restoreOne(revived.store, record, restoreTestNonce(), 1)
+	if err != nil {
+		t.Fatalf("restoreOne: %v", err)
+	}
+	if _, everHeld := restored.pqSecretHeldAtLocked(retained); !everHeld {
+		t.Fatalf("the restored group has no record that it ever held epoch 1's secret, so a " +
+			"removal fanned out on that value is followed after every restart")
+	}
+	for _, secret := range restored.pqSecrets {
+		if bytes.Equal(secret, retained) {
+			t.Fatalf("CONTROL FAILED: the restored LIVE table carries epoch 1's secret, so the " +
+				"clause above is answered by the table and not by the witness")
+		}
+	}
+	stranger := make([]byte, messagegroup.PqSecretBytes)
+	for at := range stranger {
+		stranger[at] = 0x6E
+	}
+	if _, everHeld := restored.pqSecretHeldAtLocked(stranger); everHeld {
+		t.Fatalf("CONTROL FAILED: the restored witness answers 'already held' for a value this " +
+			"group has never seen, so it would refuse every honest rotation")
+	}
+	restored.Close()
+
+	// ── THE RESIDUAL: THE SAME RECORD AS A BUILD BEFORE THE WITNESS PART WROTE IT ───────────
+	older := *record
+	older.PqSecretWitness = nil
+	olderGroup, err := revived.device.restoreOne(revived.store, &older, restoreTestNonce(), 1)
+	if err != nil {
+		t.Fatalf("restoreOne over a record with no witness part: %v", err)
+	}
+	defer olderGroup.Close()
+	if _, everHeld := olderGroup.pqSecretHeldAtLocked(retained); everHeld {
+		t.Fatalf("a record with NO witness part came back witnessing an epoch its table does not " +
+			"carry. That would mean the witness is being invented from somewhere, and the honest " +
+			"answer for that disk is that the pre-window history is gone")
+	}
+	t.Logf("THE RESIDUAL, MEASURED AND NOT CLAIMED CLOSED: a group restored from a record written "+
+		"before the witness part witnesses only the %d row(s) its table carries, so it follows a "+
+		"removal fanned out on a value it held before the window moved. The repair is on the wire: "+
+		"the wrap payload authenticated as drawn FOR the epoch it opens, which is a connect change",
+		len(older.PqSecrets))
 }
 
 func containsNonZeroOctet(octets []byte) bool {

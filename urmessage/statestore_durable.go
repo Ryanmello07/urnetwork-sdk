@@ -323,6 +323,26 @@ type GroupRecord struct {
 	// apart without a version octet: see [DurableStateStore.GroupRecords].
 	PqSecrets []EpochPqSecret
 
+	// SHA-256 OF EVERY pq_secret THIS GROUP HAS EVER FILED, keyed by the lowest epoch it was
+	// filed at, and NOT bounded by [messagegroup.PastEpochWindow].
+	//
+	// WHY A SECOND TABLE INSTEAD OF WIDENING THE FIRST. [GroupRecord.PqSecrets] is bounded on
+	// purpose: an entry further behind than the window can serve no open any schedule on this
+	// device would admit, so keeping the SECRET is keeping a retired epoch's post-quantum half for
+	// nothing. But the rule item 243 is about -- a removal may not be followed on a value the
+	// removed member also holds -- needs to know whether this group has EVER held a value, and the
+	// removed member's set does not shrink when this device's window moves. Measured: after 33
+	// honest rotations a removal fanned out on pq_secret[1] was followed with a nil error, and the
+	// removed member's retained value was the post-quantum half of the survivors' storage_root at
+	// the epoch it was removed at. So the answer to "have I held this" is kept for ever and the
+	// SECRET is not: 32 octets of digest per epoch, which is a question-answerer and not key
+	// material, beside a 32-octet secret that is erased on schedule.
+	//
+	// EMPTY ON A RECORD WRITTEN BEFORE THIS PART, and that is the residual rather than a gap to be
+	// invented around: such a device comes back witnessing only the rows its table carries. See
+	// [Group.pqSecretWitness] for the one repair that closes it, which is a wire change.
+	PqSecretWitness []EpochPqSecretWitness
+
 	// group_handle_key: the epoch ZERO storage root's expansion. It never moves, which is why it
 	// is stored once rather than per epoch.
 	GroupHandleKey []byte
@@ -401,6 +421,80 @@ const (
 type EpochPqSecret struct {
 	Epoch    uint64
 	PqSecret []byte
+}
+
+// EpochPqSecretWitness is one row of [GroupRecord.PqSecretWitness]: an epoch and SHA-256 of the
+// pq_secret this group filed at it.
+//
+// IT IS A DIGEST AND NEVER A SECRET, and the type is separate from [EpochPqSecret] for exactly that
+// reason: one field named PqSecret that sometimes holds a hash is one erase discipline away from a
+// secret nobody zeroized, and one `%x` away from a leak the census could not tell from a diagnosis.
+type EpochPqSecretWitness struct {
+	Epoch  uint64
+	Digest []byte
+}
+
+// sortEpochPqSecretWitness puts a witness in ascending epoch order, in place, for
+// [sortEpochPqSecrets]'s reason: the part is one appended frame and a map's iteration order would
+// make two writes of one unchanged witness two different files.
+//
+// IT IS THE SAME INSERTION SORT AND NOT A CALL INTO THE OTHER ONE, because the two carry different
+// row types and an adapter that copied rows between them would be a place a digest could be handed
+// to a function whose parameter is called a secret.
+func sortEpochPqSecretWitness(rows []EpochPqSecretWitness) {
+	for at := 1; at < len(rows); at += 1 {
+		row := rows[at]
+		back := at - 1
+		for 0 <= back && row.Epoch < rows[back].Epoch {
+			rows[back+1] = rows[back]
+			back -= 1
+		}
+		rows[back+1] = row
+	}
+}
+
+// encodePqSecretWitness is [GroupRecord.PqSecretWitness] as the one octet string part eight
+// carries: u64(epoch) ‖ 32 octets of digest, repeated, big-endian.
+//
+// THE WIDTH IS FIXED AND THERE IS NO LENGTH PREFIX, which is the one place this part is spelled
+// differently from the pq_secret table beside it and it is not a saving. A digest's width is this
+// package's own -- [sha256.Size], decided here and not by a peer or by a wire format -- so a row of
+// any other width is a record this build did not write, and a length octet would be a field whose
+// only purpose is to carry a value the reader must then refuse anyway.
+func encodePqSecretWitness(rows []EpochPqSecretWitness) ([]byte, error) {
+	encoded := make([]byte, 0, len(rows)*(8+sha256.Size))
+	for _, row := range rows {
+		if len(row.Digest) != sha256.Size {
+			return nil, fmt.Errorf("%w: the pq_secret witness for epoch %d is %d octets and a digest is %d",
+				ErrStateStoreFormat, row.Epoch, len(row.Digest), sha256.Size)
+		}
+		var epochOctets [8]byte
+		binary.BigEndian.PutUint64(epochOctets[:], row.Epoch)
+		encoded = append(encoded, epochOctets[:]...)
+		encoded = append(encoded, row.Digest...)
+	}
+	return encoded, nil
+}
+
+// decodePqSecretWitness reads what [encodePqSecretWitness] wrote, and refuses anything else.
+//
+// A SHORT TAIL IS A REFUSAL, for [decodePqSecretTable]'s reason one type over: a witness that
+// silently lost its last rows is a device that comes back able to follow a removal fanned out on a
+// value it has held, which is the defect this part exists to close arriving through the reader.
+func decodePqSecretWitness(encoded []byte) ([]EpochPqSecretWitness, error) {
+	const row = 8 + sha256.Size
+	if len(encoded)%row != 0 {
+		return nil, fmt.Errorf("%w: the pq_secret witness is %d octets and a row is %d",
+			ErrStateStoreFormat, len(encoded), row)
+	}
+	rows := []EpochPqSecretWitness{}
+	for at := 0; at < len(encoded); at += row {
+		rows = append(rows, EpochPqSecretWitness{
+			Epoch:  binary.BigEndian.Uint64(encoded[at : at+8]),
+			Digest: append([]byte(nil), encoded[at+8:at+row]...),
+		})
+	}
+	return rows, nil
 }
 
 // sortEpochPqSecrets puts a table in ascending epoch order, in place.
@@ -1362,8 +1456,18 @@ func (self *DurableStateStore) PutGroupRecord(record *GroupRecord) error {
 	if err != nil {
 		return err
 	}
+	// THE EIGHTH PART, AND IT IS WRITTEN ON EVERY RECORD FOR THE SEVENTH'S REASON: the reader tells
+	// shapes apart by ARITY, so a part whose presence depended on the group's history would make
+	// two records of one group two shapes. Empty for a group that has witnessed nothing, which is
+	// a real state -- a caller that filled in the compatibility scalar alone has said nothing about
+	// what this group has EVER held, and inventing a witness row from the one row it did supply
+	// would be this store deciding a security question on the caller's behalf.
+	witness, err := encodePqSecretWitness(record.PqSecretWitness)
+	if err != nil {
+		return err
+	}
 	return self.writeRecord(self.groupRecordPath(record.GroupId), stateKindGroupRecord,
-		record.GroupId, record.PqSecret, record.GroupHandleKey, epochOctets[:], flags, table, dark)
+		record.GroupId, record.PqSecret, record.GroupHandleKey, epochOctets[:], flags, table, dark, witness)
 }
 
 // encodeWrapDark is [GroupRecord.WrapDarkKind] and [GroupRecord.WrapDarkEpoch] as the one octet
@@ -1481,8 +1585,8 @@ func (self *DurableStateStore) GroupRecords() ([]*GroupRecord, error) {
 // reader's arity switch, its two refusals and its field reads are one unit anyway, and splitting
 // them out is what the writer ([DurableStateStore.PutGroupRecord]) already did.
 func groupRecordOf(name string, parts [][]byte) (*GroupRecord, error) {
-	if len(parts) < 5 || 7 < len(parts) {
-		return nil, fmt.Errorf("%w: the group record in %s carries %d parts, want 7, the 6 a store written before the wrap_dark part holds, or the 5 a store written before the pq_secret table holds",
+	if len(parts) < 5 || 8 < len(parts) {
+		return nil, fmt.Errorf("%w: the group record in %s carries %d parts, want 8, the 7 a store written before the pq_secret witness holds, the 6 a store written before the wrap_dark part holds, or the 5 a store written before the pq_secret table holds",
 			ErrStateStoreFormat, name, len(parts))
 	}
 	if len(parts[3]) != 8 || len(parts[4]) != 1 {
@@ -1506,13 +1610,26 @@ func groupRecordOf(name string, parts [][]byte) (*GroupRecord, error) {
 	// by a build in which a dark group could not be persisted as dark at all, so there is no
 	// diagnosis on that disk to recover and none to invent. What such a device loses is named in
 	// [GroupRecord.WrapDarkKind] and it is one restart's worth of groups.
-	if len(parts) == 7 {
+	if 7 <= len(parts) {
 		kind, epoch, err := decodeWrapDark(parts[6])
 		if err != nil {
 			return nil, fmt.Errorf("%w: the group record in %s: %w", ErrStateStoreFormat, name, err)
 		}
 		record.WrapDarkKind = kind
 		record.WrapDarkEpoch = epoch
+	}
+	// AND A RECORD WITH NO WITNESS PART WITNESSES NOTHING, which is evidence and not a default: it
+	// was written by a build that kept the removal rule's subject inside
+	// [messagegroup.PastEpochWindow], so there is no record on that disk of what the group held
+	// below the window and none to invent. What such a device loses is named in
+	// [GroupRecord.PqSecretWitness] and in [Group.pqSecretWitness], and it is one restart's worth
+	// of pre-window history per group.
+	if len(parts) == 8 {
+		witness, err := decodePqSecretWitness(parts[7])
+		if err != nil {
+			return nil, fmt.Errorf("%w: the group record in %s: %w", ErrStateStoreFormat, name, err)
+		}
+		record.PqSecretWitness = witness
 	}
 	return record, nil
 }

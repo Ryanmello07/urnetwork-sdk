@@ -425,6 +425,14 @@ type Stats struct {
 	// it is the healthy reading -- two committers raced, this device opened both wraps and used
 	// the winner's. A number here WITH one is not a lesser failure than the others: see
 	// [ErrOrphanWrap] for why the loser-only case is as permanent as a wrap that never came.
+	//
+	// AND THE HEALTHY READING IS ORDER-INDEPENDENT SINCE 2026-09-24, which it was not before and
+	// which is what made it the reading this counter could not show. The resolution used to
+	// RETURN at the winning candidate, so an orphan numbered after it was never reached and read
+	// as zero -- and which of two racing committers wrote its fan-out first is arbitrary, so half
+	// the race orderings reported nothing at all. Every candidate is judged before any is
+	// answered now, and both orderings are driven by
+	// TestAnOrphanThatLosesToALaterCandidateIsStillCounted.
 	WrapOrphaned uint64
 
 	// Records that OPENED and became a GAP rather than a message: the two values of [GapReason]
@@ -667,6 +675,36 @@ type Group struct {
 	// connect/mls's state deletion use, and every evicted entry is ERASED rather than dropped.
 	// It is persisted: see [GroupRecord.PqSecrets] and what an old store does.
 	pqSecrets map[uint64][]byte
+
+	// pqSecretWitness is SHA-256 of every pq_secret this group has EVER filed, keyed by the
+	// lowest epoch that value was filed at, AND IT IS NOT PRUNED BY THE WINDOW.
+	//
+	// WHY IT EXISTS, AND IT IS THE 2026-09-24 REPAIR. The removal rule's subject used to be
+	// `pqSecrets` alone -- the table above -- and that table is pruned at
+	// [messagegroup.PastEpochWindow] by [Group.dropPqSecretsBelowWindowLocked]. So "a value this
+	// group already holds" SHRANK while the removed member's set did not, and a removal fanned
+	// out on a pq_secret this device had EVICTED was followed with a nil error. REPRODUCED
+	// against the production receive path by
+	// TestARemovalFannedOutOnAnEvictedEpochsSecretIsRefusedToo: 33 honest rotations, then a
+	// removal opening on pq_secret[1], and the removed member's retained value was octet for
+	// octet the post-quantum half of the survivors' storage_root at the epoch it was removed at.
+	// The eviction is LOCAL HYGIENE and an adversary does not run it.
+	//
+	// IT IS HASHES AND NEVER SECRETS, which is what makes keeping them for ever acceptable: a
+	// digest of a 32-octet uniformly drawn value answers "is this the same value" and nothing
+	// else, and the disk already carries the secrets themselves for the window. The cost is 40
+	// octets per epoch the group has ever stood at, and it is bounded only by the group's
+	// lifetime; that is stated rather than hidden, and it is the price of a rule whose subject
+	// does not shrink.
+	//
+	// WHAT IT DOES NOT REACH, NAMED AND NOT CLAIMED CLOSED: a device that never held the replayed
+	// epoch's row at all -- a member ADDED after it, or one restored from a record written before
+	// this field was persisted -- has no witness for it and follows. The only repair for THAT is
+	// on the wire: the wrap payload and the digest preimage authenticated as drawn FOR
+	// `opensEpoch`, so a replay of any earlier epoch's value is refused by construction whatever
+	// the receiver still holds. That is a `connect` change and is filed rather than taken here.
+	// See [GroupRecord.PqSecretWitness].
+	pqSecretWitness map[uint64][sha256.Size]byte
 
 	// The device wraps this group has OPENED and not yet judged, under the epoch each one
 	// delivers, and how many arrived at this device's own handle and did not open.
@@ -913,6 +951,38 @@ type Group struct {
 	// string is not a field anything can read a number out of and [GroupRecord] has to carry one.
 	// Meaningless while wrapDark is nil, and the two are written in one place.
 	wrapDarkEpoch uint64
+
+	// halted is RULING 41's OTHER OUTCOME, and it is a DIFFERENT FIELD from [Group.wrapDark]
+	// because the two are different states and the whole of ruling 41 is that they are told
+	// apart. It is [ErrRemovalWithoutRotation] and nothing else.
+	//
+	//   - VALID COMMIT whose wrap did not arrive or did not open -> [Group.wrapDark] at n+1. The
+	//     group FOLLOWED the commit and cannot derive that epoch's keys.
+	//   - INVALID COMMIT -- a removal this device could only follow on a pq_secret it already
+	//     holds -> THIS, at n. The group did NOT follow the commit. Item 242's semantics: a
+	//     hostile committer can HALT a group; it cannot TAKE it.
+	//
+	// IT IS STICKY AND IT IS PERSISTED, AND BOTH ARE 2026-09-24 REPAIRS OF A MEASURED DEFECT.
+	// Before them the refusal was returned once and nothing was kept: the second walk over the
+	// same record answered `mls: ratchet generation already consumed` (step (0) of
+	// [Group.ingestCommitLocked] tracks the committer's ladder BEFORE the refusal, so the
+	// sentinel cannot be re-derived), the third answered [ErrRecordAbandoned] and resolved the
+	// cursor PAST the refused commit, and the fourth and fifth answered nil over a group standing
+	// an epoch behind its own log with a record on the disk reading HEALTHY. A refusal that halts
+	// a group has to be at least as durable as the dark state it is contrasted with.
+	//
+	// AND THE HALT IS PERMANENT, WHICH IS MEASURED AND WAS ONCE DENIED IN PROSE. The comment that
+	// stood here said "a committer that re-commits properly is followed normally". That is FALSE:
+	// the refused commit stays in the log AHEAD of this receiver for ever, every record after it
+	// is sealed at an epoch this device is not in, and a proper re-commit lands above it. Driven
+	// by TestARefusedRemovalHaltsTheGroupForEveryLaterWalkAndAcrossARestart, which walks the same
+	// record five times and then re-commits properly. The repair is out of band and it is the
+	// same one a dark group needs: this device is re-Added.
+	halted error
+
+	// haltedEpoch is the epoch [Group.halted] left this group standing at -- n, the epoch it did
+	// NOT move off. Meaningless while halted is nil, and the two are written in one place.
+	haltedEpoch uint64
 }
 
 // ── founding and joining ─────────────────────────────────────────────────────────────────────
@@ -1460,6 +1530,14 @@ func (self *Group) committableLocked() error {
 	if self.wrapDark != nil {
 		return self.wrapDark
 	}
+	// AND A GROUP THAT HALTED MUST NOT COMMIT, for a different reason that comes to the same
+	// refusal: it stands at an epoch the server has already left. A commit sealed at n is a write
+	// at a stale epoch and the server refuses it, and building one on top of a commit this device
+	// judged INVALID would be this member re-opening the epoch the removal was supposed to close.
+	// Ruling 41's sentinel by name, rather than the server's reason code.
+	if self.halted != nil {
+		return self.halted
+	}
 	if !self.reconciled {
 		return fmt.Errorf("%w: group %x", ErrNotReconciled, self.id)
 	}
@@ -1772,6 +1850,44 @@ func (self *Group) enterEpochLocked() error {
 	return nil
 }
 
+// haltLocked records RULING 41's refusal, PERSISTS IT, and answers the sentence the caller returns.
+//
+// IT IS ONE FUNCTION BECAUSE THERE ARE TWO REFUSAL SITES AND THEY MUST PRODUCE ONE STATE.
+// [Group.ingestCommitLocked] refuses at (3a), before ApplyCommit, and at (4b), after it; two
+// spellings of "set the field and write the record" is one of them being the site that forgot,
+// which is [Group.groupRecordLocked]'s own argument about the four persist sites one paragraph
+// over.
+//
+// THE FIRST REFUSAL WINS, for [Group.wrapDark]'s reason: the state is permanent, the first sentence
+// is the one that names what actually happened, and a later walk that re-derived some other
+// refusal over the same halted group would overwrite the diagnosis with a symptom.
+//
+// AND IT IS WRITTEN TO THE DISK HERE RATHER THAN AT [Group.enterEpochLocked]'s step (7), because a
+// refusal RETURNS before step (7) is reached -- that is the whole of what a refusal is. Without
+// this line the halt died with the process, and the next one came back to a record reading HEALTHY
+// over a group standing an epoch behind its own log. The epoch does not move, so this is not an
+// epoch change and does not go through that door; what it writes is the diagnosis column beside an
+// epoch that is already there.
+//
+// A STORE THAT WILL NOT TAKE THE RECORD DOES NOT SWALLOW THE REFUSAL. The halt is the sentence the
+// caller needs, so it stays the wrapped sentinel -- errors.Is still answers
+// [ErrRemovalWithoutRotation] -- and the persist failure is carried inside it, because a halt that
+// did not reach the disk is a halt this device forgets at its next start.
+func (self *Group) haltLocked(refusal error) error {
+	if self.halted == nil {
+		self.halted = refusal
+		self.haltedEpoch = self.epoch
+	}
+	if !self.opened {
+		return self.halted
+	}
+	if err := self.device.persistGroup(self.groupRecordLocked(true)); err != nil {
+		return fmt.Errorf("%w -- and this refusal could not be persisted, so a restart would come back to a group that reads healthy: %v",
+			self.halted, err)
+	}
+	return self.halted
+}
+
 // ── sending ──────────────────────────────────────────────────────────────────────────────────
 
 // Send seals one line of text as a DURABLE record and submits it.
@@ -2000,6 +2116,17 @@ func (self *Group) sendableLocked(kind ContentKind) (string, error) {
 	// server refuses the write_auth and no peer could have read the record anyway. Refused by
 	// the name of what actually happened -- [ErrNoWrapForEpoch], [ErrWrapUnreadable] or
 	// [ErrOrphanWrap] -- rather than by a reason code the caller would have to decode.
+	//
+	// AND THE HALT BESIDE IT, WHICH IS RULING 41's OTHER OUTCOME AND IS A DIFFERENT SENTENCE. A
+	// halted group did not follow the commit, so it stands at an epoch the server has already
+	// left: its write_auth is MAC'd under write_key[n] while the server's current_epoch is n+1,
+	// and every send it makes is REASON_REJECTED with nothing to read behind it. Leaving Send
+	// open over a halt was leaving the user with exactly the undiagnosable refusal ruling 38
+	// exists to prevent, one ruling further along. What it is NOT is a claim that the group is
+	// dark: [Group.halted] and [Group.wrapDark] are two fields and errors.Is tells them apart.
+	if self.halted != nil {
+		return "", self.halted
+	}
 	if self.wrapDark != nil {
 		return "", self.wrapDark
 	}
@@ -2945,6 +3072,19 @@ func (self *Group) commitWalkLocked(walk *pageWalk, fetchErr error) error {
 	// walk too, AND SINCE THIS COMMIT IT IS ALSO ANSWERED ON EVERY LATER walk's REFUSED FETCH,
 	// which is the arm a dark group actually takes from its second Receive onwards. The sticky
 	// copy is the whole of why it can be: `resolveErr` was said once, by one walk, a process ago.
+	//
+	// AND RULING 41's HALT AHEAD OF IT, for the same reason one more time. It is a DIFFERENT state
+	// from the dark one and it is answered from a different field, and it is ahead because a
+	// halted group never entered the epoch a dark one is stuck in -- if both were somehow set, the
+	// one that describes a commit this device REFUSED is the earlier event and the cause of
+	// everything after it. Before this line the refusal was returned by exactly ONE walk: the
+	// second answered `ratchet generation already consumed` (step (0) of
+	// [Group.ingestCommitLocked] consumes the committer's generation before the refusal is
+	// reached, so the sentinel cannot be re-derived), the third [ErrRecordAbandoned], and the
+	// fourth nil.
+	if self.halted != nil {
+		return self.halted
+	}
 	if self.wrapDark != nil {
 		return self.wrapDark
 	}
@@ -3106,7 +3246,29 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 				resolve(recordId)
 				continue
 			}
+			// A GROUP THAT HAS HALTED DOES NOT PROCESS THIS RECORD AGAIN, AND THAT IS RULING 41's
+			// REFUSAL BEING AS DURABLE AS THE DARK STATE IT IS CONTRASTED WITH. The commit that
+			// halted this group is still the first record above the cursor and it always will be,
+			// so every later walk meets it. Re-ingesting it cannot re-derive the refusal --
+			// [Group.ingestCommitLocked]'s step (0) has already consumed the committer's ratchet
+			// generation, so the second attempt answers `ratchet generation already consumed` --
+			// and it is not a record that "did not open", so it must not be spent through
+			// fail()'s three attempts into [ErrRecordAbandoned] and a cursor resolved PAST it.
+			// MEASURED before this clause: walks 1 to 5 over one refused commit answered the
+			// sentinel, the ratchet error, ErrRecordAbandoned, nil and nil.
+			if self.halted != nil {
+				walk.blocked = true
+				continue
+			}
 			if err := self.ingestCommitLocked(walk, parsed); err != nil {
+				if errors.Is(err, ErrRemovalWithoutRotation) {
+					// REFUSED BY RULE, WHICH IS NOT A RECORD THAT DID NOT OPEN. The walk's
+					// sentence is [Group.halted], answered by [Group.commitWalkLocked] above
+					// every other refusal; what this arm owes is only that the cursor stays
+					// BELOW the refused commit, so the halt is re-met rather than resolved past.
+					walk.blocked = true
+					continue
+				}
 				fail(recordId, err)
 				continue
 			}
@@ -3829,7 +3991,7 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 	// separates, what evidence is available this early, and the residual it does not reach.
 	if err := self.refuseUnrotatedRemovalLocked(commitDigest, decision.RemovedLeaves); err != nil {
 		self.stats.CommitRefused += 1
-		return err
+		return self.haltLocked(err)
 	}
 	// (4) apply it: the handle enters the epoch the commit opens, and mls persists that epoch's
 	// state HERE -- the first of the two writers of epoch state.
@@ -3858,20 +4020,25 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 	// (4b) THE ONE REFUSAL THAT IS NOT A DARK STATE, WHICH IS RULING 41 REACHING AS FAR AS IT CAN
 	// FROM HERE. An unrotated removal is an INVALID commit, and the answer to an invalid commit is
 	// to not follow it -- not to advance into a permanent brick on a commit just judged invalid.
-	// (3a) takes this decision before the apply for every shape a client that does not rotate can
-	// emit; what reaches here is the residual [Group.refuseUnrotatedRemovalLocked] names, and the
-	// most this point can still do is the rest of ruling 41's outcome: the epoch field does not
-	// move, no pq_secret is filed for it, the session is not advanced, nothing is persisted and
-	// [Group.wrapDark] is NOT set. The group is HALTED at the epoch it is at, with its session and
-	// its record agreeing with each other there, and the next process re-derives the same refusal
-	// from the same record. What has moved and cannot be moved back is the MLS handle, and that is
-	// the residual rather than a claim this is indistinguishable from a pre-apply refusal.
+	// (3a) takes this decision before the apply on the EVIDENCE available there; what reaches here
+	// is the residual [Group.refuseUnrotatedRemovalLocked] names -- a fan-out this device could not
+	// judge before the apply, or no fan-out at all -- and the most this point can still do is the
+	// rest of ruling 41's outcome: the epoch field does not move, no pq_secret is filed for it, the
+	// session is not advanced and [Group.wrapDark] is NOT set. [Group.haltLocked] is what runs
+	// instead, and it is the same call (3a) makes, so the two refusal sites produce ONE state and
+	// not two spellings of one. The group is HALTED at the epoch it is at, with its session and its
+	// record agreeing with each other there, and the next process reads the halt off that record
+	// rather than re-deriving it -- which it cannot do, because step (0) above has already consumed
+	// the committer's ratchet generation by the time this line is reached and a second walk over the
+	// same record answers `ratchet generation already consumed` instead. What has moved and cannot
+	// be moved back is the MLS handle, and that is the residual rather than a claim this is
+	// indistinguishable from a pre-apply refusal.
 	//
 	// IT IS errors.Is AND NOT A SECOND FLAG, so the two outcomes are told apart by the sentinel
 	// that already names one of them and there is nothing to keep in agreement.
 	if resolveErr != nil && errors.Is(resolveErr, ErrRemovalWithoutRotation) {
 		self.stats.CommitRefused += 1
-		return resolveErr
+		return self.haltLocked(resolveErr)
 	}
 	if resolveErr != nil {
 		// THE EPOCH STILL MOVES, AND THE GROUP IS MARKED DARK BY NAME. A member with no
@@ -4845,6 +5012,16 @@ func (self *Group) initTables() {
 		owned[epoch] = append([]byte(nil), secret...)
 	}
 	self.pqSecrets = owned
+	// AND THE WITNESS IS SEEDED FROM WHAT THE CONSTRUCTOR FILLED, which is the floor and not the
+	// whole of it. Every row this group holds at construction is a value it has held, so it is a
+	// value a removal may not be followed on; [Device.restoreOne] then adds the rows the record
+	// carries for epochs the window has already moved past, which is the half that makes the rule's
+	// subject survive a restart. A constructor that filled no table leaves an empty witness, which
+	// is the truth about a group that has held nothing.
+	self.pqSecretWitness = map[uint64][sha256.Size]byte{}
+	for epoch, secret := range self.pqSecrets {
+		self.witnessPqSecretLocked(epoch, secret)
+	}
 	self.wrapsFor = map[uint64][]wrapCandidate{}
 	self.wrapsUnreadable = map[uint64]int{}
 }

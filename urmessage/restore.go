@@ -2,6 +2,7 @@ package urmessage
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 
 	"github.com/urnetwork/connect/messagegroup"
@@ -322,6 +323,7 @@ func (self *Device) restoreOne(store DeviceStore, record *GroupRecord, nonce []b
 			return nil, fmt.Errorf("%w: group %x: %w", ErrRestore, record.GroupId, err)
 		}
 	}
+	restoredDark, restoredHalt := restoredDiagnosisOf(record.WrapDarkKind, record.WrapDarkEpoch)
 	restored := &Group{
 		device:         self,
 		id:             append([]byte(nil), record.GroupId...),
@@ -340,8 +342,15 @@ func (self *Device) restoreOne(store DeviceStore, record *GroupRecord, nonce []b
 		// the record is not dark, and nil for a five- or six-part record, which is a disk with
 		// no diagnosis on it rather than a healthy group; [GroupRecord.WrapDarkKind] says what
 		// that costs.
-		wrapDark:      wrapDarkErrorOf(record.WrapDarkKind, record.WrapDarkEpoch),
+		// AND RULING 41's HALT COMES BACK AS A HALT AND NOT AS A DARK STATE. One persisted kind
+		// column, two fields, and [restoredDiagnosisOf] is the one place the octet decides which:
+		// a halted group REFUSED a commit and never entered the epoch it opens, and restoring
+		// that as [Group.wrapDark] would be this build persisting one diagnosis and reading back
+		// another.
+		wrapDark:      restoredDark,
 		wrapDarkEpoch: record.WrapDarkEpoch,
+		halted:        restoredHalt,
+		haltedEpoch:   record.WrapDarkEpoch,
 		// AND NOT RECONCILED. This is the one place a [Group] is built over an identity that
 		// existed before this process did, so it is the one place a SECOND copy of that
 		// identity is possible. [Group.Send] refuses until [Group.Receive] has walked this
@@ -350,6 +359,28 @@ func (self *Device) restoreOne(store DeviceStore, record *GroupRecord, nonce []b
 		reconciled: false,
 	}
 	restored.initTables()
+	// AND THE WITNESS THE WINDOW DOES NOT PRUNE, WHICH IS ITEM 243's RULE SURVIVING THE PROCESS
+	// THAT LEARNED IT. [Group.initTables] has just seeded a witness row for every secret in the
+	// restored table; these are the rows for the epochs the table no longer covers -- the ones the
+	// window moved past before the record was written -- and without them a restart would put the
+	// removal rule's subject back inside the window that defeated it.
+	//
+	// AN EMPTY PART IS NOT A DEFECT AND IS NOT INVENTED AROUND, and it is the residual
+	// [Group.pqSecretWitness] names: a record written before this part existed carries no rows, so
+	// what comes back is the witness of the table it did carry. That device follows a removal
+	// fanned out on a secret it once held and has since evicted AND forgotten, and the only repair
+	// for it is on the wire.
+	for _, row := range record.PqSecretWitness {
+		if len(row.Digest) != sha256.Size {
+			return nil, fmt.Errorf("%w: group %x: a pq_secret witness row for epoch %d is %d octets and a digest is %d",
+				ErrRestore, record.GroupId, row.Epoch, len(row.Digest), sha256.Size)
+		}
+		witness := [sha256.Size]byte{}
+		copy(witness[:], row.Digest)
+		if _, already := restored.pqSecretWitness[row.Epoch]; !already {
+			restored.pqSecretWitness[row.Epoch] = witness
+		}
+	}
 	// AND THE COPIES OF WHAT THIS DEVICE SAID IN IT, which since connect 4c030dc are the only
 	// place its own half of the conversation can be read from (MG-4: a member cannot open its own
 	// application record). A store that will not answer refuses THIS group by name rather than

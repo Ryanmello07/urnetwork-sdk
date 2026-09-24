@@ -331,6 +331,14 @@ var wrapSeedSinks = map[string]wrapSeedSink{
 		carries: []string{"table"},
 		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is that decoded table landing on the record.",
 	},
+	"groupRecordOf|call decodePqSecretWitness": {
+		carries: []string{"parts"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the parts of a group record are read into a [GroupRecord] and nowhere else. Here it is part eight going to the pq_secret witness decoder, which reads digests and no key material of any kind.",
+	},
+	"groupRecordOf|assign record.PqSecretWitness": {
+		carries: []string{"witness"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the parts of a group record are read into a [GroupRecord] and nowhere else. Here it is that decoded witness landing on the record: 32 octets of SHA-256 per epoch, which are a digest of a pq_secret and are never a seed.",
+	},
 	"groupRecordOf|return": {
 		carries: []string{"record"},
 		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is the whole record, or one of two arity refusals that format the record's directory name and two counts.",

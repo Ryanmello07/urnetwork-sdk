@@ -145,9 +145,14 @@ var (
 	// secret the group HOLDS, and the arm that returns a WRAP CANDIDATE reaches the same value
 	// off the wire: a committer that removed a leaf and fanned out the held secret was followed
 	// with a nil error, no dark state and no refusal. Every secret that resolution answers now
-	// leaves by one exit and is compared against the group's WHOLE pq_secret table, because the
-	// removed member keeps every row of the window it was a member for and not only the current
-	// one.
+	// leaves by one exit and is compared against every value this group HAS EVER HELD.
+	//
+	// AND "EVER HELD" IS NOT "STILL HOLDS", WHICH IS THE SECOND HALF OF THAT REPAIR. The subject
+	// was the live pq_secret table, and that table is pruned at [messagegroup.PastEpochWindow] --
+	// so the rule's set shrank while the removed member's did not, and a removal fanned out on an
+	// EVICTED epoch's secret was followed with a nil error after 33 honest rotations.
+	// [Group.pqSecretWitness] is a digest of every value this group has filed, kept for ever and
+	// persisted, and it is what the rule is spelled against now.
 	//
 	// RULING 41: IT IS AN INVALID COMMIT AND NOT A DARK STATE. It is refused the way an
 	// unauthorized commit is -- the receiver stays at epoch n, does not advance and does not
@@ -155,7 +160,16 @@ var (
 	// invalid is how any client on an older build would brick every up-to-date member of its
 	// group by removing somebody. [Group.refuseUnrotatedRemovalLocked] takes the decision
 	// before ApplyCommit, where staying at n is possible, and carries the residual it does not
-	// reach.
+	// reach. What it does NOT refuse is an ABSENCE -- no wrap at all, or a wrap that did not
+	// open -- because that is what an honest rotated removal looks like to a member whose own
+	// wrap was omitted, and spending this sentinel on it made ruling 41's other outcome
+	// unreachable for a removal. Those go DARK at n+1 under their own sentinel.
+	//
+	// AND THE HALT IT NAMES IS STICKY, PERSISTED AND PERMANENT: [Group.halted]. Every later
+	// walk, Send and Commit answers this, the next process reads it off the group record, and
+	// the refused commit is never retried or abandoned. A committer that re-commits properly
+	// does NOT repair it -- the refused commit stays in the log ahead of this receiver -- and
+	// the repair is the same one a dark group needs: this device is re-Added.
 	//
 	// IT IS A RECEIVE-SIDE RULE BECAUSE THE SEND SIDE CANNOT PRODUCE IT. This build's own
 	// removal always rotates -- [Group.stageEpochRotationLocked] draws before it enumerates --
@@ -163,7 +177,13 @@ var (
 	// acceptance window still admits and which is the shape every build before this one emitted.
 	// No production verb writes removeLeaves yet (rolescommit.go), so it is landed ahead of the
 	// verb rather than after it.
-	ErrRemovalWithoutRotation = errors.New("urmessage: a commit that removes a member opened its epoch with the pq_secret this group already held, so the removed member keeps the post-quantum half of that epoch's storage root and has not been removed from a quantum adversary at all")
+	// THE SENTENCE IS WHAT IS MEASURED AND NOT WHAT IS INFERRED. It used to say the commit
+	// "opened its epoch with the pq_secret this group already held", and one of the three arms
+	// that reach this cannot know that: a commit carrying NO epoch digest carries no
+	// authenticator to open anything against, and what is true of it is that there is no way to
+	// follow it other than on a value this group already has. "Could only be followed on" is true
+	// of all three arms; the arm's own clause, carried in the wrapped message, says which.
+	ErrRemovalWithoutRotation = errors.New("urmessage: a commit that removes a member could only be followed on a pq_secret this group has already held, so the removed member keeps the post-quantum half of that epoch's storage root and has not been removed from a quantum adversary at all; this group has refused the commit and is halted at the epoch it was at")
 
 	// The role model refused a commit, on either arm: MASTER §11's "refused by the committing
 	// client, and rejected by every receiving client on validation". On RECEIPT it is an ingested

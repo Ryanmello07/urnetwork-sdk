@@ -111,6 +111,22 @@
 // invalid hands any client on an older build a way to brick every up-to-date member of its group
 // by removing somebody, which is the exact harm the pre-apply refusal exists to prevent.
 //
+// AND THE TWO OUTCOMES ARE SEPARATELY REACHABLE, WHICH IS A 2026-09-24 REPAIR AND NOT A RESTATEMENT.
+// The pre-apply refusal used to fire on an ABSENCE of wrap candidates, and an absence is exactly
+// what an honest rotated removal looks like to a member whose own wrap was omitted or did not open
+// -- so for a REMOVAL, valid-and-dark was unreachable and every delivery failure came back under a
+// sentinel whose sentence ("opened its epoch with the pq_secret this group already held") was false
+// about what had happened. The refusal now fires only on EVIDENCE of an unrotated commit, and the
+// two fields it writes are [Group.halted] and [Group.wrapDark] -- two fields, not one, so nothing
+// has to decide later which of the two a single value meant.
+//
+// THE HALT IS STICKY, PERSISTED AND PERMANENT. It is answered on every later walk, to Send and to
+// Commit, and across a restart, and the refused commit is neither retried nor abandoned -- the
+// cursor never resolves past it. That is not tidiness: before it, the second walk over the same
+// record answered `mls: ratchet generation already consumed`, the third answered
+// [ErrRecordAbandoned] and moved the cursor PAST the commit, and the fourth answered nil over a
+// group an epoch behind its own log with a record on the disk reading HEALTHY.
+//
 // ── WHAT AN OLD STORE DOES, WHICH IS THE QUESTION A ROTATION MUST ANSWER BEFORE IT SHIPS ──────
 //
 // Every group on the deployed alpha was written by a build that held ONE pq_secret scalar, and
@@ -130,6 +146,7 @@ package urmessage
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -199,16 +216,21 @@ func (self *Group) pqSecretAtLocked(epoch uint64) ([]byte, bool) {
 	return secret, true
 }
 
-// pqSecretHeldAtLocked is the lowest epoch this group ALREADY holds `candidate` at, and whether it
-// holds it at all.
+// pqSecretHeldAtLocked is the lowest epoch this group has EVER held `candidate` at, and whether it
+// has held it at all.
 //
-// IT IS THE WHOLE TABLE AND NOT self.pqSecrets[self.epoch], and that is the difference between a
-// rule and a spelling. The rule item 243 is about is "the removed member must not keep the
-// post-quantum half of any epoch it is not in", and what the removed member keeps is every row of
-// the window it was a member for -- not only the current one. A guard that compared against the
-// current epoch's value alone would be defeated by a committer that fanned out pq_secret[n-1]
-// instead of pq_secret[n]: a different octet string, the same removed member holding it, the same
-// storage_root reproduced.
+// ITS SUBJECT IS THE WITNESS AND NOT THE LIVE TABLE, AND THAT IS THE 2026-09-24 REPAIR. The rule
+// item 243 is about is "the removed member must not keep the post-quantum half of any epoch it is
+// not in", and WHAT THE REMOVED MEMBER KEEPS IS EVERY ROW IT EVER SAW. The sentence that stood
+// here said "every row of the WINDOW it was a member for", and that was FALSE about the adversary:
+// [Group.dropPqSecretsBelowWindowLocked] prunes `self.pqSecrets` at
+// [messagegroup.PastEpochWindow], which is LOCAL HYGIENE this device runs and a retained client
+// does not. So a rule spelled against the live table had a subject that SHRANK while the
+// adversary's did not, and a removal fanned out on an EVICTED epoch's secret was followed with a
+// nil error -- reproduced, after 33 honest rotations, by
+// TestARemovalFannedOutOnAnEvictedEpochsSecretIsRefusedToo. [Group.pqSecretWitness] is the set that
+// does not shrink, and the live table is consulted beside it only so that a group whose witness was
+// seeded from a record written before that field existed still answers for the rows it does hold.
 //
 // IT IS THE OCTETS AND NEVER AN EPOCH NUMBER, for [pqSecretsShowRotation]'s reason from the other
 // side: a restored five-part record files ONE value at every epoch in the window, so "held at a
@@ -216,10 +238,10 @@ func (self *Group) pqSecretAtLocked(epoch uint64) ([]byte, bool) {
 // anything.
 //
 // CONSTANT TIME AND NO EARLY EXIT: guardrail G8 sends every comparison over key-derived material
-// through [subtle.ConstantTimeCompare], and the loop runs to the end of the table so the answer
-// costs the same whichever row matched. An empty candidate is answered false rather than being
-// allowed to match an empty row, because ConstantTimeCompare answers 1 for two zero-length inputs
-// and "this group holds nothing at that epoch" must not read as "this group already holds it".
+// through [subtle.ConstantTimeCompare], and both loops run to the end so the answer costs the same
+// whichever row matched. An empty candidate is answered false rather than being allowed to match an
+// empty row, because ConstantTimeCompare answers 1 for two zero-length inputs and "this group holds
+// nothing at that epoch" must not read as "this group already holds it".
 func (self *Group) pqSecretHeldAtLocked(candidate []byte) (uint64, bool) {
 	if len(candidate) == 0 {
 		return 0, false
@@ -233,7 +255,52 @@ func (self *Group) pqSecretHeldAtLocked(candidate []byte) (uint64, bool) {
 			at, found = epoch, true
 		}
 	}
+	witness := sha256.Sum256(candidate)
+	for epoch, digest := range self.pqSecretWitness {
+		if subtle.ConstantTimeCompare(digest[:], witness[:]) != 1 {
+			continue
+		}
+		if !found || epoch < at {
+			at, found = epoch, true
+		}
+	}
 	return at, found
+}
+
+// witnessPqSecretLocked records that this group has held `pqSecret`, as a digest, at `epoch`.
+//
+// IT IS WRITTEN WHEREVER A ROW IS FILED AND IT IS NEVER DROPPED. [Group.filePqSecretLocked] is the
+// one door a row goes in by and this goes through it, so there is no site that can file a secret
+// without leaving a witness of it; [Group.dropPqSecretsBelowWindowLocked] deliberately does not
+// touch this map, because the whole reason it exists is that the window's pruning is what defeated
+// the rule.
+//
+// THE LOWEST EPOCH WINS, for [Group.pqSecretHeldAtLocked]'s reason: a five-part restore files one
+// value at every epoch in the window, and the number the refusal prints is what tells "the
+// committer did not rotate" apart from "the committer replayed an OLDER epoch's secret".
+func (self *Group) witnessPqSecretLocked(epoch uint64, pqSecret []byte) {
+	if len(pqSecret) == 0 {
+		return
+	}
+	digest := sha256.Sum256(pqSecret)
+	for held, seen := range self.pqSecretWitness {
+		if subtle.ConstantTimeCompare(seen[:], digest[:]) == 1 && held <= epoch {
+			return
+		}
+	}
+	self.pqSecretWitness[epoch] = digest
+}
+
+// pqSecretWitnessRecordsLocked is the witness as [GroupRecord] persists it, in ascending epoch
+// order, for [Group.pqSecretRecordsLocked]'s reason: a map's iteration order would make two writes
+// of one unchanged witness two different files.
+func (self *Group) pqSecretWitnessRecordsLocked() []EpochPqSecretWitness {
+	records := make([]EpochPqSecretWitness, 0, len(self.pqSecretWitness))
+	for epoch, digest := range self.pqSecretWitness {
+		records = append(records, EpochPqSecretWitness{Epoch: epoch, Digest: append([]byte(nil), digest[:]...)})
+	}
+	sortEpochPqSecretWitness(records)
+	return records
 }
 
 // pqSecretLocked is the secret this group's CURRENT epoch runs on.
@@ -260,7 +327,13 @@ func (self *Group) pqSecretLocked() []byte {
 //
 // AN EVICTED ENTRY IS ERASED AND NOT MERELY DELETED. These are the post-quantum half of a retired
 // epoch's storage root; a map entry nobody blanked is a live secret with no owner.
+//
+// AND THE WITNESS IS WRITTEN HERE, BEFORE THE DROP, WHICH IS WHAT MAKES THE REMOVAL RULE'S SUBJECT
+// STOP SHRINKING. [Group.pqSecretWitness] keeps a digest of every value this door files, for ever;
+// the eviction below is local hygiene and a removed member does not run it, so a rule whose only
+// subject was the table below was defeated by fanning out a row this device had thrown away.
 func (self *Group) filePqSecretLocked(epoch uint64, pqSecret []byte) {
+	self.witnessPqSecretLocked(epoch, pqSecret)
 	if held, found := self.pqSecrets[epoch]; found {
 		zeroizeState(held)
 	}
@@ -269,6 +342,10 @@ func (self *Group) filePqSecretLocked(epoch uint64, pqSecret []byte) {
 }
 
 // dropPqSecretsBelowWindowLocked erases and drops every entry the window has moved past.
+//
+// IT DOES NOT TOUCH [Group.pqSecretWitness], deliberately and by measurement: this pruning is what
+// defeated the removal rule, and a witness pruned by the same bound would be the same defect with
+// one more level of indirection.
 func (self *Group) dropPqSecretsBelowWindowLocked() {
 	for epoch, secret := range self.pqSecrets {
 		if epoch < self.epoch && self.epoch-epoch > messagegroup.PastEpochWindow {
@@ -279,10 +356,18 @@ func (self *Group) dropPqSecretsBelowWindowLocked() {
 }
 
 // zeroizePqSecretsLocked erases the whole table, entry by entry.
+//
+// THE WITNESS GOES WITH IT, AND IT IS DROPPED RATHER THAN ERASED because a SHA-256 of a 32-octet
+// draw is not key material: it answers "is this the same value" and nothing else, which is the one
+// question the removal rule asks. What it must not do is survive a [Group.Close] into some later
+// group's table, so it is emptied here beside the secrets it is the witness for.
 func (self *Group) zeroizePqSecretsLocked() {
 	for epoch, secret := range self.pqSecrets {
 		zeroizeState(secret)
 		delete(self.pqSecrets, epoch)
+	}
+	for epoch := range self.pqSecretWitness {
+		delete(self.pqSecretWitness, epoch)
 	}
 }
 
@@ -315,19 +400,29 @@ func (self *Group) pqSecretRecordsLocked() []EpochPqSecret {
 // readable as the scalar it replaces -- the record describes itself twice, once in the old shape
 // and once in the new, and the two cannot disagree because both come from here.
 func (self *Group) groupRecordLocked(opened bool) *GroupRecord {
+	// AND THE DIAGNOSIS, THROUGH THE SAME DOOR AS EVERYTHING ELSE AND IN ONE COLUMN. [Group.wrapDark]
+	// is set at (4a) of [Group.ingestCommitLocked] and the persist is that function's step (7), so
+	// the record written for the epoch a group went dark at already carries the fact; [Group.halted]
+	// is set at (3a) or (4b) and persists itself there, because a refusal returns before step (7) is
+	// reached. The two are mutually exclusive by ruling 41 -- a group that refused a commit did not
+	// follow it and cannot be dark at the epoch it never entered -- and they take one column with
+	// two disjoint kinds ([wrapDarkRemoval] is the halt's and is no dark state's), so a reader has
+	// one field to consult and cannot be handed two diagnoses that disagree. See
+	// [GroupRecord.WrapDarkKind].
+	diagnosis, at := self.wrapDark, self.wrapDarkEpoch
+	if self.halted != nil {
+		diagnosis, at = self.halted, self.haltedEpoch
+	}
 	return &GroupRecord{
-		GroupId:        self.id,
-		PqSecret:       self.pqSecretLocked(),
-		PqSecrets:      self.pqSecretRecordsLocked(),
-		GroupHandleKey: self.groupHandleKey,
-		Epoch:          self.epoch,
-		Opened:         opened,
-		// AND THE DIAGNOSIS, THROUGH THE SAME DOOR AS EVERYTHING ELSE. [Group.wrapDark] is set
-		// at (4a) of [Group.ingestCommitLocked] and the persist is that function's step (7), so
-		// the record written for the epoch a group went dark at already carries the fact. See
-		// [GroupRecord.WrapDarkKind].
-		WrapDarkKind:  wrapDarkKindOf(self.wrapDark),
-		WrapDarkEpoch: self.wrapDarkEpoch,
+		GroupId:         self.id,
+		PqSecret:        self.pqSecretLocked(),
+		PqSecrets:       self.pqSecretRecordsLocked(),
+		PqSecretWitness: self.pqSecretWitnessRecordsLocked(),
+		GroupHandleKey:  self.groupHandleKey,
+		Epoch:           self.epoch,
+		Opened:          opened,
+		WrapDarkKind:    wrapDarkKindOf(diagnosis),
+		WrapDarkEpoch:   at,
 	}
 }
 
@@ -361,15 +456,40 @@ func wrapDarkKindOf(err error) uint8 {
 	}
 }
 
+// restoredDiagnosisOf routes one persisted kind into the field it belongs to: RULING 41's two
+// outcomes come back as the two DIFFERENT fields they were written from, and never as one.
+//
+// WHY IT IS A SEPARATE FUNCTION FROM [wrapDarkErrorOf]. The kind column is one column, and the
+// restore is the one place a single octet has to become either [Group.wrapDark] or [Group.halted].
+// Putting that switch in the constructor's field list would be two `if`s a later constructor could
+// spell one of; here it is one answer with two positions, so a kind cannot land in both and cannot
+// land in neither.
+func restoredDiagnosisOf(kind uint8, epoch uint64) (dark error, halted error) {
+	if kind == wrapDarkRemoval {
+		return nil, wrapDarkErrorOf(kind, epoch)
+	}
+	return wrapDarkErrorOf(kind, epoch), nil
+}
+
 // wrapDarkErrorOf rebuilds the diagnosis a restored group carries, from the two things
 // [GroupRecord] persists about it.
 //
 // IT SAYS THAT IT IS A RESTORED DIAGNOSIS, in the sentence, rather than reproducing the original
 // word for word. An error string is a thing one build wrote; what a caller acts on is the
 // sentinel, which is the same value it would have had before the restart, and what an operator
-// needs beyond that is the epoch and the fact that this device has been dark since before this
-// process started.
+// needs beyond that is the epoch and the fact that this device has been in that state since before
+// this process started.
+//
+// AND THE HALT'S SENTENCE IS NOT THE DARK ONE, because they are not the same event: a halted group
+// REFUSED a commit and never entered the epoch it opens, while a dark group followed one into an
+// epoch it holds no secret for. Saying "went dark" over a halt would be this build persisting a
+// diagnosis and then restoring it as the wrong one, which is the class the durable diagnosis exists
+// to close.
 func wrapDarkErrorOf(kind uint8, epoch uint64) error {
+	if kind == wrapDarkRemoval {
+		return fmt.Errorf("%w: this device REFUSED that commit in an earlier process and has stood at epoch %d ever since; the refusal was restored from this group's record, the group is halted and not dark, and the repair is to be added to the group again",
+			ErrRemovalWithoutRotation, epoch)
+	}
 	var sentinel error
 	switch kind {
 	case wrapDarkNoWrap:
@@ -378,8 +498,6 @@ func wrapDarkErrorOf(kind uint8, epoch uint64) error {
 		sentinel = ErrWrapUnreadable
 	case wrapDarkOrphan:
 		sentinel = ErrOrphanWrap
-	case wrapDarkRemoval:
-		sentinel = ErrRemovalWithoutRotation
 	case wrapDarkUnfollowable:
 		// THE CATCH-ALL RESTORES AS THE WIDEST TRUE SENTENCE AND NOT AS A GUESS. Everything that
 		// reaches [wrapDarkUnfollowable] came out of the resolution, and the resolution is
@@ -669,29 +787,45 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 		return nil, fmt.Errorf("%w: the commit that moved this group to epoch %d carries a digest for epoch %d",
 			ErrCommitIngest, opensEpoch, digest.Epoch)
 	}
+	// EVERY CANDIDATE IS JUDGED BEFORE ANY IS ANSWERED, AND THAT IS THE 2026-09-24 REPAIR OF
+	// [Stats.WrapOrphaned]. The loop used to RETURN at the winner, so an orphan numbered AFTER it
+	// was never reached and read as zero -- and which of two racing committers wrote its fan-out
+	// first is arbitrary, so HALF the race orderings reported nothing at all. The reading
+	// [Stats.WrapOrphaned]'s own doc calls healthy ("two committers raced, this device opened both
+	// wraps and used the winner's") was the one reading it could not show in either ordering before
+	// the counter moved out of the refusal, and could show in only one after. Both orderings are
+	// driven by TestAnOrphanThatLosesToALaterCandidateIsStillCounted.
+	//
+	// AN EXTRA DIGEST COMPARISON PER LOSING CANDIDATE IS WHAT IT COSTS, and it buys the count. It
+	// cannot introduce a new failure: [Group.matchesEpochDigestLocked]'s only error arms are
+	// [epochDigestGroupId] and [message.EpochKeysDigest], neither of which reads the candidate --
+	// a candidate of the wrong width is answered `false, nil` -- so an error here was already
+	// certain to be returned by the FIRST candidate.
 	candidates := self.wrapsFor[opensEpoch]
-	orphans := 0
-	for _, candidate := range candidates {
+	winner := -1
+	for at, candidate := range candidates {
 		matches, err := self.matchesEpochDigestLocked(mlsSecret, digest, candidate.secret)
 		if err != nil {
 			return nil, err
 		}
-		if matches {
-			// THE WRAP-CANDIDATE ARM, AND IT IS A HELD-SECRET ARM TOO. It reads the wire and can
-			// still reach a value this group already has -- a committer that removes a leaf and
-			// fans out the secret the group already holds -- so it leaves by the same exit as the
-			// other two. Until 2026-09-24 it returned `candidate.secret, nil` directly and that
-			// removal removed nothing.
-			return answerSecret(candidate.secret,
-				"delivered, in a device wrap this device opened, a pq_secret this group already holds")
+		if matches && winner < 0 {
+			winner = at
 		}
-		// THE COUNTER MOVES WHERE THE ORPHAN IS FOUND AND NOT WHERE ONE IS REPORTED. It used to be
-		// added in the refusal below, so an orphan that lost to a LATER candidate or to the held
-		// secret -- a wrap that opened and lost the digest -- read as zero, and the one reading
-		// [Stats.WrapOrphaned]'s own doc calls healthy ("two committers raced, this device opened
-		// both wraps and used the winner's") was the one reading it could never show.
-		self.stats.WrapOrphaned += 1
-		orphans += 1
+	}
+	orphans := len(candidates)
+	if 0 <= winner {
+		orphans -= 1
+	}
+	self.stats.WrapOrphaned += uint64(orphans)
+	if 0 <= winner {
+		// THE WRAP-CANDIDATE ARM, AND IT IS A HELD-SECRET ARM TOO. It reads the wire and can
+		// still reach a value this group already has -- a committer that removes a leaf and
+		// fans out the secret the group already holds -- so it leaves by the same exit as the
+		// other two. Until 2026-09-24 it returned `candidate.secret, nil` directly and that
+		// removal removed nothing.
+		candidate := candidates[winner]
+		return answerSecret(candidate.secret,
+			"delivered, in a device wrap this device opened, a pq_secret this group already holds")
 	}
 	if isHeld {
 		matches, err := self.matchesEpochDigestLocked(mlsSecret, digest, held)
@@ -749,11 +883,20 @@ func refuseRemovalOnHeldSecret(opensEpoch uint64, removedLeaves []uint32, heldAt
 // NOT go dark. The distinction is the point and it is two outcomes, not one:
 //
 //   - INVALID COMMIT -- a removal this device can only follow on a value it already has -> refused
-//     HERE, the group stays at n, [Group.wrapDark] is not set, and the group keeps working at the
-//     epoch it is at. A committer that re-commits properly is followed normally. This is item
-//     242's established semantics: a hostile committer can HALT a group; it cannot TAKE it.
+//     HERE, the group stays at n and [Group.wrapDark] is not set. [Group.halted] is, and it is
+//     STICKY AND PERSISTED: the same refusal is answered on every later walk, to Send and to
+//     Commit, and after a restart. This is item 242's established semantics: a hostile committer
+//     can HALT a group; it cannot TAKE it.
 //   - VALID COMMIT whose wrap did not arrive or did not open -> DARK at n+1, diagnosable, with the
 //     sentinel that says which of the three states it is.
+//
+// AND THE HALT IS PERMANENT. The line that stood here said "the group keeps working at the epoch it
+// is at. A committer that re-commits properly is followed normally", and BOTH HALVES ARE FALSE:
+// the refused commit stays in the log ahead of this receiver for ever, so a proper re-commit lands
+// ABOVE it and is never reached -- measured, the re-committing world left the receiver at epoch 1
+// with the committer at 3 and a nil error on its walk. What the refusal buys is not continuity, it
+// is that the removed member does not keep the post-quantum half of an epoch it is not in; the cost
+// is a partition, and the repair is out of band and is a re-Add.
 //
 // Going dark was the wrong answer to an invalid commit. [Group.resolvePqSecretLocked] runs after
 // ApplyCommit -- judging a candidate needs mls_secret[n+1] and there is no exporter over a
@@ -762,36 +905,54 @@ func refuseRemovalOnHeldSecret(opensEpoch uint64, removedLeaves []uint32, heldAt
 // up-to-date member of its group by removing somebody, which is the exact harm this refusal exists
 // to prevent.
 //
-// THE QUESTION IT ASKS IS THE ONE THAT IS DECIDABLE HERE: does this device hold, for the epoch
-// this commit would open, a wrap candidate carrying a pq_secret it does not ALREADY hold? The
-// digest cannot be evaluated before the apply, so the octets are what there is -- and they are
-// enough for every shape a client that does not rotate can emit, because such a client has nothing
-// fresh to put in a wrap. A commit carrying no epoch digest at all is refused outright: nothing it
-// delivers can be judged, so the epoch it opens could only ever be followed on the held secret.
+// THE QUESTION IT ASKS IS EVIDENCE OF AN INVALID COMMIT AND NEVER AN ABSENCE, AND THAT DISTINCTION
+// IS THE 2026-09-24 REPAIR. There are exactly two shapes this can decide before the apply:
 //
-// THE EVIDENCE IS PARTLY AN ABSENCE, AND WHAT MAKES THAT SOUND IS RULING 37 AND ONLY RULING 37.
-// The wraps for epoch n+1 are submitted at epoch n, staged and PRE-MERGE, so they carry lower
-// record ids than the commit and a walk in record-id order has already met them when this runs --
-// [wrapCandidate]'s own header is the same fact from the other side. The day that order changes,
-// this check refuses every removal, which is the safe direction and is loud rather than silent.
+//   - A COMMIT CARRYING NO EPOCH DIGEST AT ALL. Nothing it delivers can be judged -- there is no
+//     authenticator to judge it against -- so the epoch it opens could only ever be followed on the
+//     secret this group already has. That is a positive fact about the record, not a gap.
+//   - A FAN-OUT THAT EXISTS AND CARRIES NOTHING NEW. At least one candidate was opened for this
+//     epoch and EVERY one of them carries a pq_secret this device has already held. A committer
+//     that rotated had something fresh to put in those wraps and did not.
+//
+// AND WHAT IT MUST NOT REFUSE IS AN ABSENCE, WHICH IS WHAT IT USED TO DO AND WHAT MADE RULING 41's
+// SECOND OUTCOME UNREACHABLE FOR A REMOVAL. "No candidate at all" is item 132's omission at the
+// victim, and "a wrap arrived and did not open" is a delivery failure; both are things an HONEST,
+// ROTATING committer's fan-out can look like from here, and refusing them spent the removal
+// sentinel -- whose sentence says the epoch was opened on the held secret -- on commits whose
+// committer had rotated. MEASURED: an honest rotated removal with the victim's wrap omitted
+// answered ErrRemovalWithoutRotation with dark=false and nothing persisted, while the same omission
+// on a commit removing NOBODY answered ErrNoWrapForEpoch, dark, persisted. One delivery failure,
+// two sentences, and the one a removal got was false about what happened. So an absence is let past
+// and judged at the resolution, where mls_secret[n+1] exists and the digest can be asked: a valid
+// commit whose wrap did not arrive or did not open goes DARK at n+1 with its own sentinel, which is
+// the outcome ruling 41 names for it. Driven by
+// TestAnHonestRotatedRemovalWithTheWrapOmittedGoesDarkAndIsNotCalledUnrotated.
+//
+// THE EVIDENCE OF THE SECOND SHAPE IS STILL PARTLY AN ORDERING, AND WHAT MAKES THAT SOUND IS RULING
+// 37 AND ONLY RULING 37. The wraps for epoch n+1 are submitted at epoch n, staged and PRE-MERGE, so
+// they carry lower record ids than the commit and a walk in record-id order has already met them
+// when this runs -- [wrapCandidate]'s own header is the same fact from the other side. The day that
+// order changes, every removal reads as an absence here and is judged at the resolution instead,
+// which is one epoch later and is loud rather than silent.
 //
 // WHAT IT REACHES, MEASURED, AND IT IS NOT "THE REMOVAL CASE OF ALL THREE DARK STATES". That
 // sentence stood here and was FALSE, not merely unmeasured: the check it described asked only
 // whether ANY candidate existed, so it was structurally unable to reach any case in which one
-// does -- and [ErrOrphanWrap] is by definition such a case. What this asks now reaches:
+// does -- and [ErrOrphanWrap] is by definition such a case. What this asks now reaches, and it is
+// one class and not three:
 //
-//   - ErrNoWrapForEpoch's removal case: no wrap arrived, so no candidate -- and item 132's
-//     omission at the victim, for the same reason.
-//   - ErrWrapUnreadable's removal case: a wrap arrived and did not open, so it staged no candidate.
-//   - The ORPHAN whose payload is a value this group already holds, which is the reproduced
-//     blocker and the only orphan shape a non-rotating client can produce.
+//   - THE UNROTATED REMOVAL WITH A FAN-OUT, in both its spellings: the digest-less commit, and the
+//     complete openable fan-out of a value this device has already held. That second one is the
+//     reproduced blocker.
 //
-// AND THE RESIDUAL IS NAMED RATHER THAN CLAIMED CLOSED: an orphan carrying a FRESH value that is
-// nonetheless not the one the epoch was opened with satisfies this check and is judged at the
-// resolution, after the apply. If that judgement is the removal rule,
-// [Group.ingestCommitLocked] takes ruling 41's outcome as far as it can from there -- it does not
-// advance and does not set the dark state -- but the MLS handle has already moved, so the group is
-// halted at n with its handle at n+1 rather than never having applied at all.
+// AND THE RESIDUAL IS NAMED RATHER THAN CLAIMED CLOSED: a fan-out carrying a FRESH value that is
+// nonetheless not the one the epoch was opened with satisfies this check, and so does a removal
+// with no fan-out at all whose digest then names the held secret. Both are judged at the
+// resolution, after the apply. [Group.ingestCommitLocked] takes ruling 41's outcome as far as it
+// can from there -- it does not advance, does not set the dark state, and halts the group by name
+// -- but the MLS handle has already moved, so the group is halted at n with its handle at n+1
+// rather than never having applied at all.
 // TestTheResidualUnrotatedRemovalIsRefusedAfterTheApplyAndStillDoesNotGoDark drives exactly that
 // shape and asserts both halves of it.
 //
@@ -806,14 +967,22 @@ func (self *Group) refuseUnrotatedRemovalLocked(digest *message.EpochDigestAttac
 		return fmt.Errorf("%w: the commit that would open epoch %d removes %d leaf/leaves and carries no epoch digest at all, so nothing it delivers can be judged and the epoch it opens could only be followed on a pq_secret this group already holds; the group has not followed it",
 			ErrRemovalWithoutRotation, opensEpoch, len(removedLeaves))
 	}
-	for _, candidate := range self.wrapsFor[opensEpoch] {
+	candidates := self.wrapsFor[opensEpoch]
+	if len(candidates) == 0 {
+		// THE ABSENCE, LET PAST DELIBERATELY. No wrap opened for this epoch, which is item 132's
+		// omission or a wrap that did not open, and neither is evidence that the committer failed
+		// to rotate. The resolution decides it against the digest and names it as one of the three
+		// dark states -- ruling 41's valid-and-dark -- or, if the digest does turn out to name the
+		// held secret, as the removal refusal one epoch later.
+		return nil
+	}
+	for _, candidate := range candidates {
 		if _, alreadyHeld := self.pqSecretHeldAtLocked(candidate.secret); !alreadyHeld {
 			return nil
 		}
 	}
-	return fmt.Errorf("%w: the commit that would open epoch %d removes %d leaf/leaves and this device opened %d device wrap(s) for that epoch, none of them carrying a pq_secret this group does not already hold (%d wrap(s) addressed to it did not open), so the epoch it opens was either not rotated at all or rotated without this device in the fan-out; the group has not followed it",
-		ErrRemovalWithoutRotation, opensEpoch, len(removedLeaves), len(self.wrapsFor[opensEpoch]),
-		self.wrapsUnreadable[opensEpoch])
+	return fmt.Errorf("%w: the commit that would open epoch %d removes %d leaf/leaves and every one of the %d device wrap(s) this device opened for that epoch carries a pq_secret this group has already held, so the epoch it opens was not rotated at all; the group has not followed it",
+		ErrRemovalWithoutRotation, opensEpoch, len(removedLeaves), len(candidates))
 }
 
 // epochDigestOf is the kind 0x0005 body a commit record carries, or nil when it carries the older
