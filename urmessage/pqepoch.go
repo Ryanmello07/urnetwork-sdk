@@ -835,19 +835,41 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 		// reading this body were each defeated one level of indirection further out, so the
 		// readings are mostly gone and the INPUTS are driven instead:
 		// TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProductionReceivePath
-		// puts eighteen shapes through the production receive path -- removals of one, two and
-		// THREE leaves, a removal bundled with an add, a replay of an earlier epoch's secret, a
-		// secret one octet away from a held one (followed, it is fresh), both doors, and the
-		// honest rotated removals as rows of the same table -- and every narrowing of this guard
-		// that a mutant could express inside those arities turns it red. What is still read
+		// puts twenty-one shapes through the production receive path -- removals of one, two,
+		// THREE and FOUR leaves, a removal bundled with an add, a replay of an earlier epoch's
+		// secret, a secret one octet away from a held one (followed, it is fresh), both doors, and
+		// the honest rotated removals as rows of the same table -- and every narrowing of this
+		// guard that a mutant could express inside those arities turns it red. What is still read
 		// statically is this predicate as SOURCE TEXT against a written disposition, because a
 		// narrowing one arity ABOVE what the table drives passes it; that is
 		// TestBothRemovalDoorsAreDecidedByAPredicateWrittenWholeAndTheRefusalIsReturned, and it is
 		// why the predicate must stay written whole here rather than behind a name.
-		if 0 < len(removedLeaves) {
-			if heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret); alreadyHeld {
-				return nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)
-			}
+		//
+		// AND IT IS ONE CONDITION AND NOT TWO -- the 2026-09-24 (SEVENTH PASS) repair, and it is
+		// the same DELETION argument one level in. This guard was written as an outer
+		// `if 0 < len(removedLeaves)` around an inner `if ...; alreadyHeld`, and the static
+		// reading walks TOP-LEVEL conditionals of this body: it read the OUTER condition and
+		// nothing read the inner one. So the narrowing that the reading exists for --
+		//
+		//	if heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret); alreadyHeld && len(removedLeaves) < 4 {
+		//
+		// -- passed the reading, passed the table, and passed this package, written ONE LINE LOWER
+		// than the place the same narrowing is caught. Measured, at pqepoch.go sha256 553bd9fffa2c:
+		// table ok, both predicate gates ok. Collapsed to one condition there is no second
+		// condition for it to sit in, and the old outer-only `0 < len(removedLeaves)` is no longer
+		// a dispositioned predicate, so re-nesting this guard is refused by the reading itself.
+		//
+		// WHAT IT COSTS AND WHAT IT DOES NOT. [Group.pqSecretHeldAtLocked] is now asked on every
+		// answer rather than only on a removal: it is a read of two maps bounded by
+		// [messagegroup.PastEpochWindow], it has no effects, and it is constant-time by
+		// construction. Mutation S3 of the fifth pass measured exactly this binding as an
+		// equivalent edit. THE RESIDUAL, NAMED: a statement between this binding and the guard can
+		// still narrow `alreadyHeld`, and at an arity the table drives it goes red there -- above
+		// the interval the table prints, it is outside both instruments, which is what that
+		// interval is printed for.
+		heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret)
+		if 0 < len(removedLeaves) && alreadyHeld {
+			return nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)
 		}
 		return secret, nil
 	}
@@ -991,10 +1013,15 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 //     and 3 witness rows and answers *held* for pq_secret[1]; a member admitted at epoch 3 holds
 //     one row of each and answers *not held* for the same octets, with the control firing for its
 //     own reason -- the joiner does recognise its OWN row. A receiver cannot check a property
-//     about a history it does not have. NAMED RATHER THAN HELD: that measurement was a probe and
-//     no test in this package drives it, because [rotWorld] admits every member in the founding
-//     commit and has no door that admits one later. What IS held here is the founder's side --
-//     every case in pqdarkgate_test.go section 3 is a receiver that did hold the replayed value.
+//     about a history it does not have. AND IT IS DRIVEN RATHER THAN NAMED: the `late-joiner` row
+//     of TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProductionReceivePath
+//     puts ONE page in front of TWO receivers -- the founder REFUSES the replay of pq_secret[1]
+//     and the member admitted at epoch 3 FOLLOWS it -- over a world door, `rotWorld.admit`, that
+//     admits a member LATER than the founding commit. The sentence that stood here said that
+//     measurement was a probe and that no test drives it because [rotWorld] has no such door;
+//     both halves were false the moment the row landed, and the other door's header said so in
+//     the same commit. What is held BESIDE it is the founder's side -- every case in
+//     pqdarkgate_test.go section 3 is a receiver that did hold the replayed value.
 //
 //  2. IF EVERY SURVIVOR JOINED AFTER EPOCH k AND THE COMMITTER REUSES pq_secret[k], NOBODY REFUSES.
 //     Not "the check is weaker" -- there is no refuser left. The committer never runs the receive

@@ -71,12 +71,24 @@
 // ── WHAT THIS TABLE CANNOT HOLD, PRINTED RATHER THAN DESCRIBED ───────────────────────────────
 //
 // A driven table is a finite set of inputs, and the axis every one of the six rounds was bypassed
-// on is ARITY -- how many leaves the commit removes. The arities this table drives are LOGGED per
-// door before anything is asserted, so what is outside them is visible in a line rather than
-// inferred from a count: a bypass keyed on `4 <= len(removedLeaves)` is not driven here and would
-// pass. That is the honest residual of this instrument and it is why the one-exit gate in
-// pqdarkgate_test.go is kept for the one class no table can cover -- an arm that no row drives
-// because the arm does not exist yet.
+// on is ARITY -- how many leaves the commit removes. The arity axis is LOGGED per door before
+// anything is asserted, as the INTERVAL it drives and as the fact that the interval has a TOP, so
+// what is outside it is visible in a line rather than inferred from a count: a bypass keyed on
+// `5 <= len(removedLeaves)` is not driven here and would pass.
+//
+// IT IS AN INTERVAL AND NOT A SET, AND THAT IS THE 2026-09-24 (SEVENTH PASS) CORRECTION. The line
+// used to print `{0, 1, 2, 3}`, which reads as a choice of points and leaves the reader to work
+// out that the edge is what matters. For any top k this table drives, the narrowing outside it is
+// `< k+1` and there is always one, so no number of rows closes the axis -- what a row buys is
+// moving the edge, and what the line has to say is where the edge IS. The rows at four leaves
+// bought exactly one thing and it was worth buying: the sixth pass's own surviving mutant,
+// `len(removedLeaves) < 4`, sat at arity four.
+//
+// That is the honest residual of this instrument and it is why the predicate readings in
+// pqdarkgate_test.go are kept -- for the class no table can cover (an arm that no row drives
+// because the arm does not exist yet) and for a narrowing written into the guard's own condition
+// above this interval. What NEITHER covers, stated because it is the shape that got through last
+// time: a narrowing written into some OTHER statement of the exit, above this interval.
 package urmessage
 
 import (
@@ -289,7 +301,7 @@ type removalInput struct {
 // shared, so a row is a SHAPE and not a copy of the assertions with one thing changed.
 func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProductionReceivePath(t *testing.T) {
 	rows := []removalInput{
-		// ── the digest door: one, two and THREE leaves on the secret the victims hold ───────
+		// ── the digest door: one to FOUR leaves on the secret the victims hold ──────────────
 		{name: "digest/one-leaf/current-epoch", door: digestDoor, arity: 1, followed: false,
 			shape: "a removal with a complete openable fan-out carrying the secret the group is " +
 				"standing on, under a digest that names it",
@@ -307,6 +319,15 @@ func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProd
 				"the compatibility arm reached at arity three, which no candidate-reading check " +
 				"could ever have refused",
 			build: buildFreshFanOutHeldDigest(3)},
+		{name: "digest/four-leaves/current-epoch", door: digestDoor, arity: 4, followed: false,
+			shape: "the same, removing FOUR leaves. THIS IS THE ARITY THE SIXTH PASS LEFT " +
+				"OUTSIDE THE TABLE, and it is here because the static reading that was supposed " +
+				"to cover the rest of the axis did not: while the guard was two nested " +
+				"conditionals that reading took the OUTER one, and `alreadyHeld && " +
+				"len(removedLeaves) < 4` written into the INNER one passed the reading, this " +
+				"table and this package (pqepoch.go sha256 553bd9fffa2c). A narrowing a driven " +
+				"case can catch belongs in the table as a row",
+			build: buildHeldFanOut(4, unrotatedFanOut{})},
 
 		// ── the digest door: what must be FOLLOWED, in the same test ────────────────────────
 		{name: "digest/one-leaf/honest-rotated", door: digestDoor, arity: 1, followed: true,
@@ -318,6 +339,12 @@ func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProd
 			shape: "THE CONTROL AT THE NEW ARITY. An honest rotated removal of three leaves, so " +
 				"the three-leaf rows above are not refusals of arity itself",
 			build: buildHonestRotation(3)},
+		{name: "digest/four-leaves/honest-rotated", door: digestDoor, arity: 4, followed: true,
+			shape: "THE CONTROL AT THE TOP OF THE INTERVAL. An honest rotated removal of four " +
+				"leaves, so the four-leaf row above is not a refusal of arity itself -- every " +
+				"arity this table drives carries both dispositions or the refusing row at it " +
+				"proves nothing",
+			build: buildHonestRotation(4)},
 		{name: "digest/no-removal/unrotated", door: digestDoor, arity: 0, followed: true,
 			shape: "THE COMPLEMENT OF THE GUARD'S PREDICATE. An epoch change on the secret the " +
 				"group already holds that removes NOBODY -- every group on the deployed alpha -- " +
@@ -368,6 +395,12 @@ func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProd
 			shape: "the same, THREE leaves. This door's predicate was held by neither behaviour " +
 				"nor structure at any arity above one",
 			build: buildNoDigestRemoval(3)},
+		{name: "noDigest/four-leaves", door: noDigestDoor, arity: 4, followed: false,
+			shape: "the same, FOUR leaves. The two doors carry the same arity interval on " +
+				"purpose: a narrowing written at one arity above the table is a mutant at EITHER " +
+				"door, and an interval that stopped a leaf short here would be the door's own " +
+				"edge sitting somewhere a reader has to work out",
+			build: buildNoDigestRemoval(4)},
 		{name: "noDigest/one-leaf-and-one-add", door: noDigestDoor, arity: 1, followed: false,
 			shape: "a digest-less commit that both adds and removes, refused before the apply",
 			build: buildNoDigestBundle},
@@ -395,12 +428,23 @@ func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProd
 		}
 		dispositions[key] += 1
 	}
+	// THE AXIS IS PRINTED AS AN INTERVAL AND AS THE FACT THAT IT IS BOUNDED, which is the
+	// 2026-09-24 (seventh pass) correction. It was printed as the SET {0, 1, 2, 3}, and a set
+	// reads as a choice of points while the thing a reader needs is the EDGE: for any constant k
+	// this table drives, `< k+1` is the narrowing outside it, so what matters is where the top is
+	// and that there IS a top. Both are in the line now, with the first undriven arity named.
 	for _, door := range []removalDoor{digestDoor, noDigestDoor} {
 		arities := drivenArities[door]
 		slices.Sort(arities)
-		t.Logf("DOOR %q drives len(removedLeaves) in %v and NOTHING ELSE: %d followed row(s), "+
-			"%d refused. A bypass keyed on an arity outside that set passes this table",
-			door, arities, dispositions[string(door)+"/followed"], dispositions[string(door)+"/refused"])
+		t.Logf("DOOR %q drives len(removedLeaves) over the INTERVAL [%d, %d], every arity in it "+
+			"and NOTHING ABOVE IT: %d followed row(s), %d refused. The axis is BOUNDED, so a "+
+			"bypass keyed on %d <= len(removedLeaves) -- `len(removedLeaves) < %d` at either "+
+			"door, or on the held answer between its binding and the guard -- passes this table, "+
+			"and above this interval the predicate readings in pqdarkgate_test.go cover the "+
+			"guard's own condition and nothing else",
+			door, arities[0], arities[len(arities)-1],
+			dispositions[string(door)+"/followed"], dispositions[string(door)+"/refused"],
+			arities[len(arities)-1]+1, arities[len(arities)-1]+1)
 	}
 
 	// ── AND THE TABLE'S OWN CONTROLS ────────────────────────────────────────────────────────
@@ -411,10 +455,28 @@ func TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProd
 				"with no refused row measures nothing at all", door,
 				dispositions[string(door)+"/followed"], dispositions[string(door)+"/refused"])
 		}
-		if !slices.Contains(drivenArities[door], 3) {
-			t.Fatalf("CONTROL FAILED: door %q drives arities %v and three is not among them. "+
-				"THREE is the axis three separate mutants survived on and it is the reason this "+
-				"table replaced a gate", door, drivenArities[door])
+		// THE PRINTED INTERVAL IS AN INTERVAL, which is what makes the line above a complement
+		// rather than a summary: a hole in it would make `[0, 4]` false while the two endpoints
+		// stayed true, and a deleted middle row is exactly how that happens.
+		arities := drivenArities[door]
+		for at, arity := range arities {
+			if arity != arities[0]+at {
+				t.Fatalf("CONTROL FAILED: door %q drives %v, which is not the contiguous interval "+
+					"the line above prints -- arity %d is missing. A hole makes that line false "+
+					"in the one direction it exists to be true in", door, arities, arities[0]+at)
+			}
+		}
+		if arities[0] != 0 {
+			t.Fatalf("CONTROL FAILED: door %q drives %v and does not start at zero, so the "+
+				"COMPLEMENT of the rule -- a commit that removes nobody -- is not driven here",
+				door, arities)
+		}
+		if arities[len(arities)-1] < 4 {
+			t.Fatalf("CONTROL FAILED: door %q drives %v and stops below FOUR leaves. Three is the "+
+				"axis three separate mutants survived on; four is where the sixth pass's own "+
+				"narrowing sat -- `len(removedLeaves) < 4` written one line below the condition "+
+				"the static reading reads -- and it passed everything while this table stopped "+
+				"at three", door, arities)
 		}
 	}
 
