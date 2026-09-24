@@ -486,7 +486,9 @@ func encodePqSecretWitness(rows []EpochPqSecretWitness) ([]byte, error) {
 //
 // A SHORT TAIL IS A REFUSAL, for [decodePqSecretTable]'s reason one type over: a witness that
 // silently lost its last rows is a device that comes back able to follow a removal fanned out on a
-// value it has held, which is the defect this part exists to close arriving through the reader.
+// value THIS DEVICE has held, which is the defect this part exists to close arriving through the
+// reader. The holder is named rather than left to a pronoun because the rule's whole subject is
+// WHOSE history is being checked.
 func decodePqSecretWitness(encoded []byte) ([]EpochPqSecretWitness, error) {
 	const row = 8 + sha256.Size
 	if len(encoded)%row != 0 {

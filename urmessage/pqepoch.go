@@ -1,7 +1,7 @@
 // pq_secret ROTATES, ledger item 243's step 3, under item 251's rulings 36 to 40.
 //
-// WHAT THIS FILE IS. connect's [messagegroup.GroupSession] already holds a pq_secret TABLE keyed
-// by epoch (ruling 40, connect 74abe029). This file is the other half: the thing that puts a
+// WHAT THIS FILE IS. connect keeps a pq_secret TABLE keyed by epoch, on
+// [messagegroup.GroupSession] (ruling 40, connect 74abe029). This file is the other half: the thing that puts a
 // DIFFERENT value in it every epoch, the carrier that delivers that value to the other members,
 // and the three ways that delivery can fail said out loud rather than surfacing as a group that
 // stopped working.
@@ -705,8 +705,9 @@ func (self *Group) matchesEpochDigestLocked(mlsSecret []byte, digest *message.Ep
 //     own secret and every other is an orphan -- a fan-out from a committer that lost the CAS
 //     race. They are told apart by the digest and by nothing else, which is why more than one
 //     candidate is an ordinary state here and not a refusal.
-//  2. THE SECRET THIS GROUP ALREADY HOLDS. A committer built before this file rotates nothing, so
-//     the epoch it opens runs on the value every member already has. That arm is the whole of the
+//  2. THE SECRET THIS DEVICE ALREADY HOLDS -- read off this device's own table and never off the
+//     wire. A committer built before this file rotates nothing, so the epoch it opens runs on a
+//     value this device has held since some earlier epoch. That arm is the whole of the
 //     compatibility path and it is decided by the SAME digest comparison, not by a version flag:
 //     if the committer did rotate, this candidate simply fails to reproduce the digest.
 //
@@ -729,7 +730,7 @@ func (self *Group) matchesEpochDigestLocked(mlsSecret []byte, digest *message.Ep
 // IS ONE EXIT. It used to be written twice, in the two arms that return the identifier `held` --
 // and the arm that returns a WRAP CANDIDATE was left unguarded, because it reads the wire rather
 // than `self.pqSecrets` and so did not look like a held-secret arm. It is one: a committer that
-// removes a leaf and fans out the value the group already has delivers that value through the
+// removes a leaf and fans out a value THIS DEVICE has held delivers that value through the
 // candidate arm, reproduces the epoch's own digest with it, and was followed with a nil error, no
 // dark state and no refusal. REPRODUCED, by
 // TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch, which asserts the

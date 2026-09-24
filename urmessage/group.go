@@ -688,9 +688,10 @@ type Group struct {
 	//
 	// WHY IT EXISTS, AND IT IS THE 2026-09-24 REPAIR. The removal rule's subject used to be
 	// `pqSecrets` alone -- the table above -- and that table is pruned at
-	// [messagegroup.PastEpochWindow] by [Group.dropPqSecretsBelowWindowLocked]. So "a value this
-	// group already holds" SHRANK while the removed member's set did not, and a removal fanned
-	// out on a pq_secret this device had EVICTED was followed with a nil error. REPRODUCED
+	// [messagegroup.PastEpochWindow] by [Group.dropPqSecretsBelowWindowLocked]. So the set the rule
+	// USED TO BE spelled against, "a value this group already holds", SHRANK while the removed
+	// member's did not, and a removal fanned out on a pq_secret this device had EVICTED was
+	// followed with a nil error. REPRODUCED
 	// against the production receive path by
 	// TestARemovalFannedOutOnAnEvictedEpochsSecretIsRefusedToo: 33 honest rotations, then a
 	// removal opening on pq_secret[1], and the removed member's retained value was octet for

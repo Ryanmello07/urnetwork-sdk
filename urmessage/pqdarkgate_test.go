@@ -760,6 +760,90 @@ func TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch(t *
 	}
 }
 
+// AND THE RULE HOLDS WHEN THE COMMIT REMOVES MORE THAN ONE LEAF, WHICH IS AN AXIS AND NOT A CASE.
+//
+// WHY THIS EXISTS, AND IT IS THE 2026-09-24 (FOURTH PASS) FINDING RATHER THAN A VARIANT. Every
+// other removal case in this file removes EXACTLY ONE leaf, so `len(removedLeaves) == 1` was a
+// silent premise of the whole behavioural surface. A bypass planted in the exit --
+// `if len(removedLeaves) == 1 { <the refusal> }` -- is therefore TRUE on every path any of them
+// drives, and all 168 cases in this package ran GREEN with it in the tree. A gate clause now
+// refuses that shape by reading the statement path, but a gate clause reads TEXT: what stops the
+// axis being a premise is a case that VARIES it, and this is that case. With the bypass planted
+// this case goes red, so the clause and the behaviour hold one defect from two directions.
+//
+// connect fills `RemovedLeaves` with one entry per Remove proposal, so len == 2 is an ordinary
+// commit and not a shape nobody writes: it is one ADMIN ejecting two devices at once.
+func TestARemovalOfTwoLeavesFannedOutOnTheHeldSecretIsRefusedTheSameWay(t *testing.T) {
+	world := newRotWorld(t, "alice", "bob", "carol", "dave")
+	alice, bob := world.member("alice"), world.member("bob")
+	carol, dave := world.member("carol"), world.member("dave")
+
+	retained := append([]byte(nil), carol.group.pqSecretLocked()...)
+	removing := []uint32{carol.leaf, dave.leaf}
+	published := world.fanOutOnTheHeldSecret(alice, removing, func() ([]byte, []byte, []byte, error) {
+		return alice.handle.CommitRemove(removing)
+	}, unrotatedFanOut{})
+
+	// ── CONTROL 1: THE COMMIT REALLY DOES REMOVE TWO DISTINCT LEAVES ────────────────────────
+	//
+	// Without this, a harness that quietly dropped the second leaf would make this a slower copy
+	// of the one-leaf case and the axis would still be unvaried.
+	if len(removing) != 2 || removing[0] == removing[1] {
+		t.Fatalf("CONTROL FAILED: this case removes %v, which is not two distinct leaves", removing)
+	}
+	if published.opens != 2 {
+		t.Fatalf("the removal opens epoch %d, want 2", published.opens)
+	}
+
+	// ── CONTROL 2: THE FAN-OUT IS UNROTATED, so the refusal below is about the value ────────
+	granted, err := alice.handle.Export(storageExporterLabel, nil, storageExporterBytes)
+	if err != nil {
+		t.Fatalf("the epoch-2 exporter: %v", err)
+	}
+	if !bytes.Equal(messagegroup.StorageRoot(granted, retained), messagegroup.StorageRoot(granted, published.pqSecret)) {
+		t.Fatalf("CONTROL FAILED: this fixture's removal DID rotate, so it is not the shape this " +
+			"case refuses and the refusal below would be about nothing")
+	}
+
+	// ── CONTROL 3: BOB OPENS THE WRAP, so the refusal is not an absence ─────────────────────
+	if err := world.deliver(bob, published.wraps...); err != nil {
+		t.Fatalf("CONTROL FAILED: bob's walk over the fan-out alone answered %v", err)
+	}
+	if opened := bob.group.Stats().WrapOpened; opened != 1 {
+		t.Fatalf("CONTROL FAILED: bob opened %d wrap(s) of this fan-out, want 1", opened)
+	}
+
+	// ── THE REFUSAL, AND IT IS THE SAME ONE ─────────────────────────────────────────────────
+	refused := world.deliver(bob, published.commit)
+	if refused == nil {
+		t.Fatalf("bob FOLLOWED a TWO-leaf removal fanned out on the secret both removed members " +
+			"hold. This is the one-leaf case's defect with the only axis this package never " +
+			"varied turned, and a bypass keyed on len(removedLeaves) == 1 passes every other " +
+			"case in this file")
+	}
+	if !errors.Is(refused, ErrRemovalWithoutRotation) {
+		t.Fatalf("bob's walk over the two-leaf unrotated fan-out answered %v, want "+
+			"ErrRemovalWithoutRotation", refused)
+	}
+	if bob.group.epoch != 1 {
+		t.Fatalf("bob stands at epoch %d after refusing the two-leaf removal, want 1", bob.group.epoch)
+	}
+	if bob.group.wrapDark != nil {
+		t.Fatalf("bob went DARK over a commit it refused: %v; ruling 41's two outcomes are two "+
+			"states", bob.group.wrapDark)
+	}
+	if !bytes.Equal(bob.group.pqSecretLocked(), retained) {
+		t.Fatalf("bob's pq_secret moved although it did not follow the commit")
+	}
+	if _, isHeld := bob.group.pqSecretAtLocked(published.opens); isHeld {
+		t.Fatalf("bob filed a pq_secret for epoch %d although it refused the commit that opens it",
+			published.opens)
+	}
+	t.Logf("a removal of %d leaves fanned out on the held secret is refused by name and the "+
+		"receiver stays at epoch %d; the len(removedLeaves) axis is no longer a silent premise",
+		len(removing), bob.group.epoch)
+}
+
 // AND THE RULE IS ON THE WHOLE TABLE, NOT ON THE CURRENT EPOCH'S ROW: a removal fanned out on an
 // EARLIER epoch's pq_secret.
 //
@@ -2246,17 +2330,58 @@ func TestEveryReturnOfTheResolutionThatCanCarryAPqSecretGoesThroughTheGuardedExi
 //  4. THE REFUSAL COMES FIRST. Every guarded return must sit above every return in the block that
 //     carries something other than `nil`, because a guard below the answer is a guard nothing
 //     reaches.
+//  5. AND IT IS RETURNED ON EVERY PATH THROUGH THE GUARD, WHICH IS THE 2026-09-24 (FOURTH PASS)
+//     REPAIR. Clauses 1 to 4 hold that the refusal is RETURNED; clause 5 holds that it is
+//     returned WHENEVER the guard is entered and the value is held. The walk from the
+//     `if removesLeaves` body down to the guarded return is a STATEMENT PATH, and exactly one
+//     branching statement may stand on it: the held test itself, whose condition must be a single
+//     answer bound by that conditional's own init from a call of `pqSecretHeldAtLocked`, with the
+//     refusal as the LAST statement of its body.
 //
 // THE CONDITION IS STILL READ, and it still fails closed: `if !removesLeaves`, `if removesLeaves
 // && false` and `if somethingElse` are all not an [ast.Ident] named `removesLeaves`, so none of
-// them is accepted as the guard and the block ends with no guard at all.
+// them is accepted as the guard and the block ends with no guard at all. Clause 5 fails closed the
+// same way one level down: a held test written `if alreadyHeld && somethingElse`, or one whose
+// answer is bound above the conditional rather than in its own init, is refused rather than
+// reasoned about.
 //
-// THE RESIDUAL, NAMED: this reads SHAPE and not REACHABILITY. A guard whose inner condition were
-// rewritten to something that cannot be true -- the `alreadyHeld` test replaced by a predicate
-// that always answers false -- satisfies every clause here. What holds that is the behaviour, and
-// it is driven by TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch,
+// ── WHY CLAUSE 5, AND THE EXCUSE IT REPLACES WAS FALSE AND NOT MERELY UNMEASURED ──────────────
+//
+// What stood here said the shape-versus-reachability residual is held by the behaviour, "driven by
+// TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch,
 // TestTheCompatibilityArmOfTheResolutionIsClosedToARemoval and
-// TestTheWrapCandidateArmOfTheResolutionIsClosedToARemoval, one per arm.
+// TestTheWrapCandidateArmOfTheResolutionIsClosedToARemoval, one per arm". MEASURED, and it is
+// FALSE for the member of that class that matters. Planted into the exit --
+//
+//	if removesLeaves {
+//	    if heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret); alreadyHeld {
+//	        if len(removedLeaves) == 1 {
+//	            return nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)
+//	        }
+//	    }
+//	}
+//	return secret, nil
+//
+// -- the OLD clause 4 passed it, because it asked only for positional containment
+// (`conditional.Body.Pos() <= at && at <= conditional.Body.End()`), so an arbitrarily nested
+// return still counted, and `go test -count=1 -run Test -timeout 1800s ./urmessage/` ran all 168
+// cases GREEN with it in the tree. It is REACHABLE and is not a shape nobody writes:
+// `removedLeaves` is `decision.RemovedLeaves`, which connect fills with one entry per Remove
+// proposal, so a commit carrying two Removes has len == 2, the bypass fires, and the receiver
+// follows a removal onto a secret it has held -- item 243's whole subject arriving inverted.
+//
+// AND THE BEHAVIOUR CANNOT HOLD THIS, WHICH IS THE GENERAL FACT WORTH KEEPING. A bypass predicate
+// that is FALSE on a driven path is caught by the behavioural cases -- the polarity inverse of the
+// plant above, `if 1 < len(removedLeaves)`, turns eight of them red. A bypass that is TRUE on
+// every driven path is caught by NONE of them, because every case in this package removes exactly
+// one leaf. So the sub-class the behaviour holds is "the bypass is false where a test drives it",
+// and the complement of that sub-class was held by nothing at all until clause 5.
+//
+// THE RESIDUAL THAT IS LEFT, NAMED: clause 5 reads the PATH and still not REACHABILITY. A held
+// test whose init called a [Group.pqSecretHeldAtLocked] rewritten to answer false would satisfy
+// every clause here. THAT one the behaviour does hold, and the reason is the distinction above --
+// it is a predicate every driven case makes true, so the three cases named there catch it, one per
+// arm.
 func removalGuardDefect(block *ast.BlockStmt) string {
 	const refusal = "refuseRemovalOnHeldSecret"
 
@@ -2341,12 +2466,18 @@ func removalGuardDefect(block *ast.BlockStmt) string {
 			"that refuses AND hands the value over is a refusal the caller can read past",
 			calls-len(guarded), calls)
 	}
-	// ── 4. AND IT IS REACHED THROUGH `if removesLeaves` ─────────────────────────────────────
+	// ── 4+5. AND IT IS REACHED THROUGH `if removesLeaves`, ON A PATH WITH NOTHING ON IT ─────
 	//
 	// The condition is read LAST, because a guarded return the conditional does not contain is a
 	// different defect from a conditional with no guarded return in it, and the clauses above name
 	// the first one precisely.
-	inConditional := 0
+	//
+	// THE PATH AND NOT THE POSITION. What stood here was `conditional.Body.Pos() <= at && at <=
+	// conditional.Body.End()` -- byte offsets, under which a return nested inside an arbitrary
+	// second conditional is still "inside the guard". The walk below descends by the STATEMENT
+	// TREE instead, so what stands between the guard and the refusal is a list this gate can read
+	// and refuse.
+	onAPath := 0
 	for _, statement := range block.List {
 		conditional, isIf := statement.(*ast.IfStmt)
 		if !isIf {
@@ -2356,15 +2487,53 @@ func removalGuardDefect(block *ast.BlockStmt) string {
 			continue
 		}
 		for _, at := range guarded {
-			if conditional.Body.Pos() <= at && at <= conditional.Body.End() {
-				inConditional += 1
+			path := pathToStatement(conditional.Body.List, at)
+			if path == nil {
+				continue
+			}
+			onAPath += 1
+			// EVERY BRANCHING STATEMENT ON THE PATH, and exactly one is allowed. A bare block and
+			// a label are not branching -- neither can decide whether what is inside it runs -- so
+			// they are crossed without comment.
+			tests := []*ast.IfStmt{}
+			for _, crossed := range path[:len(path)-1] {
+				kind := branchingKind(crossed)
+				if kind == "" {
+					continue
+				}
+				crossedIf, isCrossedIf := crossed.(*ast.IfStmt)
+				if !isCrossedIf {
+					return "its refusal is reached through " + kind + " inside `if removesLeaves`; " +
+						"what may stand between the guard and the refusal is the held test and " +
+						"nothing else, because everything else decides whether the refusal happens " +
+						"at all on some commit this package never drives"
+				}
+				tests = append(tests, crossedIf)
+			}
+			if len(tests) != 1 {
+				return fmt.Sprintf("its refusal sits under %d conditional(s) inside `if "+
+					"removesLeaves` and exactly ONE is allowed, the held test. A second one is a "+
+					"bypass: the guard refuses on the branch that predicate is true on and hands "+
+					"the held secret back on every other, and a bypass that is TRUE on every path "+
+					"this package drives is caught by no behavioural case here -- every one of "+
+					"them removes exactly one leaf", len(tests))
+			}
+			if defect := heldTestDefect(tests[0]); defect != "" {
+				return defect
+			}
+			// AND THE REFUSAL IS THE LAST STATEMENT OF THE HELD TEST'S BODY, so nothing below it
+			// inside that body decides whether it is reached.
+			body := tests[0].Body.List
+			if len(body) == 0 || body[len(body)-1].Pos() != at {
+				return "its refusal is not the last statement of the held test's body, so " +
+					"something under that test stands between `this value is held` and the refusal"
 			}
 		}
 	}
-	if inConditional != len(guarded) {
+	if onAPath != len(guarded) {
 		return fmt.Sprintf("%d of its %d refusal(s) are outside an `if removesLeaves` at the top "+
 			"level of the block, so what refuses is not keyed to the commit removing a leaf",
-			len(guarded)-inConditional, len(guarded))
+			len(guarded)-onAPath, len(guarded))
 	}
 	// ── 3+4. AND IT COMES FIRST ─────────────────────────────────────────────────────────────
 	for _, answer := range carrying {
@@ -2374,6 +2543,139 @@ func removalGuardDefect(block *ast.BlockStmt) string {
 					"line it is supposed to guard and nothing reaches it"
 			}
 		}
+	}
+	return ""
+}
+
+// pathToStatement returns the chain of statements from `list` down to the return statement that
+// starts at `at`, innermost last, or nil when that statement is not under `list`. It descends by
+// the STATEMENT TREE, which is what makes clause 5 a path and not a byte range, and it never
+// descends into a function literal -- clause 3, one level down.
+func pathToStatement(list []ast.Stmt, at token.Pos) []ast.Stmt {
+	for _, statement := range list {
+		// A position filter first, because a statement that cannot contain `at` cannot be on the
+		// path to it. The DESCENT below is structural; this only skips work.
+		if at < statement.Pos() || statement.End() < at {
+			continue
+		}
+		if ret, isReturn := statement.(*ast.ReturnStmt); isReturn && ret.Pos() == at {
+			return []ast.Stmt{statement}
+		}
+		for _, inner := range stepsInto(statement) {
+			if found := pathToStatement(inner, at); found != nil {
+				return append([]ast.Stmt{statement}, found...)
+			}
+		}
+	}
+	return nil
+}
+
+// stepsInto answers the statement lists a statement owns. A [ast.FuncLit] is an EXPRESSION and is
+// therefore not one of them, which is how the walk stays out of nested closures.
+func stepsInto(statement ast.Stmt) [][]ast.Stmt {
+	switch node := statement.(type) {
+	case *ast.BlockStmt:
+		return [][]ast.Stmt{node.List}
+	case *ast.IfStmt:
+		lists := [][]ast.Stmt{node.Body.List}
+		if node.Else != nil {
+			lists = append(lists, []ast.Stmt{node.Else})
+		}
+		return lists
+	case *ast.ForStmt:
+		return [][]ast.Stmt{node.Body.List}
+	case *ast.RangeStmt:
+		return [][]ast.Stmt{node.Body.List}
+	case *ast.SwitchStmt:
+		return [][]ast.Stmt{node.Body.List}
+	case *ast.TypeSwitchStmt:
+		return [][]ast.Stmt{node.Body.List}
+	case *ast.SelectStmt:
+		return [][]ast.Stmt{node.Body.List}
+	case *ast.CaseClause:
+		return [][]ast.Stmt{node.Body}
+	case *ast.CommClause:
+		return [][]ast.Stmt{node.Body}
+	case *ast.LabeledStmt:
+		return [][]ast.Stmt{{node.Stmt}}
+	}
+	return nil
+}
+
+// branchingKind names a statement that can decide whether what is under it runs at all, and
+// answers "" for one that cannot. A bare block and a label are not branching: everything inside
+// them runs whenever the block is reached, so crossing one does not weaken the guard.
+func branchingKind(statement ast.Stmt) string {
+	switch statement.(type) {
+	case *ast.IfStmt:
+		return "an `if`"
+	case *ast.SwitchStmt:
+		return "a `switch`"
+	case *ast.TypeSwitchStmt:
+		return "a type switch"
+	case *ast.ForStmt:
+		return "a `for`"
+	case *ast.RangeStmt:
+		return "a `range`"
+	case *ast.SelectStmt:
+		return "a `select`"
+	case *ast.CaseClause:
+		return "a case clause"
+	case *ast.CommClause:
+		return "a comm clause"
+	}
+	return ""
+}
+
+// heldTestDefect says what is wrong with the ONE conditional clause 5 allows between
+// `if removesLeaves` and its refusal, or "" when that conditional is the held test itself:
+//
+//	if heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret); alreadyHeld { ... }
+//
+// The condition has to be a single bound answer and the init has to be what binds it, so that
+// `alreadyHeld && len(removedLeaves) == 1` -- the same bypass ANDed in rather than nested -- is
+// refused for the same reason the nested one is, and so that an answer bound somewhere this gate
+// cannot see is refused rather than trusted.
+func heldTestDefect(conditional *ast.IfStmt) string {
+	const held = "pqSecretHeldAtLocked"
+	answer, isIdent := conditional.Cond.(*ast.Ident)
+	if !isIdent {
+		return "the one conditional between `if removesLeaves` and its refusal tests `" +
+			exprText(conditional.Cond) + "` and not a single bound answer; a predicate ANDed into " +
+			"the held test is the nested bypass in another dress, and it is true on every path " +
+			"this package drives"
+	}
+	assign, isAssign := conditional.Init.(*ast.AssignStmt)
+	if !isAssign {
+		return "the one conditional between `if removesLeaves` and its refusal tests the bare `" +
+			answer.Name + "`, bound above it where this gate cannot read what it is; the held " +
+			"test has to bind its own answer or what stands there is not `have I held this value`"
+	}
+	bound := false
+	for _, target := range assign.Lhs {
+		if name, isName := target.(*ast.Ident); isName && name.Name == answer.Name {
+			bound = true
+		}
+	}
+	if !bound {
+		return "`" + answer.Name + "` is tested by the one conditional between `if removesLeaves` " +
+			"and its refusal and is not bound by that conditional's own init"
+	}
+	asks := 0
+	ast.Inspect(assign, func(node ast.Node) bool {
+		call, isCall := node.(*ast.CallExpr)
+		if !isCall {
+			return true
+		}
+		if selector, isSelector := call.Fun.(*ast.SelectorExpr); isSelector && selector.Sel.Name == held {
+			asks += 1
+		}
+		return true
+	})
+	if asks != 1 {
+		return fmt.Sprintf("the one conditional between `if removesLeaves` and its refusal binds "+
+			"its answer from %d call(s) of %s; what may stand there is the held test and nothing "+
+			"else", asks, held)
 	}
 	return ""
 }
@@ -2917,10 +3219,29 @@ func TestNoProductionCommentClaimsADarkGroupRepairsItself(t *testing.T) {
 //     off the text immediately before it. A group subject is a refusal; a device or receiver
 //     subject is the claim this build can make. So a re-wording that says "the group still has it"
 //     is red for the same reason the old sentence was, without this gate carrying a list of the
-//     ways to spell it.
+//     ways to spell it. THE GROUP IS ASKED FIRST, so a window naming a group noun AND a device
+//     noun -- "the group THIS DEVICE is in already holds" -- is the GROUP's; the classifier fails
+//     closed on an ambiguous window rather than reading it as the claim it is allowed to make.
 //  2. AND A BLOCK MAY STATE THE OLD CLAIM IN ORDER TO CORRECT IT -- [refuseRemovalOnHeldSecret]'s
-//     own header does exactly that -- but only if the correction is IN THE SAME BLOCK. A denial
-//     with no receiver-scoped sentence beside it is the claim with an alibi.
+//     own header does exactly that -- but only if the correction is IN THE SENTENCE THE HOLDING
+//     IS IN, and only in a block that states the delivered claim somewhere. A denial anywhere in
+//     the same block is the claim with an alibi: measured, that form waived all seven group
+//     holdings that exist in production, so the arm asserted nothing about any block carrying this
+//     rule's prose, and the sentence this gate exists to refuse could be written into
+//     [Group.resolvePqSecretLocked]'s own header with the gate still green. What the waiver
+//     removes is now counted, PRINTED, and held against a floor of its own.
+//
+// THE ASYMMETRY BETWEEN THE TWO SUBJECTS, WRITTEN DOWN RATHER THAN LEFT TO BE FOUND. An
+// UNATTRIBUTED holding -- one whose window names no holder at all, "a pq_secret it already holds"
+// -- is a refusal in a string literal and is not one in a comment. The reason is that a sentinel
+// is read ALONE, with nothing around it to say what "it" is, while a comment block is read whole.
+// That excuse is not left unmeasured: a block whose holdings are ALL unattributed has no
+// antecedent anywhere in it and IS a refusal, and every unattributed holding is printed with its
+// sentence. THE RESIDUAL IT LEAVES, NAMED: a block that attributes one holding and leaves another
+// unattributed is silent on the second, so a group claim spelled with a noun outside the
+// classifier's vocabulary -- "already held anywhere in the cohort" -- is silent as a comment and
+// red as a literal. That is the whole of what this arm does not hold, and the literal arm is the
+// one that covers the surface an operator actually reads.
 //  3. THE THREE THINGS THE RULE DOES NOT DELIVER ARE PRESENT WHERE THE RULE IS, keyed by a
 //     fragment of each and held against a written disposition: a clause deleted is a refusal. This
 //     is presence and NOT truth, which is this gate's residual and is stated rather than implied --
@@ -2945,9 +3266,42 @@ func TestTheRemovalRuleIsDocumentedAsAReceiverPropertyAndNeverAsAGroupOne(t *tes
 	// with room to spare, and it is short enough that an unrelated noun two sentences back cannot
 	// reach into it.
 	const window = 24
-	// subjectsOf classifies every holding verb in a text as "group", "receiver" or "unattributed".
-	subjectsOf := func(text string) (group int, receiver int, loose int) {
+	// attributed is one holding verb, where it is in the LOWERED text, and who that text says is
+	// doing the holding. The position is carried because the waiver below is scoped to the
+	// SENTENCE the verb sits in, and a sentence cannot be found from a count.
+	type attributed struct {
+		at    int
+		verb  string
+		class string
+	}
+	// holdingsIn answers every holding verb in a text, classified.
+	//
+	// ── THE GROUP IS ASKED FIRST, WHICH IS THE 2026-09-24 (FOURTH PASS) REPAIR ─────────────────
+	//
+	// What stood here asked `device || receiver` BEFORE `group`, so a window naming BOTH read as
+	// the receiver's -- and a plain-English GROUP-property claim that mentions a device anywhere in
+	// its twenty-four octets passed. MEASURED, one plant at a time into
+	// [Group.refuseUnrotatedRemovalLocked]'s header, which no waiver reaches:
+	//
+	//	"...on a secret this group already holds"                        -> RED (the control)
+	//	"...on a secret the group THIS DEVICE is in already holds"       -> PASS
+	//	"...on a secret every device of the group already holds"         -> PASS
+	//
+	// Both of the last two are group-property claims and the second is the exact shape this gate's
+	// header promises to catch. Asking the group first makes an AMBIGUOUS window -- one naming a
+	// group noun and a device noun at once -- the GROUP's, which fails closed: the only way to
+	// write a receiver holding is to keep the group out of the window, which is what the corrected
+	// sentence does. It costs nothing on the prose that exists: no production window in this
+	// gate's subject names both, so all eleven blocks and all four literals classify identically
+	// under either order, and the change is visible only on a claim that has both.
+	//
+	// AND `nearest` WAS TRIED AND IS WRONG. Taking the noun closest to the verb -- scanning the
+	// window right to left -- leaves "the group THIS DEVICE is in already holds" reading as the
+	// receiver's, because "device" is nearer the verb than "group" is. It is the head noun and not
+	// the nearest noun that holds, and the head noun cannot be found by distance.
+	holdingsIn := func(text string) []attributed {
 		lowered := strings.ToLower(text)
+		found := []attributed{}
 		for _, holding := range holdings {
 			at := strings.Index(lowered, holding)
 			for 0 <= at {
@@ -2956,14 +3310,14 @@ func TestTheRemovalRuleIsDocumentedAsAReceiverPropertyAndNeverAsAGroupOne(t *tes
 					from = 0
 				}
 				before := lowered[from:at]
+				class := "loose"
 				switch {
-				case strings.Contains(before, "device") || strings.Contains(before, "receiver"):
-					receiver += 1
 				case strings.Contains(before, "group"):
-					group += 1
-				default:
-					loose += 1
+					class = "group"
+				case strings.Contains(before, "device") || strings.Contains(before, "receiver"):
+					class = "receiver"
 				}
+				found = append(found, attributed{at: at, verb: holding, class: class})
 				next := strings.Index(lowered[at+len(holding):], holding)
 				if next < 0 {
 					break
@@ -2971,7 +3325,47 @@ func TestTheRemovalRuleIsDocumentedAsAReceiverPropertyAndNeverAsAGroupOne(t *tes
 				at = at + len(holding) + next
 			}
 		}
+		return found
+	}
+	// subjectsOf counts what holdingsIn found, by class.
+	subjectsOf := func(text string) (group int, receiver int, loose int) {
+		for _, one := range holdingsIn(text) {
+			switch one.class {
+			case "group":
+				group += 1
+			case "receiver":
+				receiver += 1
+			default:
+				loose += 1
+			}
+		}
 		return group, receiver, loose
+	}
+	// sentenceAround answers the sentence of `text` that the octet at `at` sits in.
+	//
+	// A SENTENCE ENDS AT A FULL STOP AND NOT AT A COLON OR A DASH, and that is measured rather
+	// than chosen: this corpus writes the correction as *"this used to be documented as a GROUP
+	// property: <the old sentence>"*, so splitting at the colon would cut the denial away from the
+	// quotation it introduces and turn five honest blocks red.
+	sentenceAround := func(text string, at int) string {
+		from := 0
+		for cut := 0; cut < len(text); cut += 1 {
+			if text[cut] != ' ' || cut == 0 {
+				continue
+			}
+			end := cut - 1
+			if end < from {
+				continue
+			}
+			if text[end] != '.' && text[end] != '?' && text[end] != '!' {
+				continue
+			}
+			if at <= end {
+				return text[from:cut]
+			}
+			from = cut + 1
+		}
+		return text[from:]
 	}
 	// A BLOCK IS ABOUT THIS RULE when it says all three things. Anything narrower is a gate scoped
 	// to one file, and anything wider drags in every comment that mentions a group.
@@ -3035,8 +3429,37 @@ func TestTheRemovalRuleIsDocumentedAsAReceiverPropertyAndNeverAsAGroupOne(t *tes
 		t.Fatalf("CONTROL FAILED: the corrected sentence reads as %d group / %d receiver "+
 			"subject(s), want 0 / 1: %q", group, receiver, corrected)
 	}
+	// ── AND THE PRECEDENCE, ASSERTED AND NOT ASSUMED ────────────────────────────────────────
+	//
+	// Both of these are GROUP-property claims whose window also names a device, and both PASSED
+	// this gate before the classifier asked the group first. They are here as rows rather than as
+	// a sentence in the header, because a precedence nobody asserts is a precedence a later edit
+	// reverses without noticing. Each is the `deleted` sentence above with its subject re-worded,
+	// so the three read the same claim three ways.
+	for _, ambiguous := range []string{
+		"The rule is \"no removal may be followed on a secret the group THIS DEVICE is in already holds\"",
+		"The rule is \"no removal may be followed on a secret every device of the group already holds\"",
+	} {
+		if group, _, _ := subjectsOf(ambiguous); group != 1 {
+			t.Fatalf("CONTROL FAILED: the classifier reads %d group-subject holding(s) in %q, want "+
+				"1. A window that names a group noun AND a device noun is the GROUP's; reading it "+
+				"as the receiver's is how a plain-English group claim passes this gate", group, ambiguous)
+		}
+	}
 	if about("// the pq_secret table is pruned at PastEpochWindow") {
 		t.Fatalf("CONTROL FAILED: a block that says nothing about a removal is in this gate's subject")
+	}
+	// AND THE UNATTRIBUTED CLASS EXISTS AND IS NOT THE GROUP'S. This is the row that makes the
+	// asymmetry below a measured thing rather than an implied one: the same sentence is SILENT as
+	// a comment inside a block that names a holder elsewhere, and RED as a string literal.
+	unnamed := "no removal may be followed on a secret already held anywhere in the cohort"
+	if group, receiver, loose := subjectsOf(unnamed); group != 0 || receiver != 0 || loose != 1 {
+		t.Fatalf("CONTROL FAILED: a holding with no holder in its window reads as %d group / %d "+
+			"receiver / %d unattributed, want 0 / 0 / 1: %q", group, receiver, loose, unnamed)
+	}
+	if group, _, loose := subjectsOf("a pq_secret " + unnamed); group != 0 || loose != 1 {
+		t.Fatalf("CONTROL FAILED: the unattributed sentence is not unattributed in the literal " +
+			"subject, so the asymmetry this gate documents cannot be measured")
 	}
 	// AND THE ARM CLAUSE, WHICH IS HALF A REFUSAL AND NAMES NO REMOVAL, IS IN THE LITERAL SUBJECT.
 	// Copied from pqepoch.go rather than retyped: the clause is the sentence an operator reads.
@@ -3056,6 +3479,12 @@ func TestTheRemovalRuleIsDocumentedAsAReceiverPropertyAndNeverAsAGroupOne(t *tes
 	// ── THE WALK: production comment blocks and production string literals ──────────────────
 	root := moduleRoot(t)
 	scanned, blocks, literals := 0, 0, 0
+	// THE ARM'S OWN BOOKKEEPING, so that what it asserted and what it WAIVED are both numbers this
+	// test prints and then holds against a floor. The arm this replaces carved seven of its eleven
+	// blocks out and said nothing about it, and its only control counted the subject BEFORE the
+	// carve-out -- so it could go fully vacuous while logging "CONTROLS HELD: 11 comment block(s)".
+	held, waived := 0, 0
+	waivedRows, unattributedRows := []string{}, []string{}
 	hits := []string{}
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -3094,18 +3523,67 @@ func TestTheRemovalRuleIsDocumentedAsAReceiverPropertyAndNeverAsAGroupOne(t *tes
 				continue
 			}
 			blocks += 1
-			group, receiver, _ := subjectsOf(joined)
+			lowered := strings.ToLower(joined)
+			group, receiver, loose := subjectsOf(joined)
+
+			// A BLOCK THAT NEVER SAYS WHO HOLDS IT. An unattributed holding is tolerated in a
+			// comment and refused in a literal, and this is the premise under that asymmetry made
+			// checkable: a comment block is read WHOLE, so a pronoun is disambiguated by the block
+			// around it -- but only if the block attributes something somewhere. A block whose
+			// holdings are ALL unattributed has no antecedent anywhere in it and is the shape the
+			// asymmetry's excuse does not cover.
+			if group == 0 && receiver == 0 && 0 < loose {
+				hits = append(hits, fmt.Sprintf("%s:%d: all %d holding(s) in this block leave the "+
+					"HOLDER unnamed and nothing in the block names one, so there is no antecedent "+
+					"for the pronoun and the sentence reads as a claim about the cohort", name,
+					from+1, loose))
+				continue
+			}
+			// EVERY UNATTRIBUTED HOLDING, PRINTED. This is the complement of what the arm asserts
+			// and it is in the log rather than implied, because this arm is silent on it.
+			for _, one := range holdingsIn(joined) {
+				if one.class != "loose" {
+					continue
+				}
+				unattributedRows = append(unattributedRows, fmt.Sprintf("  %s:%d: %q",
+					name, from+1, sentenceAround(lowered, one.at)))
+			}
 			if group == 0 {
+				held += receiver + loose
 				continue
 			}
-			if denies(joined) && 0 < receiver {
-				// STATING THE OLD CLAIM IN ORDER TO CORRECT IT, with the correction in the
-				// same block. That is what [refuseRemovalOnHeldSecret]'s header does.
-				continue
+			// ── THE WAIVER, SCOPED TO THE SENTENCE AND NOT TO THE BLOCK ─────────────────────
+			//
+			// A block MAY state the old claim in order to correct it -- [refuseRemovalOnHeldSecret]'s
+			// own header does exactly that -- but the correction has to be in the SENTENCE the
+			// group holding is in, not merely somewhere in the same block.
+			//
+			// WHY, MEASURED. The block-scoped form waived every group holding in any block that
+			// carried a denial phrase and a receiver holding anywhere in it. Seven of this arm's
+			// eleven blocks were in that carve-out and ALL SEVEN group-subject holdings that exist
+			// in production were inside it, so the arm's live subject contained ZERO group
+			// holdings and asserted nothing about any block carrying this rule's prose. The exact
+			// sentence this gate exists to refuse was planted into [Group.resolvePqSecretLocked]'s
+			// own header and the gate stayed GREEN; the same sentence in
+			// [Group.refuseUnrotatedRemovalLocked]'s header -- a block that does not deny -- was
+			// RED, naming the line. The waiver did not ask whether the holding it was waiving was
+			// the one being corrected, and the sentence is where that question is answerable.
+			for _, one := range holdingsIn(joined) {
+				if one.class != "group" {
+					held += 1
+					continue
+				}
+				sentence := sentenceAround(lowered, one.at)
+				if denies(sentence) && 0 < receiver {
+					waived += 1
+					waivedRows = append(waivedRows, fmt.Sprintf("  %s:%d: %q", name, from+1, sentence))
+					continue
+				}
+				held += 1
+				hits = append(hits, fmt.Sprintf("%s:%d: a holding in this block is the GROUP's and "+
+					"the sentence it is in does not correct the claim (%d holding(s) in the block "+
+					"are the receiver's): %q", name, from+1, receiver, sentence))
 			}
-			hits = append(hits, fmt.Sprintf("%s:%d: %d holding(s) in this block are the GROUP's "+
-				"and %d are the receiver's, and nothing in it corrects the claim", name, from+1,
-				group, receiver))
 		}
 
 		// THE STRING LITERALS, off the syntax tree rather than off the text, so that a sentence
@@ -3142,6 +3620,14 @@ func TestTheRemovalRuleIsDocumentedAsAReceiverPropertyAndNeverAsAGroupOne(t *tes
 	}
 
 	// ── THE WALK'S OWN CONTROLS. An absence proves nothing without them ─────────────────────
+	//
+	// THE COMPLEMENT, PRINTED BEFORE ANYTHING IS ASSERTED. What a narrowing REMOVED is the thing
+	// that has to be visible: a waiver nobody can see reads as a clean pass.
+	t.Logf("WAIVED (%d group-subject holding(s), each in a sentence that corrects the claim):\n%s",
+		waived, strings.Join(waivedRows, "\n"))
+	t.Logf("UNATTRIBUTED (%d holding(s) that name no holder; SILENT here and RED in a string "+
+		"literal -- see this gate's header):\n%s",
+		len(unattributedRows), strings.Join(unattributedRows, "\n"))
 	if scanned < 20 {
 		t.Fatalf("CONTROL FAILED: this gate scanned %d production file(s) under %s, which is not "+
 			"this module", scanned, root)
@@ -3152,9 +3638,27 @@ func TestTheRemovalRuleIsDocumentedAsAReceiverPropertyAndNeverAsAGroupOne(t *tes
 			"the matcher stopped finding the prose rather than that the prose is right",
 			blocks, literals)
 	}
+	// ── AND THE SAME CONTROL AFTER THE CARVE-OUT, WHICH IS THE ONE THAT WAS MISSING ─────────
+	//
+	// `blocks` counts the subject BEFORE the waiver removes anything from it, so it stayed at 11
+	// while the arm's live subject went to zero. These two count what the arm actually JUDGED.
+	if held < 20 {
+		t.Fatalf("CONTROL FAILED: this arm judged %d holding(s) after waiving %d. The subject is "+
+			"%d block(s) and they carry more prose than that between them, so a clean result here "+
+			"would mean the waiver ate the subject rather than that the prose is right",
+			held, waived, blocks)
+	}
+	if waived == 0 {
+		t.Fatalf("CONTROL FAILED: not one group-subject holding was waived anywhere in %d block(s). "+
+			"This corpus DOES quote the old claim in order to correct it -- at least at "+
+			"[ErrRemovalWithoutRotation] and at [refuseRemovalOnHeldSecret] -- so a zero here is "+
+			"the classifier having stopped finding group subjects at all, which is this arm going "+
+			"blind in the direction it exists to look", blocks)
+	}
 	t.Logf("CONTROLS HELD: %d production files, %d comment block(s) and %d string literal(s) about "+
-		"this rule; the classifier reads the deleted sentence as the GROUP's and the corrected one "+
-		"as the receiver's", scanned, blocks, literals)
+		"this rule; %d holding(s) judged and %d waived; the classifier reads the deleted sentence "+
+		"as the GROUP's, the corrected one as the receiver's, and both re-wordings that name a "+
+		"device inside a group claim as the GROUP's", scanned, blocks, literals, held, waived)
 	if 0 < len(hits) {
 		t.Fatalf("the removal rule is documented as a GROUP property and it cannot deliver one: "+
 			"its subject is ONE RECEIVER's own history, [Device.Join] files one row, and if every "+
