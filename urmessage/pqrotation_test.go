@@ -432,8 +432,8 @@ func (self *rotWorld) advanceWithoutRotating(committer *rotMember,
 // ALREADY HOLDS.
 //
 // WHY IT HAS TO BE A THIRD ARM. [rotWorld.advanceWithoutRotating] writes no wrap at all, so the
-// pre-apply refusal fences it on the absence of a candidate and the receiver never reaches the
-// resolution's first arm; [rotWorld.rotate] goes through [Group.stageEpochRotationLocked], whose
+// receiver has no candidate and never reaches the resolution's first arm;
+// [rotWorld.rotate] goes through [Group.stageEpochRotationLocked], whose
 // FIRST statement is the draw, so it cannot be made to deliver a stale value. Between them sits
 // the commit that defeats both -- FANNED, so a candidate exists, and UNROTATED, so that candidate
 // is the value the removed member also holds -- and it is the only way to reach
@@ -482,6 +482,19 @@ func (self *rotWorld) fanOutOnTheHeldSecret(committer *rotMember, removing []uin
 			self.t.Fatalf("%s's wrap for leaf %d: %v", committer.name, target.leaf, err)
 		}
 		one.wraps = append(one.wraps, self.number(record))
+		if how.decoy == nil {
+			continue
+		}
+		// THE EXTRA ROW, BESIDE THE FAN-OUT'S OWN AND SEALED HERE RATHER THAN BY THE CALLER. A
+		// GroupSession seals at the epoch it was constructed over, and this function ADVANCES the
+		// committer before it returns -- so a row a caller sealed afterwards would carry epoch n+1
+		// in its header and every receiver would refuse it as a record from an epoch it is not in,
+		// which is a different failure from the one any case using this is about.
+		decoy, err := group.sealEpochWrapLocked(pending.Epoch, target, how.decoy)
+		if err != nil {
+			self.t.Fatalf("%s's decoy for leaf %d: %v", committer.name, target.leaf, err)
+		}
+		one.decoys = append(one.decoys, self.number(decoy))
 	}
 
 	// THE DIGEST IS OVER THE HELD SECRET, which is what makes this the unrotated shape: the epoch
@@ -545,7 +558,7 @@ type unrotatedFanOut struct {
 	// for, so replaying pq_secret[n-1] delivers a different octet string to the same adversary.
 	opensOn []byte
 	// payload replaces the pq_secret the wraps carry while the DIGEST still names `opensOn`. It
-	// is the residual: the candidate is fresh, so the pre-apply refusal lets the commit past,
+	// is the shape no check that reads the CANDIDATES could ever have refused: they are fresh,
 	// and the digest then says the epoch was opened on a held value after all.
 	payload []byte
 	// noDigest seals the commit with NO server attachment, which is what
@@ -553,6 +566,12 @@ type unrotatedFanOut struct {
 	// of. It is the shape that reached the resolution's no-digest arm through a walk, on the
 	// first try, while a comment in pqdarkgate_test.go said no page could.
 	noDigest bool
+	// decoy adds ONE EXTRA wrap row per target, beside the fan-out's own and carrying these
+	// octets instead of `payload`. It exists to put a candidate the removal rule does NOT
+	// recognise beside candidates it does, which is the shape the deleted pre-apply clause could
+	// not refuse: "every candidate carries a held value" is defeated by one fresh row, while the
+	// digest comparison at the resolution does not have that shape and refuses either page.
+	decoy []byte
 }
 
 // fanOutOnAFreshSecret is the residual arm: fresh octets in the wraps, the held secret in the
@@ -914,15 +933,22 @@ func TestTheThreeWaysADeviceWrapFailsAreThreeSentinelsAndThreeCounters(t *testin
 	}
 }
 
-// AN ORPHAN THAT LOSES TO A LATER CANDIDATE IS STILL COUNTED, WHICH IS THE READING
-// [Stats.WrapOrphaned]'s OWN DOC CALLS HEALTHY AND WHICH USED TO READ ZERO.
+// AN ORPHAN IS COUNTED ON EVERY ARM OF THE RESOLUTION AND IN BOTH RACE ORDERINGS, WHICH IS THE
+// READING [Stats.WrapOrphaned]'s OWN DOC CALLS HEALTHY AND WHICH USED TO READ ZERO.
 //
 // THE DEFECT. `orphans` was accumulated in the candidate loop and added to the counter only on the
 // arm reached when NO candidate won. So a wrap that OPENED and lost the digest -- to a later
 // candidate, to the held secret, or to a removal refusal -- moved nothing, and the one state the
 // counter's own documentation describes as the ordinary healthy one ("two committers raced, this
-// device opened both wraps and used the winner's") was the one state it could never report. The
-// increment is at the site where the orphan is FOUND now, so every arm counts it.
+// device opened both wraps and used the winner's") was the one state it could never report.
+//
+// AND THE FIRST REPAIR WAS THE DEFECT'S OWN SHAPE ONE LEVEL DOWN, WHICH IS WHY (c) AND (d) ARE
+// HERE. Moving the increment out of the refusal fixed the two arms REACHED THROUGH THE CANDIDATE
+// LOOP and left the two that return BEFORE it reading zero -- the digest-less commit (which is
+// every group on the deployed alpha) and the commit whose digest names another epoch. "Every arm"
+// was asserted for two arms of four. The increment is in a DEFER now, which is what makes "every
+// arm" true by construction rather than by four sites agreeing, and (c) drives the digest-less one
+// through a page while (d) drives the epoch-mismatch one directly.
 //
 // THE CASE. A loser's fan-out reaches bob FIRST -- ruling 37 puts wraps on the wire before the
 // commit, so the loser's rows carry the lower record ids -- and the winner's own wrap for bob is
@@ -934,7 +960,7 @@ func TestTheThreeWaysADeviceWrapFailsAreThreeSentinelsAndThreeCounters(t *testin
 // what the counter is reporting is two wraps that really did open and one of them really did lose,
 // rather than a group that failed in some other way. Without WrapOpened == 2 a decoy that never
 // opened would produce the same zero this case exists to refuse.
-func TestAnOrphanThatLosesToALaterCandidateIsStillCounted(t *testing.T) {
+func TestAnOrphanIsCountedOnEveryArmOfTheResolutionAndInBothRaceOrderings(t *testing.T) {
 	world := newRotWorld(t, "alice", "bob")
 	alice, bob := world.member("alice"), world.member("bob")
 
@@ -1032,6 +1058,120 @@ func TestAnOrphanThatLosesToALaterCandidateIsStillCounted(t *testing.T) {
 			"one, want 1 in both. Which of two racing committers wrote its fan-out first is "+
 			"arbitrary, so a counter that only sees the loser when it is numbered BEFORE the winner "+
 			"reads zero on half the races", secondStats.WrapOrphaned, stats.WrapOrphaned)
+	}
+
+	// ── (c) THE ARM THAT RETURNS BEFORE THE CANDIDATE LOOP: THE DIGEST-LESS COMMIT ──────────
+	//
+	// WHY THIS ARM AND NOT ANOTHER. Every group on the deployed alpha is on it -- a kind 0x0001
+	// commit inside Spec B section 5.4's open acceptance window carries no digest, so the epoch it
+	// opens runs on the secret the group already has and the resolution answers it at the TOP of
+	// the function, before any candidate is looked at. A wrap that opened for that epoch and
+	// carries something else is an orphan by [Stats.WrapOrphaned]'s own definition -- "wraps that
+	// opened and were not the epoch's own secret" -- and it read 0, because the increment sat below
+	// the loop this arm never reaches.
+	//
+	// THE CONTROLS ARE THE CLAUSES AROUND THE NUMBER: the commit really is digest-less, the walk
+	// really is followed with nil, bob really did open the row (WrapOpened), and bob really did
+	// follow onto the HELD secret rather than onto the row's own octets -- so the number below is
+	// about a wrap that opened and lost, and not about a page that failed some other way.
+	third := newRotWorld(t, "alice", "bob")
+	thirdAlice, thirdBob := third.member("alice"), third.member("bob")
+	thirdHeld := append([]byte(nil), thirdBob.group.pqSecretLocked()...)
+	stray := make([]byte, messagegroup.PqSecretBytes)
+	for at := range stray {
+		stray[at] = 0xC3
+	}
+	thirdPublished := third.fanOutOnTheHeldSecret(thirdAlice, nil, func() ([]byte, []byte, []byte, error) {
+		return thirdAlice.handle.Commit(nil)
+	}, unrotatedFanOut{noDigest: true, payload: stray})
+	if digest, err := epochDigestOf(&thirdPublished.commit.record.Header); err != nil || digest != nil {
+		t.Fatalf("CONTROL FAILED: this commit carries a digest (%v, %v), so it is not the arm this "+
+			"clause is named for", digest, err)
+	}
+	if bytes.Equal(stray, thirdHeld) {
+		t.Fatalf("CONTROL FAILED: the stray row carries the held secret, so nothing about it is an orphan")
+	}
+	if err := third.deliver(thirdBob, thirdPublished.page()...); err != nil {
+		t.Fatalf("bob's walk over a digest-less commit with one stray wrap beside it answered %v; "+
+			"that is the compatibility path and every group on the deployed alpha is on it", err)
+	}
+	thirdStats := thirdBob.group.Stats()
+	if thirdStats.WrapOpened != 1 {
+		t.Fatalf("CONTROL FAILED: bob opened %d wrap(s) and this clause needs 1, or the zero below "+
+			"would mean the stray row never opened", thirdStats.WrapOpened)
+	}
+	if !bytes.Equal(thirdBob.group.pqSecretLocked(), thirdHeld) {
+		t.Fatalf("CONTROL FAILED: bob followed the digest-less commit onto something that is not the " +
+			"held secret, so it did not take the arm this clause is about")
+	}
+	if thirdStats.WrapOrphaned != 1 {
+		t.Fatalf("Stats.WrapOrphaned is %d on the DIGEST-LESS arm after a wrap opened and was not "+
+			"the epoch's own secret, want 1. That arm returns before the candidate loop, so a counter "+
+			"added inside the loop's aftermath is 'every arm' asserted for the arms the loop reaches",
+			thirdStats.WrapOrphaned)
+	}
+
+	// ── (d) THE OTHER ARM THAT RETURNS BEFORE THE LOOP: A DIGEST FOR ANOTHER EPOCH ──────────
+	//
+	// IT IS DRIVEN DIRECTLY AND NOT THROUGH A PAGE, and the reason is in the arm's own comment: the
+	// server refuses a commit whose attachment does not open current_epoch + 1, so no page a
+	// receiver is served can carry it and a case that built one would be measuring a record this
+	// system does not produce. The arm exists anyway, because the two epochs are read from two
+	// different places, and a counter that reads zero there is the same defect as (c).
+	fourth := newRotWorld(t, "alice", "bob")
+	fourthAlice, fourthBob := fourth.member("alice"), fourth.member("bob")
+	fourthPublished := fourth.rotate(fourthAlice, nil, func() ([]byte, []byte, []byte, error) {
+		return fourthAlice.handle.Commit(nil)
+	})
+	if err := fourth.deliver(fourthBob, fourthPublished.wraps...); err != nil {
+		t.Fatalf("CONTROL FAILED: bob's walk over the fan-out alone answered %v", err)
+	}
+	if staged := fourthBob.group.wrapsFor[fourthPublished.opens]; len(staged) != 1 {
+		t.Fatalf("CONTROL FAILED: bob staged %d candidate(s) for epoch %d, want 1",
+			len(staged), fourthPublished.opens)
+	}
+	fourthDigest, err := epochDigestOf(&fourthPublished.commit.record.Header)
+	if err != nil || fourthDigest == nil {
+		t.Fatalf("the digest on the rotation commit: %v %v", fourthDigest, err)
+	}
+	before := fourthBob.group.Stats().WrapOrphaned
+	mlsSecret, err := fourthAlice.handle.Export(storageExporterLabel, nil, storageExporterBytes)
+	if err != nil {
+		t.Fatalf("the epoch-%d exporter: %v", fourthPublished.opens, err)
+	}
+	// THE MISMATCH: the digest names the epoch it really opens, and the resolution is asked about
+	// the one ABOVE it. That is the comparison the arm exists for.
+	mismatched, err := fourthBob.group.resolvePqSecretLocked(mlsSecret, fourthPublished.opens+1,
+		fourthDigest, nil)
+	if err == nil {
+		t.Fatalf("CONTROL FAILED: the epoch-mismatch arm answered %d octets instead of refusing, so "+
+			"this clause is not driving it", len(mismatched))
+	}
+	if !errors.Is(err, ErrCommitIngest) {
+		t.Fatalf("CONTROL FAILED: the epoch-mismatch arm answered %v, want ErrCommitIngest", err)
+	}
+	// NOTHING IS STAGED FOR THE EPOCH ASKED ABOUT, which is what makes this measure the arm and not
+	// the loop: the candidates are filed under `opens`, the question is about `opens+1`.
+	if staged := fourthBob.group.wrapsFor[fourthPublished.opens+1]; len(staged) != 0 {
+		t.Fatalf("CONTROL FAILED: bob has %d candidate(s) staged for epoch %d", len(staged),
+			fourthPublished.opens+1)
+	}
+	if got := fourthBob.group.Stats().WrapOrphaned - before; got != 0 {
+		t.Fatalf("Stats.WrapOrphaned moved by %d on an epoch with no candidates at all, want 0; the "+
+			"counter is supposed to be the candidates for the epoch ASKED ABOUT", got)
+	}
+	// AND NOW THE SAME ARM WITH CANDIDATES UNDER THE EPOCH IT IS ASKED ABOUT.
+	fourthBob.group.wrapsFor[fourthPublished.opens+1] = []wrapCandidate{
+		{recordId: 1, secret: append([]byte(nil), stray...)},
+	}
+	if _, err := fourthBob.group.resolvePqSecretLocked(mlsSecret, fourthPublished.opens+1,
+		fourthDigest, nil); !errors.Is(err, ErrCommitIngest) {
+		t.Fatalf("the epoch-mismatch arm answered %v, want ErrCommitIngest", err)
+	}
+	if got := fourthBob.group.Stats().WrapOrphaned - before; got != 1 {
+		t.Fatalf("Stats.WrapOrphaned moved by %d on the epoch-mismatch arm with one staged "+
+			"candidate, want 1. This arm returns before the candidate loop too, and a wrap that "+
+			"opened for an epoch nothing used is exactly what this counter names", got)
 	}
 }
 

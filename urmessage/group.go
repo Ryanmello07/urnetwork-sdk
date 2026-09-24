@@ -432,7 +432,7 @@ type Stats struct {
 	// as zero -- and which of two racing committers wrote its fan-out first is arbitrary, so half
 	// the race orderings reported nothing at all. Every candidate is judged before any is
 	// answered now, and both orderings are driven by
-	// TestAnOrphanThatLosesToALaterCandidateIsStillCounted.
+	// TestAnOrphanIsCountedOnEveryArmOfTheResolutionAndInBothRaceOrderings.
 	WrapOrphaned uint64
 
 	// Records that OPENED and became a GAP rather than a message: the two values of [GapReason]
@@ -3981,14 +3981,16 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 		self.stats.CommitRefused += 1
 		return err
 	}
-	// (3a) AND THE REMOVAL RULE, STILL BEFORE ApplyCommit — RULING 41. A commit that removes a
-	// leaf and that this device could only follow on a pq_secret it ALREADY HOLDS is an INVALID
-	// commit, and an invalid commit is refused the way an unauthorized one is: counted, not
-	// applied, and the group stays at the epoch it is at. Here is the last moment that is
-	// possible -- after the apply the handle has moved -- so a rule enforced only at (4a) would
-	// hand any client on an older build a way to brick every up-to-date member by removing
-	// somebody. [Group.refuseUnrotatedRemovalLocked] carries the two outcomes ruling 41
-	// separates, what evidence is available this early, and the residual it does not reach.
+	// (3a) AND THE REMOVAL RULE ON WHAT THE RECORD ITSELF SAYS, STILL BEFORE ApplyCommit — RULING
+	// 41. A commit that removes a leaf and carries NO epoch digest could only ever be followed on
+	// a pq_secret this device already holds -- there is no authenticator for anything it delivers
+	// -- which makes it an INVALID commit, and an invalid commit is refused the way an
+	// unauthorized one is: counted, not applied, and the group stays at the epoch it is at. That
+	// is the shape a client on an OLDER BUILD emits, and refusing it here is what stops such a
+	// client bricking every up-to-date member by removing somebody. Every removal that DOES carry
+	// a digest is let past to (4b), where the digest can be asked --
+	// [Group.refuseUnrotatedRemovalLocked] carries why a set of staged wrap candidates is not
+	// evidence about a commit, and what moving that decision one epoch later costs.
 	if err := self.refuseUnrotatedRemovalLocked(commitDigest, decision.RemovedLeaves); err != nil {
 		self.stats.CommitRefused += 1
 		return self.haltLocked(err)
@@ -4020,9 +4022,9 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 	// (4b) THE ONE REFUSAL THAT IS NOT A DARK STATE, WHICH IS RULING 41 REACHING AS FAR AS IT CAN
 	// FROM HERE. An unrotated removal is an INVALID commit, and the answer to an invalid commit is
 	// to not follow it -- not to advance into a permanent brick on a commit just judged invalid.
-	// (3a) takes this decision before the apply on the EVIDENCE available there; what reaches here
-	// is the residual [Group.refuseUnrotatedRemovalLocked] names -- a fan-out this device could not
-	// judge before the apply, or no fan-out at all -- and the most this point can still do is the
+	// (3a) takes this decision before the apply for the one shape the RECORD itself settles, a
+	// removal carrying no digest at all; everything else reaches here, because judging it needs the
+	// commit's own digest and therefore mls_secret[n+1] -- and the most this point can still do is the
 	// rest of ruling 41's outcome: the epoch field does not move, no pq_secret is filed for it, the
 	// session is not advanced and [Group.wrapDark] is NOT set. [Group.haltLocked] is what runs
 	// instead, and it is the same call (3a) makes, so the two refusal sites produce ONE state and

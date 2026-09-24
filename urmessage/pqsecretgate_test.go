@@ -202,9 +202,6 @@ var pqSecretProducerSites = map[string]string{
 		"witness that the window does not prune. It is not the current epoch's row, and it is not " +
 		"the live table alone either: the member a commit removes keeps every row it ever SAW, and " +
 		"this device's window throws rows away. See [Group.pqSecretWitness].",
-	"refuseUnrotatedRemovalLocked|candidate.secret": "one staged wrap payload, read BEFORE ApplyCommit by ruling 41's refusal -- which is the " +
-		"only place in this package a candidate is read while the group can still stay at the " +
-		"epoch it is at.",
 	"resolvePqSecretLocked|candidate.secret": "one opened wrap's payload, a candidate for this epoch.",
 	"resolvePqSecretLocked|result secret": "the resolution's ONE exit taking whichever arm's secret is being answered. Every arm that " +
 		"can carry a pq_secret hands it here, which is what the removal rule is attached to. It " +
@@ -736,12 +733,6 @@ var pqSecretSinks = map[string]pqSecretSink{
 			"input leaves this function. A version that answered the matching secret would land " +
 			"here carrying it and would have to be weighed.",
 	},
-	"refuseUnrotatedRemovalLocked|call self.pqSecretHeldAtLocked": {
-		carries: []string{"candidate.secret"},
-		why: "each staged candidate going to the removal rule's comparison, pre-apply. What comes " +
-			"back is an epoch and a bool; the refusal built from it names a leaf count, an epoch " +
-			"and a wrap count and never an octet of the candidate.",
-	},
 	"resolvePqSecretLocked|call answerSecret": {
 		carries: []string{"candidate.secret", "held"},
 		why: "EVERY ARM'S SECRET GOING TO THE ONE EXIT. This is the entry that makes the exit the " +
@@ -1001,9 +992,6 @@ var pqSecretAccumulatorSites = map[string]string{
 		"keeps nothing and it derives nothing; its whole body is a ConstantTimeCompare of the " +
 		"candidate against rows of a table this census already covers, and what it answers is an " +
 		"epoch number and a bool. Its header carries why the subject is the whole table.",
-	"refuseUnrotatedRemovalLocked|accumulate self.pqSecretHeldAtLocked": "the same comparison on the PRE-APPLY side, over the staged wrap candidates. Ruling 41 " +
-		"puts the decision here so the receiver can stay at epoch n, and the candidates it reads " +
-		"are [Group.wrapsFor]'s, which this census already covers.",
 	"restoreOne|accumulate self.hold":                        "the same, for a restored group.",
 	"sealEpochWrapLocked|accumulate self.session.SealRecord": "the session's sealer, taking the wrap body that is already a ciphertext of the secret.",
 	"writeRecord|accumulate temp.Write": "THE DISK. What happens to those octets after this call is the filesystem's and not a " +

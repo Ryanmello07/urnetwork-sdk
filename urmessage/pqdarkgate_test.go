@@ -37,7 +37,7 @@
 //     ABSENCE of a wrap candidate, and an absence is what an honest rotated removal looks like to
 //     the member whose wrap was omitted -- so both of the cases the ruling calls valid-and-dark
 //     landed in refused-and-halted under a sentence that was false about them.
-//     TestAnHonestRotatedRemovalWithTheWrapOmittedGoesDarkAndIsNotCalledUnrotated.
+//     TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideTheVictimsWrap.
 //  3. REFUSED-AND-HALTED WAS ONE WALK DEEP. The sentinel was lost on the first retry, the record
 //     was abandoned on the third, the cursor moved past the commit and every later walk answered
 //     nil over a disk reading healthy. [Group.halted] is sticky and persisted now, and
@@ -48,6 +48,24 @@
 // outside its subject by construction and passed. Its subject is now held against an independent
 // count of every return statement, the signature's results are asserted UNNAMED, and the floor is
 // a written disposition of the arms rather than the number 3.
+//
+// ── AND WHAT THE SECOND 2026-09-24 PASS FOUND: TWO REPAIRS THAT WERE SCOPED TO ONE PAGE ──────
+//
+//  4. "AN ABSENCE IS LET PAST" WAS SPELLED `len(candidates) == 0`, so it was let past only on a
+//     page with nothing else on it. One extra wrap record -- addressed to the victim's own handle,
+//     sealed to the victim's own leaf key, carrying pq_secret[n], all three of which any member can
+//     produce -- put the honest committer back under the removal sentinel and HALTED the receiver
+//     for ever, on a VALID commit. So a permanent halt rested on what a bystander wrote. The clause
+//     is gone rather than narrowed and the argument is in [Group.refuseUnrotatedRemovalLocked]: a
+//     set of staged candidates is not evidence about a commit. Reproduced in both spellings by
+//     TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideTheVictimsWrap.
+//  5. "EVERY ARM COUNTS THE ORPHAN" WAS TRUE OF THE ARMS THE CANDIDATE LOOP REACHES. The two that
+//     return above it -- the digest-less commit, which is every group on the deployed alpha, and
+//     the epoch-mismatch arm -- still read zero, and [Stats.WrapUnreadable] had the same defect in
+//     a third dress: it sat on the arm that reports it, which the orphan arm returns ahead of. Both
+//     are in a deferred block now, and TestEveryCounterTheResolutionMovesIsMovedWhereItsSubjectIsFound
+//     is the gate for the RULE -- records counted where they are FOUND, epochs on the arm that
+//     decides them, held both ways.
 package urmessage
 
 import (
@@ -382,10 +400,12 @@ func TestTheWrapDarkPartIsOptionalAndRefusesWhatThisBuildDidNotWrite(t *testing.
 // nothing.
 //
 // AND IT IS REFUSED AT THE RESOLUTION AND NOT BEFORE THE APPLY, WHICH THIS CASE MEASURES RATHER
-// THAN ARGUES. This shape carries a digest and NO fan-out, and before the apply that is
-// indistinguishable from an honest rotated removal whose wrap was omitted at this victim -- which
-// is ruling 41's OTHER outcome and must go dark rather than be refused (see
-// TestAnHonestRotatedRemovalWithTheWrapOmittedGoesDarkAndIsNotCalledUnrotated). So what the group
+// THAN ARGUES. This shape carries a digest, and every removal that carries one is judged at the
+// resolution -- because nothing available before ApplyCommit is a fact about the COMMIT rather than
+// about what reached this device, and a removal with no fan-out is in any case indistinguishable
+// there from an honest rotated removal whose wrap was omitted at this victim, which is ruling 41's
+// OTHER outcome and must go dark rather than be refused (see
+// TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideTheVictimsWrap). So what the group
 // does not do is FOLLOW it: the epoch does not move, no secret is filed for the epoch it opens,
 // the halt is persisted, and Send and Commit answer it by name. What HAS moved is the MLS handle,
 // and that is asserted as the residual. The shape an older build actually emits carries no digest
@@ -443,7 +463,7 @@ func TestARemovalThatDoesNotRotateIsRefusedAndTheGroupDoesNotFollowIt(t *testing
 	// it needs mls_secret[n+1], so it is judged at the resolution and the MLS handle has moved by
 	// then. That is asserted rather than glossed. What stays pre-apply is the shape an OLDER BUILD
 	// actually emits, which carries no digest at all: see
-	// TestNoPageReachesTheNoDigestArmOfTheResolutionThroughAWalk, where the handle does not move.
+	// TestADigestLessRemovalIsRefusedBeforeTheApplyAndOnlyANonRemovingOneReachesTheNoDigestArm, where the handle does not move.
 	if bob.handle.Epoch() != published.opens {
 		t.Fatalf("bob's MLS handle stands at epoch %d, want %d; if the pre-apply refusal now covers "+
 			"a removal with no fan-out, move this case and say what evidence it uses",
@@ -492,9 +512,9 @@ func TestARemovalThatDoesNotRotateIsRefusedAndTheGroupDoesNotFollowIt(t *testing
 //
 // WHAT IT IS. The committer removes carol and writes one well-formed device wrap per survivor,
 // each sealed to that survivor's own published X-Wing key and each carrying pq_secret[1] -- the
-// value carol holds by construction. Every wrap OPENS. So the pre-apply refusal sees a candidate
-// and the resolution's FIRST arm, the wrap-candidate arm, reproduces the commit's digest and
-// answers that candidate. Until this commit that arm carried no removal guard at all: it returned
+// value carol holds by construction. Every wrap OPENS. So the resolution's FIRST arm, the
+// wrap-candidate arm, reproduces the commit's digest and answers that candidate -- which is where
+// this page is refused. Until this commit that arm carried no removal guard at all: it returned
 // `candidate.secret, nil`, every survivor followed with no error, no dark state and no refusal,
 // and carol's retained secret reproduced their storage_root[2] exactly.
 //
@@ -511,16 +531,27 @@ func TestARemovalThatDoesNotRotateIsRefusedAndTheGroupDoesNotFollowIt(t *testing
 //  2. THE HONEST ROTATED REMOVAL, in the same test, in a second world: it is FOLLOWED. Without it
 //     the rule would be satisfied by a build that refuses every removal, which removes the feature
 //     rather than the member.
-//  3. THE REFUSAL IS PRE-APPLY, asserted by the epoch and by the absence of a dark state, which is
-//     ruling 41: an unrotated removal is an INVALID commit and is refused the way an unauthorized
-//     one is -- the receiver stays at n. It does not advance into a permanent brick on a commit it
-//     has just judged invalid.
+//  3. THE GROUP DOES NOT FOLLOW IT, asserted by the epoch, by the table, by the absence of a dark
+//     state and by Send and Commit refusing by name -- which is ruling 41: an unrotated removal is
+//     an INVALID commit and is refused the way an unauthorized one is. It does not advance into a
+//     permanent brick on a commit it has just judged invalid.
+//
+// AND WHERE THE REFUSAL IS TAKEN MOVED ON 2026-09-24, WHICH IS A WEAKENING IN ONE AXIS AND A
+// STRENGTHENING IN ANOTHER, BOTH ASSERTED HERE. It used to be taken BEFORE ApplyCommit, by a clause
+// that asked whether every candidate staged for the epoch carried a held value. That clause was
+// removed, because the candidate set is not evidence about the commit -- one decoy from a bystander
+// plus one ordinary delivery failure at the victim made it refuse an HONEST removal and halt the
+// receiver for ever (TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideTheVictimsWrap).
+// So this page is now refused at the resolution, against the commit's OWN authenticated digest, and
+// the MLS handle has moved by then: that is asserted as the residual rather than glossed. The
+// STRENGTHENING is the second world at the bottom -- the same unrotated fan-out with a FRESH decoy
+// beside it, which the deleted clause was structurally unable to refuse and which the digest
+// comparison refuses without noticing the difference.
 func TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch(t *testing.T) {
 	world := newRotWorld(t, "alice", "bob", "carol")
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
 
 	retained := append([]byte(nil), carol.group.pqSecretLocked()...)
-	atOne := world.storageRootOf(bob)
 	published := world.fanOutOnTheHeldSecret(alice, []uint32{carol.leaf}, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{carol.leaf})
 	}, unrotatedFanOut{})
@@ -576,8 +607,18 @@ func TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch(t *
 		t.Fatalf("bob went DARK over a commit it refused: %v. Ruling 41 is that the two are "+
 			"different outcomes -- refused-and-halted is not valid-and-dark", bob.group.wrapDark)
 	}
-	if !bytes.Equal(world.storageRootOf(bob), atOne) {
-		t.Fatalf("bob's storage root moved although it did not follow the commit")
+	// WHAT "DID NOT FOLLOW IT" IS ASSERTED ON, AND IT IS NO LONGER THE STORAGE ROOT. That comparison
+	// read this member's own exporter, which is the MLS HANDLE's, so it conflated "bob did not
+	// follow the commit" with "bob's handle did not move" -- one property standing in for two. The
+	// two are now asserted separately and both by name: the post-quantum half is unchanged and no
+	// row was filed for the epoch the commit opens (here), and the handle DID move (below, as the
+	// residual).
+	if !bytes.Equal(bob.group.pqSecretLocked(), retained) {
+		t.Fatalf("bob's pq_secret moved although it did not follow the commit")
+	}
+	if held, isHeld := bob.group.pqSecretAtLocked(published.opens); isHeld {
+		t.Fatalf("bob filed a pq_secret for epoch %d (%d octets) although it refused the commit that "+
+			"opens it", published.opens, len(held))
 	}
 	// ── AND THE HALT IS A STATE AND NOT ONE SENTENCE ────────────────────────────────────────
 	//
@@ -608,11 +649,59 @@ func TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch(t *
 		t.Fatalf("bob's disk names epoch %d and kind %d, want 1 and %d",
 			haltRecords[0].Epoch, haltRecords[0].WrapDarkKind, wrapDarkRemoval)
 	}
-	// THE MLS HANDLE DID NOT MOVE, which is what makes this the PRE-APPLY refusal and a different
-	// observable from the residual case next door.
-	if bob.handle.Epoch() != 1 {
-		t.Fatalf("bob's MLS handle stands at epoch %d, want 1: this page is supposed to be refused "+
-			"before ApplyCommit", bob.handle.Epoch())
+	// THE RESIDUAL, ASSERTED AND NOT GLOSSED: the MLS handle HAS moved, because this refusal is
+	// taken at the resolution and ApplyCommit runs before it. Judging the commit's digest needs
+	// mls_secret[n+1] and there is no exporter over a PROCESSED commit, so there is no earlier
+	// moment at which this page can be judged at all. The group, its session and its persisted
+	// record all stand at 1 and agree with each other; the handle is at n+1 and cannot be moved
+	// back. The shape that IS still refused before the apply is the digest-less removal -- an older
+	// build's -- and TestADigestLessRemovalIsRefusedBeforeTheApplyAndOnlyANonRemovingOneReachesTheNoDigestArm asserts the handle
+	// does not move there.
+	if bob.handle.Epoch() != published.opens {
+		t.Fatalf("bob's MLS handle stands at epoch %d, want %d; if a pre-apply refusal now covers "+
+			"this shape, move this case and say what evidence about the COMMIT it rests on",
+			bob.handle.Epoch(), published.opens)
+	}
+
+	// ── AND THE STRENGTHENING: THE SAME PAGE WITH A FRESH DECOY BESIDE IT IS REFUSED TOO ────
+	//
+	// WHY THIS IS STRICTLY STRONGER THAN THE CLAUSE IT REPLACES. The deleted pre-apply clause
+	// refused a fan-out every one of whose candidates carried a held value; one FRESH candidate
+	// beside them satisfied it and the page went past -- that was the documented residual. The
+	// digest comparison does not have that shape: it asks whether the value the commit's own
+	// authenticated H(epoch_keys) NAMES is one this group has held, so a decoy changes nothing. The
+	// control is inline and fires for its own reason: the decoy is genuinely not a value bob holds.
+	strong := newRotWorld(t, "alice", "bob", "carol")
+	strongAlice, strongBob, strongCarol := strong.member("alice"), strong.member("bob"), strong.member("carol")
+	strongRetained := append([]byte(nil), strongCarol.group.pqSecretLocked()...)
+	fresh := make([]byte, messagegroup.PqSecretBytes)
+	for at := range fresh {
+		fresh[at] = 0x6F
+	}
+	strongPublished := strong.fanOutOnTheHeldSecret(strongAlice, []uint32{strongCarol.leaf},
+		func() ([]byte, []byte, []byte, error) {
+			return strongAlice.handle.CommitRemove([]uint32{strongCarol.leaf})
+		}, unrotatedFanOut{decoy: fresh})
+	if _, alreadyHeld := strongBob.group.pqSecretHeldAtLocked(fresh); alreadyHeld {
+		t.Fatalf("CONTROL FAILED: bob already holds the 'fresh' decoy, so this page is the one above " +
+			"again and the deleted clause would have refused it too")
+	}
+	if len(strongPublished.decoys) != len(strongPublished.targets) {
+		t.Fatalf("CONTROL FAILED: the fixture wrote %d decoy row(s) for %d target(s)",
+			len(strongPublished.decoys), len(strongPublished.targets))
+	}
+	strongRefused := strong.deliver(strongBob, strongPublished.page()...)
+	if !errors.Is(strongRefused, ErrRemovalWithoutRotation) {
+		t.Fatalf("bob's walk over an unrotated removal with ONE FRESH candidate beside its fan-out "+
+			"answered %v, want ErrRemovalWithoutRotation. The clause this replaces asked whether "+
+			"EVERY candidate was held, so one fresh row took the whole page past it", strongRefused)
+	}
+	if strongBob.group.epoch != 1 || strongBob.group.wrapDark != nil || strongBob.group.halted == nil {
+		t.Fatalf("bob stands at epoch %d dark=%v halted=%v, want epoch 1, halted and not dark",
+			strongBob.group.epoch, strongBob.group.wrapDark, strongBob.group.halted)
+	}
+	if !bytes.Equal(strongBob.group.pqSecretLocked(), strongRetained) {
+		t.Fatalf("bob's pq_secret moved although it refused the commit")
 	}
 
 	// ── CONTROL 2: THE HONEST ROTATED REMOVAL IS FOLLOWED ───────────────────────────────────
@@ -958,8 +1047,8 @@ func TestARefusedRemovalHaltsTheGroupForEveryLaterWalkAndAcrossARestart(t *testi
 	_ = carol
 }
 
-// RULING 41's SECOND OUTCOME, REACHABLE FOR A REMOVAL: an HONEST ROTATED REMOVAL whose wrap did not
-// arrive, or did not open, GOES DARK AT n+1 -- and is not called unrotated.
+// AN HONEST ROTATED REMOVAL IS NEVER CALLED UNROTATED, WHATEVER ELSE IS STAGED BESIDE THE VICTIM'S
+// OWN WRAP. That is ruling 41's second outcome, and the name is the class rather than one page.
 //
 // WHY THIS CASE EXISTS. Ruling 41 names two outcomes and requires them separately reachable. For a
 // REMOVAL the second one was not reachable at all: the pre-apply refusal fired on the ABSENCE of a
@@ -969,15 +1058,31 @@ func TestARefusedRemovalHaltsTheGroupForEveryLaterWalkAndAcrossARestart(t *testi
 // group already held -- FALSE of both, because the committer had rotated -- with nothing persisted
 // and ruling 38's three-different-causes property collapsed into one.
 //
-// THE CONTROL IS THE COMMITTER'S OWN HONESTY AND IT IS ASSERTED BEFORE ANYTHING ELSE: the value the
-// epoch was opened on is NOT one this receiver has ever held. Without it a "dark" answer below
-// would be satisfied by a fixture that never rotated, which is the other case entirely.
+// AND THE NAME THIS CASE USED TO CARRY WAS ITS OWN NEXT DEFECT. It was
+// "…WithTheWrapOmittedGoesDark…", scoped to a page with NO OTHER CANDIDATE on it, and the repair it
+// held was scoped the same way: the pre-apply refusal let an absence past only through
+// `len(candidates) == 0`. One unrelated wrap record beside the victim's missing one turned "this
+// device has no wrap" back into "every candidate of the fan-out is held", and the honest committer
+// was called unrotated again -- on a page any current member can write, because a decoy carrying
+// pq_secret[n] needs only the victim's leaf key, which is public in the tree. (c) and (d) below are
+// that page, in both of its spellings, and they are why the clause is gone rather than narrowed:
+// what a WRAP RECORD carries is not evidence about a COMMIT, and a permanent halt may not rest on
+// it. See [Group.refuseUnrotatedRemovalLocked].
+//
+// THE CONTROL IS THE COMMITTER'S OWN HONESTY AND IT IS ASSERTED BEFORE ANYTHING ELSE, in every one
+// of the four worlds: the value the epoch was opened on is NOT one this receiver has ever held.
+// Without it a "dark" answer below would be satisfied by a fixture that never rotated, which is the
+// other case entirely.
 //
 // AND THE SECOND CONTROL IS THE SAME DELIVERY FAILURE ON A COMMIT THAT REMOVES NOBODY, inline, in
 // the same test: it answers the SAME sentinel and persists the SAME kind. That is the property in
 // one line -- what the receiver says is decided by what went wrong with the delivery, not by
 // whether the commit removed somebody -- and it is the comparison that showed the defect.
-func TestAnHonestRotatedRemovalWithTheWrapOmittedGoesDarkAndIsNotCalledUnrotated(t *testing.T) {
+//
+// AND (e) IS THE COMPLEMENT, FIRING FOR ITS OWN REASON: the SAME held-value decoy, beside a wrap
+// that DOES open, is followed with nil and counted as an orphan. So what (c) and (d) measure is the
+// absence at the victim and not the decoy, and a build that simply ignored decoys would fail (e).
+func TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideTheVictimsWrap(t *testing.T) {
 	// ── (a) ITEM 132's OMISSION AT THE VICTIM ───────────────────────────────────────────────
 	world := newRotWorld(t, "alice", "bob", "carol")
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
@@ -1085,9 +1190,202 @@ func TestAnHonestRotatedRemovalWithTheWrapOmittedGoesDarkAndIsNotCalledUnrotated
 		t.Fatalf("bob's disk names kind %d, want %d", bentRecords[0].WrapDarkKind, wrapDarkUnreadable)
 	}
 
-	// ── (c) AND THE WHOLE PAGE, DELIVERED, IS STILL FOLLOWED ────────────────────────────────
+	// ── (c) AND (d): THE SAME TWO DELIVERY FAILURES WITH ONE DECOY BESIDE THEM ──────────────
 	//
-	// Without this the two clauses above would also be satisfied by a build in which no removal is
+	// THIS IS THE REPRODUCED BLOCKER. The decoy is one record: a device wrap addressed to the
+	// victim's own wrap_target_handle for the epoch the removal opens, sealed to the victim's own
+	// published X-Wing key -- which is in the ratchet tree and is public to every member -- carrying
+	// pq_secret[n], which every member holds. It OPENS at the victim. So the moment the victim's own
+	// wrap is missing or unopenable, the set of candidates this device staged is {the decoy}, every
+	// one of them is a value this group has held, and the pre-apply clause that asked exactly that
+	// question refused an HONEST commit and halted the receiver for ever with a sentence that was
+	// false about what happened.
+	//
+	// WHAT IS ASSERTED IS RULING 41's OTHER OUTCOME IN BOTH SPELLINGS: dark at n+1, not halted, with
+	// the sentinel that names what actually went wrong at this device and BOTH record-shaped
+	// counters standing beside it -- so the answer does not rest on which of two sentences was
+	// chosen.
+	decoyWorld := func(name string, toAStranger bool, omit bool) {
+		t.Helper()
+		one := newRotWorld(t, "alice", "bob", "carol")
+		oneAlice, oneBob, oneCarol := one.member("alice"), one.member("bob"), one.member("carol")
+		heldAtOne := append([]byte(nil), oneBob.group.pqSecretLocked()...)
+		bends := []rotBend{{leaf: oneBob.leaf, payload: heldAtOne, decoy: true}}
+		if toAStranger {
+			bends = append([]rotBend{{leaf: oneBob.leaf, toAStranger: true}}, bends...)
+		}
+		onePublished := one.rotate(oneAlice, []uint32{oneCarol.leaf}, func() ([]byte, []byte, []byte, error) {
+			return oneAlice.handle.CommitRemove([]uint32{oneCarol.leaf})
+		}, bends...)
+		// ── THE THREE CONTROLS, BEFORE THE PAGE IS DELIVERED ────────────────────────────────
+		if _, everHeld := oneBob.group.pqSecretHeldAtLocked(onePublished.pqSecret); everHeld {
+			t.Fatalf("%s CONTROL FAILED: this removal opened its epoch on a value bob has held, so "+
+				"it is the UNROTATED shape and a refusal below would be correct", name)
+		}
+		if _, everHeld := oneBob.group.pqSecretHeldAtLocked(heldAtOne); !everHeld {
+			t.Fatalf("%s CONTROL FAILED: the decoy carries a value bob has NEVER held, so it cannot "+
+				"make the every-candidate-is-held clause fire and this world measures nothing", name)
+		}
+		if len(onePublished.decoys) != 1 {
+			t.Fatalf("%s CONTROL FAILED: the fixture built %d decoy row(s), want 1", name, len(onePublished.decoys))
+		}
+		page := append([]*sealed{}, onePublished.decoys...)
+		dropped := false
+		for at, wrap := range onePublished.wraps {
+			if omit && onePublished.targets[at].leaf == oneBob.leaf {
+				dropped = true
+				continue
+			}
+			page = append(page, wrap)
+		}
+		if omit != dropped {
+			t.Fatalf("%s CONTROL FAILED: omit=%v and the victim's row was dropped=%v", name, omit, dropped)
+		}
+		page = append(page, onePublished.commit)
+
+		answered := one.deliver(oneBob, page...)
+		if errors.Is(answered, ErrRemovalWithoutRotation) {
+			t.Fatalf("%s: bob answered the REMOVAL sentinel over a commit whose committer DID "+
+				"rotate: %v. The only thing that changed between this world and the one that is let "+
+				"past is ONE wrap record a bystander can write, so a permanent halt rests on what a "+
+				"third party put on the wire rather than on anything about the commit", name, answered)
+		}
+		if oneBob.group.halted != nil {
+			t.Fatalf("%s: bob is HALTED (%v) on a valid commit; ruling 41's two outcomes are two "+
+				"fields and this is the valid-and-dark one", name, oneBob.group.halted)
+		}
+		if oneBob.group.wrapDark == nil {
+			t.Fatalf("%s: bob has no pq_secret for epoch %d and is not marked dark; the state is "+
+				"permanent and a caller with no sentence for it reads an AEAD failure instead",
+				name, onePublished.opens)
+		}
+		if oneBob.group.epoch != onePublished.opens {
+			t.Fatalf("%s: bob stands at epoch %d, want %d: a VALID commit is followed and the group "+
+				"is dark at n+1", name, oneBob.group.epoch, onePublished.opens)
+		}
+		// BOTH RECORD-SHAPED COUNTERS, so which of the two sentences is answered is not the only
+		// observable this case has. The decoy opened and lost, which is an orphan by
+		// [Stats.WrapOrphaned]'s own definition, whatever else went wrong beside it.
+		stats := oneBob.group.Stats()
+		if stats.WrapOrphaned != 1 {
+			t.Fatalf("%s: Stats.WrapOrphaned is %d after a wrap opened and was not the epoch's own "+
+				"secret, want 1", name, stats.WrapOrphaned)
+		}
+		wantUnreadable := uint64(0)
+		if toAStranger {
+			wantUnreadable = 1
+		}
+		if stats.WrapUnreadable != wantUnreadable {
+			t.Fatalf("%s: Stats.WrapUnreadable is %d, want %d: a wrap at this device's own handle "+
+				"that did not open is counted where it is FOUND and not only on the arm that reports it",
+				name, stats.WrapUnreadable, wantUnreadable)
+		}
+		wantSentinel, wantKind := error(ErrOrphanWrap), wrapDarkOrphan
+		if toAStranger {
+			// THE ORDER OF THE TAIL, AND IT IS A CHOICE THIS CASE MAKES VISIBLE. Two things went
+			// wrong at once: a wrap at bob's OWN handle did not open, and a wrap that did open was
+			// not the epoch's. The first is what deprived bob and the second is a statement about
+			// somebody else's record, so the unreadable sentence is the one answered.
+			wantSentinel, wantKind = ErrWrapUnreadable, wrapDarkUnreadable
+		}
+		if !errors.Is(answered, wantSentinel) {
+			t.Fatalf("%s: bob's walk answered %v, want %v", name, answered, wantSentinel)
+		}
+		if !errors.Is(oneBob.group.wrapDark, wantSentinel) {
+			t.Fatalf("%s: bob's sticky diagnosis is %v, want %v", name, oneBob.group.wrapDark, wantSentinel)
+		}
+		decoyRecords, err := oneBob.dev.store.GroupRecords()
+		if err != nil {
+			t.Fatalf("%s: bob's GroupRecords: %v", name, err)
+		}
+		if len(decoyRecords) != 1 || decoyRecords[0].WrapDarkKind != wantKind ||
+			decoyRecords[0].Epoch != onePublished.opens {
+			t.Fatalf("%s: bob's disk names epoch %d kind %d, want %d and %d", name,
+				decoyRecords[0].Epoch, decoyRecords[0].WrapDarkKind, onePublished.opens, wantKind)
+		}
+		t.Logf("%s: bob epoch=%d halted=%v dark=%v WrapOrphaned=%d WrapUnreadable=%d kind=%d",
+			name, oneBob.group.epoch, oneBob.group.halted != nil, oneBob.group.wrapDark != nil,
+			stats.WrapOrphaned, stats.WrapUnreadable, decoyRecords[0].WrapDarkKind)
+	}
+	decoyWorld("(c) the omission at the victim, with one held-value decoy beside it", false, true)
+	decoyWorld("(d) the wrap sealed to a stranger, with one held-value decoy beside it", true, false)
+
+	// ── (e) THE COMPLEMENT: THE SAME DECOY, BESIDE A WRAP THAT DOES OPEN, IS FOLLOWED ───────
+	//
+	// It fires for its own reason and it is what makes (c) and (d) about the ABSENCE at the victim
+	// rather than about the decoy: one record of exactly the same shape, carrying exactly the same
+	// held value, with the victim's own honest wrap left in the page -- and the walk answers nil.
+	beside := newRotWorld(t, "alice", "bob", "carol")
+	besideAlice, besideBob, besideCarol := beside.member("alice"), beside.member("bob"), beside.member("carol")
+	besideHeld := append([]byte(nil), besideBob.group.pqSecretLocked()...)
+	besidePublished := beside.rotate(besideAlice, []uint32{besideCarol.leaf}, func() ([]byte, []byte, []byte, error) {
+		return besideAlice.handle.CommitRemove([]uint32{besideCarol.leaf})
+	}, rotBend{leaf: besideBob.leaf, payload: besideHeld, decoy: true})
+	if _, everHeld := besideBob.group.pqSecretHeldAtLocked(besideHeld); !everHeld {
+		t.Fatalf("CONTROL FAILED: the decoy in the complement carries a value bob has never held, " +
+			"so it is not the same record (c) and (d) are built on")
+	}
+	if err := beside.deliver(besideBob, besidePublished.page()...); err != nil {
+		t.Fatalf("(e) THE COMPLEMENT FAILED: the same held-value decoy, beside a wrap that DOES "+
+			"open, answered %v. A build that let (c) and (d) past by ignoring decoys would fail "+
+			"here, and without this clause (c) and (d) would not be about the absence at all", err)
+	}
+	if besideBob.group.epoch != besidePublished.opens || besideBob.group.halted != nil ||
+		besideBob.group.wrapDark != nil {
+		t.Fatalf("(e) bob stands at epoch %d halted=%v dark=%v, want epoch %d and neither",
+			besideBob.group.epoch, besideBob.group.halted, besideBob.group.wrapDark, besidePublished.opens)
+	}
+	if got := besideBob.group.Stats().WrapOrphaned; got != 1 {
+		t.Fatalf("(e) Stats.WrapOrphaned is %d after the decoy opened and lost to bob's own wrap, want 1", got)
+	}
+
+	// ── (e2) AND A WRAP THAT DID NOT OPEN, ON A PAGE THAT IS FOLLOWED ───────────────────────
+	//
+	// THE STRONGEST FORM OF "COUNTED WHERE IT IS FOUND", because no arm reports it: bob is handed a
+	// second row at its own wrap_target_handle sealed to a key nobody holds, beside its own honest
+	// wrap. The walk answers nil, bob follows onto the epoch's own secret -- and one wrap at this
+	// device's handle did not open, which is exactly what [Stats.WrapUnreadable] names. It read 0
+	// before the counter moved out of the arm that reports it, on every healthy page.
+	unopenable := newRotWorld(t, "alice", "bob", "carol")
+	unopenableAlice, unopenableBob, unopenableCarol :=
+		unopenable.member("alice"), unopenable.member("bob"), unopenable.member("carol")
+	unopenablePublished := unopenable.rotate(unopenableAlice, []uint32{unopenableCarol.leaf},
+		func() ([]byte, []byte, []byte, error) {
+			return unopenableAlice.handle.CommitRemove([]uint32{unopenableCarol.leaf})
+		}, rotBend{leaf: unopenableBob.leaf, toAStranger: true, decoy: true})
+	if len(unopenablePublished.decoys) != 1 {
+		t.Fatalf("(e2) CONTROL FAILED: the fixture built %d decoy row(s), want 1",
+			len(unopenablePublished.decoys))
+	}
+	if err := unopenable.deliver(unopenableBob, unopenablePublished.page()...); err != nil {
+		t.Fatalf("(e2) bob's walk over its own honest wrap plus one unopenable row answered %v; the "+
+			"page carries everything bob needs and is supposed to be followed", err)
+	}
+	unopenableStats := unopenableBob.group.Stats()
+	if unopenableBob.group.epoch != unopenablePublished.opens || unopenableBob.group.wrapDark != nil ||
+		unopenableBob.group.halted != nil {
+		t.Fatalf("(e2) bob stands at epoch %d dark=%v halted=%v, want epoch %d and neither",
+			unopenableBob.group.epoch, unopenableBob.group.wrapDark, unopenableBob.group.halted,
+			unopenablePublished.opens)
+	}
+	if unopenableStats.WrapOpened != 1 {
+		t.Fatalf("(e2) CONTROL FAILED: bob opened %d wrap(s) and this clause needs 1 -- its own -- "+
+			"or the number below would be about a page that failed", unopenableStats.WrapOpened)
+	}
+	if unopenableStats.WrapUnreadable != 1 {
+		t.Fatalf("(e2) Stats.WrapUnreadable is %d on a page that was FOLLOWED, want 1. A wrap at "+
+			"this device's own handle that did not open is a record, and no arm of the resolution "+
+			"reports it when the page succeeds -- so a counter added on the arm that names it reads "+
+			"zero on every healthy page", unopenableStats.WrapUnreadable)
+	}
+	if unopenableStats.WrapOrphaned != 0 {
+		t.Fatalf("(e2) Stats.WrapOrphaned is %d and nothing here opened and lost, want 0",
+			unopenableStats.WrapOrphaned)
+	}
+
+	// ── (f) AND THE WHOLE PAGE, DELIVERED, IS STILL FOLLOWED ────────────────────────────────
+	//
+	// Without this the clauses above would also be satisfied by a build in which no removal is
 	// ever followed at all, which removes the feature rather than the member.
 	clean := newRotWorld(t, "alice", "bob", "carol")
 	cleanAlice, cleanBob, cleanCarol := clean.member("alice"), clean.member("bob"), clean.member("carol")
@@ -1184,15 +1482,17 @@ func TestTheWrapCandidateArmOfTheResolutionIsClosedToARemoval(t *testing.T) {
 	}
 }
 
-// AND THE RESIDUAL, DRIVEN RATHER THAN NAMED: a removal whose fan-out is FRESH and whose digest
-// still names the held secret.
+// AND THE SHAPE NO NARROWING OF THE PRE-APPLY REFUSAL COULD EVER HAVE CAUGHT: a removal whose
+// fan-out is FRESH and whose digest still names the held secret.
 //
 // WHY IT EXISTS AT ALL. The pre-apply refusal cannot evaluate the digest -- judging a candidate
-// needs mls_secret at the epoch the commit OPENS and there is no exporter over a PROCESSED commit
-// -- so it refuses only what is EVIDENCE of an unrotated commit before the apply: a commit with no
-// digest at all, or a fan-out every one of whose candidates carries a value this device has held.
-// A committer that writes a decoy nobody can use satisfies neither, is let past, and the digest
-// then says the epoch was opened on the held secret after all. This case builds exactly that.
+// needs mls_secret at the epoch the commit OPENS and there is no exporter over a PROCESSED commit.
+// This page carries a decoy nobody can use, so the clause that asked whether every candidate
+// carried a HELD value answered no and let it past, and the digest then said the epoch was opened
+// on the held secret after all. That clause is gone now for a different reason -- a candidate set
+// is not evidence about a commit -- and this case is kept because it is the page that shows the
+// clause could not have been repaired by narrowing: there is nothing about the wraps to narrow ON.
+// It is the same refusal the case above takes, reached from the opposite direction.
 //
 // WHAT IS ASSERTED IS RULING 41's OUTCOME AND THE RESIDUAL BESIDE IT. The commit is refused with
 // the same sentinel, the group does NOT go dark and its own epoch does not move -- and the MLS
@@ -1210,8 +1510,8 @@ func TestTheResidualUnrotatedRemovalIsRefusedAfterTheApplyAndStillDoesNotGoDark(
 	published := world.fanOutOnAFreshSecret(alice, []uint32{carol.leaf}, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{carol.leaf})
 	})
-	// THE CONTROL, INLINE: the decoy this case rests on is genuinely NOT a value bob holds, or the
-	// pre-apply refusal would fence the commit and this case would be the previous one again.
+	// THE CONTROL, INLINE: the decoy this case rests on is genuinely NOT a value bob holds, which
+	// is what makes this page the one no narrowing of a candidate-reading check could have caught.
 	if err := world.deliver(bob, published.wraps...); err != nil {
 		t.Fatalf("CONTROL FAILED: bob's walk over the decoy fan-out answered %v", err)
 	}
@@ -1220,7 +1520,7 @@ func TestTheResidualUnrotatedRemovalIsRefusedAfterTheApplyAndStillDoesNotGoDark(
 		t.Fatalf("CONTROL FAILED: bob staged %d candidate(s), want 1", len(staged))
 	}
 	if bytes.Equal(staged[0].secret, retained) {
-		t.Fatalf("CONTROL FAILED: the decoy IS the held secret, so this case is the pre-apply one")
+		t.Fatalf("CONTROL FAILED: the decoy IS the held secret, so this case is the one next door")
 	}
 	if _, alreadyHeld := bob.group.pqSecretHeldAtLocked(staged[0].secret); alreadyHeld {
 		t.Fatalf("CONTROL FAILED: bob already holds the decoy, so the pre-apply refusal fences this " +
@@ -1288,7 +1588,7 @@ func TestTheResidualUnrotatedRemovalIsRefusedAfterTheApplyAndStillDoesNotGoDark(
 // asked only whether one existed, and landed here through an ordinary walk. (3a) asks a different
 // question again -- see [Group.refuseUnrotatedRemovalLocked] -- and the claim is no longer argued: the page
 // that reached this arm is built and delivered by
-// TestNoPageReachesTheNoDigestArmOfTheResolutionThroughAWalk, which measures where the refusal is
+// TestADigestLessRemovalIsRefusedBeforeTheApplyAndOnlyANonRemovingOneReachesTheNoDigestArm, which measures where the refusal is
 // taken instead of asserting where it cannot be. This case stays a direct call because a property
 // whose only driver is a page is one pre-apply repair away from being unmeasured.
 func TestTheNoDigestArmOfTheResolutionIsAlsoClosedToARemoval(t *testing.T) {
@@ -1320,25 +1620,35 @@ func TestTheNoDigestArmOfTheResolutionIsAlsoClosedToARemoval(t *testing.T) {
 	}
 }
 
-// THE COUNTEREXAMPLE TO THE SENTENCE ABOVE, BUILT AND DELIVERED: the page that DID reach the
-// no-digest arm through a walk, and where its refusal is taken now.
+// A DIGEST-LESS REMOVAL IS REFUSED BEFORE THE APPLY, AND THE NO-DIGEST ARM IS REACHED ONLY BY A
+// COMMIT THAT REMOVES NOBODY.
+//
+// THE NAME IS THE SECOND CORRECTION OF ONE CLAIM. This case was called
+// "TestNoPageReachesTheNoDigestArmOfTheResolutionThroughAWalk" after the sentence it was written to
+// refute, and the name was then FALSE in the other direction: the control at the bottom -- a
+// digest-less commit removing nobody, which is every kind 0x0001 commit on the deployed alpha --
+// reaches that arm through a walk on purpose and is FOLLOWED. What is true of every page is the
+// pair: the removing shape never reaches it, the non-removing shape always does, and both halves
+// are driven here.
 //
 // THE SHAPE. A committer removes carol, writes a complete openable fan-out -- so no check on the
 // ABSENCE of a candidate can see it -- and seals its commit with no server attachment at all,
-// which is what [epochDigestOf] answers nil for. Under the old (3a) this walked straight past the
+// which is what [epochDigestOf] answers nil for. Under the first (3a) this walked straight past the
 // pre-apply refusal, applied the commit, and was refused at the resolution: dark at n+1, on a
 // commit the build had just judged invalid, which is the outcome ruling 41 took away.
 //
-// WHAT IS ASSERTED IS WHERE, AND NOT WHETHER. Both builds refuse this page; the difference is the
-// epoch the receiver is standing at afterwards and whether it is dark. So this case asserts the
-// refusal is taken BEFORE ApplyCommit -- bob's own MLS handle has not moved, which the residual
-// case next door shows is a genuinely different observable and not a restatement of the epoch.
+// WHAT IS ASSERTED IS WHERE, AND NOT WHETHER. Every build since ruling 41 refuses this page; the
+// difference is the epoch the receiver is standing at afterwards and whether it is dark. So this
+// case asserts the refusal is taken BEFORE ApplyCommit -- bob's own MLS handle has not moved, which
+// the residual case next door shows is a genuinely different observable and not a restatement of
+// the epoch. Since 2026-09-24 the digest clause is the ONLY thing that can take it there, so this
+// is also the whole of what remains pre-apply.
 //
 // THE CONTROL IS INLINE AND FIRES FOR ITS OWN REASON: the same committer, the same fan-out, the
-// same missing attachment, removing NOBODY -- which is every kind 0x0001 commit on the deployed
-// alpha -- is FOLLOWED. Without it this would also be satisfied by a build that refuses every
-// commit carrying no digest, which would take the whole acceptance window down with it.
-func TestNoPageReachesTheNoDigestArmOfTheResolutionThroughAWalk(t *testing.T) {
+// same missing attachment, removing NOBODY, is FOLLOWED. Without it this would also be satisfied by
+// a build that refuses every commit carrying no digest, which would take the whole acceptance
+// window down with it.
+func TestADigestLessRemovalIsRefusedBeforeTheApplyAndOnlyANonRemovingOneReachesTheNoDigestArm(t *testing.T) {
 	world := newRotWorld(t, "alice", "bob", "carol")
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
 
@@ -1376,14 +1686,14 @@ func TestNoPageReachesTheNoDigestArmOfTheResolutionThroughAWalk(t *testing.T) {
 
 	// ── THE SECOND SHAPE, AND IT IS HERE BECAUSE A MUTANT SURVIVED ──────────────────────────
 	//
-	// Deleting the `digest == nil` arm of the pre-apply refusal left the whole suite GREEN. The
-	// page above does not need it: its wraps carry the held secret, so the candidate clause
-	// refuses that commit anyway and neither the epoch nor the handle can tell the two refusals
-	// apart. The arm is load-bearing for exactly one shape -- a digest-less removal whose fan-out
-	// carries something FRESH -- because a fresh candidate satisfies the candidate clause, and
-	// nothing else available before ApplyCommit can say that a commit with no digest could only
-	// ever be followed on a value this group already holds. That shape is built here, and it is
-	// what kills the mutant.
+	// Deleting the `digest == nil` arm of the pre-apply refusal used to leave the whole suite
+	// GREEN: the page above did not need it, because the candidate clause beside it refused that
+	// commit anyway and neither the epoch nor the handle could tell the two refusals apart. The
+	// clause is gone now, so the page above kills that mutant by itself -- and this second shape is
+	// kept, because it is the one whose ONLY pre-apply evidence has ever been the missing digest. A
+	// fresh fan-out satisfies any check that reads the candidates, so if the removed clause is ever
+	// reintroduced in some narrower dress, this page is what still holds the digest arm to being
+	// load-bearing on its own.
 	fresh := newRotWorld(t, "alice", "bob", "carol")
 	freshAlice, freshBob, freshCarol := fresh.member("alice"), fresh.member("bob"), fresh.member("carol")
 	decoy := make([]byte, messagegroup.PqSecretBytes)
@@ -1436,11 +1746,12 @@ func TestNoPageReachesTheNoDigestArmOfTheResolutionThroughAWalk(t *testing.T) {
 // IT IS DRIVEN DIRECTLY, AND THE REASON IS A MEASUREMENT RATHER THAN A CONVENIENCE. Mutation row
 // M5 -- the digest arm's guard deleted -- was killed by the structural gate below and by NOTHING
 // ELSE, on the build where (3a) fenced every removal with no fan-out before ApplyCommit. That is
-// no longer true: (3a) refuses only EVIDENCE of an unrotated commit, so a removal with no fan-out
-// reaches this arm through a walk and TestARemovalThatDoesNotRotateIsRefusedAndTheGroupDoesNotFollowIt
-// is the page that does it. The direct drive stays anyway, for the reason it was written: a
-// property whose only gate is structural is one refactor away from being unmeasured, and this asks
-// the arm with the values production hands it rather than through a page that might stop reaching it.
+// no longer true: (3a) reads only the commit's own digest, so EVERY removal carrying one reaches
+// this arm or the one beside it through a walk, and
+// TestARemovalThatDoesNotRotateIsRefusedAndTheGroupDoesNotFollowIt is the page that does it. The
+// direct drive stays anyway, for the reason it was written: a property whose only gate is
+// structural is one refactor away from being unmeasured, and this asks the arm with the values
+// production hands it rather than through a page that might stop reaching it.
 //
 // THE COMMITTER IS THE ONE MEMBER THAT CAN ASK. Judging a candidate needs mls_secret at the epoch
 // the commit opens, and only a device that has merged holds it; alice has. The digest is read back
@@ -1876,6 +2187,167 @@ func blockGuardsRemoval(block *ast.BlockStmt) bool {
 		})
 	}
 	return found
+}
+
+// ── 4b. EVERY COUNTER THE RESOLUTION MOVES IS MOVED WHERE ITS SUBJECT IS FOUND ───────────────
+
+// A COUNTER OF RECORDS IS ADDED ON A PATH EVERY RETURN PASSES; A COUNTER OF EPOCHS IS ADDED ON THE
+// ARM THAT DECIDES THE EPOCH. BOTH WAYS, AND FOR EVERY COUNTER THE RESOLUTION CAN MOVE.
+//
+// WHY THIS GATE EXISTS, and it is the same class twice rather than one bug. [Stats.WrapOrphaned]
+// was added inside the arm that REPORTS an orphan, so it read 0 on every arm that answers a secret
+// -- which is every arm a healthy group takes. That was repaired by moving it below the candidate
+// loop, and the repair had the defect's own shape one level down: the two arms that return BEFORE
+// the loop (a digest-less commit, which is every group on the deployed alpha, and a commit whose
+// digest names another epoch) still read 0. [Stats.WrapUnreadable] had it in a third dress: it sat
+// inside the arm that reports an unreadable wrap, which the orphan arm returns ahead of, so a device
+// whose own wrap did not open read 0 for it whenever anything else had opened beside it.
+//
+// SO THE SUBJECT IS NOT A COUNTER, IT IS THE RULE. Every `self.stats.…` assignment the resolution
+// makes is keyed by the counter's name and held against a written disposition BOTH WAYS -- a site
+// with no row is a refusal, a row naming no site is a refusal -- and each row says which of two
+// things that counter counts:
+//
+//   - RECORDS ("wraps that opened and were not the epoch's own secret", "wraps at this device's own
+//     handle that did NOT open"). Its site must be on a path EVERY return passes, which is the
+//     deferred block at the top of the function. An arm added later inherits it.
+//   - EPOCHS ("epochs this device could not take a pq_secret for"). Its site must NOT be there: the
+//     deferred block runs whatever the function answers, so an epoch counter in it would count an
+//     epoch that was resolved. The asymmetry is asserted in both directions so that "move
+//     everything into the defer" fails too.
+//
+// AND THE MECHANISM IS CHECKED AND NOT ONLY THE PLACEMENT. The deferred block has to be a direct
+// statement of the function body -- a defer nested inside an `if` is registered conditionally, which
+// is the every-return property lost in a shape that still reads as a defer -- and it has to be
+// registered BEFORE the first return statement in the function, because a defer below an early
+// return never runs for that return.
+//
+// THE RESIDUAL, NAMED: this gate reads placement, not reachability. A deferred block whose own body
+// wrapped the additions in a condition would satisfy every clause here. What holds that is the
+// behaviour, and it is driven for all four arms of the resolution by
+// TestAnOrphanIsCountedOnEveryArmOfTheResolutionAndInBothRaceOrderings and by (d) of
+// TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideTheVictimsWrap, which is
+// the case where an unreadable wrap and an orphan are both true at once.
+func TestEveryCounterTheResolutionMovesIsMovedWhereItsSubjectIsFound(t *testing.T) {
+	dispositions := map[string]struct {
+		everyExit bool
+		why       string
+	}{
+		"WrapOrphaned": {everyExit: true,
+			why: "RECORDS: wraps that opened and were not the epoch's own secret. Which arm the " +
+				"function answers on does not change how many of them there were"},
+		"WrapUnreadable": {everyExit: true,
+			why: "RECORDS: wraps at this device's own wrap_target_handle that did not open. It is " +
+				"a count of rows and not of epochs, so the arm that reports it is not the arm that " +
+				"decides how many there are"},
+		"WrapMissing": {everyExit: false,
+			why: "EPOCHS: epochs this device could not take a pq_secret for at all. Its subject is " +
+				"the answer and not a row, so its site is the arm that takes that answer"},
+	}
+
+	declaration := parseFuncDecl(t, "pqepoch.go", "resolvePqSecretLocked")
+	body := declaration.Body
+
+	// ── THE DEFERRED BLOCK, FOUND BY SHAPE AND REQUIRED TO BE THE ONLY ONE ──────────────────
+	deferred := []*ast.DeferStmt{}
+	ast.Inspect(body, func(node ast.Node) bool {
+		if statement, isDefer := node.(*ast.DeferStmt); isDefer {
+			deferred = append(deferred, statement)
+		}
+		return true
+	})
+	if len(deferred) != 1 {
+		t.Fatalf("the resolution registers %d deferred call(s) and this gate is written against "+
+			"exactly one: the every-exit counter block. Two would be two orders to reason about and "+
+			"this gate would be measuring one of them", len(deferred))
+	}
+	atTopLevel := false
+	for _, statement := range body.List {
+		if statement == ast.Stmt(deferred[0]) {
+			atTopLevel = true
+		}
+	}
+	if !atTopLevel {
+		t.Fatalf("the resolution's defer is nested inside another statement. A defer inside an `if` " +
+			"or a loop is registered CONDITIONALLY, so the every-return property is gone while the " +
+			"shape still reads as a defer")
+	}
+	literal, isLiteral := deferred[0].Call.Fun.(*ast.FuncLit)
+	if !isLiteral {
+		t.Fatalf("the resolution defers %q rather than a function literal; this gate reads the "+
+			"literal's body to find the counter sites", exprText(deferred[0].Call.Fun))
+	}
+	firstReturn := token.NoPos
+	ast.Inspect(body, func(node ast.Node) bool {
+		if _, isReturn := node.(*ast.ReturnStmt); isReturn && firstReturn == token.NoPos {
+			firstReturn = node.Pos()
+		}
+		return true
+	})
+	if firstReturn == token.NoPos {
+		t.Fatalf("the resolution has no return statement at all, which this gate cannot be right about")
+	}
+	if firstReturn < deferred[0].Pos() {
+		t.Fatalf("the resolution returns before it registers its deferred counter block. A defer " +
+			"below an early return never runs for that return, which is the every-arm property lost " +
+			"in a shape that still reads as a defer")
+	}
+
+	// ── THE SITES ───────────────────────────────────────────────────────────────────────────
+	sites := map[string]int{}
+	inDefer := map[string]int{}
+	ast.Inspect(body, func(node ast.Node) bool {
+		assign, isAssign := node.(*ast.AssignStmt)
+		if !isAssign {
+			return true
+		}
+		for _, target := range assign.Lhs {
+			text := exprText(target)
+			if !strings.HasPrefix(text, "self.stats.") {
+				continue
+			}
+			counter := strings.TrimPrefix(text, "self.stats.")
+			sites[counter] += 1
+			if literal.Body.Pos() <= assign.Pos() && assign.End() <= literal.Body.End() {
+				inDefer[counter] += 1
+			}
+		}
+		return true
+	})
+	if len(sites) == 0 {
+		t.Fatalf("this gate found no counter assignment in the resolution at all, so it is not " +
+			"reading the function it names")
+	}
+	t.Logf("the resolution moves %d counter(s): %v, of which inside the every-exit block: %v",
+		len(sites), sites, inDefer)
+
+	// ── BOTH WAYS ───────────────────────────────────────────────────────────────────────────
+	for counter, count := range sites {
+		entry, dispositioned := dispositions[counter]
+		if !dispositioned {
+			t.Fatalf("the resolution moves Stats.%s at %d site(s) and this gate has no disposition "+
+				"for it. Say whether it counts RECORDS -- in which case it belongs in the deferred "+
+				"block that every return passes -- or EPOCHS, in which case it belongs on the arm "+
+				"that decides the epoch. A counter added to an arm because that arm is the one that "+
+				"reports it is this project's defect three times over", counter, count)
+		}
+		if entry.everyExit && inDefer[counter] != count {
+			t.Fatalf("Stats.%s counts %s and %d of its %d site(s) are OUTSIDE the deferred block, so "+
+				"it reads zero on every arm that returns without passing them", counter, entry.why,
+				count-inDefer[counter], count)
+		}
+		if !entry.everyExit && inDefer[counter] != 0 {
+			t.Fatalf("Stats.%s counts %s and %d of its %d site(s) are INSIDE the deferred block, "+
+				"which runs whatever this function answers -- so an epoch that WAS resolved is "+
+				"counted as one that could not be", counter, entry.why, inDefer[counter], count)
+		}
+	}
+	for counter, entry := range dispositions {
+		if sites[counter] == 0 {
+			t.Fatalf("this gate disposes of Stats.%s (%s) and the resolution never moves it. A row "+
+				"for a counter nobody adds is a row that has stopped measuring", counter, entry.why)
+		}
+	}
 }
 
 // ── 5. THE CENSUS: EVERY DIAGNOSIS THE RESOLUTION CAN RETURN IS PERSISTED AS A DARK KIND ─────

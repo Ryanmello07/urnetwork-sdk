@@ -101,11 +101,19 @@ var (
 	// encapsulation key, at a different epoch, or was altered.
 	ErrWrapUnreadable = errors.New("urmessage: a device wrap addressed to this device did not open, so this device holds no pq_secret for the epoch it was for")
 
-	// A WRAP ADDRESSED TO THIS DEVICE OPENED, FOR AN EPOCH THAT WAS THEN OPENED BY SOMEBODY
-	// ELSE'S COMMIT. Ruling 37 has the fan-out submitted at epoch n, staged and pre-merge, so a
-	// committer writes its wraps and then loses the race for the commit -- which leaves wraps
-	// addressed to an epoch that never opened under their secret. This build PRODUCES that
-	// state by design, which is why the detector ships with the rotation rather than after it.
+	// A WRAP ADDRESSED TO THIS DEVICE OPENED, AND IT IS NOT THE SECRET THE EPOCH WAS OPENED
+	// WITH. Ruling 37 has the fan-out submitted at epoch n, staged and pre-merge, so a committer
+	// writes its wraps and then loses the race for the commit -- which leaves wraps addressed to
+	// an epoch that never opened under their secret. This build PRODUCES that state by design,
+	// which is why the detector ships with the rotation rather than after it.
+	//
+	// AND THE LOST RACE IS ONE OF TWO CAUSES AND NOT THE ONLY ONE, which is a 2026-09-24
+	// correction of this sentence and not an addition to it. A device wrap is addressed to a
+	// wrap_target_handle any member can derive from the group handle key, and sealed to a leaf
+	// key that is public in the ratchet tree -- so ANY member can land an openable row at any
+	// other member's handle for any epoch. That is item 132's decoy, this build cannot tell it
+	// from a losing committer's fan-out, and it no longer claims to: the sentinel names both.
+	// What it means for THIS device is the same either way, and that is the paragraph below.
 	//
 	// IT IS NOBODY'S FAULT AND IT DOES NOT REPAIR ITSELF. Those two used to be one sentence here
 	// and the second half was FALSE, not merely unmeasured. The loser's fan-out is harmless only
@@ -130,7 +138,7 @@ var (
 	// only repair is out of band -- this device is re-Added to the group and receives the current
 	// epoch's secret in its Welcome. [Group.wrapDark] and [GroupRecord.WrapDarkKind] are the
 	// diagnosis kept where a caller can find it, which is all this build can do about it.
-	ErrOrphanWrap = errors.New("urmessage: the device wraps this device opened for this epoch are the fan-out of a commit that lost its race, and none of them carries the secret this epoch was opened with")
+	ErrOrphanWrap = errors.New("urmessage: the device wraps this device opened for this epoch carry no secret this epoch was opened with, so they are a fan-out for an epoch that never opened or records landed at this device's handle by somebody else")
 
 	// A COMMIT THAT REMOVES A LEAF AND DOES NOT ROTATE pq_secret, refused on ingest.
 	//
