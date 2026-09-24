@@ -332,6 +332,16 @@ func (self *Device) restoreOne(store DeviceStore, record *GroupRecord, nonce []b
 		sessionBound:   nonceEpoch,
 		epoch:          record.Epoch,
 		opened:         record.Opened,
+		// AND THE DIAGNOSIS THIS GROUP CAME BACK DARK WITH, which is ruling 38 surviving the
+		// process that took it. Without this the restored group holds a pq_secret no peer agrees
+		// with, a table that reads as healthy -- [pqSecretsShowRotation] compares octets and the
+		// fallback wrote the same octets as the epoch below -- and no sentence anywhere, so Send
+		// and Receive answer the server's generic refusal instead of naming the wrap. nil when
+		// the record is not dark, and nil for a five- or six-part record, which is a disk with
+		// no diagnosis on it rather than a healthy group; [GroupRecord.WrapDarkKind] says what
+		// that costs.
+		wrapDark:      wrapDarkErrorOf(record.WrapDarkKind, record.WrapDarkEpoch),
+		wrapDarkEpoch: record.WrapDarkEpoch,
 		// AND NOT RECONCILED. This is the one place a [Group] is built over an identity that
 		// existed before this process did, so it is the one place a SECOND copy of that
 		// identity is possible. [Group.Send] refuses until [Group.Receive] has walked this

@@ -68,13 +68,20 @@ var (
 	// what the field sees is REASON_REJECTED with nothing readable behind it. The orphan case
 	// -- a fan-out from a committer that LOST its CAS race, addressed to an epoch that never
 	// opened under its secret -- "must be a typed refusal separable from this one, or the two
-	// are indistinguishable in the field". They have three different repairs: the orphan needs
-	// none and resolves at the next commit, the unreadable wrap is a wrong key or an altered
-	// record, and the missing wrap is item 132's omission and is the one an operator must act
-	// on.
+	// are indistinguishable in the field". They name three different CAUSES -- a lost CAS race, a
+	// wrong key or an altered record, and item 132's omission -- and the operator acts on the
+	// three differently.
+	//
+	// WHAT THEY DO NOT NAME IS THREE DIFFERENT COSTS, AND THIS BLOCK USED TO SAY THEY DID.
+	// Reaching ANY of the three means this device followed a commit into an epoch it holds no
+	// pq_secret for, and from that moment the cost is one cost and it is total and permanent:
+	// see [ErrOrphanWrap] for the measurement, which is the same for all three. A caller reads
+	// the sentinel to learn WHO to go to; it must not read it as a severity.
 	//
 	// Each has a counter beside it on [Stats], because a sentinel is only visible to a caller
-	// that is holding the error and cannot answer "is this happening".
+	// that is holding the error and cannot answer "is this happening". The counters are this
+	// PROCESS's; the diagnosis itself is durable, because [GroupRecord] carries the epoch this
+	// device went dark at and which of these three it was.
 
 	// NO WRAP ADDRESSED TO THIS DEVICE ARRIVED for an epoch that was opened with a pq_secret
 	// this device does not hold. It is item 132's omission attack arriving as a diagnosis: a
@@ -100,9 +107,47 @@ var (
 	// addressed to an epoch that never opened under their secret. This build PRODUCES that
 	// state by design, which is why the detector ships with the rotation rather than after it.
 	//
-	// IT IS NOT A FAULT AND IT REPAIRS ITSELF: the winner's own wrap is in the same page, and
-	// this sentinel is reached only when no candidate at all reproduced the epoch's digest.
+	// IT IS NOBODY'S FAULT AND IT DOES NOT REPAIR ITSELF. Those two used to be one sentence here
+	// and the second half was FALSE, not merely unmeasured. The loser's fan-out is harmless only
+	// while the WINNER's wrap is in the same page; this sentinel is reached exactly when it was
+	// not, and by then the epoch is open, this device has followed it on a secret no peer holds,
+	// and there is no later page in which the right wrap can arrive.
+	//
+	// WHY NO LATER PAGE, MEASURED IN connect RATHER THAN ASSERTED, because "it resolves itself"
+	// is the kind of sentence that is true of a design and false of a build. A fetch carries
+	// req_auth MAC'd under read_key[read_epoch], which msgrepo's api/fetch.go check 7 verifies
+	// against the key the committer published for that epoch, BEFORE a single row is read. A
+	// device that holds the wrong pq_secret for the epoch it stands at derives the wrong
+	// read_key for it, so every fetch it makes is REASON_REJECTED. It cannot fall back to the
+	// epoch below either: connect 74abe029 answers read_key and write_key through exactly one
+	// door, [messagegroup.GroupSession.EpochKeys], which answers the SESSION's own epoch
+	// (session.go:446, `newEpochKeys(self.epoch, self.readKey, self.writeKey)`), and the
+	// past-epoch value `pastEpoch` carries is `classKeys` and no read or write key at all. The
+	// control for that query is in it: the past-epoch doors that DO exist are RoleAt and
+	// TrackSenderAt, so the absence is of this key pair and not of past-epoch access.
+	//
+	// SO THE COST IS: dark in both directions, at that epoch, for ever, across restarts, and the
+	// only repair is out of band -- this device is re-Added to the group and receives the current
+	// epoch's secret in its Welcome. [Group.wrapDark] and [GroupRecord.WrapDarkKind] are the
+	// diagnosis kept where a caller can find it, which is all this build can do about it.
 	ErrOrphanWrap = errors.New("urmessage: the device wraps this device opened for this epoch are the fan-out of a commit that lost its race, and none of them carries the secret this epoch was opened with")
+
+	// A COMMIT THAT REMOVES A LEAF AND DOES NOT ROTATE pq_secret, refused on ingest.
+	//
+	// IT IS ITEM 243 ARRIVING INVERTED THROUGH THE ONE ARM THE PROSE CALLS "the whole of the
+	// compatibility path". [Group.resolvePqSecretLocked]'s second arm follows a commit on the
+	// secret this group already holds, decided by the digest -- which is right for every group
+	// built before rotation, and is exactly wrong when the commit REMOVES somebody: the removed
+	// member holds that same secret by construction, so it reproduces the survivors' storage
+	// root at the epoch it was removed at and the removal removed nothing.
+	//
+	// IT IS A RECEIVE-SIDE RULE BECAUSE THE SEND SIDE CANNOT PRODUCE IT. This build's own
+	// removal always rotates -- [Group.stageEpochRotationLocked] draws before it enumerates --
+	// so what this refuses is a commit from some OTHER build, which Spec B section 5.4's open
+	// acceptance window still admits and which is the shape every build before this one emitted.
+	// No production verb writes removeLeaves yet (rolescommit.go), so it is landed ahead of the
+	// verb rather than after it.
+	ErrRemovalWithoutRotation = errors.New("urmessage: a commit that removes a member opened its epoch with the pq_secret this group already held, so the removed member keeps the post-quantum half of that epoch's storage root and has not been removed from a quantum adversary at all")
 
 	// The role model refused a commit, on either arm: MASTER §11's "refused by the committing
 	// client, and rejected by every receiving client on validation". On RECEIPT it is an ingested

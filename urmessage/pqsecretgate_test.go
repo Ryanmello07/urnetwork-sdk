@@ -460,6 +460,22 @@ var pqSecretSinks = map[string]pqSecretSink{
 		why: "THE PERSISTED SCALAR COMING BACK: part two, which on the alpha's disk is the group's " +
 			"whole pq_secret. It carries `parts` because that is the name it has here.",
 	},
+	"groupRecordOf|call decodeWrapDark": {
+		carries: []string{"parts"},
+		why: "part SEVEN going to the wrap_dark decoder. It carries `parts` for the same reason every " +
+			"other site here does -- the walk cannot tell one part from another -- and what the decoder " +
+			"answers is a kind octet and an epoch, neither of which is key material.",
+	},
+	"groupRecordOf|assign record.WrapDarkKind": {
+		carries: []string{"kind"},
+		why: "the restored diagnosis's KIND landing on the record: which of the five ways this device " +
+			"could not follow a commit it was. It is tainted because it came out of part seven and the " +
+			"walk follows the parts, not because a kind octet is a secret.",
+	},
+	"groupRecordOf|assign record.WrapDarkEpoch": {
+		carries: []string{"epoch"},
+		why:     "the epoch that diagnosis was taken at, out of the same part and for the same reason.",
+	},
 	"groupRecordOf|return": {
 		carries: []string{"record"},
 		why: "the whole record, or one of the two arity refusals. NEITHER of those refusals formats a " +

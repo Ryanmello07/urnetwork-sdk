@@ -299,6 +299,18 @@ var wrapSeedSinks = map[string]wrapSeedSink{
 		carries: []string{"parts"},
 		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is part three, the group_handle_key.",
 	},
+	"groupRecordOf|call decodeWrapDark": {
+		carries: []string{"parts"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is part seven going to the wrap_dark decoder.",
+	},
+	"groupRecordOf|assign record.WrapDarkKind": {
+		carries: []string{"kind"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is that decoder's kind octet landing on the record.",
+	},
+	"groupRecordOf|assign record.WrapDarkEpoch": {
+		carries: []string{"epoch"},
+		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is the epoch beside it.",
+	},
 	"groupRecordOf|literal GroupRecord.Epoch": {
 		carries: []string{"parts"},
 		why:     "THE GROUP RECORD'S DECODE, WHICH HOLDS NO SEED, and it is in this census because the net above seeds ANY parameter called `parts` -- the widening that reached the disk. This gate cannot tell one record kind from another and does not claim to: what it holds here is that the six parts of a group record are read into a [GroupRecord] and nowhere else. The value that IS this function's subject is censused by pqsecretgate_test.go, which is the gate for it. Here it is part four, an epoch.",

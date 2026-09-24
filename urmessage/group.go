@@ -399,6 +399,12 @@ type Stats struct {
 	// wrap that carries key material is the thing a member goes permanently dark without, in
 	// BOTH directions, and a caller that can only learn about it by holding an error cannot
 	// answer "is this happening to my users". These are what it reads instead.
+	//
+	// THEY ARE THIS PROCESS'S AND THEY RESET AT A RESTART, which is ordinary for a counter and is
+	// said because the STATE they count does not reset: a group that went dark comes back dark,
+	// off [GroupRecord.WrapDarkKind], with these four at zero. A caller looking for "is this
+	// happening" reads the counters; a caller asking "is this group dark" reads the error
+	// [Group.Send] and [Group.Receive] refuse with.
 
 	// Device wraps addressed to THIS device that opened and were staged for the epoch they
 	// deliver. In an unremarkable group this rises by exactly one per epoch change this device
@@ -417,7 +423,8 @@ type Stats struct {
 	// Device wraps that opened and were not the epoch's own secret: the fan-out of a commit
 	// that lost its CAS race. [ErrOrphanWrap]. A number here with no [Stats.WrapMissing] beside
 	// it is the healthy reading -- two committers raced, this device opened both wraps and used
-	// the winner's.
+	// the winner's. A number here WITH one is not a lesser failure than the others: see
+	// [ErrOrphanWrap] for why the loser-only case is as permanent as a wrap that never came.
 	WrapOrphaned uint64
 
 	// Records that OPENED and became a GAP rather than a message: the two values of [GapReason]
@@ -877,10 +884,35 @@ type Group struct {
 	// It is one of [ErrNoWrapForEpoch], [ErrWrapUnreadable] and [ErrOrphanWrap], with the epoch
 	// named inside it.
 	//
-	// IT IS NOT REPAIRABLE IN THIS PROCESS AND THAT IS WHY IT IS STICKY RATHER THAN A COUNTER
-	// ALONE. The wraps for epoch n+1 were written at epoch n, below this group's cursor and below
-	// item 246's ceiling for a reader that has moved on; there is no later page they arrive in.
+	// IT IS NOT REPAIRABLE AT ALL -- not in this process and not in any later one -- AND THAT IS
+	// WHY IT IS STICKY AND WHY IT IS PERSISTED. This used to say "not repairable in this
+	// process", which reads as though a restart might fix it. A restart does not. Two independent
+	// reasons, either alone sufficient, both measured rather than argued:
+	//
+	//  1. THE WRAP CANNOT BE SERVED AGAIN. A fetch carries req_auth MAC'd under
+	//     read_key[read_epoch] and msgrepo's api/fetch.go check 7 verifies it against the key the
+	//     committer published, before a row is read. This device holds the wrong pq_secret for
+	//     the epoch it stands at, so it derives the wrong read_key and every fetch it makes is
+	//     REASON_REJECTED. It cannot ask at the epoch BELOW either: connect 74abe029 answers
+	//     read_key and write_key through one door, EpochKeys, which answers the session's OWN
+	//     epoch (session.go:446), and a `pastEpoch` carries classKeys and no read or write key.
+	//     The control for that query is inside it -- RoleAt and TrackSenderAt are past-epoch
+	//     doors that DO exist -- so what is missing is this key pair and not past-epoch access.
+	//  2. EVEN HANDED THE WRAP, THERE IS NOWHERE TO PUT IT. The session has already advanced into
+	//     the epoch on the fallback secret, and connect refuses both doors onto that entry:
+	//     InstallPqSecret refuses `epoch == self.epoch` by name (ErrPqSecretEpochIsCurrent) and
+	//     AdvanceEpoch refuses a differing value at an epoch already filed
+	//     (ErrPqSecretEpochConflict). So [Group.ingestWrapLocked]'s `tag.Epoch <= self.epoch`
+	//     guard is not what forecloses recovery; these two are.
+	//
+	// The repair is out of band and it is a re-Add. cp3b's darkgroup_test.go drives (1) against a
+	// real server.
 	wrapDark error
+
+	// wrapDarkEpoch is the epoch [Group.wrapDark] was taken at, kept beside it because the error
+	// string is not a field anything can read a number out of and [GroupRecord] has to carry one.
+	// Meaningless while wrapDark is nil, and the two are written in one place.
+	wrapDarkEpoch uint64
 }
 
 // ── founding and joining ─────────────────────────────────────────────────────────────────────
@@ -3778,7 +3810,23 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 	// (3) THE AUTHORIZATION, before anything is applied: MASTER §11's rules on every commit, then
 	// this device's own hook. A refusal is counted, the staged epoch is erased by the defer above,
 	// and this group stays at the epoch it was at -- the commit is neither applied nor crashed on.
-	if err := self.authorizeCommitLocked(processed); err != nil {
+	//
+	// THE DECISION IS CARRIED OUT OF THIS CALL RATHER THAN REBUILT, because (3a) and (4a) below
+	// both read what the commit REMOVES and a second read off `processed` would be a second
+	// source for one fact about one commit. Both arms of one predicate must not disagree.
+	decision, err := self.authorizeCommitLocked(processed)
+	if err != nil {
+		self.stats.CommitRefused += 1
+		return err
+	}
+	// (3a) AND THE REMOVAL RULE, STILL BEFORE ApplyCommit. A commit that removes a leaf and for
+	// which this device opened no wrap is one this group must not follow, and here is the last
+	// moment refusing it is cheap: after the apply the handle has moved and a refusal makes this
+	// group permanently dark, so a rule enforced only at (4a) would hand any client on an older
+	// build a way to brick every up-to-date member by removing somebody.
+	// [Group.refuseUnfannedRemovalLocked] carries why the absence of a candidate is sound
+	// evidence here and what it deliberately does not catch.
+	if err := self.refuseUnfannedRemovalLocked(decision.RemovedLeaves); err != nil {
 		self.stats.CommitRefused += 1
 		return err
 	}
@@ -3804,7 +3852,7 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 	if err != nil {
 		return fmt.Errorf("%w: the exporter at epoch %d: %w", ErrCommitIngest, newEpoch, err)
 	}
-	pqNext, resolveErr := self.resolvePqSecretLocked(newMlsSecret, newEpoch, commitDigest)
+	pqNext, resolveErr := self.resolvePqSecretLocked(newMlsSecret, newEpoch, commitDigest, decision.RemovedLeaves)
 	zeroizeState(newMlsSecret)
 	if resolveErr != nil {
 		// THE EPOCH STILL MOVES, AND THE GROUP IS MARKED DARK BY NAME. A member with no
@@ -3816,6 +3864,7 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 		pqNext = self.pqSecretLocked()
 		if self.wrapDark == nil {
 			self.wrapDark = resolveErr
+			self.wrapDarkEpoch = newEpoch
 		}
 	}
 	self.filePqSecretLocked(newEpoch, pqNext)
@@ -3871,20 +3920,23 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 //
 // A refusal, from either, is surfaced as [ErrCommitUnauthorized] with the rule or the hook's own
 // cause carried, so a caller can errors.Is both.
-func (self *Group) authorizeCommitLocked(processed *messagegroup.EngineProcessed) error {
+// IT ANSWERS THE DECISION IT TOOK, and the caller reads what the commit removes off THAT value
+// rather than off `processed` a second time. The two would agree today -- one is a clone of the
+// other -- which is exactly why a second read is the kind of thing that stops agreeing later.
+func (self *Group) authorizeCommitLocked(processed *messagegroup.EngineProcessed) (*CommitAuthorization, error) {
 	decision, err := self.commitAuthorizationLocked(processed)
 	if err != nil {
-		return fmt.Errorf("%w: the inputs the authorization check reads: %w", ErrCommitIngest, err)
+		return nil, fmt.Errorf("%w: the inputs the authorization check reads: %w", ErrCommitIngest, err)
 	}
 	if err := authorizeCommit(decision); err != nil {
-		return fmt.Errorf("%w: %w", ErrCommitUnauthorized, err)
+		return nil, fmt.Errorf("%w: %w", ErrCommitUnauthorized, err)
 	}
 	if authorizer := self.device.commitAuthorizer; authorizer != nil {
 		if err := authorizer(decision); err != nil {
-			return fmt.Errorf("%w: %w", ErrCommitUnauthorized, err)
+			return nil, fmt.Errorf("%w: %w", ErrCommitUnauthorized, err)
 		}
 	}
-	return nil
+	return decision, nil
 }
 
 // commitAuthorizationLocked builds the [CommitAuthorization] for one processed commit: the

@@ -1550,8 +1550,20 @@ type messageGroupStats struct {
 	// wrap_opened rises by one per epoch change this device did not commit itself, and a zero
 	// across a commit is the first thing to look at. wrap_missing is item 132's omission measured
 	// at the victim; wrap_unreadable is a wrap at this device's own handle that did not open; and
-	// wrap_orphaned is the fan-out of a committer that LOST its CAS race, which repairs itself --
-	// a number there with no wrap_missing beside it is the healthy reading.
+	// wrap_orphaned is the fan-out of a committer that LOST its CAS race -- a number there with
+	// no wrap_missing beside it is the healthy reading, because the winner's own wrap was in the
+	// same page and was used.
+	//
+	// THE ORPHAN DOES NOT REPAIR ITSELF, and this comment used to say it does. That is true only
+	// of the reading above, where the winner's wrap arrived; the SENTINEL is reached exactly when
+	// it did not, and then this device has followed a commit into an epoch it holds no pq_secret
+	// for and is dark in both directions, permanently, across restarts. urmessage.ErrOrphanWrap
+	// carries the measurement for why no later page can repair it. All three failures cost the
+	// same thing; what the three numbers separate is WHO to go to, not how bad it is.
+	//
+	// AND ALL FOUR ARE THIS PROCESS'S. The STATE does not reset at a restart -- a group that went
+	// dark comes back dark and says so by name -- but these counters do, so a caller that watches
+	// them alone sees a healthy-looking device.
 	WrapOpened     uint64 `json:"wrap_opened"`
 	WrapMissing    uint64 `json:"wrap_missing"`
 	WrapUnreadable uint64 `json:"wrap_unreadable"`

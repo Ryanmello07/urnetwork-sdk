@@ -288,18 +288,23 @@ type GroupRecord struct {
 	// entry written a second time.
 	//
 	// WHY IT IS STILL WRITTEN, which is the whole of what an OLD STORE does. A record written
-	// before rotation has five parts and this field is part two; a record written by this build
-	// has six, and the sixth is the table. The reader takes both arities: on a five-part record it
+	// before rotation has five parts and this field is part two; one written before the
+	// wrap_dark part has six, the sixth being the table; and one written by this build has
+	// seven. The reader takes both arities: on a five-part record it
 	// files this one scalar at the epoch the record names and leaves connect's group-lifetime
 	// premise standing, which answers every past epoch out of that one value -- the behaviour of
 	// every build before this one, exactly. So a device whose disk was written by the deployed
 	// alpha restores, opens its backlog and keeps working, and the day it ingests a rotated
 	// commit the premise is refuted by the octets rather than by a version.
 	//
-	// WHAT IT DOES NOT BUY IS A DOWNGRADE. A build from before this commit meeting a six-part
-	// record refuses THAT GROUP by name (`ErrStateStoreFormat`, "not one this build wrote"),
-	// because its reader tests `len(parts) != 5`. That is loud rather than silent -- it never
-	// mis-reads the table as some other field -- and it is stated here rather than discovered.
+	// WHAT IT DOES NOT BUY IS A DOWNGRADE, AND THE COST GOES UP BY ONE ARITY WITH EVERY PART.
+	// A build from before the table meeting a six- or seven-part record refuses THAT GROUP by
+	// name (`ErrStateStoreFormat`), because its reader tests `len(parts) != 5`; a build from
+	// before the wrap_dark part refuses a seven-part one, because its reader tests
+	// `len(parts) != 5 && != 6`. That is loud rather than silent -- neither ever mis-reads a
+	// later part as some other field -- and it is stated here rather than discovered. The alpha's
+	// disk is FIVE parts, so what a downgrade costs is a group written by a build newer than the
+	// one reading it, which is a rollback and not an upgrade.
 	PqSecret []byte
 
 	// pq_secret PER EPOCH: item 251's ruling 40, and the value a restart has to come back holding
@@ -335,7 +340,61 @@ type GroupRecord struct {
 	// never opened would be refused by the server at its first send, with a REASON the caller
 	// would have to decode; carrying the bit means [Group.Send] refuses it by name instead.
 	Opened bool
+
+	// ── THE DIAGNOSIS A DARK GROUP OWES, ACROSS THE PROCESS THAT TOOK IT ────────────────────
+	//
+	// WHY IT IS ON THE DISK AT ALL. [Group.wrapDark] is ruling 38's whole answer to "an
+	// undiagnosable REASON_REJECTED", and it was a field of a value that dies at exit. A device
+	// that went dark and restarted came back with a persisted pq_secret no peer agrees with, no
+	// diagnosis, and a pq_secret table that reads as HEALTHY -- [pqSecretsShowRotation] compares
+	// octets and the fallback wrote the same octets as the epoch below, so nothing in the table
+	// says anything is wrong. From then on Send and Receive gave the server's generic refusal
+	// with no sentence about the wrap: exactly the state ruling 38 exists to prevent, arriving
+	// through a restart instead of through a fan-out.
+	//
+	// THE OTHER SHAPE WAS TRIED FIRST AND IS WRITTEN DOWN BECAUSE IT IS THE TEMPTING ONE: stop
+	// filing the fallback secret, so the restored session meets
+	// [messagegroup.ErrPqSecretUnknownEpoch] by name instead of an AEAD tag, and carry no new
+	// field. It cannot be built from here. The session has to be advanced into the epoch the
+	// handle is at, [messagegroup.GroupSession.AdvanceEpoch] refuses an empty pq_secret by name,
+	// and not advancing it leaves the session an epoch behind the handle -- which is the state
+	// [Group.ingestCommitLocked] refuses for its own reasons, and which `ReadEpoch: self.epoch`
+	// on every fetch would then be wrong about. So the fallback stays and the diagnosis is made
+	// durable instead.
+	//
+	// WHICH of the three it was, as the octet [WrapDarkKind] spells, or zero for "this group is
+	// not dark". It is the kind and not the sentence: an error string is a thing this build
+	// wrote and the next build would have to keep writing, while the sentinel is a value a
+	// caller compares with [errors.Is].
+	WrapDarkKind uint8
+
+	// The epoch [WrapDarkKind] was taken at. Meaningless when that is zero.
+	WrapDarkEpoch uint64
 }
+
+// The values of [GroupRecord.WrapDarkKind]. Zero is "not dark" and is not a kind, so a record
+// that has never been dark and a record whose kind was lost are the same state and there is no
+// third reading to tell apart.
+//
+// THEY ARE WIRE VALUES ON A DISK THIS BUILD HAS TO KEEP READING, so they are numbered here once
+// and never derived from a slice order or an iota over the sentinel list -- an inserted sentinel
+// would renumber every record already written.
+const (
+	wrapDarkNone       uint8 = 0
+	wrapDarkNoWrap     uint8 = 1
+	wrapDarkUnreadable uint8 = 2
+	wrapDarkOrphan     uint8 = 3
+	wrapDarkRemoval    uint8 = 4
+	// wrapDarkUnfollowable IS THE ONE CATCH-ALL AND IT IS ASSERTED TO HAVE ONE PRODUCER.
+	// [Group.ingestCommitLocked] makes a group dark on ANY error the resolution returns, not
+	// only on the three wrap sentinels, and a kind octet with a silent default would persist
+	// those as HEALTHY -- the exact failure making the diagnosis durable exists to close. So
+	// there is a kind for "this device could not follow the commit and the reason is not one
+	// this build persists by name", and pqdarkgate_test.go's census enumerates every value the
+	// resolution can return and holds each against a written disposition: a NEW refusal landing
+	// here fails that gate rather than quietly becoming this.
+	wrapDarkUnfollowable uint8 = 5
+)
 
 // EpochPqSecret is one row of [GroupRecord.PqSecrets]: an epoch and the post-quantum half its
 // storage root was extracted from.
@@ -1294,8 +1353,60 @@ func (self *DurableStateStore) PutGroupRecord(record *GroupRecord) error {
 	if err != nil {
 		return err
 	}
+	// THE SEVENTH PART, AND IT IS WRITTEN ON EVERY RECORD RATHER THAN ONLY ON A DARK ONE. The
+	// reader tells shapes apart by ARITY, which is the rule the sixth part's paragraph above
+	// states; a part written only when a group is dark would make the arity depend on the
+	// group's STATE, so "six parts" would mean "this build, healthy" and two records of one
+	// group would have two shapes. Nine octets when dark, empty when not.
+	dark, err := encodeWrapDark(record.WrapDarkKind, record.WrapDarkEpoch)
+	if err != nil {
+		return err
+	}
 	return self.writeRecord(self.groupRecordPath(record.GroupId), stateKindGroupRecord,
-		record.GroupId, record.PqSecret, record.GroupHandleKey, epochOctets[:], flags, table)
+		record.GroupId, record.PqSecret, record.GroupHandleKey, epochOctets[:], flags, table, dark)
+}
+
+// encodeWrapDark is [GroupRecord.WrapDarkKind] and [GroupRecord.WrapDarkEpoch] as the one octet
+// string part seven carries: empty for a group that is not dark, or u8(kind) ‖ u64(epoch).
+//
+// THE KIND IS REFUSED RATHER THAN CLAMPED. A value this build does not name is a caller -- or a
+// later build sharing this type -- writing a diagnosis the reader would have to invent a meaning
+// for, and inventing one is how "not dark" gets written over a dark group.
+func encodeWrapDark(kind uint8, epoch uint64) ([]byte, error) {
+	switch kind {
+	case wrapDarkNone:
+		return nil, nil
+	case wrapDarkNoWrap, wrapDarkUnreadable, wrapDarkOrphan, wrapDarkRemoval, wrapDarkUnfollowable:
+	default:
+		return nil, fmt.Errorf("%w: wrap_dark kind %d is not one this build names", ErrStateStoreFormat, kind)
+	}
+	encoded := make([]byte, 0, 1+8)
+	encoded = append(encoded, kind)
+	var epochOctets [8]byte
+	binary.BigEndian.PutUint64(epochOctets[:], epoch)
+	return append(encoded, epochOctets[:]...), nil
+}
+
+// decodeWrapDark reads what [encodeWrapDark] wrote, and refuses anything else.
+//
+// AN EMPTY PART IS "not dark" AND IS THE ONLY SHORT SHAPE ADMITTED. A part of any other length is
+// a record this build did not write, and answering "not dark" for it would be answering the
+// safest-sounding thing about a file that has been altered.
+func decodeWrapDark(part []byte) (uint8, uint64, error) {
+	if len(part) == 0 {
+		return wrapDarkNone, 0, nil
+	}
+	if len(part) != 1+8 {
+		return 0, 0, fmt.Errorf("%w: the wrap_dark part is %d octets and it is either empty or %d",
+			ErrStateStoreFormat, len(part), 1+8)
+	}
+	switch part[0] {
+	case wrapDarkNoWrap, wrapDarkUnreadable, wrapDarkOrphan, wrapDarkRemoval, wrapDarkUnfollowable:
+	default:
+		return 0, 0, fmt.Errorf("%w: the wrap_dark part names kind %d, which is not one this build names",
+			ErrStateStoreFormat, part[0])
+	}
+	return part[0], binary.BigEndian.Uint64(part[1:]), nil
 }
 
 // GroupRecords walks the group directory and answers every record it holds.
@@ -1370,8 +1481,8 @@ func (self *DurableStateStore) GroupRecords() ([]*GroupRecord, error) {
 // reader's arity switch, its two refusals and its field reads are one unit anyway, and splitting
 // them out is what the writer ([DurableStateStore.PutGroupRecord]) already did.
 func groupRecordOf(name string, parts [][]byte) (*GroupRecord, error) {
-	if len(parts) != 5 && len(parts) != 6 {
-		return nil, fmt.Errorf("%w: the group record in %s carries %d parts, want 6 or the 5 a store written before the pq_secret table holds",
+	if len(parts) < 5 || 7 < len(parts) {
+		return nil, fmt.Errorf("%w: the group record in %s carries %d parts, want 7, the 6 a store written before the wrap_dark part holds, or the 5 a store written before the pq_secret table holds",
 			ErrStateStoreFormat, name, len(parts))
 	}
 	if len(parts[3]) != 8 || len(parts[4]) != 1 {
@@ -1384,12 +1495,24 @@ func groupRecordOf(name string, parts [][]byte) (*GroupRecord, error) {
 		Epoch:          binary.BigEndian.Uint64(parts[3]),
 		Opened:         parts[4][0] == 1,
 	}
-	if len(parts) == 6 {
+	if 6 <= len(parts) {
 		table, err := decodePqSecretTable(parts[5])
 		if err != nil {
 			return nil, fmt.Errorf("%w: the group record in %s: %w", ErrStateStoreFormat, name, err)
 		}
 		record.PqSecrets = table
+	}
+	// A SIX-PART RECORD IS NOT DARK AND THAT IS EVIDENCE RATHER THAN A DEFAULT: it was written
+	// by a build in which a dark group could not be persisted as dark at all, so there is no
+	// diagnosis on that disk to recover and none to invent. What such a device loses is named in
+	// [GroupRecord.WrapDarkKind] and it is one restart's worth of groups.
+	if len(parts) == 7 {
+		kind, epoch, err := decodeWrapDark(parts[6])
+		if err != nil {
+			return nil, fmt.Errorf("%w: the group record in %s: %w", ErrStateStoreFormat, name, err)
+		}
+		record.WrapDarkKind = kind
+		record.WrapDarkEpoch = epoch
 	}
 	return record, nil
 }

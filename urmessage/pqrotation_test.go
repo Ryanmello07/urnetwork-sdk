@@ -334,10 +334,18 @@ func (self *rotWorld) rotate(committer *rotMember, removing []uint32,
 // The receiver's compatibility arm is what opens it: the digest is computed over the keys the HELD
 // secret descends from, so [Group.resolvePqSecretLocked] reproduces it from the value every member
 // already has and no wrap is looked for. ExpectedWrapCount is zero because there is no fan-out.
-func (self *rotWorld) advanceWithoutRotating(committer *rotMember) *rotation {
+//
+// IT TAKES THE COMMIT ARM RATHER THAN ALWAYS BUILDING A BARE ONE, because the shape ledger item
+// 243 is about is an old build's REMOVAL -- a CommitRemove whose digest is computed over the held
+// secret -- and a harness that could only build `Commit(nil)` could not produce it. The two
+// callers are the bare epoch change and that removal, and both go through this one body, so what
+// the removal case measures is this build's receive side and not a second fixture.
+func (self *rotWorld) advanceWithoutRotating(committer *rotMember,
+	arm func() ([]byte, []byte, []byte, error)) *rotation {
+
 	self.t.Helper()
 	group := committer.group
-	commit, _, _, err := committer.handle.Commit(nil)
+	commit, _, _, err := arm()
 	if err != nil {
 		self.t.Fatalf("%s's commit: %v", committer.name, err)
 	}
@@ -1087,7 +1095,9 @@ func TestAFivePartRecordRestoredAboveABacklogKeepsItAcrossTheFirstRotation(t *te
 
 	// TWO EPOCH CHANGES THE OLD WAY, so the group's whole history ran on the founding scalar.
 	for at := 0; at < 2; at += 1 {
-		published := world.advanceWithoutRotating(alice)
+		published := world.advanceWithoutRotating(alice, func() ([]byte, []byte, []byte, error) {
+			return alice.handle.Commit(nil)
+		})
 		if err := world.deliver(bob, published.page()...); err != nil {
 			t.Fatalf("bob's walk over a non-rotating epoch change: %v", err)
 		}

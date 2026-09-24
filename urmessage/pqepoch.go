@@ -115,6 +115,7 @@ package urmessage
 import (
 	"bytes"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 
 	"github.com/urnetwork/connect/message"
@@ -268,7 +269,77 @@ func (self *Group) groupRecordLocked(opened bool) *GroupRecord {
 		GroupHandleKey: self.groupHandleKey,
 		Epoch:          self.epoch,
 		Opened:         opened,
+		// AND THE DIAGNOSIS, THROUGH THE SAME DOOR AS EVERYTHING ELSE. [Group.wrapDark] is set
+		// at (4a) of [Group.ingestCommitLocked] and the persist is that function's step (7), so
+		// the record written for the epoch a group went dark at already carries the fact. See
+		// [GroupRecord.WrapDarkKind].
+		WrapDarkKind:  wrapDarkKindOf(self.wrapDark),
+		WrapDarkEpoch: self.wrapDarkEpoch,
 	}
+}
+
+// wrapDarkKindOf is which of the three ways a wrap fails an error is, as [GroupRecord] spells it,
+// or [wrapDarkNone] for nil.
+//
+// IT IS errors.Is AND NOT A SWITCH ON A STORED TAG, so a wrapped error keeps its kind and there is
+// no second field on [Group] to keep in agreement with [Group.wrapDark]. An error that is none of
+// the three is [wrapDarkNone] -- it cannot be persisted as a kind this build does not name -- and
+// that is a state nothing produces today, because the only writer of that field is the resolution
+// and every one of its refusals carries one of these three. wrapDarkCensus in pqdarkgate_test.go
+// is what holds that, so a fourth refusal added to the resolution without a kind here fails rather
+// than being silently persisted as healthy.
+func wrapDarkKindOf(err error) uint8 {
+	switch {
+	case err == nil:
+		return wrapDarkNone
+	case errors.Is(err, ErrNoWrapForEpoch):
+		return wrapDarkNoWrap
+	case errors.Is(err, ErrWrapUnreadable):
+		return wrapDarkUnreadable
+	case errors.Is(err, ErrOrphanWrap):
+		return wrapDarkOrphan
+	case errors.Is(err, ErrRemovalWithoutRotation):
+		return wrapDarkRemoval
+	default:
+		// NOT wrapDarkNone. A non-nil error here is a group that IS dark, and mapping it to
+		// "not dark" would persist the state as healthy -- which is the defect this whole
+		// field exists to close, arriving through its own default arm.
+		return wrapDarkUnfollowable
+	}
+}
+
+// wrapDarkErrorOf rebuilds the diagnosis a restored group carries, from the two things
+// [GroupRecord] persists about it.
+//
+// IT SAYS THAT IT IS A RESTORED DIAGNOSIS, in the sentence, rather than reproducing the original
+// word for word. An error string is a thing one build wrote; what a caller acts on is the
+// sentinel, which is the same value it would have had before the restart, and what an operator
+// needs beyond that is the epoch and the fact that this device has been dark since before this
+// process started.
+func wrapDarkErrorOf(kind uint8, epoch uint64) error {
+	var sentinel error
+	switch kind {
+	case wrapDarkNoWrap:
+		sentinel = ErrNoWrapForEpoch
+	case wrapDarkUnreadable:
+		sentinel = ErrWrapUnreadable
+	case wrapDarkOrphan:
+		sentinel = ErrOrphanWrap
+	case wrapDarkRemoval:
+		sentinel = ErrRemovalWithoutRotation
+	case wrapDarkUnfollowable:
+		// THE CATCH-ALL RESTORES AS THE WIDEST TRUE SENTENCE AND NOT AS A GUESS. Everything that
+		// reaches [wrapDarkUnfollowable] came out of the resolution, and the resolution is
+		// reached only from [Group.ingestCommitLocked]; so the one thing that is certainly true
+		// of it is that this device could not follow a commit into the epoch it opens, which is
+		// what ErrCommitIngest says. The specific refusal is not recoverable and the sentence
+		// says so rather than inventing one.
+		sentinel = ErrCommitIngest
+	default:
+		return nil
+	}
+	return fmt.Errorf("%w: this device went dark at epoch %d in an earlier process and the diagnosis was restored from this group's record; it is not repairable from here, and the repair is to be added to the group again",
+		sentinel, epoch)
 }
 
 // restoredPqSecret is one row of a restored table, in the shape [Device.restoreOne] walks.
@@ -453,14 +524,42 @@ func (self *Group) matchesEpochDigestLocked(mlsSecret []byte, digest *message.Ep
 //     compatibility path and it is decided by the SAME digest comparison, not by a version flag:
 //     if the committer did rotate, this candidate simply fails to reproduce the digest.
 //
+// AND ARM 2 IS CLOSED TO A COMMIT THAT REMOVES A LEAF. That is `removedLeaves`, and it is the one
+// rule here that is not about telling secrets apart. A removal followed on the held secret is item
+// 243's entire subject arriving inverted through the arm this header calls "the whole of the
+// compatibility path": the removed member holds that secret BY CONSTRUCTION, so it reproduces the
+// survivors' storage_root at the epoch it was removed at, every survivor follows along, and
+// nothing anywhere is set. Spec B section 5.4's acceptance window still admits such a commit and
+// it is the shape every build before this one emitted, so it has to be REFUSED rather than merely
+// not produced. [ErrRemovalWithoutRotation].
+//
+// THE REFUSAL COVERS BOTH ARMS THAT CAN ANSWER THE HELD SECRET, which is why it is written twice
+// and not once in front: a kind 0x0001 commit -- no digest at all -- removing a leaf reaches the
+// first arm and never the second, and a single guard at the top would also refuse a removal that
+// DID rotate and whose wrap this device opened, which is the case the whole file exists to serve.
+// The rule is "no removal may be followed on the secret this group already holds", not "no
+// removal may be followed".
+//
 // A MISS IS THREE DIFFERENT SENTENCES AND THAT IS RULING 38's REQUIREMENT. "I opened a wrap and it
 // was for another epoch's fan-out", "a wrap arrived for me and did not open" and "no wrap arrived
-// for me at all" are separable by [errors.Is] here, because in the field they have three different
-// repairs and one of them -- the orphan -- is nobody's fault and resolves itself at the next
-// commit.
+// for me at all" are separable by [errors.Is] here, because in the field they name three different
+// CAUSES and an operator acts on the three differently.
+//
+// WHAT THE THREE DO NOT NAME IS THREE DIFFERENT COSTS, and this header used to say the orphan "is
+// nobody's fault and resolves itself at the next commit". The first half is true and the second is
+// FALSE. Whichever sentence is returned, this device is about to follow a commit into an epoch it
+// holds no pq_secret for, and from that moment every fetch it makes is refused by the server
+// before a row is read -- so the wrap that would have repaired it can never arrive, in this
+// process or in any later one. [ErrOrphanWrap] carries the measurement in connect and in msgrepo;
+// TestADarkGroupIsStillDarkAfterTheNextCleanRotation drives the claim's own counterexample and
+// finds it does not exist. The repair is out of band: this device is re-Added.
 func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
-	digest *message.EpochDigestAttachment) ([]byte, error) {
+	digest *message.EpochDigestAttachment, removedLeaves []uint32) ([]byte, error) {
 
+	// ONE VALUE, READ ONCE. The leaves the commit removes are both the predicate and the number
+	// the refusal names; two parameters, or a bool beside a count, would be two things to keep in
+	// agreement about one commit.
+	removesLeaves := 0 < len(removedLeaves)
 	held, isHeld := self.pqSecretAtLocked(self.epoch)
 	if digest == nil {
 		// A COMMIT WITH NO DIGEST CANNOT BE ASKED THE QUESTION, and that is a kind 0x0001 commit
@@ -470,6 +569,9 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 		// than guessed at: if this group holds no secret at all it is refused by the same sentinel
 		// a missing wrap gets, because the consequence is the same one.
 		if isHeld {
+			if removesLeaves {
+				return nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, "carries no epoch digest at all")
+			}
 			return held, nil
 		}
 		self.stats.WrapMissing += 1
@@ -505,6 +607,14 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 			// THE COMPATIBILITY PATH, and it is reached by measurement rather than by assumption:
 			// this epoch was opened with the secret the group already had, so the committer did
 			// not rotate. Every group on the deployed alpha is here.
+			//
+			// AND IT IS CLOSED TO A REMOVAL, on the SAME measurement rather than on a guess: the
+			// digest has just said, in this epoch's own authenticated H(epoch_keys), that the
+			// epoch runs on the value the member this commit removes also holds.
+			if removesLeaves {
+				return nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves,
+					"opened its epoch with the pq_secret this group already held")
+			}
 			return held, nil
 		}
 	}
@@ -523,6 +633,57 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 	self.stats.WrapMissing += 1
 	return nil, fmt.Errorf("%w: epoch %d was opened with a pq_secret this device does not hold and no wrap addressed to it arrived, so every key of that epoch is unreachable in both directions",
 		ErrNoWrapForEpoch, opensEpoch)
+}
+
+// refuseRemovalOnHeldSecret is the one sentence both of [Group.resolvePqSecretLocked]'s
+// held-secret arms answer a removal with, built in one place so the two cannot drift apart.
+//
+// `how` is what the commit did, in the caller's own words, because the two arms are reached by two
+// different records and an operator reading this needs to know which: a commit with no epoch
+// digest at all is an older client, and a commit whose digest names the held secret is a client
+// that had the attachment and did not rotate under it.
+func refuseRemovalOnHeldSecret(opensEpoch uint64, removedLeaves []uint32, how string) error {
+	return fmt.Errorf("%w: the commit that opens epoch %d removes leaf/leaves %v and %s",
+		ErrRemovalWithoutRotation, opensEpoch, removedLeaves, how)
+}
+
+// refuseUnfannedRemovalLocked refuses a commit that REMOVES a leaf and for which this device holds
+// no wrap candidate at all -- BEFORE ApplyCommit, so the group does not move.
+//
+// WHY IT IS HERE AND NOT ONLY AT THE RESOLUTION, which is the difference between a refusal and a
+// brick. [Group.resolvePqSecretLocked] runs after ApplyCommit, because judging a candidate needs
+// mls_secret[n+1] and there is no exporter over a PROCESSED commit. A refusal THERE leaves the
+// handle at n+1, this group dark at n+1, and dark is permanent ([ErrOrphanWrap]) -- so a removal
+// rule enforced only there would let any client on an older build permanently brick every
+// up-to-date member of its group by removing somebody. Enforced here the group simply does not
+// follow: it stays at the epoch it was at, says why, and a committer that re-commits properly is
+// followed normally.
+//
+// THE EVIDENCE IS AN ABSENCE, AND WHAT MAKES THAT SOUND IS RULING 37 AND ONLY RULING 37. The
+// wraps for epoch n+1 are submitted at epoch n, staged and PRE-MERGE, so they carry lower record
+// ids than the commit and a walk in record-id order has already met them when this runs --
+// [wrapCandidate]'s own header is the same fact from the other side. The day that order changes,
+// this check refuses every removal, which is the safe direction and is loud rather than silent.
+//
+// IT SUBSUMES THE REMOVAL CASE OF ALL THREE DARK STATES, which is more than the rule it replaces
+// would have caught. No candidate is: a committer that did not rotate (no fan-out at all), a
+// committer that rotated and left THIS device out of the fan-out (item 132's omission), and a
+// wrap that arrived and did not open -- all three of which end in a permanently dark group today
+// and end in a refusal here. What it deliberately does NOT catch is a candidate that exists and
+// loses to the held secret at the digest; that is the resolution's own arm and it is kept.
+//
+// A COMMIT THAT REMOVES NOTHING IS UNTOUCHED. Every group on the deployed alpha, every ordinary
+// Add and every policy commit goes past this without a comparison.
+func (self *Group) refuseUnfannedRemovalLocked(removedLeaves []uint32) error {
+	if len(removedLeaves) == 0 {
+		return nil
+	}
+	opensEpoch := self.epoch + 1
+	if 0 < len(self.wrapsFor[opensEpoch]) {
+		return nil
+	}
+	return fmt.Errorf("%w: the commit that would open epoch %d removes %d leaf/leaves and this device opened no device wrap for that epoch (%d wrap(s) addressed to it did not open), so the epoch it opens either was not rotated at all or was rotated without this device in the fan-out; the group has not followed it",
+		ErrRemovalWithoutRotation, opensEpoch, len(removedLeaves), self.wrapsUnreadable[opensEpoch])
 }
 
 // epochDigestOf is the kind 0x0005 body a commit record carries, or nil when it carries the older
@@ -770,6 +931,21 @@ func (self *Group) ingestWrapLocked(walk *pageWalk, recordId uint64, parsed *mes
 	// or can no longer act on: the founding fan-out's own records are the ordinary instance, since
 	// epoch one's secret travels in the Welcome. Counted and dropped rather than opened, so a
 	// re-walk over old rows cannot manufacture candidates for a decision that is already taken.
+	//
+	// AND THIS LINE IS NOT WHAT MAKES A DARK GROUP UNRECOVERABLE, which is worth writing down
+	// because it LOOKS like it is: narrow it to `tag.Epoch <= self.epoch && !dark at that epoch`
+	// and a re-served wrap could be re-judged against the commit's digest, which is still
+	// authenticated and still on the server. TWO OTHER THINGS FORECLOSE IT, either alone
+	// sufficient, both measured rather than argued -- see [Group.wrapDark] for both queries:
+	//
+	//  1. THE WRAP CANNOT BE SERVED AGAIN. A dark group's fetch is MAC'd under the wrong
+	//     read_key and msgrepo's check 7 refuses it before a row is read, and connect exposes no
+	//     read key for any epoch but the session's own, so there is no lower epoch to ask at.
+	//  2. THERE IS NOWHERE TO PUT THE SECRET. InstallPqSecret refuses the session's current
+	//     epoch by name and AdvanceEpoch refuses a differing value at an epoch already filed.
+	//
+	// So narrowing this guard alone would buy a candidate nothing can arrive to fill and nothing
+	// could act on. It is left as it is, and what would have to change first is in connect.
 	if tag.Epoch <= self.epoch {
 		return false
 	}
