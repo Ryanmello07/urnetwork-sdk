@@ -187,27 +187,44 @@ func (self *rotWorld) member(name string) *rotMember {
 }
 
 // rotation is one publication: the wrap rows in the order they go on the wire, then the commit.
+//
+// `wraps` STAYS INDEX-PARALLEL TO `targets` and a decoy never goes in it. A case that omits one
+// member's wrap finds it by `targets[at].leaf`, so a list that sometimes holds an extra row would
+// silently omit the wrong leaf; [rotBend.decoy]'s rows live in `decoys` for that reason alone.
 type rotation struct {
 	wraps    []*sealed
+	decoys   []*sealed
 	commit   *sealed
 	opens    uint64
 	pqSecret []byte
 	targets  []wrapTarget
 }
 
-// rotBend is one leaf's wrap built wrong on purpose: sealed to a key nobody holds, or carrying a
-// secret this epoch was not opened with. Both are states the field produces -- a committer that
-// encapsulated to the wrong leaf, and a committer that lost its CAS race -- and both are built by
-// the production sealer rather than by editing octets, so what each case measures is the OPENER.
+// rotBend is one leaf's wrap built wrong on purpose: sealed to a key nobody holds, carrying a
+// secret this epoch was not opened with, or landed BESIDE the honest one. All three are states the
+// field produces -- a committer that encapsulated to the wrong leaf, a committer that lost its CAS
+// race, and a committer that lost its CAS race while the WINNER's wrap arrived too -- and all are
+// built by the production sealer rather than by editing octets, so what each case measures is the
+// OPENER.
 type rotBend struct {
 	leaf        uint32
 	toAStranger bool
 	payload     []byte
+	// decoy ADDS the bent row instead of replacing the honest one, which is the only way to put
+	// TWO candidates for one epoch in front of one device. It is the reading [Stats.WrapOrphaned]'s
+	// own doc calls healthy -- "two committers raced, this device opened both wraps and used the
+	// winner's" -- and until the counter moved it was the reading that could never show, because
+	// the orphan total was added only on the arm where NO candidate won.
+	decoy bool
 }
 
-// page is the publication as a receiver meets it, wraps first -- ruling 37's order.
+// page is the publication as a receiver meets it, wraps first -- ruling 37's order. The decoys go
+// FIRST, because a loser's fan-out is written before the winner's commit is accepted and a walk in
+// record-id order meets it first; putting them last would test the easy direction.
 func (self *rotation) page() []*sealed {
-	return append(append([]*sealed{}, self.wraps...), self.commit)
+	page := append([]*sealed{}, self.decoys...)
+	page = append(page, self.wraps...)
+	return append(page, self.commit)
 }
 
 // rotate runs [Group.publishCommitLocked]'s (2a) through (4) with no server in between: draw the
@@ -275,6 +292,12 @@ func (self *rotWorld) rotate(committer *rotMember, removing []uint32,
 			replacement, err := group.sealEpochWrapLocked(pending.Epoch, bent, payload)
 			if err != nil {
 				self.t.Fatalf("%s's bent wrap for leaf %d: %v", committer.name, target.leaf, err)
+			}
+			if bend.decoy {
+				// THE LOSER'S ROW, BESIDE THE WINNER'S. The honest record is left alone and this
+				// one is numbered ahead of it by [rotation.page].
+				one.decoys = append(one.decoys, self.number(replacement))
+				continue
 			}
 			record = replacement
 		}
@@ -401,6 +424,148 @@ func (self *rotWorld) advanceWithoutRotating(committer *rotMember,
 		self.t.Fatalf("%s entering epoch %d: %v", committer.name, pending.Epoch, err)
 	}
 	return one
+}
+
+// fanOutOnTheHeldSecret is THE SHAPE NEITHER OF THE TWO ARMS ABOVE CAN BUILD, and it is the one
+// item 251's ruling 41 was taken over: a committer that REMOVES a leaf, writes a COMPLETE,
+// well-formed, openable fan-out to every survivor, and puts in every wrap the pq_secret the group
+// ALREADY HOLDS.
+//
+// WHY IT HAS TO BE A THIRD ARM. [rotWorld.advanceWithoutRotating] writes no wrap at all, so the
+// pre-apply refusal fences it on the absence of a candidate and the receiver never reaches the
+// resolution's first arm; [rotWorld.rotate] goes through [Group.stageEpochRotationLocked], whose
+// FIRST statement is the draw, so it cannot be made to deliver a stale value. Between them sits
+// the commit that defeats both -- FANNED, so a candidate exists, and UNROTATED, so that candidate
+// is the value the removed member also holds -- and it is the only way to reach
+// [Group.resolvePqSecretLocked]'s wrap-candidate arm with a secret the removal was supposed to
+// take away.
+//
+// `how` IS THE ONE KNOB AND IT IS NOT A SECOND FIXTURE: see [unrotatedFanOut]. The zero value is
+// the reproduced blocker, and the two fields are the two other shapes an old or hostile client can
+// put on the wire with a fan-out behind it.
+//
+// EVERY RECORD IS BUILT BY A PRODUCTION SEALER: the targets are [Group.wrapTargetsAtLocked]'s and
+// each wrap is [Group.sealEpochWrapLocked]'s, so what a case built on this measures is the
+// RECEIVER and not a hand-encoded octet string.
+func (self *rotWorld) fanOutOnTheHeldSecret(committer *rotMember, removing []uint32,
+	arm func() ([]byte, []byte, []byte, error), how unrotatedFanOut) *rotation {
+
+	self.t.Helper()
+	group := committer.group
+	commit, _, _, err := arm()
+	if err != nil {
+		self.t.Fatalf("%s's commit: %v", committer.name, err)
+	}
+	pending, err := committer.handle.PendingEpoch()
+	if err != nil {
+		self.t.Fatalf("%s's pending epoch: %v", committer.name, err)
+	}
+	held := append([]byte(nil), group.pqSecretLocked()...)
+	if how.opensOn != nil {
+		held = append([]byte(nil), how.opensOn...)
+	}
+	wrapped := held
+	if how.payload != nil {
+		wrapped = how.payload
+	}
+	targets, err := group.wrapTargetsAtLocked(pending.Epoch, removing)
+	if err != nil {
+		self.t.Fatalf("%s's targets: %v", committer.name, err)
+	}
+	if len(targets) == 0 {
+		self.t.Fatalf("%s's removal addresses no survivor", committer.name)
+	}
+	one := &rotation{opens: pending.Epoch, pqSecret: held, targets: targets}
+	for _, target := range targets {
+		record, err := group.sealEpochWrapLocked(pending.Epoch, target, wrapped)
+		if err != nil {
+			self.t.Fatalf("%s's wrap for leaf %d: %v", committer.name, target.leaf, err)
+		}
+		one.wraps = append(one.wraps, self.number(record))
+	}
+
+	// THE DIGEST IS OVER THE HELD SECRET, which is what makes this the unrotated shape: the epoch
+	// really is opened on the value every member -- including the one being removed -- already has.
+	var attachment *message.ServerAttachment
+	if !how.noDigest {
+		newMlsSecret, err := committer.handle.PendingExport(storageExporterLabel, nil, storageExporterBytes)
+		if err != nil {
+			self.t.Fatalf("%s's staged exporter: %v", committer.name, err)
+		}
+		newRoot := messagegroup.StorageRoot(newMlsSecret, held)
+		writeKey, readKey := message.WriteKey(newRoot), message.ReadKey(newRoot)
+		groupId, err := epochDigestGroupId(group.id)
+		if err != nil {
+			self.t.Fatalf("the group id: %v", err)
+		}
+		contextHash := rotSha256(pending.GroupContext)
+		digest, err := message.NewEpochDigestAttachment(groupId, message.EpochDigestAttachment{
+			Epoch:             pending.Epoch,
+			AlgId:             epochAttachmentAlgId,
+			GroupContextHash:  contextHash[:],
+			ExpectedWrapCount: uint32(len(targets)),
+		}, writeKey, readKey)
+		if err != nil {
+			self.t.Fatalf("the epoch digest: %v", err)
+		}
+		attachment = &message.ServerAttachment{Kind: message.AttachmentEpochDigest, EpochDigest: digest}
+	}
+	record, err := group.session.SealRecord(message.RetentionPermanent, 0, true,
+		encodeHead(time.Now().UnixMilli()), commit, 0, attachment)
+	if err != nil {
+		self.t.Fatalf("%s sealing its commit record: %v", committer.name, err)
+	}
+	one.commit = self.number(record)
+
+	if err := committer.handle.MergePendingCommit(); err != nil {
+		self.t.Fatalf("%s's MergePendingCommit: %v", committer.name, err)
+	}
+	group.filePqSecretLocked(pending.Epoch, held)
+	if err := group.session.AdvanceEpoch(held); err != nil {
+		self.t.Fatalf("%s advancing to epoch %d: %v", committer.name, pending.Epoch, err)
+	}
+	if err := group.crossEpochLadderLocked(pending.Epoch); err != nil {
+		self.t.Fatalf("%s crossing the epoch: %v", committer.name, err)
+	}
+	if err := group.enterEpochLocked(); err != nil {
+		self.t.Fatalf("%s entering epoch %d: %v", committer.name, pending.Epoch, err)
+	}
+	return one
+}
+
+// unrotatedFanOut is how one hand-rolled adversarial committer differs from the honest one, in the
+// two ways that change WHICH refusal the receiver takes. The zero value is the reproduced blocker:
+// a complete, openable fan-out of the secret the group already holds, under a digest that names
+// it.
+type unrotatedFanOut struct {
+	// opensOn is the value the epoch is actually opened on -- what the wraps carry AND what the
+	// digest is computed over. nil is the group's CURRENT secret, which is the ordinary
+	// unrotated removal. A value from an EARLIER epoch is the shape that separates the rule
+	// from its old spelling: the removed member keeps every row of the window it was a member
+	// for, so replaying pq_secret[n-1] delivers a different octet string to the same adversary.
+	opensOn []byte
+	// payload replaces the pq_secret the wraps carry while the DIGEST still names `opensOn`. It
+	// is the residual: the candidate is fresh, so the pre-apply refusal lets the commit past,
+	// and the digest then says the epoch was opened on a held value after all.
+	payload []byte
+	// noDigest seals the commit with NO server attachment, which is what
+	// [Group.epochDigestOf] answers nil for -- a commit the resolution cannot ask the question
+	// of. It is the shape that reached the resolution's no-digest arm through a walk, on the
+	// first try, while a comment in pqdarkgate_test.go said no page could.
+	noDigest bool
+}
+
+// fanOutOnAFreshSecret is the residual arm: fresh octets in the wraps, the held secret in the
+// digest. Spelled once here so no caller has to decide for itself what "fresh" means.
+func (self *rotWorld) fanOutOnAFreshSecret(committer *rotMember, removing []uint32,
+	arm func() ([]byte, []byte, []byte, error)) *rotation {
+
+	self.t.Helper()
+	decoy := make([]byte, messagegroup.PqSecretBytes)
+	if _, err := rand.Read(decoy); err != nil {
+		self.t.Fatalf("the decoy payload: %v", err)
+	}
+	return self.fanOutOnTheHeldSecret(committer, removing, arm, unrotatedFanOut{payload: decoy})
 }
 
 func (self *rotWorld) number(record *message.Record) *sealed {
@@ -746,6 +911,74 @@ func TestTheThreeWaysADeviceWrapFailsAreThreeSentinelsAndThreeCounters(t *testin
 				}
 			}
 		})
+	}
+}
+
+// AN ORPHAN THAT LOSES TO A LATER CANDIDATE IS STILL COUNTED, WHICH IS THE READING
+// [Stats.WrapOrphaned]'s OWN DOC CALLS HEALTHY AND WHICH USED TO READ ZERO.
+//
+// THE DEFECT. `orphans` was accumulated in the candidate loop and added to the counter only on the
+// arm reached when NO candidate won. So a wrap that OPENED and lost the digest -- to a later
+// candidate, to the held secret, or to a removal refusal -- moved nothing, and the one state the
+// counter's own documentation describes as the ordinary healthy one ("two committers raced, this
+// device opened both wraps and used the winner's") was the one state it could never report. The
+// increment is at the site where the orphan is FOUND now, so every arm counts it.
+//
+// THE CASE. A loser's fan-out reaches bob FIRST -- ruling 37 puts wraps on the wire before the
+// commit, so the loser's rows carry the lower record ids -- and the winner's own wrap for bob is
+// in the same page behind it. bob opens both, the digest picks the winner, and bob follows the
+// commit with no error at all.
+//
+// THE CONTROLS ARE THE ASSERTIONS AROUND THE NUMBER, and each fires for its own reason: bob is NOT
+// dark, bob stands at the new epoch, bob holds the epoch's own secret, and WrapOpened is 2 -- so
+// what the counter is reporting is two wraps that really did open and one of them really did lose,
+// rather than a group that failed in some other way. Without WrapOpened == 2 a decoy that never
+// opened would produce the same zero this case exists to refuse.
+func TestAnOrphanThatLosesToALaterCandidateIsStillCounted(t *testing.T) {
+	world := newRotWorld(t, "alice", "bob")
+	alice, bob := world.member("alice"), world.member("bob")
+
+	loser := make([]byte, messagegroup.PqSecretBytes)
+	for at := range loser {
+		loser[at] = 0x5A
+	}
+	published := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+		return alice.handle.Commit(nil)
+	}, rotBend{leaf: bob.leaf, payload: loser, decoy: true})
+	if len(published.decoys) != 1 {
+		t.Fatalf("CONTROL FAILED: the fixture built %d decoy row(s), want 1", len(published.decoys))
+	}
+	if bytes.Equal(loser, published.pqSecret) {
+		t.Fatalf("CONTROL FAILED: the decoy carries the epoch's own secret, so nothing in this page loses")
+	}
+
+	if err := world.deliver(bob, published.page()...); err != nil {
+		t.Fatalf("bob's walk over a winner-and-loser page answered %v; this is the HEALTHY reading "+
+			"and the group is supposed to follow it", err)
+	}
+	if bob.group.wrapDark != nil {
+		t.Fatalf("bob went dark although the winner's wrap was in the same page: %v", bob.group.wrapDark)
+	}
+	if bob.group.epoch != published.opens {
+		t.Fatalf("bob stands at epoch %d, want %d", bob.group.epoch, published.opens)
+	}
+	if !bytes.Equal(bob.group.pqSecretLocked(), published.pqSecret) {
+		t.Fatalf("bob followed onto a secret that is not the epoch's own")
+	}
+	stats := bob.group.Stats()
+	if stats.WrapOpened != 2 {
+		t.Fatalf("CONTROL FAILED: bob opened %d wrap(s) and this case needs 2 -- the winner's and "+
+			"the loser's. With fewer, a zero below would mean the decoy never opened", stats.WrapOpened)
+	}
+	if stats.WrapOrphaned != 1 {
+		t.Fatalf("Stats.WrapOrphaned is %d after a wrap opened and lost the digest, want 1. An "+
+			"orphan counted only where it is REPORTED and not where it is FOUND reads as zero on "+
+			"every arm that answers a secret, which is every arm a healthy group takes", stats.WrapOrphaned)
+	}
+	if stats.WrapMissing != 0 || stats.WrapUnreadable != 0 {
+		t.Fatalf("Stats.WrapMissing=%d WrapUnreadable=%d; this case is about neither, and a number "+
+			"in either would mean the page failed for a reason this case is not measuring",
+			stats.WrapMissing, stats.WrapUnreadable)
 	}
 }
 

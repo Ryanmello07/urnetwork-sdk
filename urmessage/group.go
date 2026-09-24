@@ -3819,14 +3819,15 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 		self.stats.CommitRefused += 1
 		return err
 	}
-	// (3a) AND THE REMOVAL RULE, STILL BEFORE ApplyCommit. A commit that removes a leaf and for
-	// which this device opened no wrap is one this group must not follow, and here is the last
-	// moment refusing it is cheap: after the apply the handle has moved and a refusal makes this
-	// group permanently dark, so a rule enforced only at (4a) would hand any client on an older
-	// build a way to brick every up-to-date member by removing somebody.
-	// [Group.refuseUnfannedRemovalLocked] carries why the absence of a candidate is sound
-	// evidence here and what it deliberately does not catch.
-	if err := self.refuseUnfannedRemovalLocked(decision.RemovedLeaves); err != nil {
+	// (3a) AND THE REMOVAL RULE, STILL BEFORE ApplyCommit — RULING 41. A commit that removes a
+	// leaf and that this device could only follow on a pq_secret it ALREADY HOLDS is an INVALID
+	// commit, and an invalid commit is refused the way an unauthorized one is: counted, not
+	// applied, and the group stays at the epoch it is at. Here is the last moment that is
+	// possible -- after the apply the handle has moved -- so a rule enforced only at (4a) would
+	// hand any client on an older build a way to brick every up-to-date member by removing
+	// somebody. [Group.refuseUnrotatedRemovalLocked] carries the two outcomes ruling 41
+	// separates, what evidence is available this early, and the residual it does not reach.
+	if err := self.refuseUnrotatedRemovalLocked(commitDigest, decision.RemovedLeaves); err != nil {
 		self.stats.CommitRefused += 1
 		return err
 	}
@@ -3854,6 +3855,24 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 	}
 	pqNext, resolveErr := self.resolvePqSecretLocked(newMlsSecret, newEpoch, commitDigest, decision.RemovedLeaves)
 	zeroizeState(newMlsSecret)
+	// (4b) THE ONE REFUSAL THAT IS NOT A DARK STATE, WHICH IS RULING 41 REACHING AS FAR AS IT CAN
+	// FROM HERE. An unrotated removal is an INVALID commit, and the answer to an invalid commit is
+	// to not follow it -- not to advance into a permanent brick on a commit just judged invalid.
+	// (3a) takes this decision before the apply for every shape a client that does not rotate can
+	// emit; what reaches here is the residual [Group.refuseUnrotatedRemovalLocked] names, and the
+	// most this point can still do is the rest of ruling 41's outcome: the epoch field does not
+	// move, no pq_secret is filed for it, the session is not advanced, nothing is persisted and
+	// [Group.wrapDark] is NOT set. The group is HALTED at the epoch it is at, with its session and
+	// its record agreeing with each other there, and the next process re-derives the same refusal
+	// from the same record. What has moved and cannot be moved back is the MLS handle, and that is
+	// the residual rather than a claim this is indistinguishable from a pre-apply refusal.
+	//
+	// IT IS errors.Is AND NOT A SECOND FLAG, so the two outcomes are told apart by the sentinel
+	// that already names one of them and there is nothing to keep in agreement.
+	if resolveErr != nil && errors.Is(resolveErr, ErrRemovalWithoutRotation) {
+		self.stats.CommitRefused += 1
+		return resolveErr
+	}
 	if resolveErr != nil {
 		// THE EPOCH STILL MOVES, AND THE GROUP IS MARKED DARK BY NAME. A member with no
 		// pq_secret[n+1] is dark at n+1 whatever this function does -- read_key[n+1] and

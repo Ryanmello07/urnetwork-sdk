@@ -184,10 +184,20 @@ var pqSecretProducerSites = map[string]string{
 	"pqSecretsMapOf|row.secret":            "one row's octets on the way into the map.",
 	"pqSecretsShowRotation|parameter table": "the restored table, read for the ONE fact a restarted device can observe: two different " +
 		"values.",
-	"pqSecretsShowRotation|table.secret":          "the two octet strings the constant-time comparison is over.",
-	"publishCommitLocked|staged.pqSecret":         "the staged rotation's secret, taken off the [stagedRotation] this commit was built with.",
-	"resolvePqSecretLocked|candidate.secret":      "one opened wrap's payload, a candidate for this epoch.",
-	"resolvePqSecretLocked|result held":           "the held secret when the digest says it is the epoch's own.",
+	"pqSecretsShowRotation|table.secret":  "the two octet strings the constant-time comparison is over.",
+	"publishCommitLocked|staged.pqSecret": "the staged rotation's secret, taken off the [stagedRotation] this commit was built with.",
+	"pqSecretHeldAtLocked|self.pqSecrets": "the whole table, read row by row by the removal rule's comparison. It is the WHOLE table " +
+		"and not the current epoch's row because the member a commit removes keeps every row of " +
+		"the window it was a member for.",
+	"refuseUnrotatedRemovalLocked|candidate.secret": "one staged wrap payload, read BEFORE ApplyCommit by ruling 41's refusal -- which is the " +
+		"only place in this package a candidate is read while the group can still stay at the " +
+		"epoch it is at.",
+	"resolvePqSecretLocked|candidate.secret": "one opened wrap's payload, a candidate for this epoch.",
+	"resolvePqSecretLocked|result secret": "the resolution's ONE exit taking whichever arm's secret is being answered. Every arm that " +
+		"can carry a pq_secret hands it here, which is what the removal rule is attached to. It " +
+		"REPLACED `resolvePqSecretLocked|result held`, and this census refusing the stale entry by " +
+		"name is the entry-with-no-site direction doing its job: `held` stopped being a result of " +
+		"this function the moment the arms stopped returning it themselves.",
 	"resolvePqSecretLocked|self.pqSecretAtLocked": "the held secret, which is the compatibility arm's own candidate.",
 	"restoreOne|pqSecretsMapOf":                   "the same table as the map the restored group runs on.",
 	"restoreOne|restoredPqSecrets":                "the decode of whatever arity the record came back with.",
@@ -613,16 +623,64 @@ var pqSecretSinks = map[string]pqSecretSink{
 		carries: []string{"commitDigest"},
 		why:     "the digest riding on the commit record, tainted by derivation from the keys.",
 	},
+	"ingestCommitLocked|call errors.Is": {
+		carries: []string{"resolveErr"},
+		why: "RULING 41's FORK, which is a sentinel comparison and not a secret. `resolveErr` is " +
+			"tainted because it is bound in the same statement as `pqNext`; what goes to errors.Is " +
+			"is an error value and a package-level sentinel, and what comes back is a bool deciding " +
+			"whether this group HALTS or goes dark.",
+	},
+	"pqSecretHeldAtLocked|call subtle.ConstantTimeCompare": {
+		carries: []string{"secret"},
+		why: "THE REMOVAL RULE'S COMPARISON ITSELF: a candidate against one row of this group's own " +
+			"table. Constant time is guardrail G8's and the header carries why there is no early " +
+			"exit. It answers an int and formats nothing.",
+	},
+	"pqSecretHeldAtLocked|return": {
+		carries: []string{"at", "found"},
+		why: "AN EPOCH AND A BOOL, AND THIS IS THE ENTRY THAT SAYS SO. The comparison's answer is " +
+			"`(uint64, bool)` -- which row matched and whether one did -- so no octet of either " +
+			"input leaves this function. A version that answered the matching secret would land " +
+			"here carrying it and would have to be weighed.",
+	},
+	"refuseUnrotatedRemovalLocked|call self.pqSecretHeldAtLocked": {
+		carries: []string{"candidate.secret"},
+		why: "each staged candidate going to the removal rule's comparison, pre-apply. What comes " +
+			"back is an epoch and a bool; the refusal built from it names a leaf count, an epoch " +
+			"and a wrap count and never an octet of the candidate.",
+	},
+	"resolvePqSecretLocked|call answerSecret": {
+		carries: []string{"candidate.secret", "held"},
+		why: "EVERY ARM'S SECRET GOING TO THE ONE EXIT. This is the entry that makes the exit the " +
+			"exit: if a fourth arm is added, its value appears in this carries list, and an arm that " +
+			"returned around the exit instead would show up as a `return` carrying something this " +
+			"census would have to be told about.",
+	},
+	"resolvePqSecretLocked|call refuseRemovalOnHeldSecret": {
+		carries: []string{"heldAt"},
+		why: "THE REFUSAL, AND WHAT IT IS HANDED IS THE POINT: an epoch, the removed leaf list, the " +
+			"epoch the value is already held at, and a clause of English. The secret it refused is " +
+			"NOT among them and must never be -- this error reaches a log, and the shape this whole " +
+			"gate exists to refuse is the live post-quantum secret in an error string.",
+	},
 	"resolvePqSecretLocked|call self.matchesEpochDigestLocked": {
 		carries: []string{"candidate.secret", "held"},
 		why: "each candidate going to the digest check, which is the only thing that tells the epoch's " +
 			"own secret from an orphan.",
 	},
+	"resolvePqSecretLocked|call self.pqSecretHeldAtLocked": {
+		carries: []string{"secret"},
+		why: "the exit's own parameter going to the removal rule's comparison: whatever this " +
+			"function is about to answer, against the whole table it already holds.",
+	},
 	"resolvePqSecretLocked|return": {
-		carries: []string{"candidate.secret", "held"},
+		carries: []string{"answerSecret", "candidate.secret", "held", "heldAt", "secret"},
 		why: "the secret the epoch runs on. Every OTHER return of this function is an error, and none " +
 			"of them formats a candidate -- which is the property mutant ADV-M1 attacked and this " +
-			"entry's carries list is what refuses it.",
+			"entry's carries list is what refuses it. `answerSecret` and `secret` joined the list " +
+			"when the three arms were funnelled through one guarded exit; " +
+			"TestEveryReturnOfTheResolutionThatCanCarryAPqSecretGoesThroughTheGuardedExit is the " +
+			"gate that holds THAT shape, and this one holds what the returns carry.",
 	},
 	"restoreOne|call fmt.Errorf": {
 		carries: []string{"row"},
@@ -828,6 +886,15 @@ var pqSecretAccumulatorSites = map[string]string{
 		"than a sink by the letter of the rule. It is not a blind spot in fact: " +
 		"matchesEpochDigestLocked is in this census's own sources and its two derived keys are " +
 		"dropped inside it.",
+	"resolvePqSecretLocked|accumulate self.pqSecretHeldAtLocked": "THE REMOVAL RULE'S COMPARISON, at the resolution's one guarded exit. A horizon by the " +
+		"letter of the rule -- a method on this same group -- and not a blind spot in fact: " +
+		"[Group.pqSecretHeldAtLocked] is in this census's own sources, it COPIES nothing, it " +
+		"keeps nothing and it derives nothing; its whole body is a ConstantTimeCompare of the " +
+		"candidate against rows of a table this census already covers, and what it answers is an " +
+		"epoch number and a bool. Its header carries why the subject is the whole table.",
+	"refuseUnrotatedRemovalLocked|accumulate self.pqSecretHeldAtLocked": "the same comparison on the PRE-APPLY side, over the staged wrap candidates. Ruling 41 " +
+		"puts the decision here so the receiver can stay at epoch n, and the candidates it reads " +
+		"are [Group.wrapsFor]'s, which this census already covers.",
 	"restoreOne|accumulate self.hold":                        "the same, for a restored group.",
 	"sealEpochWrapLocked|accumulate self.session.SealRecord": "the session's sealer, taking the wrap body that is already a ciphertext of the secret.",
 	"writeRecord|accumulate temp.Write": "THE DISK. What happens to those octets after this call is the filesystem's and not a " +

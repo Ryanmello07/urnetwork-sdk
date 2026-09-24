@@ -95,6 +95,22 @@
 // Each has its own counter on [Stats] beside it, because a sentinel a caller has to be holding an
 // error to see cannot answer "is this happening".
 //
+// ── AND A FOURTH STATE THAT IS NOT ONE OF THEM, WHICH IS RULING 41 ────────────────────────────
+//
+// [ErrRemovalWithoutRotation] is not a way delivery failed. It is a commit this device REFUSES:
+// a removal it could only follow on a pq_secret it already holds, which is item 243's whole
+// subject arriving inverted -- the removed member holds that value by construction, so it
+// reproduces the survivors' storage_root at the epoch it was removed at and the removal removed
+// nothing. Ruling 41 makes it an INVALID COMMIT and refuses it the way an unauthorized one is
+// refused: the receiver STAYS AT EPOCH n and does not follow it. It does NOT go dark.
+//
+// THE DISTINCTION IS THE POINT AND IT IS WRITTEN AT THE SITE, in [Group.refuseUnrotatedRemovalLocked]:
+// an invalid commit is refused and halts, a VALID commit whose wrap did not arrive or did not open
+// goes dark at n+1 with one of the three sentinels above. Going dark was the wrong answer to an
+// invalid commit -- advancing into a permanent brick on a commit this build has just judged
+// invalid hands any client on an older build a way to brick every up-to-date member of its group
+// by removing somebody, which is the exact harm the pre-apply refusal exists to prevent.
+//
 // ── WHAT AN OLD STORE DOES, WHICH IS THE QUESTION A ROTATION MUST ANSWER BEFORE IT SHIPS ──────
 //
 // Every group on the deployed alpha was written by a build that held ONE pq_secret scalar, and
@@ -181,6 +197,43 @@ func (self *Group) pqSecretAtLocked(epoch uint64) ([]byte, bool) {
 		return nil, false
 	}
 	return secret, true
+}
+
+// pqSecretHeldAtLocked is the lowest epoch this group ALREADY holds `candidate` at, and whether it
+// holds it at all.
+//
+// IT IS THE WHOLE TABLE AND NOT self.pqSecrets[self.epoch], and that is the difference between a
+// rule and a spelling. The rule item 243 is about is "the removed member must not keep the
+// post-quantum half of any epoch it is not in", and what the removed member keeps is every row of
+// the window it was a member for -- not only the current one. A guard that compared against the
+// current epoch's value alone would be defeated by a committer that fanned out pq_secret[n-1]
+// instead of pq_secret[n]: a different octet string, the same removed member holding it, the same
+// storage_root reproduced.
+//
+// IT IS THE OCTETS AND NEVER AN EPOCH NUMBER, for [pqSecretsShowRotation]'s reason from the other
+// side: a restored five-part record files ONE value at every epoch in the window, so "held at a
+// different epoch" and "the same value" are routinely both true and only the second decides
+// anything.
+//
+// CONSTANT TIME AND NO EARLY EXIT: guardrail G8 sends every comparison over key-derived material
+// through [subtle.ConstantTimeCompare], and the loop runs to the end of the table so the answer
+// costs the same whichever row matched. An empty candidate is answered false rather than being
+// allowed to match an empty row, because ConstantTimeCompare answers 1 for two zero-length inputs
+// and "this group holds nothing at that epoch" must not read as "this group already holds it".
+func (self *Group) pqSecretHeldAtLocked(candidate []byte) (uint64, bool) {
+	if len(candidate) == 0 {
+		return 0, false
+	}
+	at, found := uint64(0), false
+	for epoch, secret := range self.pqSecrets {
+		if subtle.ConstantTimeCompare(secret, candidate) != 1 {
+			continue
+		}
+		if !found || epoch < at {
+			at, found = epoch, true
+		}
+	}
+	return at, found
 }
 
 // pqSecretLocked is the secret this group's CURRENT epoch runs on.
@@ -524,21 +577,35 @@ func (self *Group) matchesEpochDigestLocked(mlsSecret []byte, digest *message.Ep
 //     compatibility path and it is decided by the SAME digest comparison, not by a version flag:
 //     if the committer did rotate, this candidate simply fails to reproduce the digest.
 //
-// AND ARM 2 IS CLOSED TO A COMMIT THAT REMOVES A LEAF. That is `removedLeaves`, and it is the one
-// rule here that is not about telling secrets apart. A removal followed on the held secret is item
-// 243's entire subject arriving inverted through the arm this header calls "the whole of the
-// compatibility path": the removed member holds that secret BY CONSTRUCTION, so it reproduces the
-// survivors' storage_root at the epoch it was removed at, every survivor follows along, and
-// nothing anywhere is set. Spec B section 5.4's acceptance window still admits such a commit and
-// it is the shape every build before this one emitted, so it has to be REFUSED rather than merely
-// not produced. [ErrRemovalWithoutRotation].
+// AND NO ARM MAY ANSWER A SECRET THIS GROUP ALREADY HOLDS WHEN THE COMMIT REMOVES A LEAF. That is
+// `removedLeaves`, and it is the one rule here that is not about telling secrets apart. A removal
+// followed on a held secret is item 243's entire subject arriving inverted: the removed member
+// holds that value BY CONSTRUCTION, so it reproduces the survivors' storage_root at the epoch it
+// was removed at, every survivor follows along, and nothing anywhere is set. Spec B section 5.4's
+// acceptance window still admits such a commit and it is the shape every build before this one
+// emitted, so it has to be REFUSED rather than merely not produced. [ErrRemovalWithoutRotation].
 //
-// THE REFUSAL COVERS BOTH ARMS THAT CAN ANSWER THE HELD SECRET, which is why it is written twice
-// and not once in front: a kind 0x0001 commit -- no digest at all -- removing a leaf reaches the
-// first arm and never the second, and a single guard at the top would also refuse a removal that
-// DID rotate and whose wrap this device opened, which is the case the whole file exists to serve.
-// The rule is "no removal may be followed on the secret this group already holds", not "no
-// removal may be followed".
+// THE RULE IS ON THE VALUE AND NOT ON THE ARM, WHICH IS THE 2026-09-24 REPAIR AND THE REASON THERE
+// IS ONE EXIT. It used to be written twice, in the two arms that return the identifier `held` --
+// and the arm that returns a WRAP CANDIDATE was left unguarded, because it reads the wire rather
+// than `self.pqSecrets` and so did not look like a held-secret arm. It is one: a committer that
+// removes a leaf and fans out the value the group already has delivers that value through the
+// candidate arm, reproduces the epoch's own digest with it, and was followed with a nil error, no
+// dark state and no refusal. REPRODUCED, by
+// TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch, which asserts the
+// removed member's retained secret reproduces the survivors' storage_root before it asserts the
+// refusal. So the guard is now on the ANSWER -- every secret this function can return leaves
+// through [answerSecret] and is compared against the WHOLE table by
+// [Group.pqSecretHeldAtLocked] -- and a fourth arm added later inherits it instead of having to
+// remember it. The rule is "no removal may be followed on a secret this group already holds", not
+// "no removal may be followed", which is why the guard is at the exit and not at the top: a
+// removal that DID rotate is answered normally and is the case this whole file exists to serve.
+//
+// AND THE PRIMARY ENFORCEMENT IS NOT HERE, WHICH IS RULING 41. This function runs AFTER
+// ApplyCommit, so a refusal taken here cannot un-move the handle.
+// [Group.refuseUnrotatedRemovalLocked] takes the same decision BEFORE the apply, on the evidence
+// that is available there, and the receiver simply stays at epoch n. What survives to this exit is
+// the residual that header names.
 //
 // A MISS IS THREE DIFFERENT SENTENCES AND THAT IS RULING 38's REQUIREMENT. "I opened a wrap and it
 // was for another epoch's fan-out", "a wrap arrived for me and did not open" and "no wrap arrived
@@ -561,6 +628,25 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 	// agreement about one commit.
 	removesLeaves := 0 < len(removedLeaves)
 	held, isHeld := self.pqSecretAtLocked(self.epoch)
+	// THE ONE EXIT EVERY pq_secret THIS FUNCTION ANSWERS LEAVES BY, and the removal rule lives in
+	// it rather than in each arm. `how` is what the commit did, in the arm's own words, because
+	// the arms are reached by different records and an operator reading the refusal needs to know
+	// which: a commit with no epoch digest is an older client, a commit whose digest names the
+	// held secret is a client that had the attachment and did not rotate under it, and a wrap
+	// carrying a held value is a client that fanned out a rotation it never performed.
+	//
+	// TestEveryReturnOfTheResolutionThatCanCarryAPqSecretGoesThroughTheGuardedExit holds the
+	// package to this being the only way out with a secret in hand -- by the SHAPE of the return
+	// and against a written disposition, not by the name of the value returned, which is exactly
+	// what the gate it replaces was scoped to and exactly why it printed this defect and passed.
+	answerSecret := func(secret []byte, how string) ([]byte, error) {
+		if removesLeaves {
+			if heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret); alreadyHeld {
+				return nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)
+			}
+		}
+		return secret, nil
+	}
 	if digest == nil {
 		// A COMMIT WITH NO DIGEST CANNOT BE ASKED THE QUESTION, and that is a kind 0x0001 commit
 		// inside Spec B section 5.4's open acceptance window rather than a malformed one. It
@@ -569,10 +655,7 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 		// than guessed at: if this group holds no secret at all it is refused by the same sentinel
 		// a missing wrap gets, because the consequence is the same one.
 		if isHeld {
-			if removesLeaves {
-				return nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, "carries no epoch digest at all")
-			}
-			return held, nil
+			return answerSecret(held, "carries no epoch digest at all")
 		}
 		self.stats.WrapMissing += 1
 		return nil, fmt.Errorf("%w: epoch %d was opened by a commit carrying no epoch digest and this device holds no pq_secret to follow it with",
@@ -594,8 +677,20 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 			return nil, err
 		}
 		if matches {
-			return candidate.secret, nil
+			// THE WRAP-CANDIDATE ARM, AND IT IS A HELD-SECRET ARM TOO. It reads the wire and can
+			// still reach a value this group already has -- a committer that removes a leaf and
+			// fans out the secret the group already holds -- so it leaves by the same exit as the
+			// other two. Until 2026-09-24 it returned `candidate.secret, nil` directly and that
+			// removal removed nothing.
+			return answerSecret(candidate.secret,
+				"delivered, in a device wrap this device opened, a pq_secret this group already holds")
 		}
+		// THE COUNTER MOVES WHERE THE ORPHAN IS FOUND AND NOT WHERE ONE IS REPORTED. It used to be
+		// added in the refusal below, so an orphan that lost to a LATER candidate or to the held
+		// secret -- a wrap that opened and lost the digest -- read as zero, and the one reading
+		// [Stats.WrapOrphaned]'s own doc calls healthy ("two committers raced, this device opened
+		// both wraps and used the winner's") was the one reading it could never show.
+		self.stats.WrapOrphaned += 1
 		orphans += 1
 	}
 	if isHeld {
@@ -606,22 +701,16 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 		if matches {
 			// THE COMPATIBILITY PATH, and it is reached by measurement rather than by assumption:
 			// this epoch was opened with the secret the group already had, so the committer did
-			// not rotate. Every group on the deployed alpha is here.
-			//
-			// AND IT IS CLOSED TO A REMOVAL, on the SAME measurement rather than on a guess: the
-			// digest has just said, in this epoch's own authenticated H(epoch_keys), that the
-			// epoch runs on the value the member this commit removes also holds.
-			if removesLeaves {
-				return nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves,
-					"opened its epoch with the pq_secret this group already held")
-			}
-			return held, nil
+			// not rotate. Every group on the deployed alpha is here. The exit closes it to a
+			// removal on the SAME measurement rather than on a guess: the digest has just said, in
+			// this epoch's own authenticated H(epoch_keys), that the epoch runs on the value the
+			// member this commit removes also holds.
+			return answerSecret(held, "opened its epoch with the pq_secret this group already held")
 		}
 	}
 	// no candidate reproduced the digest. Which of the three states this is depends on what
 	// arrived, and all three are counted whatever the caller does with the error.
 	if 0 < orphans {
-		self.stats.WrapOrphaned += uint64(orphans)
 		return nil, fmt.Errorf("%w: %d wrap(s) addressed to this device opened for epoch %d and none of them carries the secret that epoch was opened with, so they are the fan-out of a commit that lost its race",
 			ErrOrphanWrap, orphans, opensEpoch)
 	}
@@ -635,55 +724,96 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 		ErrNoWrapForEpoch, opensEpoch)
 }
 
-// refuseRemovalOnHeldSecret is the one sentence both of [Group.resolvePqSecretLocked]'s
-// held-secret arms answer a removal with, built in one place so the two cannot drift apart.
+// refuseRemovalOnHeldSecret is the one sentence [Group.resolvePqSecretLocked]'s single guarded
+// exit answers a removal with, whichever arm reached it.
 //
-// `how` is what the commit did, in the caller's own words, because the two arms are reached by two
-// different records and an operator reading this needs to know which: a commit with no epoch
-// digest at all is an older client, and a commit whose digest names the held secret is a client
-// that had the attachment and did not rotate under it.
-func refuseRemovalOnHeldSecret(opensEpoch uint64, removedLeaves []uint32, how string) error {
-	return fmt.Errorf("%w: the commit that opens epoch %d removes leaf/leaves %v and %s",
-		ErrRemovalWithoutRotation, opensEpoch, removedLeaves, how)
+// `how` is what the commit did, in the arm's own words, because the arms are reached by different
+// records and an operator reading this needs to know which. `heldAt` is the epoch this group
+// already holds that value at, which is the difference between "the committer did not rotate" and
+// "the committer replayed an OLDER epoch's secret" -- two different clients, both refused, and the
+// number is the only thing in the sentence that tells them apart.
+//
+// THE VALUE ITSELF IS NEVER IN THE SENTENCE. What is printed is an epoch, a leaf list and a
+// clause; guardrail G8's rule is that a diagnosis names what happened and never the material it
+// happened to, and this error reaches a log.
+func refuseRemovalOnHeldSecret(opensEpoch uint64, removedLeaves []uint32, heldAt uint64, how string) error {
+	return fmt.Errorf("%w: the commit that opens epoch %d removes leaf/leaves %v and %s -- a value this group already holds at epoch %d",
+		ErrRemovalWithoutRotation, opensEpoch, removedLeaves, how, heldAt)
 }
 
-// refuseUnfannedRemovalLocked refuses a commit that REMOVES a leaf and for which this device holds
-// no wrap candidate at all -- BEFORE ApplyCommit, so the group does not move.
+// refuseUnrotatedRemovalLocked refuses a commit that REMOVES a leaf and that this device could
+// only follow on a pq_secret it ALREADY HOLDS -- BEFORE ApplyCommit, so the group does not move.
 //
-// WHY IT IS HERE AND NOT ONLY AT THE RESOLUTION, which is the difference between a refusal and a
-// brick. [Group.resolvePqSecretLocked] runs after ApplyCommit, because judging a candidate needs
-// mls_secret[n+1] and there is no exporter over a PROCESSED commit. A refusal THERE leaves the
-// handle at n+1, this group dark at n+1, and dark is permanent ([ErrOrphanWrap]) -- so a removal
-// rule enforced only there would let any client on an older build permanently brick every
-// up-to-date member of its group by removing somebody. Enforced here the group simply does not
-// follow: it stays at the epoch it was at, says why, and a committer that re-commits properly is
-// followed normally.
+// RULING 41 IS WHAT THIS FUNCTION IS. An unrotated removal is an INVALID COMMIT and is refused the
+// way an unauthorized one is: the receiver stays at epoch n and does not follow it, and it does
+// NOT go dark. The distinction is the point and it is two outcomes, not one:
 //
-// THE EVIDENCE IS AN ABSENCE, AND WHAT MAKES THAT SOUND IS RULING 37 AND ONLY RULING 37. The
-// wraps for epoch n+1 are submitted at epoch n, staged and PRE-MERGE, so they carry lower record
-// ids than the commit and a walk in record-id order has already met them when this runs --
+//   - INVALID COMMIT -- a removal this device can only follow on a value it already has -> refused
+//     HERE, the group stays at n, [Group.wrapDark] is not set, and the group keeps working at the
+//     epoch it is at. A committer that re-commits properly is followed normally. This is item
+//     242's established semantics: a hostile committer can HALT a group; it cannot TAKE it.
+//   - VALID COMMIT whose wrap did not arrive or did not open -> DARK at n+1, diagnosable, with the
+//     sentinel that says which of the three states it is.
+//
+// Going dark was the wrong answer to an invalid commit. [Group.resolvePqSecretLocked] runs after
+// ApplyCommit -- judging a candidate needs mls_secret[n+1] and there is no exporter over a
+// PROCESSED commit -- and dark is permanent ([ErrOrphanWrap]), so advancing into a brick on a
+// commit just judged invalid would hand any client on an older build a way to brick every
+// up-to-date member of its group by removing somebody, which is the exact harm this refusal exists
+// to prevent.
+//
+// THE QUESTION IT ASKS IS THE ONE THAT IS DECIDABLE HERE: does this device hold, for the epoch
+// this commit would open, a wrap candidate carrying a pq_secret it does not ALREADY hold? The
+// digest cannot be evaluated before the apply, so the octets are what there is -- and they are
+// enough for every shape a client that does not rotate can emit, because such a client has nothing
+// fresh to put in a wrap. A commit carrying no epoch digest at all is refused outright: nothing it
+// delivers can be judged, so the epoch it opens could only ever be followed on the held secret.
+//
+// THE EVIDENCE IS PARTLY AN ABSENCE, AND WHAT MAKES THAT SOUND IS RULING 37 AND ONLY RULING 37.
+// The wraps for epoch n+1 are submitted at epoch n, staged and PRE-MERGE, so they carry lower
+// record ids than the commit and a walk in record-id order has already met them when this runs --
 // [wrapCandidate]'s own header is the same fact from the other side. The day that order changes,
 // this check refuses every removal, which is the safe direction and is loud rather than silent.
 //
-// IT SUBSUMES THE REMOVAL CASE OF ALL THREE DARK STATES, which is more than the rule it replaces
-// would have caught. No candidate is: a committer that did not rotate (no fan-out at all), a
-// committer that rotated and left THIS device out of the fan-out (item 132's omission), and a
-// wrap that arrived and did not open -- all three of which end in a permanently dark group today
-// and end in a refusal here. What it deliberately does NOT catch is a candidate that exists and
-// loses to the held secret at the digest; that is the resolution's own arm and it is kept.
+// WHAT IT REACHES, MEASURED, AND IT IS NOT "THE REMOVAL CASE OF ALL THREE DARK STATES". That
+// sentence stood here and was FALSE, not merely unmeasured: the check it described asked only
+// whether ANY candidate existed, so it was structurally unable to reach any case in which one
+// does -- and [ErrOrphanWrap] is by definition such a case. What this asks now reaches:
+//
+//   - ErrNoWrapForEpoch's removal case: no wrap arrived, so no candidate -- and item 132's
+//     omission at the victim, for the same reason.
+//   - ErrWrapUnreadable's removal case: a wrap arrived and did not open, so it staged no candidate.
+//   - The ORPHAN whose payload is a value this group already holds, which is the reproduced
+//     blocker and the only orphan shape a non-rotating client can produce.
+//
+// AND THE RESIDUAL IS NAMED RATHER THAN CLAIMED CLOSED: an orphan carrying a FRESH value that is
+// nonetheless not the one the epoch was opened with satisfies this check and is judged at the
+// resolution, after the apply. If that judgement is the removal rule,
+// [Group.ingestCommitLocked] takes ruling 41's outcome as far as it can from there -- it does not
+// advance and does not set the dark state -- but the MLS handle has already moved, so the group is
+// halted at n with its handle at n+1 rather than never having applied at all.
+// TestTheResidualUnrotatedRemovalIsRefusedAfterTheApplyAndStillDoesNotGoDark drives exactly that
+// shape and asserts both halves of it.
 //
 // A COMMIT THAT REMOVES NOTHING IS UNTOUCHED. Every group on the deployed alpha, every ordinary
 // Add and every policy commit goes past this without a comparison.
-func (self *Group) refuseUnfannedRemovalLocked(removedLeaves []uint32) error {
+func (self *Group) refuseUnrotatedRemovalLocked(digest *message.EpochDigestAttachment, removedLeaves []uint32) error {
 	if len(removedLeaves) == 0 {
 		return nil
 	}
 	opensEpoch := self.epoch + 1
-	if 0 < len(self.wrapsFor[opensEpoch]) {
-		return nil
+	if digest == nil {
+		return fmt.Errorf("%w: the commit that would open epoch %d removes %d leaf/leaves and carries no epoch digest at all, so nothing it delivers can be judged and the epoch it opens could only be followed on a pq_secret this group already holds; the group has not followed it",
+			ErrRemovalWithoutRotation, opensEpoch, len(removedLeaves))
 	}
-	return fmt.Errorf("%w: the commit that would open epoch %d removes %d leaf/leaves and this device opened no device wrap for that epoch (%d wrap(s) addressed to it did not open), so the epoch it opens either was not rotated at all or was rotated without this device in the fan-out; the group has not followed it",
-		ErrRemovalWithoutRotation, opensEpoch, len(removedLeaves), self.wrapsUnreadable[opensEpoch])
+	for _, candidate := range self.wrapsFor[opensEpoch] {
+		if _, alreadyHeld := self.pqSecretHeldAtLocked(candidate.secret); !alreadyHeld {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: the commit that would open epoch %d removes %d leaf/leaves and this device opened %d device wrap(s) for that epoch, none of them carrying a pq_secret this group does not already hold (%d wrap(s) addressed to it did not open), so the epoch it opens was either not rotated at all or rotated without this device in the fan-out; the group has not followed it",
+		ErrRemovalWithoutRotation, opensEpoch, len(removedLeaves), len(self.wrapsFor[opensEpoch]),
+		self.wrapsUnreadable[opensEpoch])
 }
 
 // epochDigestOf is the kind 0x0005 body a commit record carries, or nil when it carries the older

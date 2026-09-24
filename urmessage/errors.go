@@ -134,12 +134,28 @@ var (
 
 	// A COMMIT THAT REMOVES A LEAF AND DOES NOT ROTATE pq_secret, refused on ingest.
 	//
-	// IT IS ITEM 243 ARRIVING INVERTED THROUGH THE ONE ARM THE PROSE CALLS "the whole of the
-	// compatibility path". [Group.resolvePqSecretLocked]'s second arm follows a commit on the
-	// secret this group already holds, decided by the digest -- which is right for every group
-	// built before rotation, and is exactly wrong when the commit REMOVES somebody: the removed
-	// member holds that same secret by construction, so it reproduces the survivors' storage
-	// root at the epoch it was removed at and the removal removed nothing.
+	// IT IS ITEM 243 ARRIVING INVERTED. Following a commit on a secret this group already holds
+	// is right for every group built before rotation and is exactly wrong when the commit
+	// REMOVES somebody: the removed member holds that same value by construction, so it
+	// reproduces the survivors' storage root at the epoch it was removed at and the removal
+	// removed nothing.
+	//
+	// THE RULE IS ON THE VALUE AND NOT ON ONE ARM, which is the 2026-09-24 repair. It was
+	// written as a rule about the two arms of [Group.resolvePqSecretLocked] that return the
+	// secret the group HOLDS, and the arm that returns a WRAP CANDIDATE reaches the same value
+	// off the wire: a committer that removed a leaf and fanned out the held secret was followed
+	// with a nil error, no dark state and no refusal. Every secret that resolution answers now
+	// leaves by one exit and is compared against the group's WHOLE pq_secret table, because the
+	// removed member keeps every row of the window it was a member for and not only the current
+	// one.
+	//
+	// RULING 41: IT IS AN INVALID COMMIT AND NOT A DARK STATE. It is refused the way an
+	// unauthorized commit is -- the receiver stays at epoch n, does not advance and does not
+	// set [Group.wrapDark] -- because advancing into a permanent brick on a commit just judged
+	// invalid is how any client on an older build would brick every up-to-date member of its
+	// group by removing somebody. [Group.refuseUnrotatedRemovalLocked] takes the decision
+	// before ApplyCommit, where staying at n is possible, and carries the residual it does not
+	// reach.
 	//
 	// IT IS A RECEIVE-SIDE RULE BECAUSE THE SEND SIDE CANNOT PRODUCE IT. This build's own
 	// removal always rotates -- [Group.stageEpochRotationLocked] draws before it enumerates --
