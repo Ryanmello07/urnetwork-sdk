@@ -772,10 +772,11 @@ func (self *Group) matchesEpochDigestLocked(mlsSecret []byte, digest *message.Ep
 func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 	digest *message.EpochDigestAttachment, removedLeaves []uint32) ([]byte, error) {
 
-	// ONE VALUE, READ ONCE. The leaves the commit removes are both the predicate and the number
-	// the refusal names; two parameters, or a bool beside a count, would be two things to keep in
-	// agreement about one commit.
-	removesLeaves := 0 < len(removedLeaves)
+	// ONE VALUE, READ ONCE, AND IT IS THE PARAMETER ITSELF. `removedLeaves` is both the predicate
+	// and the number the refusal names; two parameters, or a bool beside a count, would be two
+	// things to keep in agreement about one commit. There used to be a `removesLeaves` bool bound
+	// here and tested at the guard, and the 2026-09-24 (fifth pass) repair DELETED it rather than
+	// checking it harder -- see the guard below for what that name cost.
 	held, isHeld := self.pqSecretAtLocked(self.epoch)
 	// EVERYTHING THIS EPOCH'S WRAPS DID, READ ONCE AND BEFORE ANY ARM BRANCHES -- which is the
 	// 2026-09-24 repair of the two RECORD-shaped counters. `orphans` starts as every candidate and
@@ -816,7 +817,26 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 	// and against a written disposition, not by the name of the value returned, which is exactly
 	// what the gate it replaces was scoped to and exactly why it printed this defect and passed.
 	answerSecret := func(secret []byte, how string) ([]byte, error) {
-		if removesLeaves {
+		// THE PREDICATE IS WRITTEN WHOLE, HERE, AND IT IS NOT A NAMED BOOL -- the 2026-09-24
+		// (fifth pass) repair, and it is a DELETION rather than another check. This guard used to
+		// read `if removesLeaves`, a bool bound at the top of this function, and that name was a
+		// level of indirection no gate on this body could see through: narrowing the BINDING by
+		// one token --
+		//
+		//	removesLeaves := 0 < len(removedLeaves) && len(removedLeaves) < 3
+		//
+		// -- left this body BYTE-IDENTICAL to production, passed the gate, and passed all 169
+		// cases in this package, with the removal rule gone for any commit removing three or more
+		// leaves. One ADMIN ejecting a user's three devices is one Remove proposal per leaf, so
+		// that is the shape item 243 is about, arriving inverted. Written this way there is
+		// nothing between the parameter and the guard for a narrowing to hide in.
+		//
+		// TestTheRemovalGuardIsDecidedByValuesNothingInTheResolutionCanRewrite holds BOTH halves:
+		// this predicate as source text, and `removedLeaves`, `secret` and `self` bound ONCE
+		// each, in a parameter list, and assigned, shadowed or addressed NOWHERE in this
+		// function. A second binding of any of them is a refusal, the way a second exit already
+		// is.
+		if 0 < len(removedLeaves) {
 			if heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret); alreadyHeld {
 				return nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)
 			}
