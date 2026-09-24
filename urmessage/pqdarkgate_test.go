@@ -81,9 +81,9 @@
 //  6. THE ONE-EXIT GATE ASKED WHETHER THE REFUSAL IS CALLED, NOT WHETHER IT IS RETURNED. An exit
 //     spelled `_ = refuseRemovalOnHeldSecret(...)` inside the same guard passed it with the whole
 //     property gone -- reproduced before it was repaired, with the two behavioural cases red
-//     beside a green gate. [removalGuardDefect] holds the RETURNED value now, and two of its
-//     mutants (the refusal returned beside the secret, and the refusal reached through a second
-//     branch) are caught by the gate and by NOTHING ELSE in this package, which is what it is for.
+//     beside a green gate. [removalGuardDefect] holds the RETURNED value now, and one of its
+//     mutants -- the refusal returned BESIDE the secret -- is caught by that reading and by
+//     nothing else in this package, which is the whole of what it is still for.
 //  7. AND THE PROMISE WAS A GROUP PROPERTY THE CODE CANNOT DELIVER -- ledger rulings 42-45. It is
 //     corrected everywhere it was written, and section 7's gate holds it by class rather than by
 //     banned phrase: the noun doing the holding, in every production sentence about this rule.
@@ -96,13 +96,28 @@
 //     BINDING by one token -- `0 < len(removedLeaves) && len(removedLeaves) < 3` -- left the exit
 //     byte-identical, passed the gate, passed all 169 cases, and logged the same complement as
 //     the correct code, with the removal rule gone for every commit removing three or more
-//     leaves. THE REPAIR IS A DELETION: `pqepoch.go` no longer has the bool, the predicate is
-//     written whole at the guard, and [guardSubjectDefect] holds every value that guard reads to
-//     ONE binding, from the caller, written nowhere in the resolution. Four rounds of widening a
-//     reading and one round of removing the thing being read -- the adversary was the
-//     INDIRECTION, not the editor, and the eighteen-row mutant table under
-//     TestTheRemovalGuardIsDecidedByValuesNothingInTheResolutionCanRewrite is what stops round
-//     six being a sixth reading.
+//     leaves. THE REPAIR IS A DELETION: `pqepoch.go` no longer has the bool and the predicate is
+//     written whole at the guard. Four rounds of widening a reading and one round of removing the
+//     thing being read -- the adversary was the INDIRECTION, not the editor.
+//
+// ── AND WHAT THE SIXTH ROUND DECIDED: STOP READING, AND DRIVE THE INPUTS (LEDGER RULING 46) ───
+//
+//  9. THE SIXTH ROUND WAS DEFEATED IN THE CALLER, one segment further out again, and that was the
+//     signal. Enforcement is a semantic property: a gate that must prove *this refusal fires for
+//     every input it should* is deciding a runtime question out of syntax, and each reading it
+//     adds is one more surface to route around. What the readings were standing in for is a SET
+//     OF INPUTS THAT MUST BE REFUSED, and those are driven now, through the production receive
+//     path, by
+//     TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProductionReceivePath
+//     -- eighteen input shapes, both doors, arities {0, 1, 2, 3}, honest rows and refused rows in
+//     one function. SIX of the gate's eight clauses are DELETED, each one measured being caught
+//     by a driven row instead ([removalGuardDefect]'s header carries that table mutant by
+//     mutant), and the three readings that are KEPT are kept because a mutant was measured
+//     PASSING the driven table: the refusal returned beside the secret, a predicate narrowed one
+//     arity above what the table drives, and that predicate hidden behind a NAME. One reading was
+//     ADDED while six went -- the same predicate rule asked of the OTHER door, which an adversary
+//     found had no gate on its own predicate at all, and where the one-arity-above narrowing was
+//     caught by nothing whatever until it existed.
 package urmessage
 
 import (
@@ -116,7 +131,6 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1975,8 +1989,9 @@ func TestTheCompatibilityArmOfTheResolutionIsClosedToARemoval(t *testing.T) {
 // AND THE EXIT IS ASSERTED TO BE GUARDED, structurally: there is exactly one local function value
 // in the resolution, it is the one every secret leaves by, and its body RETURNS what
 // [refuseRemovalOnHeldSecret] builds -- nil in the secret position, the refusal in the error one,
-// above every answer -- before it answers anything. [removalGuardDefect] carries each clause and
-// why "a call of the refusal appears" was not one of them.
+// under a condition read whole. [removalGuardDefect] carries the three clauses that are left, why
+// "a call of the refusal appears" was never one of them, and the six that were deleted on
+// 2026-09-24 with the driven row that catches each.
 //
 // ── AND WHY IT WAS REWRITTEN A SECOND TIME, 2026-09-24 ────────────────────────────────────────
 //
@@ -2014,8 +2029,19 @@ func TestTheCompatibilityArmOfTheResolutionIsClosedToARemoval(t *testing.T) {
 // property gone, and printed a HEALTHIER complement than the correct code does. That is ledger item
 // 254's "owed from this pass", it was reproduced before it was repaired, and it is the same class
 // as the two rewrites above: the subject was a spelling (*a call appears*) where the property is an
-// answer (*the refusal is what the exit returns*). [removalGuardDefect] is the repair and carries
-// its four clauses, the mutants that made each one necessary, and its own residual.
+// answer (*the refusal is what the exit returns*). [removalGuardDefect] is the repair.
+//
+// ── AND WHAT IS LEFT OF IT AFTER LEDGER RULING 46, WHICH IS WHY THIS GATE IS STILL HERE ──────
+//
+// [removalGuardDefect] went from eight clauses to three on 2026-09-24, because six of them were
+// measured being caught by
+// TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProductionReceivePath
+// instead -- one driven input per mutant, table in that function's own header. THIS gate is NOT
+// one of the deletions, and the reason is a class rather than a preference: its subject is every
+// RETURN OF THE RESOLUTION, held against a written disposition both ways, so a FOURTH ARM added
+// later lands here as a key with no row. A driven table cannot cover an arm that does not exist
+// yet -- there is no input that reaches it -- and the one-exit property is what makes the removal
+// rule a property of the function rather than of the three arms somebody remembered.
 func TestEveryReturnOfTheResolutionThatCanCarryAPqSecretGoesThroughTheGuardedExit(t *testing.T) {
 	// THE DISPOSITIONS, keyed by the SOURCE TEXT of the expression in the secret position. `why`
 	// is a sentence and not a label because a disposition nobody can disagree with is a row that
@@ -2099,8 +2125,8 @@ func TestEveryReturnOfTheResolutionThatCanCarryAPqSecretGoesThroughTheGuardedExi
 	// AND THE READING IS LOGGED, WHICH IS THE POINT OF RETURNING IT. Both mutants that defeated
 	// the clause this replaces left the complement below looking exactly as healthy as the correct
 	// code's, so there was no line anywhere saying what the guard had been narrowed to. There is
-	// one now, and it names the predicate and every value that predicate decides on.
-	reading, defect := removalGuardDefect(declaration, exits[0])
+	// one now, and it names the predicate the guard decides on.
+	reading, defect := removalGuardDefect(exits[0])
 	t.Logf("THE REMOVAL GUARD, AS THIS GATE READ IT: %s", reading)
 	if defect != "" {
 		t.Fatalf("%q does not refuse a removal with refuseRemovalOnHeldSecret before it answers: %s. "+
@@ -2311,159 +2337,87 @@ func TestEveryReturnOfTheResolutionThatCanCarryAPqSecretGoesThroughTheGuardedExi
 	}
 }
 
-// removalGuardDefect says what is WRONG with a block's removal guard, in one clause, or "" when
-// nothing is. The property it holds is that the block refuses a removal BEFORE it answers a
-// secret: an `if removesLeaves { ... return nil, refuseRemovalOnHeldSecret(...) ... }`.
+// removalGuardDefect says what is WRONG with the resolution's one guarded exit, in one clause, or
+// "" when nothing is. It answers (what it READ, what is wrong), so a narrowing shows up in a log
+// line rather than in an absence.
 //
-// ── WHY THIS IS NOT A CALL COUNT, WHICH IS THE 2026-09-24 (THIRD PASS) REPAIR ─────────────────
+// ── IT WAS EIGHT CLAUSES AND IT IS THREE. THE DELETION IS LEDGER RULING 46 ────────────────────
 //
-// What stood here asked whether a CALL of `refuseRemovalOnHeldSecret` appears anywhere inside an
-// `if removesLeaves`. It never asked what happens to the call's RESULT. So the exit
+// Six consecutive rounds built or repaired this function and every one was defeated ONE LEVEL OF
+// INDIRECTION FURTHER OUT: the VALUE was named, then the CALL was named and its result was not,
+// then the RESULT was named and the path to it was not, then the POSITION was named and the
+// binding was not, then the BINDING was deleted and the held test's ARGUMENT took the narrowing,
+// and the caller's list after that. Enforcement is a semantic property and this class is not
+// statically definable: a gate that must prove *this refusal fires for every input it should* is
+// deciding a runtime question out of syntax, and each reading it adds is one more surface to route
+// around.
 //
-//	answerSecret := func(secret []byte, how string) ([]byte, error) {
-//	    if removesLeaves {
-//	        if heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret); alreadyHeld {
-//	            _ = refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)
-//	        }
-//	    }
-//	    return secret, nil
-//	}
+// WHAT THE DELETED CLAUSES WERE STANDING IN FOR IS A SET OF INPUTS THAT MUST BE REFUSED, and those
+// inputs are driven now, through the production receive path, by
+// TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProductionReceivePath.
+// EACH DELETION BELOW IS A MEASUREMENT AND NOT A JUDGEMENT: the mutant the clause existed for was
+// re-applied to `pqepoch.go` (sha256 a8d6faf57786 before and after every run) or to `group.go`
+// (45028ef7b883), and the TABLE was measured going red on it.
 //
-// -- which computes the refusal, throws it away and hands the held secret back -- PASSED this
-// gate, with the whole property gone and with the complement it prints looking healthier than
-// before (`nil x7` rather than `nil x8`). REPRODUCED before it was fixed: the gate logged PASS on
-// that body while TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch and
-// TestTheCompatibilityArmOfTheResolutionIsClosedToARemoval both went red on it. It is ledger item
-// 254's "owed from this pass", and it is the SAME class as the two rewrites above it: the gate
-// named a spelling (*a call appears*) where the property is an answer (*the refusal is what the
-// exit returns*).
+//	DELETED CLAUSE                          THE MUTANT IT EXISTED FOR              THE TABLE
+//	3. the guarded return is the exit's     a refusal returned from a nested       CAUGHT
+//	   own, not a nested literal's           closure nothing calls
+//	4. the refusal sits above every         the guard moved below the answer       CAUGHT
+//	   answer
+//	5. it is returned on EVERY PATH         `if len(removedLeaves) == 1` around    CAUGHT, by the
+//	   through the guard -- one              the refusal; the same ANDed into       two- and
+//	   branching statement, the held         the held test; the same as a switch    three-leaf rows
+//	   test, refusal last in its body        with no default
+//	6a. the polarity                        `if 1 < len(removedLeaves)`            CAUGHT
+//	7. every value the guard decides on     `removedLeaves = removedLeaves[:1]`    CAUGHT
+//	   is bound once and written             above the exit; the same shadowed
+//	   nowhere                               inside it; the exit given its OWN
+//	                                         `removedLeaves` parameter narrowed
+//	                                         at all three call sites;
+//	                                         `self.pqSecretWitness = nil`;
+//	                                         `secret = held` above the answer
+//	8. the guard is the exit's FIRST        the candidate zeroed through           CAUGHT
+//	   statement                             `copy(secret, …)` under a leaf count
+//	9. the caller hands BOTH doors the      `decision.RemovedLeaves[:1]` at        CAUGHT, because
+//	   whole `decision.RemovedLeaves`        either call site, and a rewrite of     the refusal
+//	                                         `decision` above both                  PRINTS the list
+//	                                                                                and the table
+//	                                                                                reads it back
 //
-// ── WHAT IT ASKS NOW, and every clause is here because a mutant defeated its absence ──────────
+// CLAUSE 8 EARNED ITS OWN LINE ON THE WAY OUT, and it is the sharpest argument for the deletion:
+// it was written FOR the copy-through-`secret` mutant, and it does NOT catch that mutant when the
+// copy is planted one line lower, inside the guard's own body. Measured: that plant passed this
+// function and turned the table red. A clause that does not cover the class its own comment names
+// is exactly what ruling 46 is about.
 //
-//  1. THE CALL'S RESULT IS RETURNED. Every call of the refusal in the block is counted, and so is
-//     every call that sits inside the ERROR position of a return statement; the two counts must
-//     agree. `_ = refuse(...)`, `err := refuse(...)` with no use, and a call handed to a logger
-//     are all one class -- a call whose value does not leave -- and they die on one clause rather
-//     than on three cases.
-//  2. THE RETURN CARRIES NO SECRET. The secret position of that return must be exactly `nil`, so
-//     `return secret, refuseRemovalOnHeldSecret(...)` -- which refuses and hands the value over
-//     anyway, and which a caller reading only the secret would follow -- is red.
-//  3. THE RETURN IS THE EXIT'S OWN. The walk does not descend into a nested function literal: a
-//     refusal returned from a closure the guard never calls is returned from THAT closure.
-//  4. THE REFUSAL COMES FIRST. Every guarded return must sit above every return in the block that
-//     carries something other than `nil`, because a guard below the answer is a guard nothing
-//     reaches.
-//  5. AND IT IS RETURNED ON EVERY PATH THROUGH THE GUARD, WHICH IS THE 2026-09-24 (FOURTH PASS)
-//     REPAIR. Clauses 1 to 4 hold that the refusal is RETURNED; clause 5 holds that it is
-//     returned WHENEVER the guard is entered and the value is held. The walk from the guard's
-//     body down to the guarded return is a STATEMENT PATH, and exactly one branching statement
-//     may stand on it: the held test itself, whose condition must be a single answer bound by
-//     that conditional's own init from a call of `pqSecretHeldAtLocked`, with the refusal as the
-//     LAST statement of its body.
-//  6. THE GUARD IS READ BY VALUE AND NOT BY NAME, WHICH IS THE 2026-09-24 (FIFTH PASS) REPAIR.
-//     The guard's condition is read WHOLE, as source text, and held against a written
-//     disposition. A condition that is a NAME is refused for being a name: there is no binding
-//     between the parameter and the guard for this gate to have to chase.
-//  7. AND NOTHING IN THE RESOLUTION CAN REWRITE WHAT THE GUARD DECIDES ON. The identifiers the
-//     guard's condition and the held test's init READ -- derived from those two expressions, not
-//     typed here -- must each be bound EXACTLY ONCE in the whole [ast.FuncDecl], in a parameter
-//     list or as the receiver, and must be assigned, re-declared, shadowed, ranged over or
-//     addressed NOWHERE in it, nested closures included. `removedLeaves = removedLeaves[:1]`
-//     above the exit, `secret = held` between the guard and the answer, and the exit given a
-//     `removedLeaves` parameter of its own are one class, and they are the class every narrowing
-//     of this guard belongs to. THE RECEIVER IS A SUBJECT TOO -- the held test asks IT -- and
-//     this resolution legitimately writes fields of it, so which fields is a DISPOSITION, held
-//     both ways: `self.stats` and nothing else, and a permission nobody uses is a refusal.
-//  8. AND THE GUARD IS THE EXIT'S FIRST STATEMENT. Clause 7 refuses an assignment to a value the
-//     guard decides on; it is structurally blind to a mutation THROUGH one, and `copy(secret,
-//     make([]byte, len(secret)))` under a leaf count is exactly that. There is no spelling to
-//     ban: the answer is that nothing runs between the exit's parameters arriving and the guard.
+// ── AND THE THREE THAT ARE KEPT, EACH BECAUSE THE TABLE MEASURABLY DOES NOT COVER IT ─────────
 //
-// ── WHY 6 AND 7 ARE ONE REPAIR, AND WHY IT IS A DELETION RATHER THAN A FIFTH READING ──────────
+//  1. THE CALL'S RESULT IS RETURNED. Every call of the refusal in the exit is counted, and so is
+//     every call sitting in the ERROR position of a return; the two counts must agree. `_ =
+//     refuse(...)`, `err := refuse(...)` with no use, and a call handed to a logger are one class.
+//  2. AND THAT RETURN CARRIES NO SECRET -- the secret position must be exactly `nil`. THIS IS THE
+//     CLAUSE THE TABLE CANNOT HAVE. `return secret, refuseRemovalOnHeldSecret(...)` was applied to
+//     production and the whole table stayed GREEN, because [Group.ingestCommitLocked] reads the
+//     ERROR first (`errors.Is(resolveErr, ErrRemovalWithoutRotation)`) and never looks at the
+//     secret on that path. It is not a live defect today; it is a coupling to the CALLER's shape,
+//     it becomes live the day that caller changes, and no input can reach it. That is what a
+//     static clause is for and it is the whole of what one is for here.
+//  3. THE CONDITION IS READ WHOLE, AGAINST A WRITTEN DISPOSITION, AND A NAME IS REFUSED FOR BEING
+//     A NAME. MEASURED, and this is the honest edge of the table:
+//     `0 < len(removedLeaves) && len(removedLeaves) < 4` -- the SAME narrowing one arity above
+//     what the table drives -- passes the table and is refused here. The table's arity axis is
+//     {0, 1, 2, 3} and it prints that set before it asserts anything; this clause is what covers
+//     the rest of the axis, and it covers it at the moment the predicate is written rather than
+//     at the moment somebody removes four leaves. A condition that is a NAME is refused because
+//     that is the one road that defeated this clause before: narrowing the BINDING by one token
+//     leaves the guard byte-identical.
 //
-// What stood here claimed: *"THE CONDITION IS STILL READ, and it still fails closed: `if
-// !removesLeaves`, `if removesLeaves && false` and `if somethingElse` are all not an [ast.Ident]
-// named `removesLeaves`, so none of them is accepted as the guard."* THAT SENTENCE WAS FALSE, not
-// merely unmeasured. The guard was held by its NAME and never by its VALUE, and this function was
-// handed only the exit's [ast.BlockStmt], so it could not read what the name was bound to even in
-// principle. Two mutants, both reproduced at `pqepoch.go` sha256 618428439f27…, gate PASS and
-// `go test -count=1 -run Test -timeout 1800s ./urmessage/` 169/169 PASS on each, and each logging
-// the SAME complement as the correct code (`nil x8`):
-//
-//	removesLeaves := 0 < len(removedLeaves) && len(removedLeaves) < 3   // the binding, one token
-//	removesLeaves := removesLeaves && len(removedLeaves) < 3            // the shadow, in the exit
-//
-// Both are `if removesLeaves && <predicate>` with the conjunction moved off the condition, which
-// is exactly what the refuted sentence said could not be accepted. THE INDIRECTION IS THE
-// ADVERSARY, and four rounds of widening the reading is this corpus's own signal to remove the
-// thing being read rather than read it harder: the bool is DELETED from `pqepoch.go` and the
-// predicate is written whole at the guard, so clause 6 has no name to chase and clause 7 makes
-// the parameter it reads unwritable. Clause 5 fails closed the same way one level down: a held
-// test written `if alreadyHeld && somethingElse`, or one whose answer is bound above the
-// conditional rather than in its own init, is refused rather than reasoned about.
-//
-// EVERY CLAUSE'S MUTANT IS A ROW IN A TABLE NOW, not a sentence in a report:
-// TestTheRemovalGuardIsDecidedByValuesNothingInTheResolutionCanRewrite runs EIGHTEEN synthetic
-// bodies past this function -- THREE that must be ACCEPTED, one of them the unmutated shape, so
-// the FIFTEEN refusals under them are not refusals of something already broken -- and asserts
-// each disposition AND the clause each refusal is refused BY. The two mutants above are two of
-// the fifteen. The four earlier rounds' mutants are rows too, so a sixth rewrite of this function
-// cannot quietly re-open any of them.
-//
-// ── WHY CLAUSE 5, AND THE EXCUSE IT REPLACES WAS FALSE AND NOT MERELY UNMEASURED ──────────────
-//
-// What stood here said the shape-versus-reachability residual is held by the behaviour, "driven by
-// TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch,
-// TestTheCompatibilityArmOfTheResolutionIsClosedToARemoval and
-// TestTheWrapCandidateArmOfTheResolutionIsClosedToARemoval, one per arm". MEASURED, and it is
-// FALSE for the member of that class that matters. Planted into the exit --
-//
-//	if removesLeaves {
-//	    if heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret); alreadyHeld {
-//	        if len(removedLeaves) == 1 {
-//	            return nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)
-//	        }
-//	    }
-//	}
-//	return secret, nil
-//
-// -- the OLD clause 4 passed it, because it asked only for positional containment
-// (`conditional.Body.Pos() <= at && at <= conditional.Body.End()`), so an arbitrarily nested
-// return still counted, and `go test -count=1 -run Test -timeout 1800s ./urmessage/` ran all 168
-// cases GREEN with it in the tree. It is REACHABLE and is not a shape nobody writes:
-// `removedLeaves` is `decision.RemovedLeaves`, which connect fills with one entry per Remove
-// proposal, so a commit carrying two Removes has len == 2, the bypass fires, and the receiver
-// follows a removal onto a secret it has held -- item 243's whole subject arriving inverted.
-//
-// AND THE BEHAVIOUR CANNOT HOLD THIS, WHICH IS THE GENERAL FACT WORTH KEEPING. A bypass predicate
-// that is FALSE on a driven path is caught by the behavioural cases -- the polarity inverse of the
-// plant above, `if 1 < len(removedLeaves)`, turns eight of them red. A bypass that is TRUE on
-// every driven path is caught by NONE of them, because every case in this package removes exactly
-// one leaf. So the sub-class the behaviour holds is "the bypass is false where a test drives it",
-// and the complement of that sub-class was held by nothing at all until clause 5.
-//
-// THE RESIDUAL THAT IS LEFT, NAMED, AND IT IS NOW OUTSIDE THIS MODULE RATHER THAN INSIDE THIS
-// FUNCTION. Clauses 5 to 8 hold everything between `resolvePqSecretLocked`'s parameter list and
-// the refusal; clause 9, in the mutant table's last section, holds the rest of the same path on
-// this side -- `group.go` hands both removal doors `decision.RemovedLeaves`, whole, and neither
-// `decision` nor its leaves may be rewritten between them. Where it STOPS is
-// `authorizeCommitLocked` filling `decision` from connect's `processed.Commit.RemovedLeaves()`:
-// another repository, another subject, and not claimed here.
-//
-// NOR IS a [Group.pqSecretHeldAtLocked] rewritten to answer false; THAT one the behaviour does
-// hold, and the reason is the distinction above -- it is a predicate every driven case makes
-// true, so TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch,
-// TestTheCompatibilityArmOfTheResolutionIsClosedToARemoval and
-// TestTheWrapCandidateArmOfTheResolutionIsClosedToARemoval catch it, one per arm. And nor is a
-// [refuseRemovalOnHeldSecret] that answers a nil error on some commit: that is not this bypass --
-// it answers (nil, nil) rather than the held secret, so the group follows the epoch with NO
-// pq_secret and fails loudly at the next AEAD rather than quietly onto a value it holds -- but it
-// is a different function with no gate of its own and it is recorded rather than covered.
-//
-// It answers (what it READ, what is WRONG). The reading is returned rather than discarded so that
-// a narrowing shows up in a log line, which is what the two mutants above did not: they left the
-// complement looking exactly as healthy as the correct code's.
-func removalGuardDefect(declaration *ast.FuncDecl, exit *ast.FuncLit) (string, string) {
+// THE RESIDUAL, NAMED. This function reads the exit and nothing else. It does not decide that the
+// refusal is REACHED -- that is the table's -- and it says nothing about the other door, which has
+// its own reading at [doorPredicateDefect] for its own reason: an adversary found that door had no
+// gate on its own predicate at all, and a narrowing of it one arity above the table's is caught by
+// neither instrument until that reading exists.
+func removalGuardDefect(exit *ast.FuncLit) (string, string) {
 	const refusal = "refuseRemovalOnHeldSecret"
 	block := exit.Body
 
@@ -2477,8 +2431,8 @@ func removalGuardDefect(declaration *ast.FuncDecl, exit *ast.FuncLit) (string, s
 	}
 	reading := "no guard was found to read"
 
-	// inspect walks `node` without descending into a nested function literal, so that clause 3
-	// is a property of the walk rather than a case inside it.
+	// inspect walks `node` without descending into a nested function literal, so a call inside a
+	// closure the guard never runs is not counted as the guard's.
 	inspect := func(node ast.Node, visit func(ast.Node) bool) {
 		ast.Inspect(node, func(child ast.Node) bool {
 			if child == nil {
@@ -2499,7 +2453,7 @@ func removalGuardDefect(declaration *ast.FuncDecl, exit *ast.FuncLit) (string, s
 		return isIdent && name.Name == refusal
 	}
 
-	// EVERY CALL OF THE REFUSAL IN THE BLOCK, wherever it is and whatever is done with it.
+	// EVERY CALL OF THE REFUSAL IN THE EXIT, wherever it is and whatever is done with it.
 	calls := 0
 	inspect(block, func(node ast.Node) bool {
 		if isRefusalCall(node) {
@@ -2511,21 +2465,10 @@ func removalGuardDefect(declaration *ast.FuncDecl, exit *ast.FuncLit) (string, s
 		return reading, "it never calls " + refusal + " at all"
 	}
 
-	// EVERY RETURN OF THE BLOCK, split by what it carries. `carrying` is the answer the guard has
-	// to sit above; `guarded` is a return whose error position carries the refusal.
-	carried, guarded, carrying := 0, []token.Pos{}, []token.Pos{}
+	carried, guarded := 0, []token.Pos{}
 	inspect(block, func(node ast.Node) bool {
 		ret, isReturn := node.(*ast.ReturnStmt)
-		if !isReturn {
-			return true
-		}
-		if len(ret.Results) == 0 {
-			return true
-		}
-		if exprText(ret.Results[0]) != "nil" {
-			carrying = append(carrying, ret.Pos())
-		}
-		if len(ret.Results) < 2 {
+		if !isReturn || len(ret.Results) < 2 {
 			return true
 		}
 		here := 0
@@ -2558,24 +2501,13 @@ func removalGuardDefect(declaration *ast.FuncDecl, exit *ast.FuncLit) (string, s
 			"a guard that refuses AND hands the value over is a refusal the caller can read past",
 			calls-len(guarded), calls)
 	}
-	// ── 4+5+6+7. AND IT IS REACHED THROUGH THE GUARD, ON A PATH WITH NOTHING ON IT, AND THE
-	//            GUARD READS VALUES NOTHING IN THE RESOLUTION CAN REWRITE ────────────────────
+	// ── 3. AND THE CONDITION IT IS UNDER IS READ WHOLE ──────────────────────────────────────
 	//
-	// The condition is read LAST, because a guarded return the conditional does not contain is a
-	// different defect from a conditional with no guarded return in it, and the clauses above name
-	// the first one precisely.
-	//
-	// THE PATH AND NOT THE POSITION. What stood here was `conditional.Body.Pos() <= at && at <=
-	// conditional.Body.End()` -- byte offsets, under which a return nested inside an arbitrary
-	// second conditional is still "inside the guard". The walk below descends by the STATEMENT
-	// TREE instead, so what stands between the guard and the refusal is a list this gate can read
-	// and refuse.
-	//
-	// AND EVERY TOP-LEVEL CONDITIONAL HOLDING A GUARDED RETURN IS EXAMINED, whatever its condition
-	// says. It used to skip any conditional whose condition was not an [ast.Ident] spelled
-	// `removesLeaves`, so a renamed or re-spelled guard fell out of the loop entirely and was
-	// reported as "outside an `if removesLeaves`" -- the right colour for the wrong reason, and
-	// the reading that let the guard be held by a NAME in the first place.
+	// THE CONTAINMENT IS POSITIONAL AND THAT IS DELIBERATE NOW. The path walk this replaces
+	// existed to refuse a second branching statement between the guard and the refusal; the table
+	// drives that class at three arities and the walk is gone with the rest of clause 5. What is
+	// left here is only "which conditional's condition am I reading", for which a byte range is
+	// the right tool and not a weak version of a stronger one.
 	onAPath := 0
 	for _, statement := range block.List {
 		conditional, isIf := statement.(*ast.IfStmt)
@@ -2583,379 +2515,130 @@ func removalGuardDefect(declaration *ast.FuncDecl, exit *ast.FuncLit) (string, s
 			continue
 		}
 		for _, at := range guarded {
-			path := pathToStatement(conditional.Body.List, at)
-			if path == nil {
+			if at < conditional.Body.Pos() || conditional.Body.End() < at {
 				continue
 			}
 			onAPath += 1
-			// ── 6. THE GUARD IS READ BY VALUE ───────────────────────────────────────────────
 			condition := sourceText(conditional.Cond)
 			reading = "the guard `if " + condition + "`"
 			why, dispositioned := predicates[condition]
 			if !dispositioned {
-				if _, isName := conditional.Cond.(*ast.Ident); isName {
+				if _, isName := boundName(conditional.Cond); isName {
 					return reading, fmt.Sprintf("its refusal is guarded by the NAME %q and not by "+
 						"a predicate this gate can read. Whatever that name is bound to is a level "+
 						"of indirection between the commit and the guard, and narrowing the "+
 						"BINDING by one token -- `%s := 0 < len(removedLeaves) && "+
-						"len(removedLeaves) < 3` -- leaves this body byte-identical, passes every "+
-						"other clause here and passes every behavioural case in this package. "+
-						"Write the predicate whole at the guard", condition, condition)
+						"len(removedLeaves) < 3` -- leaves this body byte-identical and passes "+
+						"every behavioural case in this package. Write the predicate whole at the "+
+						"guard", condition, condition)
 				}
 				return reading, fmt.Sprintf("its refusal is guarded by `%s` and this gate has no "+
 					"disposition for that predicate. The guard's condition is the whole of what "+
-					"decides whether a removal is checked at all, so a new one is a decision that "+
-					"gets a row here saying what it reads and why, not a reading this gate works "+
-					"out for itself", condition)
+					"decides whether a removal is checked at all, and it is the one thing the "+
+					"driven table cannot cover past the arities it drives -- `0 < "+
+					"len(removedLeaves) && len(removedLeaves) < 4` passes every row of it. So a "+
+					"new predicate gets a row here saying what it reads and why", condition)
 			}
-			// ── 8. AND THE GUARD IS THE EXIT'S FIRST STATEMENT ──────────────────────────────
-			//
-			// NOTHING RUNS BETWEEN THE EXIT'S PARAMETERS ARRIVING AND THE GUARD. Clause 7 refuses
-			// an ASSIGNMENT to a value the guard decides on; it cannot see a mutation THROUGH one,
-			// and `copy(secret, make([]byte, len(secret)))` under a leaf count is exactly that --
-			// the held test then answers false, every clause above still reads correctly, and no
-			// case in this package drives it. There is no spelling to ban here: the answer is that
-			// the guard is the first statement, so there is nowhere to put one.
-			//
-			// THE COST, recorded rather than glossed: a legitimate statement hoisted to the top of
-			// this exit goes red and has to move below the guard or be argued for here. That is
-			// the same trade as the held test's own init requirement, and on the same footing.
-			if block.List[0] != ast.Stmt(conditional) {
-				return reading, "its guard is not the FIRST statement of the exit; `" +
-					sourceText(block.List[0]) + "` runs before it. A statement above the guard can " +
-					"mutate the very value the held test is about to be asked -- `copy(secret, " +
-					"...)` under a leaf count leaves every other clause here reading correctly -- " +
-					"and no behavioural case in this package drives it"
-			}
-			// EVERY BRANCHING STATEMENT ON THE PATH, and exactly one is allowed. A bare block and
-			// a label are not branching -- neither can decide whether what is inside it runs -- so
-			// they are crossed without comment.
-			tests := []*ast.IfStmt{}
-			for _, crossed := range path[:len(path)-1] {
-				kind := branchingKind(crossed)
-				if kind == "" {
-					continue
-				}
-				crossedIf, isCrossedIf := crossed.(*ast.IfStmt)
-				if !isCrossedIf {
-					return reading, "its refusal is reached through " + kind + " inside the " +
-						"removal guard; what may stand between the guard and the refusal is the " +
-						"held test and nothing else, because everything else decides whether the " +
-						"refusal happens at all on some commit this package never drives"
-				}
-				tests = append(tests, crossedIf)
-			}
-			if len(tests) != 1 {
-				return reading, fmt.Sprintf("its refusal sits under %d conditional(s) inside the "+
-					"removal guard and exactly ONE is allowed, the held test. A second one is a "+
-					"bypass: the guard refuses on the branch that predicate is true on and hands "+
-					"the held secret back on every other, and a bypass that is TRUE on every path "+
-					"this package drives is caught by no behavioural case here -- every one of "+
-					"them removes one leaf or two", len(tests))
-			}
-			if defect := heldTestDefect(tests[0]); defect != "" {
-				return reading, defect
-			}
-			// AND THE REFUSAL IS THE LAST STATEMENT OF THE HELD TEST'S BODY, so nothing below it
-			// inside that body decides whether it is reached.
-			body := tests[0].Body.List
-			if len(body) == 0 || body[len(body)-1].Pos() != at {
-				return reading, "its refusal is not the last statement of the held test's body, " +
-					"so something under that test stands between `this value is held` and the refusal"
-			}
-			// ── 7. AND NOTHING CAN REWRITE WHAT IT READS ────────────────────────────────────
-			//
-			// The subjects are DERIVED from the two expressions that decide -- the guard's
-			// condition and the held test's init -- rather than typed here, so a guard that
-			// starts reading a fourth value brings that value under the rule by itself. The held
-			// test's init is read from `tests[0]` and not from the path, so this clause is asked
-			// about the conditional [heldTestDefect] has just approved and about no other.
-			subjects, defect := guardSubjectDefect(declaration,
-				[]ast.Node{conditional.Cond, tests[0].Init})
-			reading = "the guard `if " + condition + "` (" + why + "), deciding on " +
-				strings.Join(subjects, "; ")
-			if defect != "" {
-				return reading, defect
-			}
+			reading = "the guard `if " + condition + "` (" + why + ")"
 		}
 	}
 	if onAPath != len(guarded) {
 		return reading, fmt.Sprintf("%d of its %d refusal(s) are outside a conditional at the top "+
-			"level of the block, so what refuses is not keyed to the commit removing a leaf",
+			"level of the exit, so what refuses is not keyed to the commit removing a leaf",
 			len(guarded)-onAPath, len(guarded))
-	}
-	// ── 3+4. AND IT COMES FIRST ─────────────────────────────────────────────────────────────
-	for _, answer := range carrying {
-		for _, at := range guarded {
-			if answer < at {
-				return reading, "it answers a secret ABOVE its own refusal, so the guard is below " +
-					"the line it is supposed to guard and nothing reaches it"
-			}
-		}
 	}
 	return reading, ""
 }
 
-// guardSubjectDefect holds clause 7: every value the removal guard DECIDES on is bound exactly
-// once, in a parameter list or as the receiver, and is written nowhere in the resolution.
+// doorPredicateDefect is [removalGuardDefect]'s clause 3 asked of THE OTHER DOOR,
+// [Group.refuseUnrotatedRemovalLocked], and it is the one reading this pass ADDS while deleting
+// six.
 //
-// It answers (what it read, what is wrong), one line per subject, so that the reading is a log
-// line rather than an absence. The subjects are the identifiers `decide` READS -- the guard's
-// condition and the held test's init -- intersected with the names `declaration` binds, which is
-// what drops `len` and `nil` without a list of exceptions to keep up to date.
+// WHY IT IS ADDED RATHER THAN INHERITED. An adversary found that door had no gate on its own
+// predicate at any point in the six rounds: everything written was about the resolution's exit.
+// The driven table now covers that door at four arities ({0, 1, 2, 3}, printed by the table
+// itself), and MEASURED, the four narrowings an adversary would write there -- `2 <
+// len(removedLeaves)` folded into the early return, `!= 1`, the door deleted outright, and the
+// door made to refuse every removal digest or not -- are ALL caught by the table and by none of
+// the six gates. What the table does not catch is the same narrowing one arity ABOVE what it
+// drives: `len(removedLeaves) == 0 || 3 < len(removedLeaves)` was applied to production and
+// passed the table AND every gate. This reading is what closes that, and it closes it the way
+// clause 3 does: the condition is read whole as source text, held against a written disposition
+// BOTH WAYS, and a condition that is a NAME is refused for being a name.
 //
-// WHY THE SCAN IS THE WHOLE [ast.FuncDecl] AND NOT THE EXIT. The two mutants that defeated the
-// gate this replaces both sat OUTSIDE the exit's block: one narrowed a binding at the top of the
-// resolution, the other shadowed that binding as the exit's first statement. A gate handed only
-// the exit's body could not have read either one even in principle. `removedLeaves =
-// removedLeaves[:1]` anywhere above the exit, a `removedLeaves :=` shadow inside it, `secret =
-// nil` before the held test, and `&removedLeaves` handed to anything are one class, and this is
-// the class every narrowing of this guard has belonged to.
-func guardSubjectDefect(declaration *ast.FuncDecl, decide []ast.Node) ([]string, string) {
-	// WHAT THE RESOLUTION BINDS, AND HOW. A parameter, a result name and the receiver are the
-	// three bindings a caller decides; everything else is a binding the function decides, which
-	// is exactly what must not stand between the parameter and the guard.
-	// AND WHAT IT WRITES THROUGH A SUBJECT. The receiver is a subject -- the held test asks
-	// `self` whether it has held the value -- and this resolution legitimately writes fields of
-	// it, so "the receiver is never written" is not a rule it can keep. WHICH fields is a
-	// disposition instead, and the class it refuses is the one that matters: a write to the
-	// tables the held test reads. `self.pqSecretWitness = nil` above the exit narrows the held
-	// test exactly the way a narrowed binding narrows the guard, and everything else here still
-	// reads correctly.
-	through := map[string][]string{}
-	permitted := map[string]string{
-		"self.stats": "the wrap counters. An operator reads them; [Group.pqSecretHeldAtLocked] " +
-			"does not, so no write under this prefix can change what the held test answers",
+// ITS SUBJECT IS EVERY TOP-LEVEL CONDITIONAL OF THE DOOR, because this door decides by returning
+// nil early: a predicate added ANYWHERE in it can let a removal past, and "the ones I thought to
+// look at" is how the six rounds went.
+func doorPredicateDefect(declaration *ast.FuncDecl) ([]string, string) {
+	predicates := map[string]string{
+		"len(removedLeaves) == 0": "a commit that removes NOTHING is untouched by this door. It " +
+			"is the complement of the rule and it is driven: a digest-less commit that removes " +
+			"nobody reaches the resolution's no-digest arm and is followed",
+		"digest != nil": "a removal that CARRIES a digest is let past here and judged at the " +
+			"resolution against that digest, which no third party can move. Everything this point " +
+			"could still read is a statement about the wire rather than about the commit, and a " +
+			"permanent halt may not rest on a record a bystander can write",
 	}
-
-	fromCaller := map[string]bool{}
-	bindings := map[string][]string{}
-	writes := map[string][]string{}
-	place := func(pos token.Pos) string {
-		return fmt.Sprintf("offset %d", int(pos))
+	read, seen := []string{}, map[string]bool{}
+	for _, statement := range declaration.Body.List {
+		conditional, isIf := statement.(*ast.IfStmt)
+		if !isIf {
+			continue
+		}
+		condition := sourceText(conditional.Cond)
+		read = append(read, "`if "+condition+"`")
+		if _, isName := boundName(conditional.Cond); isName {
+			return read, fmt.Sprintf("this door decides on the NAME %q. Whatever that name is "+
+				"bound to is a level of indirection between the commit and the decision, and it "+
+				"is the road that defeated the resolution's own guard: narrowing the BINDING by "+
+				"one token leaves the door byte-identical. Write the predicate whole", condition)
+		}
+		why, dispositioned := predicates[condition]
+		if !dispositioned {
+			return read, fmt.Sprintf("this door decides on `%s` and this gate has no disposition "+
+				"for that predicate. Every predicate here can let a removal past, and the driven "+
+				"table cannot cover one past the arities it drives -- `len(removedLeaves) == 0 || "+
+				"3 < len(removedLeaves)` passes every row of it. So a new predicate gets a row "+
+				"saying what it reads and why", condition)
+		}
+		seen[condition] = true
+		read[len(read)-1] = "`if " + condition + "` (" + why + ")"
 	}
-	bindField := func(fields *ast.FieldList, kind string, caller bool) {
-		if fields == nil {
-			return
-		}
-		for _, field := range fields.List {
-			for _, name := range field.Names {
-				if name.Name == "_" {
-					continue
-				}
-				bindings[name.Name] = append(bindings[name.Name], kind)
-				if caller {
-					fromCaller[name.Name] = true
-				}
-			}
-		}
-	}
-	bindField(declaration.Recv, "the receiver of "+declaration.Name.Name, true)
-	bindField(declaration.Type.Params, "a parameter of "+declaration.Name.Name, true)
-	bindField(declaration.Type.Results, "a result name of "+declaration.Name.Name, false)
-	ast.Inspect(declaration, func(node ast.Node) bool {
-		switch typed := node.(type) {
-		case *ast.FuncLit:
-			bindField(typed.Type.Params, "a parameter of a function literal", true)
-			bindField(typed.Type.Results, "a result name of a function literal", false)
-		case *ast.ValueSpec:
-			for _, name := range typed.Names {
-				if name.Name != "_" {
-					bindings[name.Name] = append(bindings[name.Name],
-						"a declaration at "+place(name.Pos()))
-				}
-			}
-		case *ast.AssignStmt:
-			for _, target := range typed.Lhs {
-				name, isName := target.(*ast.Ident)
-				if !isName || name.Name == "_" {
-					continue
-				}
-				if typed.Tok == token.DEFINE {
-					bindings[name.Name] = append(bindings[name.Name],
-						"a `:=` at "+place(name.Pos()))
-					continue
-				}
-				writes[name.Name] = append(writes[name.Name], "an assignment at "+place(name.Pos()))
-			}
-			for _, target := range typed.Lhs {
-				if _, isName := target.(*ast.Ident); isName {
-					continue
-				}
-				root, path := rootIdent(target)
-				if root == nil {
-					continue
-				}
-				through[root.Name] = append(through[root.Name], path)
-			}
-		case *ast.RangeStmt:
-			for _, target := range []ast.Expr{typed.Key, typed.Value} {
-				name, isName := target.(*ast.Ident)
-				if !isName || name.Name == "_" {
-					continue
-				}
-				if typed.Tok == token.DEFINE {
-					bindings[name.Name] = append(bindings[name.Name],
-						"a range binding at "+place(name.Pos()))
-					continue
-				}
-				writes[name.Name] = append(writes[name.Name],
-					"a range assignment at "+place(name.Pos()))
-			}
-		case *ast.IncDecStmt:
-			if name, isName := typed.X.(*ast.Ident); isName {
-				writes[name.Name] = append(writes[name.Name], "an ++/-- at "+place(name.Pos()))
-				return true
-			}
-			if root, path := rootIdent(typed.X); root != nil {
-				through[root.Name] = append(through[root.Name], path)
-			}
-		case *ast.UnaryExpr:
-			if typed.Op != token.AND {
-				return true
-			}
-			if name, isName := typed.X.(*ast.Ident); isName {
-				writes[name.Name] = append(writes[name.Name],
-					"its address taken at "+place(name.Pos()))
-			}
-		}
-		return true
-	})
-
-	// THE SUBJECTS, DERIVED. An identifier the deciding expressions read that this function binds
-	// at all; `len`, `nil` and a package name are bound nowhere here and drop out by themselves.
-	names := []string{}
-	seen := map[string]bool{}
-	for _, node := range decide {
-		ast.Inspect(node, func(child ast.Node) bool {
-			assign, isAssign := child.(*ast.AssignStmt)
-			if isAssign {
-				// THE INIT IS READ ON ITS RIGHT-HAND SIDE ONLY. `heldAt, alreadyHeld :=` are what
-				// the held test BINDS, and [heldTestDefect] already holds them; what this clause
-				// is about is the values that init READS.
-				for _, value := range assign.Rhs {
-					ast.Inspect(value, func(inner ast.Node) bool {
-						if name, isName := inner.(*ast.Ident); isName && len(bindings[name.Name]) != 0 && !seen[name.Name] {
-							seen[name.Name] = true
-							names = append(names, name.Name)
-						}
-						return true
-					})
-				}
-				return false
-			}
-			if name, isName := child.(*ast.Ident); isName && len(bindings[name.Name]) != 0 && !seen[name.Name] {
-				seen[name.Name] = true
-				names = append(names, name.Name)
-			}
-			return true
-		})
-	}
-	sort.Strings(names)
-	if len(names) == 0 {
-		return nil, "the removal guard reads no value this resolution binds, so there is nothing " +
-			"for this clause to hold and the guard is deciding on something outside the function"
-	}
-
-	readings := []string{}
-	for _, name := range names {
-		readings = append(readings, fmt.Sprintf(
-			"`%s` bound %d time(s) [%s], written %d time(s), written THROUGH %d time(s) %v",
-			name, len(bindings[name]), strings.Join(bindings[name], ", "), len(writes[name]),
-			len(through[name]), through[name]))
-	}
-	for _, name := range names {
-		if 1 < len(bindings[name]) {
-			return readings, fmt.Sprintf("the removal guard decides on `%s` and this resolution "+
-				"binds that name %d times (%s). A second binding is a SHADOW, and a shadow is "+
-				"where a narrowing hides: re-declaring `%s` above the guard from a NARROWER value "+
-				"leaves the guard's own line byte-identical, passes every other clause here, and "+
-				"passes every behavioural case in this package. One binding, from the caller, or "+
-				"this gate is reading a name again", name, len(bindings[name]),
-				strings.Join(bindings[name], ", "), name)
-		}
-		if !fromCaller[name] {
-			return readings, fmt.Sprintf("the removal guard decides on `%s`, which is %s and not "+
-				"a value the caller handed over. What the guard reads has to come from outside "+
-				"this function, or the function can choose what it is checked against",
-				name, bindings[name][0])
-		}
-		if 0 < len(writes[name]) {
-			return readings, fmt.Sprintf("the removal guard decides on `%s` and this resolution "+
-				"writes it %d time(s) (%s). `removedLeaves = removedLeaves[:1]` above the exit, "+
-				"and `secret = held` between the guard and the answer, are the same defect as a "+
-				"narrowed binding one statement further along: the guard's own line still reads "+
-				"correctly and the value it decides on is no longer the one the caller handed over",
-				name, len(writes[name]), strings.Join(writes[name], ", "))
-		}
-		// AND A WRITE THROUGH IT IS DISPOSITIONED, BOTH WAYS. A row that names no write is a
-		// refusal too, below, so a prefix that stops being written stops being permitted.
-		for _, path := range through[name] {
-			allowed := ""
-			for prefix := range permitted {
-				if path == prefix || strings.HasPrefix(path, prefix+".") ||
-					strings.HasPrefix(path, prefix+"[") {
-					allowed = prefix
-				}
-			}
-			if allowed == "" {
-				return readings, fmt.Sprintf("the removal guard decides on `%s` and this "+
-					"resolution writes `%s` through it, which no row here permits. The held test "+
-					"asks `%s` whether it has held the value, so a write to what it reads -- "+
-					"`self.pqSecretWitness = nil` under a leaf count is the shape -- narrows the "+
-					"held test exactly the way a narrowed binding narrows the guard, and leaves "+
-					"every other clause here reading correctly", name, path, name)
-			}
+	for condition, why := range predicates {
+		if !seen[condition] {
+			return read, fmt.Sprintf("this gate disposes of `%s` (%s) and the door has no such "+
+				"condition. A predicate that was deleted and a row left behind are the same "+
+				"defect, and a count could tell neither from a rewrite", condition, why)
 		}
 	}
-	for prefix, why := range permitted {
-		found := false
-		for _, name := range names {
-			for _, path := range through[name] {
-				if path == prefix || strings.HasPrefix(path, prefix+".") ||
-					strings.HasPrefix(path, prefix+"[") {
-					found = true
-				}
-			}
-		}
-		if !found {
-			return readings, fmt.Sprintf("this gate permits writes under `%s` (%s) and the "+
-				"resolution makes none. A permission kept for a write nobody makes is a hole "+
-				"left open for the next one that fits it", prefix, why)
-		}
-	}
-	return readings, ""
+	return read, ""
 }
 
-// rootIdent answers the identifier a write-target is rooted at and the source text of the path
-// down to it -- `self` and `self.stats.WrapOrphaned` for `self.stats.WrapOrphaned += 1` -- or nil
-// for a target this gate cannot attribute to one value. It is what turns "the receiver is never
-// written", which this resolution cannot keep, into "which of the receiver's fields is written is
-// a disposition", which it can.
-func rootIdent(target ast.Expr) (*ast.Ident, string) {
-	path := sourceText(target)
+// boundName answers the identifier a condition is, when the condition is nothing but a name --
+// through parentheses and through a negation, because `!removesLeaves` is the same indirection as
+// `removesLeaves` and refusing only the second would be a gate scoped to one spelling of one
+// bypass, which is the class ledger ruling 46 is about. It answers false for every condition that
+// reads something.
+func boundName(condition ast.Expr) (string, bool) {
 	for {
-		switch typed := target.(type) {
+		switch shape := condition.(type) {
 		case *ast.Ident:
-			return typed, path
-		case *ast.SelectorExpr:
-			target = typed.X
-		case *ast.IndexExpr:
-			target = typed.X
-		case *ast.StarExpr:
-			target = typed.X
+			return shape.Name, true
 		case *ast.ParenExpr:
-			target = typed.X
+			condition = shape.X
+		case *ast.UnaryExpr:
+			if shape.Op != token.NOT {
+				return "", false
+			}
+			condition = shape.X
 		default:
-			return nil, path
+			return "", false
 		}
 	}
 }
 
-// sourceText prints a node back as Go source, WHOLE and on one line, so that a predicate can be
-// read as what it SAYS. [exprText] answers a KEY -- `f(...)`, `x[...]` -- and deliberately loses
-// the operands, which is the right subject for the return walk above and the wrong one for a
-// guard's condition, where the operands are the whole of what decides.
+// sourceText is a node's own source, printed back from the tree. It is what lets a condition be
+// held as TEXT against a disposition instead of being reasoned about node by node.
 func sourceText(node ast.Node) string {
 	buffer := bytes.Buffer{}
 	if err := printer.Fprint(&buffer, token.NewFileSet(), node); err != nil {
@@ -2964,151 +2647,13 @@ func sourceText(node ast.Node) string {
 	return strings.Join(strings.Fields(buffer.String()), " ")
 }
 
-// pathToStatement returns the chain of statements from `list` down to the return statement that
-// starts at `at`, innermost last, or nil when that statement is not under `list`. It descends by
-// the STATEMENT TREE, which is what makes clause 5 a path and not a byte range, and it never
-// descends into a function literal -- clause 3, one level down.
-func pathToStatement(list []ast.Stmt, at token.Pos) []ast.Stmt {
-	for _, statement := range list {
-		// A position filter first, because a statement that cannot contain `at` cannot be on the
-		// path to it. The DESCENT below is structural; this only skips work.
-		if at < statement.Pos() || statement.End() < at {
-			continue
-		}
-		if ret, isReturn := statement.(*ast.ReturnStmt); isReturn && ret.Pos() == at {
-			return []ast.Stmt{statement}
-		}
-		for _, inner := range stepsInto(statement) {
-			if found := pathToStatement(inner, at); found != nil {
-				return append([]ast.Stmt{statement}, found...)
-			}
-		}
-	}
-	return nil
-}
-
-// stepsInto answers the statement lists a statement owns. A [ast.FuncLit] is an EXPRESSION and is
-// therefore not one of them, which is how the walk stays out of nested closures.
-func stepsInto(statement ast.Stmt) [][]ast.Stmt {
-	switch node := statement.(type) {
-	case *ast.BlockStmt:
-		return [][]ast.Stmt{node.List}
-	case *ast.IfStmt:
-		lists := [][]ast.Stmt{node.Body.List}
-		if node.Else != nil {
-			lists = append(lists, []ast.Stmt{node.Else})
-		}
-		return lists
-	case *ast.ForStmt:
-		return [][]ast.Stmt{node.Body.List}
-	case *ast.RangeStmt:
-		return [][]ast.Stmt{node.Body.List}
-	case *ast.SwitchStmt:
-		return [][]ast.Stmt{node.Body.List}
-	case *ast.TypeSwitchStmt:
-		return [][]ast.Stmt{node.Body.List}
-	case *ast.SelectStmt:
-		return [][]ast.Stmt{node.Body.List}
-	case *ast.CaseClause:
-		return [][]ast.Stmt{node.Body}
-	case *ast.CommClause:
-		return [][]ast.Stmt{node.Body}
-	case *ast.LabeledStmt:
-		return [][]ast.Stmt{{node.Stmt}}
-	}
-	return nil
-}
-
-// branchingKind names a statement that can decide whether what is under it runs at all, and
-// answers "" for one that cannot. A bare block and a label are not branching: everything inside
-// them runs whenever the block is reached, so crossing one does not weaken the guard.
-func branchingKind(statement ast.Stmt) string {
-	switch statement.(type) {
-	case *ast.IfStmt:
-		return "an `if`"
-	case *ast.SwitchStmt:
-		return "a `switch`"
-	case *ast.TypeSwitchStmt:
-		return "a type switch"
-	case *ast.ForStmt:
-		return "a `for`"
-	case *ast.RangeStmt:
-		return "a `range`"
-	case *ast.SelectStmt:
-		return "a `select`"
-	case *ast.CaseClause:
-		return "a case clause"
-	case *ast.CommClause:
-		return "a comm clause"
-	}
-	return ""
-}
-
-// heldTestDefect says what is wrong with the ONE conditional clause 5 allows between the removal
-// guard and its refusal, or "" when that conditional is the held test itself:
-//
-//	if heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret); alreadyHeld { ... }
-//
-// The condition has to be a single bound answer and the init has to be what binds it, so that
-// `alreadyHeld && len(removedLeaves) == 1` -- the same bypass ANDed in rather than nested -- is
-// refused for the same reason the nested one is, and so that an answer bound somewhere this gate
-// cannot see is refused rather than trusted.
-//
-// THE ANSWER'S NAME IS NOT READ, only its SHAPE, which is the difference between this and the
-// guard clause it sits under: `isHeldValue` in place of `alreadyHeld` is a rename and not a
-// narrowing, and row A2 of the mutant table asserts it is accepted. What the answer is bound
-// FROM is then held by clause 7, which reads the init's right-hand side.
-func heldTestDefect(conditional *ast.IfStmt) string {
-	const held = "pqSecretHeldAtLocked"
-	answer, isIdent := conditional.Cond.(*ast.Ident)
-	if !isIdent {
-		return "the one conditional between the removal guard and its refusal tests `" +
-			sourceText(conditional.Cond) + "` and not a single bound answer; a predicate ANDed into " +
-			"the held test is the nested bypass in another dress, and it is true on every path " +
-			"this package drives"
-	}
-	assign, isAssign := conditional.Init.(*ast.AssignStmt)
-	if !isAssign {
-		return "the one conditional between the removal guard and its refusal tests the bare `" +
-			answer.Name + "`, bound above it where this gate cannot read what it is; the held " +
-			"test has to bind its own answer or what stands there is not `have I held this value`"
-	}
-	bound := false
-	for _, target := range assign.Lhs {
-		if name, isName := target.(*ast.Ident); isName && name.Name == answer.Name {
-			bound = true
-		}
-	}
-	if !bound {
-		return "`" + answer.Name + "` is tested by the one conditional between the removal guard " +
-			"and its refusal and is not bound by that conditional's own init"
-	}
-	asks := 0
-	ast.Inspect(assign, func(node ast.Node) bool {
-		call, isCall := node.(*ast.CallExpr)
-		if !isCall {
-			return true
-		}
-		if selector, isSelector := call.Fun.(*ast.SelectorExpr); isSelector && selector.Sel.Name == held {
-			asks += 1
-		}
-		return true
-	})
-	if asks != 1 {
-		return fmt.Sprintf("the one conditional between the removal guard and its refusal binds "+
-			"its answer from %d call(s) of %s; what may stand there is the held test and nothing "+
-			"else", asks, held)
-	}
-	return ""
-}
-
-// ── 4c. THE GUARD'S OWN MUTANTS ARE ROWS, NOT SENTENCES IN A REPORT ─────────────────────────
+// ── 4c. THE TWO SURVIVING READINGS HAVE THEIR OWN MUTANTS, AS ROWS ──────────────────────────
 
 // guardShape is the shape [Group.resolvePqSecretLocked] has, reduced to what
 // [removalGuardDefect] reads. It is a stand-in for the production function and it is held against
-// the production function on the row below: A0 asserts that this template is ACCEPTED and the
-// real resolution is accepted too, so a template that had drifted into some other shape would
-// make every refusal under it vacuous and would say so here rather than pass quietly.
+// the production function on a row below: A0 asserts that this template is ACCEPTED and the real
+// resolution is accepted too, so a template that had drifted into some other shape would make
+// every refusal under it vacuous and would say so here rather than pass quietly.
 //
 // It is never compiled -- [parser.ParseFile] does not resolve `message` or `errNoSecret` -- which
 // is the point: a mutant that would not compile in production still has to be REFUSED by the
@@ -3135,26 +2680,46 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 }
 `
 
-// A NARROWING OF THIS GUARD IS ASSERTED TO BE REFUSED, AND THE REASON IT IS REFUSED FOR IS
-// ASSERTED TOO.
+// doorShape is [Group.refuseUnrotatedRemovalLocked] reduced to what [doorPredicateDefect] reads,
+// and it stands in the same relation to its subject that [guardShape] does to its own.
+const doorShape = `package urmessage
+
+func (self *Group) refuseUnrotatedRemovalLocked(digest *message.EpochDigestAttachment, removedLeaves []uint32) error {
+	if len(removedLeaves) == 0 {
+		return nil
+	}
+	if digest != nil {
+		return nil
+	}
+	return fmt.Errorf("%w: the commit that would open epoch %d removes %d leaf/leaves",
+		ErrRemovalWithoutRotation, self.epoch+1, len(removedLeaves))
+}
+`
+
+// BOTH REMOVAL DOORS ARE DECIDED BY A PREDICATE WRITTEN WHOLE, AND THE RESOLUTION'S REFUSAL IS
+// RETURNED RATHER THAN COMPUTED.
 //
-// WHY THIS TABLE EXISTS. [removalGuardDefect] is on its FIFTH round over one shape, and the four
-// before it each ended as a paragraph in a report saying which mutants had been tried by hand.
-// A mutant tried by hand is a measurement that expires the moment the next editor touches the
-// function: every one of the four rounds re-discovered that the PREVIOUS round's written excuse
-// was false. So each mutant is a row here, applied to [guardShape] by an exact substring swap
-// whose occurrence count is asserted to be 1 -- a swap that stopped matching is a row that would
-// otherwise pass by not being applied at all.
+// WHAT THIS TEST IS AFTER LEDGER RULING 46. It held EIGHTEEN synthetic bodies against eight
+// clauses and a caller walk. Six of those clauses are deleted, each one measured being caught by
+// the driven table instead -- the deletion table is in [removalGuardDefect]'s header, mutant by
+// mutant -- so the rows that existed for them are deleted with them. A row kept for a clause that
+// is gone would be a refusal nothing needs, and this project has already been bitten by a gate
+// whose header named a class its code did not cover.
 //
-// AND EACH REFUSAL NAMES THE CLAUSE IT IS REFUSED BY. Without that, twelve rows could all be
-// refused by clause 1 and the table would be twelve copies of one measurement. `names` is a
-// fragment of the defect sentence, and it is asserted.
+// WHAT IS LEFT IS TWELVE ROWS ACROSS TWO READINGS, and every one of them exists because the mutant
+// under it was measured PASSING the driven table:
 //
-// AND THREE ROWS MUST BE ACCEPTED, or the refusals below them prove nothing: the shape itself,
-// a legitimate statement above the refusal, and the held test's answer under a different name.
-// A gate that refuses everything is not a gate.
-func TestTheRemovalGuardIsDecidedByValuesNothingInTheResolutionCanRewrite(t *testing.T) {
-	rows := []struct {
+//   - the resolution's exit: the refusal computed and dropped, the refusal returned beside the
+//     secret, a narrowed predicate, and a predicate hidden behind a NAME;
+//   - the other door: a narrowed predicate and a predicate hidden behind a NAME.
+//
+// AND EACH REFUSAL NAMES THE CLAUSE IT IS REFUSED BY. Without that, six rows could all be refused
+// by clause 1 and the table would be six copies of one measurement.
+//
+// AND THE ACCEPTED ROWS ARE WHAT MAKE THE REFUSALS MEAN SOMETHING: the two shapes themselves, a
+// legitimate statement above the refusal, and the held test's answer under a different name.
+func TestBothRemovalDoorsAreDecidedByAPredicateWrittenWholeAndTheRefusalIsReturned(t *testing.T) {
+	exitRows := []struct {
 		row      string
 		was      string
 		now      string
@@ -3169,128 +2734,57 @@ func TestTheRemovalGuardIsDecidedByValuesNothingInTheResolutionCanRewrite(t *tes
 			was:      "\t\t\t\treturn nil, refuseRemovalOnHeldSecret(",
 			now:      "\t\t\t\t_ = how\n\t\t\t\treturn nil, refuseRemovalOnHeldSecret(",
 			accepted: true,
-			why: "nothing between `this value is held` and the refusal DECIDES whether the " +
-				"refusal runs, so it is crossed without comment. A gate that refused this would " +
-				"be refusing a comment or a log line"},
+			why: "nothing between `this value is held` and the refusal is this reading's " +
+				"business any more -- the table drives that class at three arities -- and a gate " +
+				"that refused this would be refusing a comment or a log line"},
 		{row: "A2 the held test's answer under another name",
 			was:      "heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret); alreadyHeld {",
 			now:      "heldAt, isHeldValue := self.pqSecretHeldAtLocked(secret); isHeldValue {",
 			accepted: true,
-			why: "the held test is held by its SHAPE -- one answer, bound by its own init, from " +
-				"one call of pqSecretHeldAtLocked -- and a rename is not a narrowing"},
-
+			why:      "a rename is not a narrowing, and this reading is about the GUARD's condition"},
+		{row: "R9 the refusal, computed and dropped",
+			was:   "\t\t\t\treturn nil, refuseRemovalOnHeldSecret(",
+			now:   "\t\t\t\t_ = refuseRemovalOnHeldSecret(",
+			names: "compute it and drop it",
+			why: "the 2026-09-24 (third pass) blocker and ledger item 254's `owed from this " +
+				"pass`. The table catches it too; it is kept because it is the same walk clause 2 " +
+				"rests on"},
+		{row: "R10 the refusal, returned beside the secret",
+			was:   "\t\t\t\treturn nil, refuseRemovalOnHeldSecret(",
+			now:   "\t\t\t\treturn secret, refuseRemovalOnHeldSecret(",
+			names: "beside a non-nil secret",
+			why: "MEASURED PASSING THE DRIVEN TABLE, and this row is the whole argument for " +
+				"keeping a static reading here at all: ingestCommitLocked reads the ERROR first, " +
+				"so no input can reach the secret this hands back. It is a coupling to the " +
+				"caller's shape and it becomes live the day that caller changes"},
+		{row: "R6 the conjunction, left on the condition",
+			was:   "\t\tif 0 < len(removedLeaves) {",
+			now:   "\t\tif 0 < len(removedLeaves) && len(removedLeaves) < 4 {",
+			names: "has no disposition for that predicate",
+			why: "MEASURED PASSING THE DRIVEN TABLE at `< 4`, which is one arity above the set " +
+				"the table prints. It is refused by the reading rather than by a list of banned " +
+				"operators"},
 		{row: "R1 the binding, narrowed by one token -- the 2026-09-24 blocker",
 			was: "\tanswerSecret := func(secret []byte, how string) ([]byte, error) {\n\t\tif 0 < len(removedLeaves) {",
 			now: "\tremovesLeaves := 0 < len(removedLeaves) && len(removedLeaves) < 3\n" +
 				"\tanswerSecret := func(secret []byte, how string) ([]byte, error) {\n\t\tif removesLeaves {",
 			names: "guarded by the NAME",
 			why: "REPRODUCED against production at pqepoch.go sha256 618428439f27…: gate PASS, " +
-				"169/169 cases PASS, and the same complement the correct code logs. The removal " +
-				"rule was gone for every commit removing three or more leaves, which is one ADMIN " +
-				"ejecting a user's three devices"},
+				"169/169 cases PASS, and the same complement the correct code logs. This one the " +
+				"table DOES catch at three leaves; the row stays because the NAME is the road " +
+				"that would put `< 4` back out of clause 3's sight"},
 		{row: "R2 the honest named form, narrowed by nothing at all",
 			was: "\tanswerSecret := func(secret []byte, how string) ([]byte, error) {\n\t\tif 0 < len(removedLeaves) {",
 			now: "\tremovesLeaves := 0 < len(removedLeaves)\n" +
 				"\tanswerSecret := func(secret []byte, how string) ([]byte, error) {\n\t\tif removesLeaves {",
 			names: "guarded by the NAME",
-			why: "THE ROW THAT COSTS SOMETHING, and it is deliberate. This is what production " +
-				"said until this pass and it is behaviourally identical to the shape above it. It " +
-				"is refused because this gate cannot tell it from R1 without chasing the binding, " +
-				"and four rounds of chasing spellings is what put the name here. The indirection " +
-				"is refused, not the narrowing"},
-		{row: "R3 the exit given its OWN removedLeaves, narrowed at the call",
-			was:   "\tanswerSecret := func(secret []byte, how string) ([]byte, error) {",
-			now:   "\tanswerSecret := func(secret []byte, how string, removedLeaves []uint32) ([]byte, error) {",
-			names: "binds that name 2 times",
-			why: "THE SHAPE EVERY OTHER CLAUSE IS BLIND TO. The guard's line is byte-identical, " +
-				"it is still the exit's first statement, its path and its held test are " +
-				"untouched, and each arm hands over `removedLeaves[:1]`. Only the binding COUNT " +
-				"sees it. The one-exit gate's own `len(call.Args) != 2` clause is a second, " +
-				"independent catch, which is why this row asserts WHICH clause answers"},
-		{row: "R3b the same narrowing as a shadow, as the exit's first statement",
-			was:   "\t\tif 0 < len(removedLeaves) {",
-			now:   "\t\tremovedLeaves := removedLeaves[:1]\n\t\tif 0 < len(removedLeaves) {",
-			names: "is not the FIRST statement of the exit",
-			why: "the second mutant of the 2026-09-24 blocker, briefed as D4. It is answered by " +
-				"POSITION rather than by the binding count, and the row asserts that: nothing at " +
-				"all runs between the exit's parameters arriving and the guard"},
-		{row: "R4 the parameter, rewritten above the exit",
-			was:   "\tanswerSecret := func(secret []byte, how string) ([]byte, error) {",
-			now:   "\tremovedLeaves = removedLeaves[:1]\n\tanswerSecret := func(secret []byte, how string) ([]byte, error) {",
-			names: "decides on `removedLeaves` and this resolution writes it",
-			why: "a Go parameter is assignable, so `the guard reads the parameter` is not the " +
-				"same claim as `the guard reads what the caller passed` until this clause exists"},
-		{row: "R5 the VALUE TESTED and the VALUE ANSWERED pulled apart",
-			was:   "\t\treturn secret, nil",
-			now:   "\t\tif 2 < len(removedLeaves) {\n\t\t\tsecret = held\n\t\t}\n\t\treturn secret, nil",
-			names: "decides on `secret` and this resolution writes it",
-			why: "the exit checks the candidate and answers the HELD value, which is item 243 " +
-				"arriving inverted with the guard, its path, its held test and its position all " +
-				"reading exactly as production does. This is why `secret` is a subject and not " +
-				"only `removedLeaves`: the rule is about a value, so the value has to be the same " +
-				"one at the test and at the answer"},
-		{row: "R6 the conjunction, left on the condition",
-			was:   "\t\tif 0 < len(removedLeaves) {",
-			now:   "\t\tif 0 < len(removedLeaves) && len(removedLeaves) < 3 {",
-			names: "has no disposition for that predicate",
-			why: "the same bypass with nowhere to hide; it is refused by the reading rather than " +
-				"by a list of banned operators"},
-		{row: "R7 the bypass, nested under the held test",
-			was:   "\t\t\t\treturn nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)",
-			now:   "\t\t\t\tif len(removedLeaves) == 1 {\n\t\t\t\t\treturn nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)\n\t\t\t\t}",
-			names: "sits under 2 conditional(s)",
-			why: "the 2026-09-24 (fourth pass) blocker, kept as a row so that a rewrite of the " +
-				"path walk cannot quietly re-open it"},
-		{row: "R8 the bypass, ANDed into the held test",
-			was:   "self.pqSecretHeldAtLocked(secret); alreadyHeld {",
-			now:   "self.pqSecretHeldAtLocked(secret); alreadyHeld && len(removedLeaves) < 3 {",
-			names: "not a single bound answer",
-			why: "R7 one level down and without a second statement; the held test is the only " +
-				"conditional allowed on the path and it has to be only the held test"},
-		{row: "R9 the refusal, computed and dropped",
-			was:   "\t\t\t\treturn nil, refuseRemovalOnHeldSecret(",
-			now:   "\t\t\t\t_ = refuseRemovalOnHeldSecret(",
-			names: "compute it and drop it",
-			why:   "the 2026-09-24 (third pass) blocker, and ledger item 254's `owed from this pass`"},
-		{row: "R10 the refusal, returned beside the secret",
-			was:   "\t\t\t\treturn nil, refuseRemovalOnHeldSecret(",
-			now:   "\t\t\t\treturn secret, refuseRemovalOnHeldSecret(",
-			names: "beside a non-nil secret",
-			why:   "a caller that reads the secret and not the error follows the removal anyway"},
-		{row: "R11 the parameter's ADDRESS, handed out",
-			was:   "\tanswerSecret := func(secret []byte, how string) ([]byte, error) {",
-			now:   "\tnarrow(&removedLeaves)\n\tanswerSecret := func(secret []byte, how string) ([]byte, error) {",
-			names: "its address taken at",
-			why: "R4 written so that the assignment is in another function entirely. An address " +
-				"is a write this gate cannot follow, so it is refused rather than followed"},
-		{row: "R12 the refusal, reached through a switch",
-			was: "\t\t\t\treturn nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)",
-			now: "\t\t\t\tswitch {\n\t\t\t\tcase len(removedLeaves) == 1:\n" +
-				"\t\t\t\t\treturn nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)\n\t\t\t\t}",
-			names: "reached through a `switch`",
-			why: "R7 in a shape the path walk has to name rather than count, because a switch " +
-				"with no default decides the refusal the same way a second `if` does"},
-		{row: "R13 the value under test, mutated THROUGH rather than assigned",
-			was: "\t\tif 0 < len(removedLeaves) {",
-			now: "\t\tif 2 < len(removedLeaves) {\n\t\t\tcopy(secret, make([]byte, len(secret)))\n" +
-				"\t\t}\n\t\tif 0 < len(removedLeaves) {",
-			names: "is not the FIRST statement of the exit",
-			why: "R5 with no assignment in it, so clause 7 is structurally blind to it: the held " +
-				"test then answers false on a zeroed candidate while the guard, its path and its " +
-				"predicate all still read exactly as production does. Clause 8 answers it with " +
-				"position rather than with a banned call"},
-		{row: "R14 the table the held test reads, emptied above the exit",
-			was:   "\tanswerSecret := func(secret []byte, how string) ([]byte, error) {",
-			now:   "\tself.pqSecretWitness = nil\n\tanswerSecret := func(secret []byte, how string) ([]byte, error) {",
-			names: "through it, which no row here permits",
-			why: "the receiver is a subject too -- the held test asks IT -- and `self` is not " +
-				"assigned here, so the write-count clause cannot see this. It is the same " +
-				"narrowing one indirection out, and the counters row is what keeps the " +
-				"disposition from being `refuse every write to self`"},
+			why: "THE ROW THAT COSTS SOMETHING, and it is deliberate. It is behaviourally " +
+				"identical to R1 and is refused because this reading cannot tell the two apart " +
+				"without chasing the binding. The indirection is refused, not the narrowing"},
 	}
 
 	refused, accepted := 0, 0
-	for _, row := range rows {
+	for _, row := range exitRows {
 		source := guardShape
 		if row.was != "" {
 			// THE SWAP ITSELF IS ASSERTED. A mutant that stopped matching its anchor would be a
@@ -3303,31 +2797,34 @@ func TestTheRemovalGuardIsDecidedByValuesNothingInTheResolutionCanRewrite(t *tes
 			source = strings.Replace(source, row.was, row.now, 1)
 		}
 		reading, defect := guardShapeDefect(t, row.row, source)
-		t.Logf("%s -> %s | READ: %s", row.row, map[bool]string{true: "ACCEPTED", false: "REFUSED: " + defect}[defect == ""], reading)
+		t.Logf("%s -> %s | READ: %s", row.row,
+			map[bool]string{true: "ACCEPTED", false: "REFUSED: " + defect}[defect == ""], reading)
 		if row.accepted {
 			accepted += 1
 			if defect != "" {
-				t.Fatalf("%s is supposed to be ACCEPTED (%s) and this gate refused it: %s. Every "+
-					"refusal in this table is a mutation of this source, so a gate that refuses "+
-					"the source refuses everything and measures nothing", row.row, row.why, defect)
+				t.Fatalf("%s is supposed to be ACCEPTED (%s) and this reading refused it: %s. "+
+					"Every refusal in this table is a mutation of this source, so a reading that "+
+					"refuses the source refuses everything and measures nothing", row.row, row.why, defect)
 			}
 			continue
 		}
 		refused += 1
 		if defect == "" {
-			t.Fatalf("%s is supposed to be REFUSED (%s) and this gate ACCEPTED it. It read: %s",
+			t.Fatalf("%s is supposed to be REFUSED (%s) and this reading ACCEPTED it. It read: %s",
 				row.row, row.why, reading)
 		}
 		if !strings.Contains(defect, row.names) {
-			t.Fatalf("%s is refused, and not for its own reason: this gate answered %q and the "+
+			t.Fatalf("%s is refused, and not for its own reason: this reading answered %q and the "+
 				"clause this row exists for says %q. A row refused by some other clause is a row "+
 				"that would keep passing after the clause it was written for is deleted",
 				row.row, defect, row.names)
 		}
 	}
 
-	// AND THE PRODUCTION FUNCTION TAKES THE SAME READING. [guardShape] is a stand-in, and a
-	// stand-in that has drifted from its subject is a table measuring a file nobody ships.
+	// ── AND THE PRODUCTION EXIT TAKES THE SAME READING ──────────────────────────────────────
+	//
+	// [guardShape] is a stand-in, and a stand-in that has drifted from its subject is a table
+	// measuring a file nobody ships.
 	declaration := parseFuncDecl(t, "pqepoch.go", "resolvePqSecretLocked")
 	production := (*ast.FuncLit)(nil)
 	for _, statement := range declaration.Body.List {
@@ -3345,112 +2842,93 @@ func TestTheRemovalGuardIsDecidedByValuesNothingInTheResolutionCanRewrite(t *tes
 		t.Fatalf("pqepoch.go's resolvePqSecretLocked holds no local function value, so the exit " +
 			"this table stands in for does not exist")
 	}
-	reading, defect := removalGuardDefect(declaration, production)
+	reading, defect := removalGuardDefect(production)
 	t.Logf("the PRODUCTION resolution reads: %s", reading)
 	if defect != "" {
-		t.Fatalf("the production resolution is refused by this gate: %s", defect)
-	}
-	// ── 9. AND THE CALLER HANDS OVER THE COMMIT'S WHOLE LIST ────────────────────────────────
-	//
-	// Clauses 6 to 8 hold everything from `resolvePqSecretLocked`'s parameter list inward. This
-	// is the rest of the same path and the same class, not a new shape: the property is *the
-	// guard decides on the commit's removed-leaf list*, and on this side of the module boundary
-	// that list arrives as `decision.RemovedLeaves`. A caller that truncates it satisfies every
-	// clause above, so the residual named at [removalGuardDefect] is closed here rather than
-	// merely recorded. Where it STOPS is `decision` itself: `authorizeCommitLocked` fills it from
-	// connect's `processed.Commit.RemovedLeaves()`, which is another repository's subject.
-	//
-	// BOTH DOORS ARE READ, and that is the point of doing it here rather than at one call: the
-	// pre-apply refusal and the resolution are the two detectors ruling 43 says do not overlap in
-	// time, and a narrowing that fed one a different list from the other would put the two out of
-	// agreement about one commit.
-	const list = "decision.RemovedLeaves"
-	doors := map[string]int{"refuseUnrotatedRemovalLocked": 0, "resolvePqSecretLocked": 0}
-	ingest := parseFuncDecl(t, "group.go", "ingestCommitLocked")
-	ast.Inspect(ingest, func(node ast.Node) bool {
-		call, isCall := node.(*ast.CallExpr)
-		if !isCall {
-			return true
-		}
-		selector, isSelector := call.Fun.(*ast.SelectorExpr)
-		if !isSelector {
-			return true
-		}
-		if _, isDoor := doors[selector.Sel.Name]; !isDoor {
-			return true
-		}
-		doors[selector.Sel.Name] += 1
-		handed := []string{}
-		for _, argument := range call.Args {
-			handed = append(handed, sourceText(argument))
-		}
-		t.Logf("ingestCommitLocked hands %s: %v", selector.Sel.Name, handed)
-		if !slices.Contains(handed, list) {
-			t.Fatalf("ingestCommitLocked hands %s the arguments %v and none of them is `%s`. The "+
-				"guard inside reads its parameter WHOLE and cannot tell a truncated list from a "+
-				"short one, so a narrowing written HERE -- `%s[:1]` -- takes the removal rule out "+
-				"for every commit above that length and leaves every clause in "+
-				"removalGuardDefect reading correctly",
-				selector.Sel.Name, handed, list, list)
-		}
-		return true
-	})
-	for door, count := range doors {
-		if count != 1 {
-			t.Fatalf("ingestCommitLocked calls %s %d time(s) and this gate is written against "+
-				"exactly one. Two calls are two lists one commit is judged by, and zero is a door "+
-				"that has moved somewhere this gate does not read", door, count)
-		}
-	}
-	// AND THE LIST IS NOT REWRITTEN BETWEEN THE TWO DOORS. `decision` is bound once by
-	// `authorizeCommitLocked` and nothing else in the function may touch it or its leaves --
-	// `decision.RemovedLeaves = decision.RemovedLeaves[:1]` above the doors is the narrowing in
-	// its last available dress, and the source text at both call sites stays byte-identical.
-	bindings, writes := 0, []string{}
-	ast.Inspect(ingest, func(node ast.Node) bool {
-		assign, isAssign := node.(*ast.AssignStmt)
-		if !isAssign {
-			return true
-		}
-		for _, target := range assign.Lhs {
-			root, path := rootIdent(target)
-			if root == nil || root.Name != "decision" {
-				continue
-			}
-			if assign.Tok == token.DEFINE && path == "decision" {
-				bindings += 1
-				continue
-			}
-			writes = append(writes, path)
-		}
-		return true
-	})
-	if bindings != 1 || 0 < len(writes) {
-		t.Fatalf("ingestCommitLocked binds `decision` %d time(s) and writes %v. The two removal "+
-			"doors read `%s` off it, so a second binding or any write is a narrowing that leaves "+
-			"both call sites byte-identical", bindings, writes, list)
+		t.Fatalf("the production resolution is refused by this reading: %s", defect)
 	}
 
-	if accepted != 3 || refused != 15 {
-		t.Fatalf("this table ran %d accepted row(s) and %d refused one(s); it is written as 3 and "+
-			"15, and a row that was deleted rather than answered is what this count is here to "+
-			"find", accepted, refused)
+	// ── AND THE OTHER DOOR, WHICH HAD NO READING OF ITS OWN AT ALL ──────────────────────────
+	doorRows := []struct {
+		row      string
+		was      string
+		now      string
+		accepted bool
+		names    string
+		why      string
+	}{
+		{row: "D0 the door itself", accepted: true,
+			why: "THE CONTROL, for A0's reason"},
+		{row: "D1 the early return widened by one arity above the table",
+			was:   "\tif len(removedLeaves) == 0 {",
+			now:   "\tif len(removedLeaves) == 0 || 3 < len(removedLeaves) {",
+			names: "no disposition for that predicate",
+			why: "MEASURED PASSING THE DRIVEN TABLE AND EVERY ONE OF THE SIX GATES. It was the " +
+				"one mutation in the whole set that nothing caught, and it is why this reading " +
+				"was added while six clauses were deleted"},
+		{row: "D2 the let-past widened",
+			was:   "\tif digest != nil {",
+			now:   "\tif digest != nil || 3 < len(removedLeaves) {",
+			names: "no disposition for that predicate",
+			why: "the same narrowing at the door's OTHER predicate. Both can let a removal past, " +
+				"so both are read"},
+		{row: "D3 the predicate hidden behind a name",
+			was:   "\tif len(removedLeaves) == 0 {",
+			now:   "\tremovesLeaves := 0 < len(removedLeaves)\n\tif !removesLeaves {",
+			names: "decides on the NAME",
+			why: "the road that defeated the resolution's own guard four rounds running, refused " +
+				"here before it is walked rather than after"},
+	}
+	for _, row := range doorRows {
+		source := doorShape
+		if row.was != "" {
+			if count := strings.Count(source, row.was); count != 1 {
+				t.Fatalf("%s: its anchor %q appears %d time(s) in the door's shape and has to "+
+					"appear exactly once", row.row, row.was, count)
+			}
+			source = strings.Replace(source, row.was, row.now, 1)
+		}
+		read, defect := doorShapeDefect(t, row.row, source)
+		t.Logf("%s -> %s | READ: %v", row.row,
+			map[bool]string{true: "ACCEPTED", false: "REFUSED: " + defect}[defect == ""], read)
+		if row.accepted {
+			accepted += 1
+			if defect != "" {
+				t.Fatalf("%s is supposed to be ACCEPTED (%s) and this reading refused it: %s",
+					row.row, row.why, defect)
+			}
+			continue
+		}
+		refused += 1
+		if defect == "" {
+			t.Fatalf("%s is supposed to be REFUSED (%s) and this reading ACCEPTED it. It read: %v",
+				row.row, row.why, read)
+		}
+		if !strings.Contains(defect, row.names) {
+			t.Fatalf("%s is refused, and not for its own reason: this reading answered %q and the "+
+				"clause this row exists for says %q", row.row, defect, row.names)
+		}
+	}
+	doorRead, doorDefect := doorPredicateDefect(parseFuncDecl(t, "pqepoch.go", "refuseUnrotatedRemovalLocked"))
+	t.Logf("the PRODUCTION door reads: %v", doorRead)
+	if doorDefect != "" {
+		t.Fatalf("the production door is refused by this reading: %s", doorDefect)
+	}
+
+	if accepted != 4 || refused != 8 {
+		t.Fatalf("this table ran %d accepted row(s) and %d refused one(s); it is written as 4 and "+
+			"8, and a row that was deleted rather than answered is what this count is here to find",
+			accepted, refused)
 	}
 }
 
-// guardShapeDefect parses one row of the table above and asks [removalGuardDefect] about it. It
+// guardShapeDefect parses one row of the exit table and asks [removalGuardDefect] about it. It
 // finds the exit the way the gate itself does -- the one local function value in the resolution --
 // so a mutant that moves the exit is refused by the same reading rather than by this helper.
 func guardShapeDefect(t *testing.T, row string, source string) (string, string) {
 	t.Helper()
-	fileSet := token.NewFileSet()
-	parsed, err := parser.ParseFile(fileSet, "guardshape.go", source, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("%s does not parse: %v", row, err)
-	}
-	for _, declaration := range parsed.Decls {
-		function, isFunc := declaration.(*ast.FuncDecl)
-		if !isFunc || function.Name.Name != "resolvePqSecretLocked" || function.Body == nil {
+	for _, function := range parsedFuncsOf(t, row, source) {
+		if function.Name.Name != "resolvePqSecretLocked" {
 			continue
 		}
 		for _, statement := range function.Body.List {
@@ -3463,13 +2941,45 @@ func guardShapeDefect(t *testing.T, row string, source string) (string, string) 
 				if !isLiteral {
 					continue
 				}
-				return removalGuardDefect(function, literal)
+				return removalGuardDefect(literal)
 			}
 		}
 		t.Fatalf("%s holds no local function value to read as the exit", row)
 	}
 	t.Fatalf("%s holds no resolvePqSecretLocked", row)
 	return "", ""
+}
+
+// doorShapeDefect is guardShapeDefect for the other door.
+func doorShapeDefect(t *testing.T, row string, source string) ([]string, string) {
+	t.Helper()
+	for _, function := range parsedFuncsOf(t, row, source) {
+		if function.Name.Name != "refuseUnrotatedRemovalLocked" {
+			continue
+		}
+		return doorPredicateDefect(function)
+	}
+	t.Fatalf("%s holds no refuseUnrotatedRemovalLocked", row)
+	return nil, ""
+}
+
+// parsedFuncsOf is the one parse both shape tables go through.
+func parsedFuncsOf(t *testing.T, row string, source string) []*ast.FuncDecl {
+	t.Helper()
+	fileSet := token.NewFileSet()
+	parsed, err := parser.ParseFile(fileSet, "shape.go", source, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("%s does not parse: %v", row, err)
+	}
+	functions := []*ast.FuncDecl{}
+	for _, declaration := range parsed.Decls {
+		function, isFunc := declaration.(*ast.FuncDecl)
+		if !isFunc || function.Body == nil {
+			continue
+		}
+		functions = append(functions, function)
+	}
+	return functions
 }
 
 // ── 4b. EVERY COUNTER THE RESOLUTION MOVES IS MOVED WHERE ITS SUBJECT IS FOUND ───────────────

@@ -831,11 +831,19 @@ func (self *Group) resolvePqSecretLocked(mlsSecret []byte, opensEpoch uint64,
 		// that is the shape item 243 is about, arriving inverted. Written this way there is
 		// nothing between the parameter and the guard for a narrowing to hide in.
 		//
-		// TestTheRemovalGuardIsDecidedByValuesNothingInTheResolutionCanRewrite holds BOTH halves:
-		// this predicate as source text, and `removedLeaves`, `secret` and `self` bound ONCE
-		// each, in a parameter list, and assigned, shadowed or addressed NOWHERE in this
-		// function. A second binding of any of them is a refusal, the way a second exit already
-		// is.
+		// AND WHAT HOLDS IT CHANGED ON 2026-09-24 (SIXTH PASS), LEDGER RULING 46. Six rounds of
+		// reading this body were each defeated one level of indirection further out, so the
+		// readings are mostly gone and the INPUTS are driven instead:
+		// TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProductionReceivePath
+		// puts eighteen shapes through the production receive path -- removals of one, two and
+		// THREE leaves, a removal bundled with an add, a replay of an earlier epoch's secret, a
+		// secret one octet away from a held one (followed, it is fresh), both doors, and the
+		// honest rotated removals as rows of the same table -- and every narrowing of this guard
+		// that a mutant could express inside those arities turns it red. What is still read
+		// statically is this predicate as SOURCE TEXT against a written disposition, because a
+		// narrowing one arity ABOVE what the table drives passes it; that is
+		// TestBothRemovalDoorsAreDecidedByAPredicateWrittenWholeAndTheRefusalIsReturned, and it is
+		// why the predicate must stay written whole here rather than behind a name.
 		if 0 < len(removedLeaves) {
 			if heldAt, alreadyHeld := self.pqSecretHeldAtLocked(secret); alreadyHeld {
 				return nil, refuseRemovalOnHeldSecret(opensEpoch, removedLeaves, heldAt, how)
@@ -1098,6 +1106,33 @@ func refuseRemovalOnHeldSecret(opensEpoch uint64, removedLeaves []uint32, heldAt
 // convention for it is `2 x device_leaves + 1` the day ledger item 185 is ruled -- so a permanent
 // halt would rest on an unverified number whose convention is already scheduled to change. A build
 // before the rotation declares 1.
+//
+// ── WHAT THE RULE THIS DOOR SERVES DELIVERS, AND THE THREE SHAPES IT DOES NOT: RULINGS 42-45 ──
+//
+// A READER MEETS THE REMOVAL RULE AT THIS DOOR AS OFTEN AS AT THE OTHER ONE, so its limits are
+// written here too rather than one hop away. The rule is not a property of a cohort and nothing
+// here can make it one. What it delivers is
+//
+//	THIS RECEIVER DOES NOT FOLLOW A REMOVAL ONTO A SECRET THIS RECEIVER HAS HELD
+//
+// and three shapes fall outside it: (1) a late joiner's history is STRICTLY SMALLER, so it refuses
+// less and its false negative is a theorem rather than a bug -- [Device.Join] files exactly one
+// row, and that pair is driven, one page and two receivers, by the `late-joiner` row of
+// TestEveryRemovalShapeThisPackageCanPutOnTheWireIsRefusedOrFollowedByTheProductionReceivePath;
+// (2) if every survivor joined after epoch k and the committer reuses pq_secret[k], NOBODY
+// refuses -- the committer never runs the receive path against its own commit -- and the effect is
+// a partition by join epoch, which item 242 prices as *a hostile committer can HALT a group; it
+// cannot TAKE it*; (3) against a hostile ADMIN or OWNER committer this delivers NOTHING,
+// structurally, because that party must hold storage_root[n+1] in its own process to build the
+// digest at all and can hand over the root itself. The argument for each is at
+// [refuseRemovalOnHeldSecret].
+//
+// AND RULING 43's DATE IS THIS DOOR'S OWN. The class this door covers is *removals on the 0x0001
+// wire format*, and Spec B section 5.4's acceptance window dates that class out on 2026-11-03 OR
+// the day Remove ships, whichever is earlier -- so on the day Remove ships THIS DOOR COVERS THE
+// EMPTY SET and the held-secret rule at the resolution is the only detector left for a client
+// whose rotation regresses. The two doors do not overlap in time, which is why keeping both is not
+// redundancy and why neither one's residual is answered by the other.
 //
 // A COMMIT THAT REMOVES NOTHING IS UNTOUCHED, and so is every removal carrying a digest. Every group
 // on the deployed alpha, every ordinary Add and every policy commit goes past this without reading

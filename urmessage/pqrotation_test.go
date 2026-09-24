@@ -141,7 +141,20 @@ func (self *rotWorld) rootOf(name string) string {
 // device that cannot open its own wrap rather than a wrap that is wrong.
 func (self *rotWorld) enroll(name string, dev *crossProcessDevice, handle messagegroup.GroupHandle) *rotMember {
 	self.t.Helper()
-	session := newCrossProcessSession(self.t, handle, self.founding, self.groupHandleKey, dev.reserver, name+"'s nonce")
+	return self.enrollAt(name, dev, handle, self.founding)
+}
+
+// enrollAt is enroll with the ONE pq_secret row this member starts life holding, and that row is
+// the whole of what separates a founder from a member admitted later. [Device.Join] files exactly
+// one row -- `pqSecrets: {handle.Epoch(): invite.PqSecret}` -- so a device admitted at epoch k
+// knows nothing of the values drawn below it, which is the subject of ledger ruling 43's first
+// residual. [rotWorld.admit] is the door that uses it; `enroll` passes the founding value because
+// every member of a world built by [newRotWorld] is named in the founding commit.
+func (self *rotWorld) enrollAt(name string, dev *crossProcessDevice, handle messagegroup.GroupHandle,
+	pqSecret []byte) *rotMember {
+
+	self.t.Helper()
+	session := newCrossProcessSession(self.t, handle, pqSecret, self.groupHandleKey, dev.reserver, name+"'s nonce")
 	self.t.Cleanup(func() { session.Close() })
 	group := &Group{
 		device: &Device{
@@ -157,7 +170,7 @@ func (self *rotWorld) enroll(name string, dev *crossProcessDevice, handle messag
 		id:             append([]byte(nil), self.groupId...),
 		handle:         handle,
 		groupHandleKey: self.groupHandleKey,
-		pqSecrets:      map[uint64][]byte{handle.Epoch(): self.founding},
+		pqSecrets:      map[uint64][]byte{handle.Epoch(): append([]byte(nil), pqSecret...)},
 		session:        session,
 		epoch:          handle.Epoch(),
 		opened:         true,
