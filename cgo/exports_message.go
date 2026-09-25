@@ -634,6 +634,32 @@ func urnet_message_device_create_group(self C.uint64_t, ctx C.uint64_t, groupId 
 	return C.uint64_t(newHandle(group))
 }
 
+// urnet_message_device_join joins the group an invite carries. A group joined ABOVE EPOCH ONE will
+// not seal until urnet_message_group_receive has run once over it -- that is urmessage's
+// ErrStreamFloorUnheld, and it is what bounds a leaf a removed member may have stood at. It is the
+// exact mirror of the restore contract two functions up, and it is written here because join->send
+// is the flow a C caller writes by default.
+//
+// WHY IT EXISTS, IN ONE DERIVATION. A joiner lands on the leftmost BLANK leaf (RFC 9420 section
+// 7.7), which may be a leaf a removed member stood at, and its sender_handle takes no epoch and no
+// identity -- so it inherits that member's sixteen octets byte for byte, and the server already
+// holds a stream claim at every index that member spent. A first send with no receive behind it
+// collides with one of those claims, and the refusal that follows is STICKY for the life of the
+// process: that group can never be sent to again from this device. One receive is what makes the two
+// occupants' index ranges disjoint.
+//
+// WHAT A CALLER DOES ABOUT IT: call urnet_message_group_receive once, then send. A group joined at
+// epoch one never carries the refusal -- and every group this ABI can create is one, because
+// urnet_message_group_add_member adds exactly one member before urnet_message_group_open -- so a
+// caller that receives once before its first send is correct in both cases and needs no epoch test.
+// An invite minted by a client that is not this ABI can be above epoch one, which is why the rule is
+// stated on the join and not on the add.
+//
+// THIS ABI HAS NO TYPED ERROR CHANNEL TO BRANCH ON, and that is measured rather than assumed: every
+// call here reports through char** out_error, and the only typedef in urnetwork_message.h is the
+// connect-attempt callback. What a caller gets is the sentence, carrying urmessage's own stable
+// prefix. The remedy needs no code, because it is the same one receive either way.
+//
 //export urnet_message_device_join
 func urnet_message_device_join(self C.uint64_t, ctx C.uint64_t, invite C.uint64_t, outError **C.char) C.uint64_t {
 	defer cgoGuard("urnet_message_device_join")

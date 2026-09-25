@@ -268,6 +268,13 @@ uint64_t urnet_message_device_groups(uint64_t self);
 uint64_t urnet_message_device_restore(uint64_t self, uint64_t ctx, char** out_error);
 /* group_id is 32 octets. */
 uint64_t urnet_message_device_create_group(uint64_t self, uint64_t ctx, const uint8_t* group_id, int32_t group_id_len, char** out_error);
+/* a group joined ABOVE EPOCH ONE will not seal until urnet_message_group_receive has run once over
+ * it -- that is urmessage's ErrStreamFloorUnheld, and it is what bounds a leaf a removed member may
+ * have stood at: the joiner inherits that member's sender_handle byte for byte, and a first send
+ * with no receive behind it collides with a stream claim the server already holds and is then
+ * refused FOR THE LIFE OF THE PROCESS. receive once, then send: a group joined at epoch one never
+ * carries it, so that order is correct in both cases and needs no epoch test. errors here are
+ * sentences and not codes -- this abi has no typed error channel. */
 uint64_t urnet_message_device_join(uint64_t self, uint64_t ctx, uint64_t invite, char** out_error);
 
 /* ----- the invite, which is secret in full ----- */

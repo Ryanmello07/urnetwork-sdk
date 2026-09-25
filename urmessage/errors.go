@@ -537,5 +537,27 @@ var (
 	// It is not sticky and it is not a diagnosis: one [Group.Receive] that completes cleanly
 	// clears it, exactly as [ErrNotReconciled] is cleared, and a group FOUNDED in this process
 	// never has it, because a group id drawn here has no claim under any handle of it.
+	//
+	// ── THE PRODUCT CONTRACT, AND THE SENTENCE ABOUT IT THAT WAS FALSE ───────────────────────
+	//
+	// A CALLER THAT JOINS ABOVE EPOCH ONE MUST [Group.Receive] ONCE BEFORE ITS FIRST [Group.Send],
+	// [Group.SetRole] or [Group.AddMemberAndPublish]. That is an obligation on every joiner and not
+	// a fact about reused leaves, so it is written here as one.
+	//
+	// WHAT THIS MODULE'S OWN CALLERS MEASURE, corrected because the first statement of it was
+	// measurably false. The claim made for this gate was "every Device.Join site in cp3b is an
+	// epoch-one join, so nothing needed to change". It is not: cp3b/roles_test.go joins carol under
+	// the header `epoch 3: bob, an admin, adds carol` and asserts epoch 3 over her group two lines
+	// later; cp3b/lostrace_test.go joins carol at 3, dave at 4 and erin at 7; liveprobe checks
+	// `C joined at epoch %d, want 2`. FOUR of cp3b's fourteen Join sites, and liveprobe's, are above
+	// epoch one and are gated. What holds is a property and not the epoch: every one of those
+	// joiners RECEIVES before its first Send. The suites measure that property rather than assert
+	// it -- with this gate in the build a joiner that sent first turns them red -- and it was driven
+	// at the roles site by moving that Send above that Receive, which answers this sentinel by name.
+	//
+	// AND ONE REFUSAL A Receive DOES NOT CLEAR, NAMED WHERE THE PROMISE IS MADE: if this group gave
+	// a record up before it could read its header ([Group.ownFloorBlind]), the index that record
+	// claims is unknown for ever and no later walk asks for it again. The error says so in its own
+	// text, so a caller is never told to retry what cannot succeed.
 	ErrStreamFloorUnheld = errors.New("urmessage: this group was joined on a leaf that may carry a previous occupant's stream claims and its own floor has not been held against them yet; Receive once before Send")
 )

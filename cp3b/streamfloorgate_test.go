@@ -34,6 +34,29 @@ import (
 // WHAT WOULD GO RED: drop the ownFloorHeld clause from urmessage.Group.sendableLocked (the
 // epoch-two Send is answered nil); set ownFloorHeld false at every Join (the epoch-one control is
 // refused); set it true at every Join (the property is).
+//
+// ── WHAT THE REST OF THIS PACKAGE MEASURES ABOUT THE GATE, AND THE SENTENCE THAT WAS WRONG ───
+//
+// This gate was landed with the claim that "every one of cp3b's 13 real Device.Join sites is an
+// epoch-1 join, so the alpha's own flow is unchanged and cp3b needed no edits". THE COUNT IS RIGHT
+// AND THE PROPERTY ATTRIBUTED TO IT IS FALSE. Four of those sites are above epoch one, by this
+// package's own assertions: roles_test.go joins carol under the header `epoch 3: bob, an admin,
+// adds carol` and runs rolesAssertEpoch(t, 3, groups) over a map holding her group;
+// lostrace_test.go joins carol at 3, dave at 4 (groups["dave"] a few lines on) and erin at 7. So is
+// liveprobe's own third party -- `C joined at epoch %d, want 2`.
+//
+// WHAT KEEPS THEM GREEN IS A PROPERTY AND NOT THE EPOCH: every above-epoch-one joiner here Receives
+// -- rolesReceiveAll, or the mesh's own gcReceiveTextMessage -- before its first Send. That is
+// measured rather than asserted, because with this gate in the build a joiner that sent first goes
+// RED; and it was driven at the roles site rather than argued, by putting carol's first Send between
+// her Join and that Receive:
+//
+//	roles_test.go:130: M-join-send-first: carol's immediate Send answered urmessage: this group was
+//	joined on a leaf that may carry a previous occupant's stream claims and its own floor has not
+//	been held against them yet; Receive once before Send: group bd9b6af3...
+//
+// A Join->Send caller is a real caller and not a hypothetical one, which is why the C ABI states the
+// rule at urnet_message_device_join rather than leaving it to be found.
 func TestAJoinerAboveEpochOneHoldsItsStreamFloorBeforeItSends(t *testing.T) {
 	world := newWorld(t)
 	ctx := context.Background()
