@@ -483,5 +483,5 @@ func (self *Group) commitPolicyAndPublishLocked(ctx context.Context, policy []by
 	if err != nil {
 		return fmt.Errorf("urmessage: CommitPolicy: %w", err)
 	}
-	return self.publishCommitLocked(ctx, commit, nil)
+	return self.publishCommitLocked(ctx, commit)
 }

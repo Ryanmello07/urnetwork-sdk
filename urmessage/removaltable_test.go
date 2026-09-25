@@ -152,7 +152,7 @@ func (self *rotWorld) admit(committer *rotMember, name string, receivers ...*rot
 		self.t.Fatalf("%s's key package: %v", name, err)
 	}
 	var welcome, ratchetTree []byte
-	published := self.rotate(committer, nil, func() ([]byte, []byte, []byte, error) {
+	published := self.rotate(committer, func() ([]byte, []byte, []byte, error) {
 		commit, admission, tree, err := committer.handle.CommitAdd([][]byte{keyPackage})
 		welcome, ratchetTree = admission, tree
 		return commit, admission, tree, err
@@ -191,7 +191,7 @@ func (self *rotWorld) promote(owner *rotMember, member *rotMember, receivers ...
 	if err != nil {
 		self.t.Fatalf("encoding the policy: %v", err)
 	}
-	published := self.rotate(owner, nil, func() ([]byte, []byte, []byte, error) {
+	published := self.rotate(owner, func() ([]byte, []byte, []byte, error) {
 		return owner.handle.CommitPolicy(encoded.ExtensionData)
 	})
 	for _, receiver := range receivers {
@@ -996,7 +996,7 @@ func (self *rotWorld) rotateHonestly(committer *rotMember, rounds int, receivers
 	self.t.Helper()
 	opened := map[uint64][]byte{}
 	for at := 0; at < rounds; at += 1 {
-		published := self.rotate(committer, nil, func() ([]byte, []byte, []byte, error) {
+		published := self.rotate(committer, func() ([]byte, []byte, []byte, error) {
 			return committer.handle.Commit(nil)
 		})
 		for _, receiver := range receivers {
@@ -1013,7 +1013,7 @@ func (self *rotWorld) rotateHonestly(committer *rotMember, rounds int, receivers
 func buildHeldFanOut(victims int, how unrotatedFanOut) func(t *testing.T) *removalPage {
 	return func(t *testing.T) *removalPage {
 		world, committer, receiver, removing, retained := removalCohort(t, victims)
-		published := world.fanOutOnTheHeldSecret(committer, removing, func() ([]byte, []byte, []byte, error) {
+		published := world.fanOutOnTheHeldSecret(committer, func() ([]byte, []byte, []byte, error) {
 			return committer.handle.CommitRemove(removing)
 		}, how)
 		page := &removalPage{world: world, committer: committer, receiver: receiver,
@@ -1068,7 +1068,7 @@ func buildHonestRotationAfter(rotations int, victims int) func(t *testing.T) *re
 		if 0 < victims {
 			retained = append([]byte(nil), world.member("victim0").group.pqSecretLocked()...)
 		}
-		published := world.rotate(committer, removing, func() ([]byte, []byte, []byte, error) {
+		published := world.rotate(committer, func() ([]byte, []byte, []byte, error) {
 			return committer.handle.CommitRemove(removing)
 		})
 		page := &removalPage{world: world, committer: committer, receiver: receiver,
@@ -1102,7 +1102,7 @@ func buildOneOctetFromHeld(t *testing.T) *removalPage {
 	// fresh value; a rule that answered "held" for this would be answering about a resemblance.
 	bent := append([]byte(nil), retained...)
 	bent[len(bent)-1] ^= 0x01
-	published := world.fanOutOnTheHeldSecret(committer, removing, func() ([]byte, []byte, []byte, error) {
+	published := world.fanOutOnTheHeldSecret(committer, func() ([]byte, []byte, []byte, error) {
 		return committer.handle.CommitRemove(removing)
 	}, unrotatedFanOut{opensOn: bent})
 	page := &removalPage{world: world, committer: committer, receiver: receiver,
@@ -1160,7 +1160,7 @@ func buildEarlierEpochReplay(rotations int, replaying uint64) func(t *testing.T)
 				"replay of an epoch nobody opened would be a replay of nil", replaying, rotations,
 				slices.Sorted(maps.Keys(opened)))
 		}
-		published := world.fanOutOnTheHeldSecret(committer, removing, func() ([]byte, []byte, []byte, error) {
+		published := world.fanOutOnTheHeldSecret(committer, func() ([]byte, []byte, []byte, error) {
 			return committer.handle.CommitRemove(removing)
 		}, unrotatedFanOut{opensOn: replayed})
 		page := &removalPage{world: world, committer: committer, receiver: receiver,
@@ -1201,7 +1201,7 @@ func buildEarlierEpochReplay(rotations int, replaying uint64) func(t *testing.T)
 func buildLateJoinerResidual(t *testing.T) *removalPage {
 	world, committer, receiver, removing, atOne := removalCohort(t, 1)
 	victim := world.member("victim0")
-	first := world.rotate(committer, nil, func() ([]byte, []byte, []byte, error) {
+	first := world.rotate(committer, func() ([]byte, []byte, []byte, error) {
 		return committer.handle.Commit(nil)
 	})
 	for _, member := range []*rotMember{receiver, victim} {
@@ -1210,7 +1210,7 @@ func buildLateJoinerResidual(t *testing.T) *removalPage {
 		}
 	}
 	joiner, admission := world.admit(committer, "dave", receiver, victim)
-	published := world.fanOutOnTheHeldSecret(committer, removing, func() ([]byte, []byte, []byte, error) {
+	published := world.fanOutOnTheHeldSecret(committer, func() ([]byte, []byte, []byte, error) {
 		return committer.handle.CommitRemove(removing)
 	}, unrotatedFanOut{opensOn: atOne})
 	page := &removalPage{world: world, committer: committer, receiver: receiver,
@@ -1272,7 +1272,7 @@ func buildAdminCommitter(t *testing.T) *removalPage {
 	retained := append([]byte(nil), victim.group.pqSecretLocked()...)
 	// THE COMMITTER IS THE PROMOTED ADMIN AND THE RECEIVER IS THE OWNER, so this row is the only
 	// one in the table whose commit was not written by the group's founder.
-	published := world.fanOutOnTheHeldSecret(admin, removing, func() ([]byte, []byte, []byte, error) {
+	published := world.fanOutOnTheHeldSecret(admin, func() ([]byte, []byte, []byte, error) {
 		return admin.handle.CommitRemove(removing)
 	}, unrotatedFanOut{})
 	page := &removalPage{world: world, committer: admin, receiver: owner,
@@ -1320,9 +1320,9 @@ func buildBundledRemoval(honest bool) func(t *testing.T) *removalPage {
 		arm, joining := world.bundleAddAndRemove(committer, removing[0], "dave", receiver, victim)
 		published := (*rotation)(nil)
 		if honest {
-			published = world.rotate(committer, removing, arm)
+			published = world.rotate(committer, arm)
 		} else {
-			published = world.fanOutOnTheHeldSecret(committer, removing, arm, unrotatedFanOut{})
+			published = world.fanOutOnTheHeldSecret(committer, arm, unrotatedFanOut{})
 		}
 		page := &removalPage{world: world, committer: committer, receiver: receiver,
 			page: published.page(), opens: published.opens, removes: removing,
@@ -1366,7 +1366,7 @@ func buildNoDigestRemovalAfter(rotations int, victims int) func(t *testing.T) *r
 		if 0 < victims {
 			retained = append([]byte(nil), world.member("victim0").group.pqSecretLocked()...)
 		}
-		published := world.fanOutOnTheHeldSecret(committer, removing, func() ([]byte, []byte, []byte, error) {
+		published := world.fanOutOnTheHeldSecret(committer, func() ([]byte, []byte, []byte, error) {
 			return committer.handle.CommitRemove(removing)
 		}, unrotatedFanOut{noDigest: true})
 		page := &removalPage{world: world, committer: committer, receiver: receiver,
@@ -1394,7 +1394,7 @@ func buildNoDigestBundle(t *testing.T) *removalPage {
 	world, committer, receiver, removing, retained := removalCohort(t, 1)
 	victim := world.member("victim0")
 	arm, _ := world.bundleAddAndRemove(committer, removing[0], "dave", receiver, victim)
-	published := world.fanOutOnTheHeldSecret(committer, removing, arm, unrotatedFanOut{noDigest: true})
+	published := world.fanOutOnTheHeldSecret(committer, arm, unrotatedFanOut{noDigest: true})
 	return &removalPage{world: world, committer: committer, receiver: receiver,
 		page: published.page(), opens: published.opens, removes: removing,
 		opensOn: published.pqSecret, retained: retained}
@@ -1408,7 +1408,7 @@ func buildNoDigestNoRemoval(rotations int) func(t *testing.T) *removalPage {
 	return func(t *testing.T) *removalPage {
 		world, committer, receiver, _, _ := removalCohort(t, 0)
 		world.rotateHonestly(committer, rotations, receiver)
-		published := world.fanOutOnTheHeldSecret(committer, nil, func() ([]byte, []byte, []byte, error) {
+		published := world.fanOutOnTheHeldSecret(committer, func() ([]byte, []byte, []byte, error) {
 			return committer.handle.Commit(nil)
 		}, unrotatedFanOut{noDigest: true})
 		return &removalPage{world: world, committer: committer, receiver: receiver,

@@ -41,7 +41,7 @@ import (
 //   - include/urnetwork_sdk.def names every export in this file because gen.go's manualExports()
 //     picks them up. It used to be STALE -- 0 of 34 names, so an MSVC consumer linking through the
 //     import library found none of the messaging surface -- and it is now held by
-//     gen.TestTheDefNamesEveryHandWrittenMessagingExport rather than by this sentence.
+//     gen.TestTheDefNamesEveryHandWrittenExportThatShips rather than by this sentence.
 //
 // ── WHAT IS EXPOSED IS WHAT IS PROVEN, AND THE SILENCES ARE DELIBERATE ───────────────────────
 //

@@ -673,7 +673,9 @@ func streamStoreGuardPath(dir string) string {
 // never consulted to decide whether to refuse, and an empty map changes no decision this package
 // makes. An exclusion held here instead would be a package-level mutex: invisible to a second
 // process, which is the case CP3b's two clients actually create, and
-// TestASecondProcessIsRefusedTheSameDirectory is what a mutant that tried it fails on.
+// [TestAtMostOneStoreAllocatesAgainstOneDirectory] is what a mutant that tried it fails on: it
+// drives BOTH members of the class -- a second OpenStreamStore inside this process and a second
+// PROCESS opening the same directory -- and a mutex answers only the first.
 //
 // It is also not a liveness oracle. It records nothing durable, it survives no process, and it
 // never decides that a holder is dead.

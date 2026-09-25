@@ -259,7 +259,15 @@ func (self *rotation) page() []*sealed {
 // IT CALLS THE PRODUCTION FUNCTIONS FOR EVERY STEP THAT HAS ONE. What is re-spelled here is only
 // what [Group.submitLocked] would have done -- handing a record to a transport and numbering it --
 // because no transport exists in this package's tests.
-func (self *rotWorld) rotate(committer *rotMember, removing []uint32,
+//
+// AND IT TAKES NO `removing` VECTOR, WHICH IS THE POINT AS OF 2026-09-25. Until ledger item 257's
+// ruling 51 was consumed this harness passed the removed leaves down beside the commit, exactly as
+// production's arms did -- so every case here that held a removal out of a fan-out was holding a
+// fact about what THE CASE passed. The exclusion is now [Group.wrapTargetsAtLocked]'s own read off
+// the staged commit, so a case that builds a removing commit and asserts the removed leaf is not a
+// target is measuring the derivation. A `removing` parameter restored here would make every such
+// case vacuous again without changing a line of production code, which is why there is none.
+func (self *rotWorld) rotate(committer *rotMember,
 	arm func() ([]byte, []byte, []byte, error), bends ...rotBend) *rotation {
 
 	self.t.Helper()
@@ -276,7 +284,7 @@ func (self *rotWorld) rotate(committer *rotMember, removing []uint32,
 	// and the wrap records are [Group.stageEpochRotationLocked]'s and are not re-spelled here:
 	// a harness that drew its own secret measures its own arithmetic, and it did -- a mutant
 	// that replaced the draw with the group's existing secret passed this whole file.
-	staged, err := group.stageEpochRotationLocked(pending.Epoch, removing)
+	staged, err := group.stageEpochRotationLocked(pending)
 	if err != nil {
 		self.t.Fatalf("%s's staged rotation: %v", committer.name, err)
 	}
@@ -471,7 +479,7 @@ func (self *rotWorld) advanceWithoutRotating(committer *rotMember,
 // EVERY RECORD IS BUILT BY A PRODUCTION SEALER: the targets are [Group.wrapTargetsAtLocked]'s and
 // each wrap is [Group.sealEpochWrapLocked]'s, so what a case built on this measures is the
 // RECEIVER and not a hand-encoded octet string.
-func (self *rotWorld) fanOutOnTheHeldSecret(committer *rotMember, removing []uint32,
+func (self *rotWorld) fanOutOnTheHeldSecret(committer *rotMember,
 	arm func() ([]byte, []byte, []byte, error), how unrotatedFanOut) *rotation {
 
 	self.t.Helper()
@@ -492,7 +500,7 @@ func (self *rotWorld) fanOutOnTheHeldSecret(committer *rotMember, removing []uin
 	if how.payload != nil {
 		wrapped = how.payload
 	}
-	targets, err := group.wrapTargetsAtLocked(pending.Epoch, removing)
+	targets, err := group.wrapTargetsAtLocked(pending)
 	if err != nil {
 		self.t.Fatalf("%s's targets: %v", committer.name, err)
 	}
@@ -600,7 +608,7 @@ type unrotatedFanOut struct {
 
 // fanOutOnAFreshSecret is the residual arm: fresh octets in the wraps, the held secret in the
 // digest. Spelled once here so no caller has to decide for itself what "fresh" means.
-func (self *rotWorld) fanOutOnAFreshSecret(committer *rotMember, removing []uint32,
+func (self *rotWorld) fanOutOnAFreshSecret(committer *rotMember,
 	arm func() ([]byte, []byte, []byte, error)) *rotation {
 
 	self.t.Helper()
@@ -608,7 +616,7 @@ func (self *rotWorld) fanOutOnAFreshSecret(committer *rotMember, removing []uint
 	if _, err := rand.Read(decoy); err != nil {
 		self.t.Fatalf("the decoy payload: %v", err)
 	}
-	return self.fanOutOnTheHeldSecret(committer, removing, arm, unrotatedFanOut{payload: decoy})
+	return self.fanOutOnTheHeldSecret(committer, arm, unrotatedFanOut{payload: decoy})
 }
 
 func (self *rotWorld) number(record *message.Record) *sealed {
@@ -715,7 +723,7 @@ func TestThreeMembersRotateAcrossTwoEpochsAndAMemberRemovedByThatCommitCannotFol
 	t.Logf("CONTROL HELD: at epoch 1 all three members derive one storage root")
 
 	// ── ROTATION ONE: a bare commit that removes nobody. Everyone follows. ───────────────────
-	first := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+	first := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.Commit(nil)
 	})
 	if first.opens != 2 {
@@ -751,7 +759,7 @@ func TestThreeMembersRotateAcrossTwoEpochsAndAMemberRemovedByThatCommitCannotFol
 	if !bytes.Equal(retained, first.pqSecret) {
 		t.Fatalf("carol's retained secret is not epoch 2's; the counterfactual would be about the wrong value")
 	}
-	second := world.rotate(alice, []uint32{carol.leaf}, func() ([]byte, []byte, []byte, error) {
+	second := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{carol.leaf})
 	})
 	if second.opens != 3 {
@@ -813,6 +821,138 @@ func TestThreeMembersRotateAcrossTwoEpochsAndAMemberRemovedByThatCommitCannotFol
 	if _, held := carol.group.pqSecretAtLocked(3); held {
 		t.Fatalf("the removed member holds a pq_secret for epoch 3")
 	}
+}
+
+// THE FAN-OUT LEAVES A REMOVED LEAF OUT EVEN WHEN THE SAME COMMIT REFILLS IT, WHICH IS THE ONE
+// INPUT ON WHICH EVERY COMPARISON OF THE TWO TREES AND THE TRUTH DISAGREE.
+//
+// WHY THIS CASE EXISTS BESIDE THE ONE ABOVE. The case above removes the group's HIGHEST leaf out of
+// three, so it is satisfied by any derivation that happens to name that leaf -- "the leaves that no
+// longer fit under pending.MemberCount", "the highest live leaf when the staged count is smaller",
+// a live-versus-staged set difference. Here one commit removes leaf 2 AND admits a newcomer: RFC
+// 9420 §12.3 applies Removes before Adds and an Add fills the leftmost blank, so the newcomer lands
+// on the leaf the removal just blanked and the two trees' occupied leaves -- and BOTH member
+// counts -- are EQUAL while a member was removed. Every one of those comparisons answers "nothing
+// removed" here, the removed member is still standing in the live tree the fan-out is built off
+// pre-merge, and the epoch's post-quantum secret is sealed straight to the X-Wing key of the member
+// the commit exists to shut out: ledger item 243 arriving inverted, through a commit that looks
+// balanced from every angle except the staged commit's own answer.
+//
+// THE EQUALITY IS ASSERTED FIRST AND THE EXCLUSION SECOND, because the second says nothing without
+// the first: against a build where the refill did not land, this case would be an ordinary removal
+// and would convict nothing that the case above does not. The equality is a MEASUREMENT of what
+// this MLS build does, so it fatals with its own sentence rather than being relaxed.
+//
+// AND IT IS EMPHATICALLY NOT `len(targets) == pending.MemberCount`. That equality is false on every
+// Add -- the added leaf is not in the live tree and gets no wrap -- and here it is false by two:
+// three members before, three after, two wraps. connect states the same refusal on
+// [messagegroup.PendingEpoch] itself, and holds the layer below this one in
+// TestARemovalWhoseLeafIsRefilledInTheSameCommitIsStillNamedByTheStagedCommit.
+func TestARemovalTheSameCommitRefillsIsStillLeftOutOfTheFanOut(t *testing.T) {
+	world := newRotWorld(t, "alice", "bob", "carol")
+	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
+
+	// the newcomer exists only to be admitted: it never joins, because what this case measures is
+	// the COMMITTER's fan-out over the tree the commit has not been merged into yet.
+	dave := world.device("dave")
+	keyPackage, err := dave.engine.NewKeyPackage()
+	if err != nil {
+		t.Fatalf("the newcomer's key package: %v", err)
+	}
+
+	liveOccupied := map[uint32]bool{}
+	for at := 0; at < alice.handle.MemberCount(); at += 1 {
+		leaf, _, _, err := alice.handle.MemberAt(at)
+		if err != nil {
+			t.Fatalf("the live tree's member %d: %v", at, err)
+		}
+		liveOccupied[leaf] = true
+	}
+	if !liveOccupied[carol.leaf] {
+		t.Fatalf("CONTROL FAILED: the live tree does not hold leaf %d, which is the leaf this case "+
+			"removes; occupied %v", carol.leaf, liveOccupied)
+	}
+	liveCount := alice.handle.MemberCount()
+
+	// THE COMMIT: one Remove and one Add, folded together. The seam has no by-value arm that
+	// carries both, so the two proposals are generated and committed by reference -- which is
+	// ruling 13's forbidden shape IN PRODUCTION and is the only door this package has onto a
+	// multi-proposal commit from a test. What is measured below is the derivation, not the door.
+	if _, err := alice.handle.ProposeRemove(carol.leaf); err != nil {
+		t.Fatalf("proposing the removal of leaf %d: %v", carol.leaf, err)
+	}
+	if _, err := alice.handle.ProposeAdd(keyPackage); err != nil {
+		t.Fatalf("proposing the newcomer's add: %v", err)
+	}
+	if _, _, _, err := alice.handle.Commit(nil); err != nil {
+		t.Fatalf("the remove-and-refill commit: %v", err)
+	}
+	defer alice.handle.ClearPendingCommit()
+
+	pending, err := alice.handle.PendingEpoch()
+	if err != nil {
+		t.Fatalf("the staged commit's facts: %v", err)
+	}
+
+	// ── THE MEASUREMENT: the refill landed, so nothing about the two trees can see the removal ──
+	if pending.MemberCount != liveCount {
+		t.Fatalf("MEASUREMENT FAILED: the staged tree holds %d members and the live tree holds %d. "+
+			"This case exists because an Add refills the leaf a Remove blanked in the SAME commit, "+
+			"which makes every count- and set-comparison blind; if that has stopped being true in "+
+			"this MLS build, the reason [Group.wrapTargetsAtLocked] reads the staged commit has to "+
+			"be re-derived rather than this assertion relaxed", pending.MemberCount, liveCount)
+	}
+	if alice.handle.MemberCount() != liveCount {
+		t.Fatalf("MEASUREMENT FAILED: the live tree moved under a staged commit: %d, want %d",
+			alice.handle.MemberCount(), liveCount)
+	}
+
+	// ── THE PROPERTY: and the removed leaf is left out of the fan-out anyway ────────────────────
+	//
+	// THROUGH [Group.stageEpochRotationLocked] AND NOT STRAIGHT INTO [Group.wrapTargetsAtLocked],
+	// which is the frame [Group.publishCommitLocked] actually calls. Measured: a mutant that sent
+	// the commit path through [Group.foundingWrapTargetsLocked] -- the door with no exclusion at
+	// all, which is what an arm reaching past the derivation looks like -- is invisible to a case
+	// that calls the enumerator itself, and this frame convicts it.
+	staged, err := alice.group.stageEpochRotationLocked(pending)
+	if err != nil {
+		t.Fatalf("the rotation for the epoch the remove-and-refill opens: %v", err)
+	}
+	targets := staged.targets
+	addressed := map[uint32]bool{}
+	for _, target := range targets {
+		addressed[target.leaf] = true
+	}
+	if addressed[carol.leaf] {
+		t.Fatalf("the fan-out for epoch %d addresses leaf %d, which is the leaf the commit REMOVES "+
+			"and which the same commit refilled with a newcomer. The two trees agree exactly here "+
+			"(%d members before and after), so every derivation taken by comparing them answers the "+
+			"empty set -- and this epoch's pq_secret is now sealed to the removed member's own "+
+			"X-Wing key, which is ledger item 243 inverted. The exclusion must come off the staged "+
+			"commit's own RemovedLeaves", pending.Epoch, carol.leaf, liveCount)
+	}
+	// THE POSITIVE CONTROL, IN THE SAME LOOP: both survivors ARE addressed. Without it an empty
+	// fan-out, or one this build refused to build at all, would satisfy the clause above.
+	for _, who := range []*rotMember{alice, bob} {
+		if !addressed[who.leaf] {
+			t.Fatalf("CONTROL FAILED: the fan-out does not address %s at leaf %d, so the exclusion "+
+				"above cannot be told from a fan-out that addresses nobody; addressed %v",
+				who.name, who.leaf, addressed)
+		}
+	}
+	if len(targets) != liveCount-1 {
+		t.Fatalf("the fan-out addresses %d leaves over a live tree of %d with one removal; want %d",
+			len(targets), liveCount, liveCount-1)
+	}
+	// AND THE SIZE IS NOT pending.MemberCount, which is the one-line invariant two passes offered
+	// for this function. It is false here by one and false on every Add by one the other way.
+	if len(targets) == pending.MemberCount {
+		t.Fatalf("the fan-out's size equals the staged member count (%d). That equality has never "+
+			"held -- it is false on every Add -- and if it holds here the removed leaf is back in "+
+			"the fan-out", pending.MemberCount)
+	}
+	t.Logf("live and staged member counts both %d, staged RemovedLeaves %v, fan-out addresses %d leaves",
+		liveCount, pending.RemovedLeaves, len(targets))
 }
 
 // ── 2. THE THREE FAILURE STATES ──────────────────────────────────────────────────────────────
@@ -886,7 +1026,7 @@ func TestTheThreeWaysADeviceWrapFailsAreThreeSentinelsAndThreeCounters(t *testin
 		t.Run(one.what, func(t *testing.T) {
 			world := newRotWorld(t, "alice", "bob")
 			alice, bob := world.member("alice"), world.member("bob")
-			published := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+			published := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 				return alice.handle.Commit(nil)
 			}, one.bend(bob)...)
 
@@ -995,7 +1135,7 @@ func TestAnOrphanIsCountedOnEveryArmOfTheResolutionAndInBothRaceOrderings(t *tes
 	for at := range loser {
 		loser[at] = 0x5A
 	}
-	published := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+	published := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.Commit(nil)
 	}, rotBend{leaf: bob.leaf, payload: loser, decoy: true})
 	if len(published.decoys) != 1 {
@@ -1051,7 +1191,7 @@ func TestAnOrphanIsCountedOnEveryArmOfTheResolutionAndInBothRaceOrderings(t *tes
 	for at := range secondLoser {
 		secondLoser[at] = 0xA5
 	}
-	secondPublished := second.rotate(secondAlice, nil, func() ([]byte, []byte, []byte, error) {
+	secondPublished := second.rotate(secondAlice, func() ([]byte, []byte, []byte, error) {
 		return secondAlice.handle.Commit(nil)
 	}, rotBend{leaf: secondBob.leaf, payload: secondLoser, decoy: true})
 	if len(secondPublished.decoys) != 1 || len(secondPublished.wraps) == 0 {
@@ -1108,7 +1248,7 @@ func TestAnOrphanIsCountedOnEveryArmOfTheResolutionAndInBothRaceOrderings(t *tes
 	for at := range stray {
 		stray[at] = 0xC3
 	}
-	thirdPublished := third.fanOutOnTheHeldSecret(thirdAlice, nil, func() ([]byte, []byte, []byte, error) {
+	thirdPublished := third.fanOutOnTheHeldSecret(thirdAlice, func() ([]byte, []byte, []byte, error) {
 		return thirdAlice.handle.Commit(nil)
 	}, unrotatedFanOut{noDigest: true, payload: stray})
 	if digest, err := epochDigestOf(&thirdPublished.commit.record.Header); err != nil || digest != nil {
@@ -1147,7 +1287,7 @@ func TestAnOrphanIsCountedOnEveryArmOfTheResolutionAndInBothRaceOrderings(t *tes
 	// different places, and a counter that reads zero there is the same defect as (c).
 	fourth := newRotWorld(t, "alice", "bob")
 	fourthAlice, fourthBob := fourth.member("alice"), fourth.member("bob")
-	fourthPublished := fourth.rotate(fourthAlice, nil, func() ([]byte, []byte, []byte, error) {
+	fourthPublished := fourth.rotate(fourthAlice, func() ([]byte, []byte, []byte, error) {
 		return fourthAlice.handle.Commit(nil)
 	})
 	if err := fourth.deliver(fourthBob, fourthPublished.wraps...); err != nil {
@@ -1216,7 +1356,7 @@ func TestARestartAfterARotationComesBackWithTheTableAndOpensItsBacklog(t *testin
 	alice, bob := world.member("alice"), world.member("bob")
 
 	atOne := world.storageRootOf(bob)
-	first := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+	first := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.Commit(nil)
 	})
 	if err := world.deliver(bob, first.page()...); err != nil {
@@ -1225,7 +1365,7 @@ func TestARestartAfterARotationComesBackWithTheTableAndOpensItsBacklog(t *testin
 	if bytes.Equal(atOne, world.storageRootOf(bob)) {
 		t.Fatalf("nothing rotated")
 	}
-	second := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+	second := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.Commit(nil)
 	})
 	if err := world.deliver(bob, second.page()...); err != nil {
@@ -1474,7 +1614,7 @@ func TestAGroupRecordWrittenBeforeTheTableRestoresAndFollowsTheNextRotation(t *t
 	restored.reconciled = true
 
 	// ── AND NOW THE ROTATION IT MEETS ───────────────────────────────────────────────────────
-	published := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+	published := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.Commit(nil)
 	})
 	back := &rotMember{name: "bob after the restart", root: bob.root, dev: bob.dev,
@@ -1602,7 +1742,7 @@ func TestAFivePartRecordRestoredAboveABacklogKeepsItAcrossTheFirstRotation(t *te
 	}
 
 	// ── ONE ORDINARY ROTATION ───────────────────────────────────────────────────────────────
-	published := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+	published := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.Commit(nil)
 	})
 	back := &rotMember{name: "bob after the restart", root: bob.root, dev: bob.dev,
@@ -1686,7 +1826,12 @@ func TestTheEphRootTwinOfTheDeviceWrapIsRefusedByConnectAndNotByThisPackage(t *t
 	// THE CONTROL, IN THE SAME QUERY: the PERMANENT half of the same pair, at the same target,
 	// through the same door, is sealed. Without it a refusal here would be satisfiable by a
 	// session that seals nothing at all.
-	targets, err := alice.group.wrapTargetsAtLocked(alice.group.epoch, nil)
+	//
+	// THROUGH THE FOUNDING DOOR, because this world has staged no commit: every member of a
+	// [newRotWorld] cohort was admitted by the founding CommitAdd and merged, so
+	// [Group.wrapTargetsAtLocked] would have no staged commit to read its exclusion off. What this
+	// case needs is one target's handle and nothing about a removal.
+	targets, err := alice.group.foundingWrapTargetsLocked(alice.group.epoch)
 	if err != nil {
 		t.Fatalf("the wrap targets: %v", err)
 	}
@@ -1798,7 +1943,7 @@ func TestARestartKeepsThePqSecretWitnessTheWindowDoesNotPrune(t *testing.T) {
 
 	const rotations = int(messagegroup.PastEpochWindow) + 1
 	for at := 0; at < rotations; at += 1 {
-		published := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+		published := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 			return alice.handle.Commit(nil)
 		})
 		if err := world.deliver(bob, published.page()...); err != nil {

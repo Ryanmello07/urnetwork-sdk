@@ -1285,35 +1285,84 @@ func parseLeafWrapKey(leafKeys []byte) ([]byte, error) {
 
 // ── the publishing leg ───────────────────────────────────────────────────────────────────────
 
-// wrapTargetsAtLocked is every leaf the fan-out for `opensEpoch` addresses, read off the group at
-// its CURRENT epoch and minus the leaves the staged commit removes.
+// wrapTargetsAtLocked is every leaf the fan-out for the epoch a STAGED COMMIT opens addresses: the
+// group's LIVE tree at its current epoch, minus the leaves that staged commit takes out of it.
 //
 // IT IS READ OFF THE GROUP AND NEVER OFF A LIST THE CALLER PASSES -- m1 Task 14 Property 1's scope
-// rule, because a fan-out over a caller-supplied list is a fan-out that silently omits.
+// rule, because a fan-out over a caller-supplied list is a fan-out that silently omits. Until
+// 2026-09-25 that sentence was true of the MEMBERS and false of the EXCLUSION, which arrived as a
+// `removing []uint32` parameter threaded down from whichever arm had built the commit, on the
+// recorded reasoning that there was nothing to read it off. `connect 98b72dfa` made that reasoning
+// false -- ledger item 257's ruling 51 put the answer on [messagegroup.PendingEpoch] itself -- and
+// this signature is that derivation consumed. What arrives here is the seam's own value for the
+// staged commit and not a caller's composition of one, so an arm cannot forget an argument it does
+// not pass, and ruling 54's "the omission class an arm can cause by forgetting an argument is gone
+// by construction" is a fact about this signature rather than a promise about a later commit.
+//
+// IT IS THE STAGED COMMIT'S OWN ANSWER AND NOT A DIFF OF THE TWO TREES, and that distinction is
+// not pedantic: every comparison is WRONG on one input. A commit may remove a leaf and admit a
+// member that lands on the very leaf the removal blanked -- RFC 9420 §12.3 applies Removes before
+// Adds and an Add fills the leftmost blank -- so the live tree's occupied leaves, the staged
+// tree's, AND both member counts agree exactly while a member was removed. Every derivation taken
+// by comparison answers the empty set for that commit (`self.handle.MemberCount()` against
+// `pending.MemberCount`, the live leaves against the staged ones, "the highest leaves that no
+// longer fit"), and the fan-out then seals the next epoch's post-quantum secret straight to the
+// member the commit exists to shut out. [TestARemovalTheSameCommitRefillsIsStillLeftOutOfTheFanOut]
+// drives exactly that commit through this function; connect holds the same property one layer down
+// in messagegroup's TestARemovalWhoseLeafIsRefilledInTheSameCommitIsStillNamedByTheStagedCommit.
 //
 // AND IT IS THE PRE-COMMIT TREE, WHICH IS A LIMIT OF THE SEAM AND NOT A CHOICE. Ruling 37 submits
-// these records before the merge, and the only staged-tree read the seam offers is
-// [messagegroup.PendingEpoch] -- an epoch, a member COUNT and a context; [messagegroup.ProcessedMember]
-// carries a HasLeafKeys bool and no key. So the staged tree's X-Wing keys are not reachable from
-// here at all, and the enumeration is the live tree's. What that costs is exact and is why the
-// two arms are safe:
+// these records before the merge, and what the seam reads off the staged value is
+// [messagegroup.PendingEpoch] -- an epoch, a member COUNT, the leaves the commit REMOVES, and a
+// context -- while [messagegroup.ProcessedMember] carries a HasLeafKeys bool and no key. So the
+// staged tree's X-Wing keys are not reachable from here at all, and the enumeration is the live
+// tree's. What that costs is exact and is why the two arms are safe:
 //
 //   - A REMOVE: the removed leaf is in the live tree and is excluded HERE, by leaf index, off the
-//     same list the commit was built from. That exclusion is the whole of item 243 -- the removed
-//     member gets no wrap, so it holds no pq_secret[n+1], so it derives no storage_root[n+1].
+//     staged commit itself. That exclusion is the whole of item 243 -- the removed member gets no
+//     wrap, so it holds no pq_secret[n+1], so it derives no storage_root[n+1].
 //   - AN ADD: the added leaf is not in the live tree and gets no wrap. It does not need one: a
 //     joiner receives the epoch's secret in [Invite.PqSecret], out of band through the Welcome,
 //     which MASTER section 7 has always been the founding delivery and which
-//     [Group.AddMemberAndPublish] answers AFTER the rotation has filed the new epoch's value.
+//     [Group.AddMemberAndPublish] answers AFTER the rotation has filed the new epoch's value. So
+//     NO EQUALITY BETWEEN THIS LIST'S LENGTH AND pending.MemberCount HOLDS in either direction:
+//     it is false on every Add, which is the shape two separate passes offered as a one-line
+//     invariant for this function and which fires on [Group.AddMemberAndPublish].
 //
 // So expected_wrap_count is the length of THIS list, and the marker's wrap_count is taken from the
 // same call rather than recomputed after the merge -- two numbers built from one expression cannot
 // disagree, which is the half of item 132 a client can fix by itself.
-func (self *Group) wrapTargetsAtLocked(opensEpoch uint64, removing []uint32) ([]wrapTarget, error) {
+func (self *Group) wrapTargetsAtLocked(pending *messagegroup.PendingEpoch) ([]wrapTarget, error) {
 	excluded := map[uint32]bool{}
-	for _, leaf := range removing {
+	for _, leaf := range pending.RemovedLeaves {
 		excluded[leaf] = true
 	}
+	return self.wrapTargetsExcludingLocked(pending.Epoch, excluded)
+}
+
+// foundingWrapTargetsLocked is the fan-out for an epoch NO staged commit opens: every leaf of the
+// live tree, with nothing excluded because there is nothing staged to read an exclusion OFF.
+//
+// IT IS A SECOND NAMED DOOR AND NOT A nil AT A CALL SITE, which is the whole reason it exists.
+// [Group.Open] publishes epoch one -- MASTER section 7's founding fan-out, whose commit
+// [Group.AddMember] merged before this group was ever publishable -- so the seam answers
+// mls.ErrNoPendingCommit here, and "which leaves does the staged commit remove" has no subject: a
+// group standing at its founding epoch has never removed anybody. Spelled instead as one function
+// with an exclusion argument, this site's `nil` would be indistinguishable in SHAPE from an arm
+// that forgot to pass one, which is exactly the class ruling 51 removed.
+func (self *Group) foundingWrapTargetsLocked(opensEpoch uint64) ([]wrapTarget, error) {
+	return self.wrapTargetsExcludingLocked(opensEpoch, nil)
+}
+
+// wrapTargetsExcludingLocked is the walk the two doors above share, and the two are its only
+// callers: one READS its exclusion off the staged commit and the other has no staged commit at
+// all. No verb in this package reaches an exclusion set by any other road.
+//
+// THE EXCLUSION IS TESTED BEFORE THE LEAF KEY IS PARSED, which is a behaviour rather than a
+// tidiness. A member whose urmessage_leaf_keys body this build cannot read fails the whole
+// enumeration -- and removing such a member is exactly the commit a group needs to go through, so
+// skipping the excluded leaf first is what keeps a removal of a broken member publishable.
+func (self *Group) wrapTargetsExcludingLocked(opensEpoch uint64, excluded map[uint32]bool) ([]wrapTarget, error) {
 	targets := []wrapTarget{}
 	for at := 0; at < self.handle.MemberCount(); at += 1 {
 		leaf, _, leafKeys, err := self.handle.MemberAt(at)
@@ -1370,7 +1419,7 @@ type stagedRotation struct {
 // race is a row a LOST race leaves behind naming an epoch this device never entered -- which is
 // the orphan state the receive side has to detect in other devices' fan-outs, and this device must
 // not manufacture it in its own table.
-func (self *Group) stageEpochRotationLocked(opensEpoch uint64, removing []uint32) (*stagedRotation, error) {
+func (self *Group) stageEpochRotationLocked(pending *messagegroup.PendingEpoch) (*stagedRotation, error) {
 	// THE DRAW, ledger item 243's own sentence: a FRESH pq_secret for the epoch this commit
 	// opens. Everything below descends from it -- the epoch's storage root, therefore its write
 	// and read keys, therefore the digest the commit carries, therefore what every wrap has to
@@ -1378,7 +1427,7 @@ func (self *Group) stageEpochRotationLocked(opensEpoch uint64, removing []uint32
 	// it. A second draw anywhere would be a second value to keep in step with this one.
 	pqSecret, err := messagegroup.NewPqSecret(self.device.random)
 	if err != nil {
-		return nil, fmt.Errorf("urmessage: pq_secret for epoch %d: %w", opensEpoch, err)
+		return nil, fmt.Errorf("urmessage: pq_secret for epoch %d: %w", pending.Epoch, err)
 	}
 	// THE TARGETS, AND expected_wrap_count IS THE LENGTH OF THIS LIST. It used to be
 	// `pending.MemberCount` at the commit and `len(wrapTargets)` at the marker: two numbers, two
@@ -1386,7 +1435,12 @@ func (self *Group) stageEpochRotationLocked(opensEpoch uint64, removing []uint32
 	// Remove they would not, and under the pre-merge fan-out they cannot -- the targets are the
 	// LIVE tree minus the leaves this commit removes. Two numbers built from one expression cannot
 	// disagree, which is the half of item 132 a client can close by itself.
-	targets, err := self.wrapTargetsAtLocked(opensEpoch, removing)
+	//
+	// THE STAGED VALUE GOES DOWN WHOLE, ledger item 257's ruling 51 and 2026-09-25: the epoch this
+	// rotation is FOR and the leaves it must leave OUT are two fields of one answer the seam gave,
+	// so no caller between the commit and the fan-out can supply one without the other or supply
+	// either at all.
+	targets, err := self.wrapTargetsAtLocked(pending)
 	if err != nil {
 		zeroizeState(pqSecret)
 		return nil, err
@@ -1397,7 +1451,7 @@ func (self *Group) stageEpochRotationLocked(opensEpoch uint64, removing []uint32
 	}
 	staged := &stagedRotation{pqSecret: pqSecret, targets: targets}
 	for _, target := range targets {
-		record, err := self.sealEpochWrapLocked(opensEpoch, target, pqSecret)
+		record, err := self.sealEpochWrapLocked(pending.Epoch, target, pqSecret)
 		if err != nil {
 			zeroizeState(pqSecret)
 			return nil, err
@@ -1424,8 +1478,8 @@ func (self *Group) stageEpochRotationLocked(opensEpoch uint64, removing []uint32
 // carrying a wrap tag, because ledger open item 185 leaves that record's eph_window unstated while
 // Spec A S19 and Spec B section 5.1 check 3 refuse an implausible one and a wrap head has no
 // sent_at to divide. That refusal is MEASURED from this side rather than described --
-// TestTheEphRootTwinOfThisWrapIsRefusedByConnectAndNotByThisPackage -- and it goes RED the day 185
-// is ruled and the refusal lifts, which is when the second record is due and
+// [TestTheEphRootTwinOfTheDeviceWrapIsRefusedByConnectAndNotByThisPackage] -- and it goes RED the
+// day 185 is ruled and the refusal lifts, which is when the second record is due and
 // expected_wrap_count becomes MASTER section 8.2's 2 x device_leaves + 1.
 func (self *Group) sealEpochWrapLocked(opensEpoch uint64, target wrapTarget, pqSecret []byte) (*message.Record, error) {
 	publicKey, err := messagegroup.ParseXwingPublicKey(target.xwingPub)

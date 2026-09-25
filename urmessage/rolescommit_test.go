@@ -844,7 +844,7 @@ func TestPublishCommitLockedsFirstExitErasesTheStagedEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("staging the promotion: %v", err)
 	}
-	err = owner.group.publishCommitLocked(ctx, commit, nil)
+	err = owner.group.publishCommitLocked(ctx, commit)
 	if !errors.Is(err, injected) {
 		t.Fatalf("publishCommitLocked answered %v, want the injected PendingEpoch error", err)
 	}

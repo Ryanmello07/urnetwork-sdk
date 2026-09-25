@@ -207,7 +207,7 @@ func newReuseWorldAbove(t *testing.T, bobLines int, bobFloor uint64) *reuseWorld
 	// (2) ONE COMMIT: BOB OUT, EVE IN.
 	arm, joiner := world.bundleAddAndRemove(alice, bob.leaf, "eve", carol)
 	var welcome, ratchetTree []byte
-	published := world.rotate(alice, []uint32{bob.leaf}, func() ([]byte, []byte, []byte, error) {
+	published := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		commit, admission, tree, err := arm()
 		welcome, ratchetTree = admission, tree
 		return commit, admission, tree, err
@@ -862,7 +862,7 @@ func TestARemovedLeafThatIsNeverRefilledStillResolvesItsOwnRecords(t *testing.T)
 	if err := world.deliver(carol, lines...); err != nil {
 		t.Fatalf("carol's walk over bob's lines: %v", err)
 	}
-	published := world.rotate(alice, []uint32{bob.leaf}, func() ([]byte, []byte, []byte, error) {
+	published := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{bob.leaf})
 	})
 	if err := world.deliver(carol, published.page()...); err != nil {
@@ -1193,7 +1193,7 @@ func TestALeafThatChangesHandsTwiceStillResolvesTheMiddleOccupantsRecords(t *tes
 	}
 
 	// (2) AND IS REMOVED IN ITS TURN, with nobody added, so the leaf is out of the tree for good.
-	second := world.rotate(alice, []uint32{world.leaf}, func() ([]byte, []byte, []byte, error) {
+	second := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{world.leaf})
 	})
 	if err := world.deliver(carol, second.page()...); err != nil {

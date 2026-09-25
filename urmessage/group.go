@@ -714,8 +714,9 @@ type epochLadderKey struct {
 // tracked" after the change and the first open at the new epoch would fail with "no receiver
 // ratchet is tracked for this sender and retention class." The epoch is what makes a new-epoch key
 // miss the memo and re-track; [Group.crossEpochLadderLocked] clears the whole map in the same block
-// as the install anyway, so the two are the one rule stated twice, and the AST-adjacent gate
-// TestNoTrackedKeySurvivesAnEpochChangeWithoutItsEpoch holds it.
+// as the install anyway, so the two are the one rule stated twice, and
+// [TestAfterAnEpochChangeEveryTrackedKeyNamesTheNewEpochAndTheOldOnesArePrinted] holds it -- as a
+// behaviour over a seeded old-epoch key and its printed complement, not as a reading of this type.
 type trackedKey struct {
 	epoch uint64
 	ladderKey
@@ -938,7 +939,8 @@ type Group struct {
 	// [Stats.OwnWithoutCopy].
 	//
 	// IT EXISTS BECAUSE A REWIND RE-READS THESE: without it a record re-fetched behind an earlier
-	// failure is authenticated and counted again (cp3b.TestAnOwnRecordThisDeviceKeptNoCopyOf...).
+	// failure is authenticated and counted again
+	// (cp3b.TestAnOwnRecordThisDeviceKeptNoCopyOfIsCountedAndIsNotAFailure).
 	// IT KEEPS NO INDEX, and it used to: the skip re-noted the index it was authenticated at, and
 	// deleting that re-note turned nothing red in urmessage or cp3b, because the index is already in
 	// [Group.ownIndexSeen], which is the group's and not the walk's.
@@ -1556,9 +1558,15 @@ func (self *Group) Open(ctx context.Context) error {
 	// other epoch's fan-out delivers pq_secret[n+1] under X-Wing to each leaf that is already a
 	// member; at epoch one there is no such leaf -- the only other member is holding the Welcome
 	// and takes its copy out of band in [Invite.PqSecret], MASTER section 7's founding delivery.
-	// A wrap addressed to a leaf for a secret that leaf already has would be a second copy of the
-	// same value on the wire for nothing. See [alphaWrapBody], and pqepoch.go's header.
-	wrapTargets, err := self.wrapTargetsAtLocked(self.epoch, nil)
+	// A wrap addressed to a leaf for a secret the device at that leaf already has would be a second
+	// copy of the same value on the wire for nothing. See [alphaWrapBody], and pqepoch.go's header.
+	//
+	// AND IT IS THE ONE FAN-OUT WITH NO STAGED COMMIT BEHIND IT, which is why it goes through its
+	// own door: [Group.AddMember] merged the founding commit before this group was publishable, so
+	// there is nothing staged to read an exclusion off, and a group standing at its founding epoch
+	// has carried no removal for one to be about. Every other fan-out in this package is
+	// [Group.wrapTargetsAtLocked]'s and derives its exclusion off the staged commit.
+	wrapTargets, err := self.foundingWrapTargetsLocked(self.epoch)
 	if err != nil {
 		return err
 	}
@@ -1743,7 +1751,7 @@ func (self *Group) AddMemberAndPublish(ctx context.Context, keyPackage []byte) (
 	// (2)-(5) announce, submit, and -- once the server has taken it -- merge, enter and fan out
 	// the epoch the commit opens. A refusal erases the staged epoch and answers here with nothing
 	// moved; the key package is the joiner's and a retry after Receive may offer it again.
-	if err := self.publishCommitLocked(ctx, commit, nil); err != nil {
+	if err := self.publishCommitLocked(ctx, commit); err != nil {
 		return nil, err
 	}
 
@@ -1863,15 +1871,28 @@ func (self *Group) streamFloorRefusalLocked() error {
 // member count, and the fan-out after the merge wraps to the live tree's members: they are one
 // tree, and the seam's own test holds the two readings equal across a merge.
 //
-// `removing` IS THE LEAVES THIS COMMIT TAKES OUT OF THE GROUP, and it is a parameter rather than a
-// read because there is nothing to read it off. The fan-out is built pre-merge, from the LIVE tree
-// (the seam publishes no staged leaf's X-Wing key), and a removed member is still in that tree --
-// so a fan-out that did not exclude it would hand the member this commit removes the next epoch's
-// post-quantum secret, which is item 243's whole subject arriving inverted. Its caller is the arm
-// that built the commit and therefore holds the list; every other arm passes nil, and an arm that
-// forgot would be caught by the property rather than by this sentence:
-// TestAMemberRemovedByACommitCannotDeriveTheEpochThatCommitOpens.
-func (self *Group) publishCommitLocked(ctx context.Context, commit []byte, removing []uint32) error {
+// THE LEAVES THIS COMMIT TAKES OUT OF THE GROUP ARE NOT AN ARGUMENT AND NO ARM PASSES THEM. The
+// fan-out is built pre-merge, from the LIVE tree (the seam publishes no staged leaf's X-Wing key),
+// and a removed member is still standing in that tree -- so a fan-out that did not exclude it
+// would hand the member this commit removes the next epoch's post-quantum secret, which is item
+// 243's whole subject arriving inverted. Until 2026-09-25 that exclusion was a `removing []uint32`
+// parameter on this method, passed down by whichever arm had built the commit, on the recorded
+// reasoning that there was nothing to read it off. Ledger item 257's ruling 51 refuted the
+// reasoning and `connect 98b72dfa` built the read: the staged commit's own removed leaves are a
+// field on the [messagegroup.PendingEpoch] value step (2) below ALREADY reads, one line from here,
+// post-CreateCommit and pre-merge. So the derivation and the epoch come off one answer, and the
+// omission class an arm can cause by forgetting an argument is gone by construction rather than by
+// a sentence asking arms to remember. What remains is a bug in the fan-out, which is what ruling
+// 54 leaves "re-found the group" as the recovery for.
+//
+// THE PROPERTY THAT HOLDS IT is [TestThreeMembersRotateAcrossTwoEpochsAndAMemberRemovedByThatCommitCannotFollow]:
+// a three-member group where the second rotation's commit removes one member, holding that the
+// epoch's fan-out addresses every survivor and not the removed leaf, that the removed member's
+// RETAINED pq_secret does not reproduce the survivors' storage_root even when the epoch's exporter
+// is granted to it, and that its own table never gains the removed-from epoch's row. The exclusion
+// it drives is this method's derivation and no argument of the case's own, which is what makes it
+// a property of the code rather than of the fixture.
+func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error {
 	// (2) the facts of the epoch the staged commit opens, off the staged value: the epoch, the
 	// member count the fan-out will wrap to, the group context the server keys the epoch under,
 	// and the NEW epoch's write and read keys, derived STRAIGHT OFF the staged exporter -- the
@@ -1900,7 +1921,8 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte, remov
 	// beside it" -- because under 0x0001 the server reads the keys out of the attachment and a
 	// delivery is a second copy it would not read; and a kind 0x0005 commit WITHOUT one is refused
 	// the other way, as an epoch the server was never handed what opens. Both directions are
-	// measured through the real server in cp3b's `TestItem244`. So [epochKeysFor] asks the sealed
+	// measured through the real server in cp3b's TestItem244TheServedCommitHandsOutNoEpochKey. So
+	// [epochKeysFor] asks the sealed
 	// record which kind it is and answers accordingly, which is the server's own rule read off the
 	// same octets, and not a feature flag.
 	//
@@ -1928,7 +1950,11 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte, remov
 	// arithmetic. MEASURED: it did. The first draft of this file left the draw inline and the
 	// property suite built its own fan-out beside it, so a mutant that reused one secret across
 	// every epoch -- item 243's whole subject, inverted -- passed the entire suite.
-	staged, err := self.stageEpochRotationLocked(newEpoch, removing)
+	//
+	// AND THE WHOLE STAGED VALUE GOES DOWN, not the epoch off it: `pending.RemovedLeaves` is where
+	// the fan-out's exclusion now comes from, so the epoch the rotation is FOR and the leaves it
+	// must leave OUT are two fields of one read taken at one instant. See the header above.
+	staged, err := self.stageEpochRotationLocked(pending)
 	if err != nil {
 		self.handle.ClearPendingCommit()
 		return err

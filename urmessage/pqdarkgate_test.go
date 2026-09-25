@@ -159,7 +159,7 @@ func TestADarkGroupIsStillDarkAfterTheNextCleanRotation(t *testing.T) {
 	world := newRotWorld(t, "alice", "bob", "carol")
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
 
-	first := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+	first := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.Commit(nil)
 	}, rotBend{leaf: bob.leaf, payload: make([]byte, messagegroup.PqSecretBytes)})
 
@@ -180,7 +180,7 @@ func TestADarkGroupIsStillDarkAfterTheNextCleanRotation(t *testing.T) {
 	t.Logf("CONTROL HELD: the same page that made bob dark was followed by carol")
 
 	// ── THE SECOND ROTATION, CLEAN AND COMPLETE ─────────────────────────────────────────────
-	second := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+	second := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.Commit(nil)
 	})
 	bobsWrap := 0
@@ -244,7 +244,7 @@ func TestADarkGroupComesBackDarkAndAHealthyOneDoesNot(t *testing.T) {
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
 	bobLeaf, carolLeaf := bob.leaf, carol.leaf
 
-	published := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+	published := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.Commit(nil)
 	})
 	// THE OMISSION: bob is handed the commit and none of the wraps. carol is handed everything.
@@ -603,7 +603,7 @@ func TestARemovalThatDoesNotRotateIsRefusedAndTheGroupDoesNotFollowIt(t *testing
 	// Without this clause the rule would be satisfied by a build that refuses every removal.
 	clean := newRotWorld(t, "alice", "bob", "carol")
 	cleanAlice, cleanBob, cleanCarol := clean.member("alice"), clean.member("bob"), clean.member("carol")
-	rotated := clean.rotate(cleanAlice, []uint32{cleanCarol.leaf}, func() ([]byte, []byte, []byte, error) {
+	rotated := clean.rotate(cleanAlice, func() ([]byte, []byte, []byte, error) {
 		return cleanAlice.handle.CommitRemove([]uint32{cleanCarol.leaf})
 	})
 	if err := clean.deliver(cleanBob, rotated.page()...); err != nil {
@@ -661,7 +661,7 @@ func TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch(t *
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
 
 	retained := append([]byte(nil), carol.group.pqSecretLocked()...)
-	published := world.fanOutOnTheHeldSecret(alice, []uint32{carol.leaf}, func() ([]byte, []byte, []byte, error) {
+	published := world.fanOutOnTheHeldSecret(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{carol.leaf})
 	}, unrotatedFanOut{})
 	if published.opens != 2 {
@@ -787,7 +787,7 @@ func TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch(t *
 	for at := range fresh {
 		fresh[at] = 0x6F
 	}
-	strongPublished := strong.fanOutOnTheHeldSecret(strongAlice, []uint32{strongCarol.leaf},
+	strongPublished := strong.fanOutOnTheHeldSecret(strongAlice,
 		func() ([]byte, []byte, []byte, error) {
 			return strongAlice.handle.CommitRemove([]uint32{strongCarol.leaf})
 		}, unrotatedFanOut{decoy: fresh})
@@ -817,7 +817,7 @@ func TestARemovalFannedOutOnTheHeldSecretIsRefusedAndTheGroupStaysAtItsEpoch(t *
 	clean := newRotWorld(t, "alice", "bob", "carol")
 	cleanAlice, cleanBob, cleanCarol := clean.member("alice"), clean.member("bob"), clean.member("carol")
 	cleanRetained := append([]byte(nil), cleanCarol.group.pqSecretLocked()...)
-	rotated := clean.rotate(cleanAlice, []uint32{cleanCarol.leaf}, func() ([]byte, []byte, []byte, error) {
+	rotated := clean.rotate(cleanAlice, func() ([]byte, []byte, []byte, error) {
 		return cleanAlice.handle.CommitRemove([]uint32{cleanCarol.leaf})
 	})
 	if err := clean.deliver(cleanBob, rotated.page()...); err != nil {
@@ -858,7 +858,7 @@ func TestARemovalOfTwoLeavesFannedOutOnTheHeldSecretIsRefusedTheSameWay(t *testi
 
 	retained := append([]byte(nil), carol.group.pqSecretLocked()...)
 	removing := []uint32{carol.leaf, dave.leaf}
-	published := world.fanOutOnTheHeldSecret(alice, removing, func() ([]byte, []byte, []byte, error) {
+	published := world.fanOutOnTheHeldSecret(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove(removing)
 	}, unrotatedFanOut{})
 
@@ -943,7 +943,7 @@ func TestARemovalFannedOutOnAnEarlierEpochsSecretIsRefusedToo(t *testing.T) {
 	atOne := append([]byte(nil), carol.group.pqSecretLocked()...)
 
 	// ── CONTROL 1: AN HONEST ROTATION, FOLLOWED, which is what gives bob a second row ────────
-	first := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+	first := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.Commit(nil)
 	})
 	for _, member := range []*rotMember{bob, carol} {
@@ -966,7 +966,7 @@ func TestARemovalFannedOutOnAnEarlierEpochsSecretIsRefusedToo(t *testing.T) {
 	}
 
 	// ── THE REPLAY: the removal opens epoch 3 on pq_secret[1] ────────────────────────────────
-	published := world.fanOutOnTheHeldSecret(alice, []uint32{carol.leaf}, func() ([]byte, []byte, []byte, error) {
+	published := world.fanOutOnTheHeldSecret(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{carol.leaf})
 	}, unrotatedFanOut{opensOn: atOne})
 	if !bytes.Equal(published.pqSecret, atOne) {
@@ -1031,7 +1031,7 @@ func TestARemovalFannedOutOnAnEvictedEpochsSecretIsRefusedToo(t *testing.T) {
 	// ── PastEpochWindow + 1 HONEST ROTATIONS, EVERY ONE OF THEM FOLLOWED ────────────────────
 	const rotations = int(messagegroup.PastEpochWindow) + 1
 	for at := 0; at < rotations; at += 1 {
-		published := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+		published := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 			return alice.handle.Commit(nil)
 		})
 		for _, member := range []*rotMember{bob, carol} {
@@ -1058,7 +1058,7 @@ func TestARemovalFannedOutOnAnEvictedEpochsSecretIsRefusedToo(t *testing.T) {
 	}
 
 	// ── THE REPLAY: a removal opening its epoch on pq_secret[1] ─────────────────────────────
-	published := world.fanOutOnTheHeldSecret(alice, []uint32{carol.leaf}, func() ([]byte, []byte, []byte, error) {
+	published := world.fanOutOnTheHeldSecret(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{carol.leaf})
 	}, unrotatedFanOut{opensOn: retained})
 	if !bytes.Equal(published.pqSecret, retained) {
@@ -1120,7 +1120,7 @@ func TestARemovalFannedOutOnAnEvictedEpochsSecretIsRefusedToo(t *testing.T) {
 func TestARefusedRemovalHaltsTheGroupForEveryLaterWalkAndAcrossARestart(t *testing.T) {
 	world := newRotWorld(t, "alice", "bob", "carol")
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
-	published := world.fanOutOnTheHeldSecret(alice, []uint32{carol.leaf}, func() ([]byte, []byte, []byte, error) {
+	published := world.fanOutOnTheHeldSecret(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{carol.leaf})
 	}, unrotatedFanOut{})
 
@@ -1170,7 +1170,7 @@ func TestARefusedRemovalHaltsTheGroupForEveryLaterWalkAndAcrossARestart(t *testi
 	}
 
 	// ── THE REPAIR THE PROSE NAMED, DRIVEN: A PROPER RE-COMMIT IS NOT FOLLOWED ──────────────
-	repair := world.rotate(alice, nil, func() ([]byte, []byte, []byte, error) {
+	repair := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.Commit(nil)
 	})
 	// THE CONTROL, FIRST, AND IT FIRES FOR ITS OWN REASON: the same fixture -- one honest
@@ -1180,7 +1180,7 @@ func TestARefusedRemovalHaltsTheGroupForEveryLaterWalkAndAcrossARestart(t *testi
 	// halted at the same record, which is itself the finding: the partition is the whole group's.
 	repairable := newRotWorld(t, "alice", "bob", "carol")
 	repairableAlice, repairableBob := repairable.member("alice"), repairable.member("bob")
-	control := repairable.rotate(repairableAlice, nil, func() ([]byte, []byte, []byte, error) {
+	control := repairable.rotate(repairableAlice, func() ([]byte, []byte, []byte, error) {
 		return repairableAlice.handle.Commit(nil)
 	})
 	if err := repairable.deliver(repairableBob, control.page()...); err != nil {
@@ -1279,7 +1279,7 @@ func TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideT
 	// ── (a) ITEM 132's OMISSION AT THE VICTIM ───────────────────────────────────────────────
 	world := newRotWorld(t, "alice", "bob", "carol")
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
-	published := world.rotate(alice, []uint32{carol.leaf}, func() ([]byte, []byte, []byte, error) {
+	published := world.rotate(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{carol.leaf})
 	})
 	if _, everHeld := bob.group.pqSecretHeldAtLocked(published.pqSecret); everHeld {
@@ -1328,7 +1328,7 @@ func TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideT
 	// ── THE CONTROL: THE SAME OMISSION ON A COMMIT THAT REMOVES NOBODY ──────────────────────
 	plain := newRotWorld(t, "alice", "bob", "carol")
 	plainAlice, plainBob := plain.member("alice"), plain.member("bob")
-	ordinary := plain.rotate(plainAlice, nil, func() ([]byte, []byte, []byte, error) {
+	ordinary := plain.rotate(plainAlice, func() ([]byte, []byte, []byte, error) {
 		return plainAlice.handle.Commit(nil)
 	})
 	plainDark := plain.deliver(plainBob, ordinary.commit)
@@ -1352,7 +1352,7 @@ func TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideT
 	// ── (b) THE WRAP THAT ARRIVED AND DID NOT OPEN ──────────────────────────────────────────
 	bent := newRotWorld(t, "alice", "bob", "carol")
 	bentAlice, bentBob, bentCarol := bent.member("alice"), bent.member("bob"), bent.member("carol")
-	bentPublished := bent.rotate(bentAlice, []uint32{bentCarol.leaf}, func() ([]byte, []byte, []byte, error) {
+	bentPublished := bent.rotate(bentAlice, func() ([]byte, []byte, []byte, error) {
 		return bentAlice.handle.CommitRemove([]uint32{bentCarol.leaf})
 	}, rotBend{leaf: bentBob.leaf, toAStranger: true})
 	if _, everHeld := bentBob.group.pqSecretHeldAtLocked(bentPublished.pqSecret); everHeld {
@@ -1407,7 +1407,7 @@ func TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideT
 		if toAStranger {
 			bends = append([]rotBend{{leaf: oneBob.leaf, toAStranger: true}}, bends...)
 		}
-		onePublished := one.rotate(oneAlice, []uint32{oneCarol.leaf}, func() ([]byte, []byte, []byte, error) {
+		onePublished := one.rotate(oneAlice, func() ([]byte, []byte, []byte, error) {
 			return oneAlice.handle.CommitRemove([]uint32{oneCarol.leaf})
 		}, bends...)
 		// ── THE THREE CONTROLS, BEFORE THE PAGE IS DELIVERED ────────────────────────────────
@@ -1511,7 +1511,7 @@ func TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideT
 	beside := newRotWorld(t, "alice", "bob", "carol")
 	besideAlice, besideBob, besideCarol := beside.member("alice"), beside.member("bob"), beside.member("carol")
 	besideHeld := append([]byte(nil), besideBob.group.pqSecretLocked()...)
-	besidePublished := beside.rotate(besideAlice, []uint32{besideCarol.leaf}, func() ([]byte, []byte, []byte, error) {
+	besidePublished := beside.rotate(besideAlice, func() ([]byte, []byte, []byte, error) {
 		return besideAlice.handle.CommitRemove([]uint32{besideCarol.leaf})
 	}, rotBend{leaf: besideBob.leaf, payload: besideHeld, decoy: true})
 	if _, everHeld := besideBob.group.pqSecretHeldAtLocked(besideHeld); !everHeld {
@@ -1542,7 +1542,7 @@ func TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideT
 	unopenable := newRotWorld(t, "alice", "bob", "carol")
 	unopenableAlice, unopenableBob, unopenableCarol :=
 		unopenable.member("alice"), unopenable.member("bob"), unopenable.member("carol")
-	unopenablePublished := unopenable.rotate(unopenableAlice, []uint32{unopenableCarol.leaf},
+	unopenablePublished := unopenable.rotate(unopenableAlice,
 		func() ([]byte, []byte, []byte, error) {
 			return unopenableAlice.handle.CommitRemove([]uint32{unopenableCarol.leaf})
 		}, rotBend{leaf: unopenableBob.leaf, toAStranger: true, decoy: true})
@@ -1582,7 +1582,7 @@ func TestAnHonestRotatedRemovalIsNeverCalledUnrotatedWhateverElseIsStagedBesideT
 	// ever followed at all, which removes the feature rather than the member.
 	clean := newRotWorld(t, "alice", "bob", "carol")
 	cleanAlice, cleanBob, cleanCarol := clean.member("alice"), clean.member("bob"), clean.member("carol")
-	cleanPublished := clean.rotate(cleanAlice, []uint32{cleanCarol.leaf}, func() ([]byte, []byte, []byte, error) {
+	cleanPublished := clean.rotate(cleanAlice, func() ([]byte, []byte, []byte, error) {
 		return cleanAlice.handle.CommitRemove([]uint32{cleanCarol.leaf})
 	})
 	if err := clean.deliver(cleanBob, cleanPublished.page()...); err != nil {
@@ -1625,7 +1625,7 @@ func TestTheWrapCandidateArmOfTheResolutionIsClosedToARemoval(t *testing.T) {
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
 	retained := append([]byte(nil), carol.group.pqSecretLocked()...)
 
-	published := world.fanOutOnTheHeldSecret(alice, []uint32{carol.leaf}, func() ([]byte, []byte, []byte, error) {
+	published := world.fanOutOnTheHeldSecret(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{carol.leaf})
 	}, unrotatedFanOut{})
 	// bob opens its wrap and stops there: the commit is not delivered to it, so what the
@@ -1700,7 +1700,7 @@ func TestTheResidualUnrotatedRemovalIsRefusedAfterTheApplyAndStillDoesNotGoDark(
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
 	retained := append([]byte(nil), carol.group.pqSecretLocked()...)
 
-	published := world.fanOutOnAFreshSecret(alice, []uint32{carol.leaf}, func() ([]byte, []byte, []byte, error) {
+	published := world.fanOutOnAFreshSecret(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{carol.leaf})
 	})
 	// THE CONTROL, INLINE: the decoy this case rests on is genuinely NOT a value bob holds, which
@@ -1845,7 +1845,7 @@ func TestADigestLessRemovalIsRefusedBeforeTheApplyAndOnlyANonRemovingOneReachesT
 	world := newRotWorld(t, "alice", "bob", "carol")
 	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
 
-	published := world.fanOutOnTheHeldSecret(alice, []uint32{carol.leaf}, func() ([]byte, []byte, []byte, error) {
+	published := world.fanOutOnTheHeldSecret(alice, func() ([]byte, []byte, []byte, error) {
 		return alice.handle.CommitRemove([]uint32{carol.leaf})
 	}, unrotatedFanOut{noDigest: true})
 	if digest, err := epochDigestOf(&published.commit.record.Header); err != nil || digest != nil {
@@ -1893,7 +1893,7 @@ func TestADigestLessRemovalIsRefusedBeforeTheApplyAndOnlyANonRemovingOneReachesT
 	for at := range decoy {
 		decoy[at] = 0x3D
 	}
-	fanned := fresh.fanOutOnTheHeldSecret(freshAlice, []uint32{freshCarol.leaf}, func() ([]byte, []byte, []byte, error) {
+	fanned := fresh.fanOutOnTheHeldSecret(freshAlice, func() ([]byte, []byte, []byte, error) {
 		return freshAlice.handle.CommitRemove([]uint32{freshCarol.leaf})
 	}, unrotatedFanOut{noDigest: true, payload: decoy})
 	if err := fresh.deliver(freshBob, fanned.wraps...); err != nil {
@@ -1921,7 +1921,7 @@ func TestADigestLessRemovalIsRefusedBeforeTheApplyAndOnlyANonRemovingOneReachesT
 	// ── THE CONTROL: THE SAME COMMIT SHAPE, REMOVING NOBODY, IS FOLLOWED ────────────────────
 	plain := newRotWorld(t, "alice", "bob", "carol")
 	plainAlice, plainBob := plain.member("alice"), plain.member("bob")
-	ordinary := plain.fanOutOnTheHeldSecret(plainAlice, nil, func() ([]byte, []byte, []byte, error) {
+	ordinary := plain.fanOutOnTheHeldSecret(plainAlice, func() ([]byte, []byte, []byte, error) {
 		return plainAlice.handle.Commit(nil)
 	}, unrotatedFanOut{noDigest: true})
 	if err := plain.deliver(plainBob, ordinary.page()...); err != nil {
