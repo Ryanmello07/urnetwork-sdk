@@ -659,6 +659,21 @@ type Stats struct {
 	// argued where it is taken; what a forged header costs is stream indices this device did not
 	// need to spend, and this is where that shows.
 	StreamFloorSeeded uint64
+
+	// Records given up on ([Stats.Unopened]) that the server WOULD NOT ATTRIBUTE TO A STREAM: no
+	// §4.3.3 `sender_handle` projection of sixteen octets, or one with no `stream_index` beside
+	// it. A strict subset of [Stats.Unopened], and the only rows about which this device cannot
+	// say whether they spent an index under its own sender_handle.
+	//
+	// IT IS A COUNTER BECAUSE THE ALTERNATIVE WAS A REFUSAL AND THE REFUSAL WAS WORSE. A row this
+	// build cannot parse used to take [Group.Send] away for the life of every later process -- see
+	// [Group.ownFloorHeldByLocked] -- on the strength of a question the row's own projection
+	// answers. Every deployed server fills that projection out of the same `projectionOf` the
+	// submit path verifies a client's against (message-server `api/fetch.go`), so a number here is
+	// a server that is not serving §4.3.3 rows; what this device then cannot rule out is a claim
+	// under its own handle, and what that costs is the [ErrIdentityInUse] the same server can
+	// answer any submit with directly ([Group.cloneRefusalLocked]).
+	UnopenedUnattributed uint64
 }
 
 // ladderKey names one receiver ladder INDEPENDENT of the epoch its key schedule is derived at.
@@ -1067,7 +1082,22 @@ type Group struct {
 	//     exists to prevent, produced by the gate certifying a floor nobody had held.
 	//
 	// SO THE GATE CARRIES THE SEED'S OWN VERDICT NOW, plus two clauses about what the walk could not
-	// see. [Group.ownFloorHeldByLocked] lists all four and argues each one.
+	// see. [Group.ownFloorHeldByLocked] lists all three and argues each one.
+	//
+	// AND THE SECOND REPRODUCTION IS CLOSED BY READING THE ROW RATHER THAN BY REFUSING THE GROUP,
+	// which is the repair of a fix that was worse than the defect. The first shape of that repair
+	// was a FOURTH clause -- one record this build gave up on unparsed, anywhere in a group's
+	// history, took this flag away permanently -- and because the cursor is not persisted, a
+	// restarted device re-walks that row, re-abandons it and re-derives the veto every time the app
+	// opens. Measured: a group with one unparseable row and NO reused leaf at all -- three founding
+	// members, three distinct sender_handles, nothing ever removed -- sent before the restart and
+	// was refused [ErrStreamFloorUnheld] after it, for ever. A record that does not parse is not
+	// evidence about a previous occupant of THIS device's leaf unless it is a record under THIS
+	// device's own sender_handle, and §4.3.3's projection is what says which:
+	// [Group.noteUnparsedClaimLocked] takes the server's own `sender_handle` and `stream_index`
+	// beside the octets, so the honest case -- a previous occupant that wrote in a record format
+	// this build cannot read -- RAISES THE FLOOR instead of bricking the group. What is left is
+	// [Stats.UnopenedUnattributed].
 	//
 	// IT IS A DIFFERENT QUESTION FROM [Group.reconciled] AND THE TWO MUST NOT BE ONE FIELD.
 	// `reconciled` asks "is another copy of this folder writing my stream"; this asks "did
@@ -1102,25 +1132,6 @@ type Group struct {
 	// the one the number was seen under rather than carrying it across.
 	ownClaimSeen   uint64
 	ownClaimHandle [16]byte
-
-	// ownFloorBlind is the record id of the FIRST record this group GAVE UP ON WITHOUT EVER READING
-	// ITS HEADER, and while it is set no walk may raise [Group.ownFloorHeld].
-	//
-	// WHY A RECORD THAT DID NOT PARSE IS DIFFERENT FROM ONE THAT DID NOT OPEN. A stream index is
-	// read off the plaintext header, ABOVE every branch that takes a record away, so a record that
-	// parsed and then failed for any other reason still contributed the index it claims. A record
-	// that did not PARSE contributed nothing, this build cannot even tell whether it was sealed
-	// under this device's own sixteen octets, and after [maxRecordAttempts] the cursor moves past it
-	// and no later walk asks for it again. Its index is therefore unknown FOR EVER, and "the floor
-	// clears every claim this group has seen" stops being a statement about every claim that exists.
-	//
-	// WHAT IT COSTS, STATED RATHER THAN DISCOVERED: a group holding one permanently unparseable row
-	// leaves a joiner admitted above epoch one, and a restored group, refused at [Group.Send] --
-	// [ErrStreamFloorUnheld], naming the record ([Group.streamFloorRefusalLocked]). That is the
-	// conservative direction and it is the only one available: the alternative is the seal, and the
-	// refusal a collision produces is sticky for the life of the process while this one is a refusal
-	// a caller can read and report.
-	ownFloorBlind uint64
 
 	// identityInUse is sticky and is the whole of the clone refusal. Once set, every Send is
 	// refused with it. See [Group.Receive].
@@ -1800,16 +1811,14 @@ func (self *Group) committableLocked() error {
 // streamFloorRefusalLocked is the one place [ErrStreamFloorUnheld] is built, because the two doors
 // that answer it -- the send door and every commit door -- must not drift apart on WHY.
 //
-// IT NAMES THE BLIND RECORD WHEN THERE IS ONE, and that is the difference between a refusal a
-// caller waits out and one it cannot. The ordinary refusal is cleared by the next clean
-// [Group.Receive]; a record this build gave up on before it could read its header is never fetched
-// again, so the refusal it causes does not clear by retrying and the caller is told which record it
-// is rather than left to retry for ever. See [Group.ownFloorBlind].
+// IT IS ONE SENTENCE AND IT IS CLEARED BY THE NEXT CLEAN [Group.Receive], WHICH IS THE WHOLE OF WHAT
+// IT PROMISES. It used to have a second arm for a record given up on unparsed, whose text said "AND
+// NOT BY THE Receive ABOVE" -- a refusal that no Receive cleared and that a restart re-derived,
+// because the cursor is not persisted. There is no such state any more: a row this build cannot
+// parse contributes the server's own §4.3.3 projection of its stream
+// ([Group.noteUnparsedClaimLocked]) and the floor is raised off it, so the only thing that keeps
+// this refusal standing is a walk that has not finished yet. See [Group.ownFloorHeldByLocked].
 func (self *Group) streamFloorRefusalLocked() error {
-	if self.ownFloorBlind != 0 {
-		return fmt.Errorf("%w -- AND NOT BY THE Receive ABOVE: record %d of group %x was given up on before its header could be read, so this device cannot rule out a stream claim under its own sender_handle at any index, and that record is never fetched again",
-			ErrStreamFloorUnheld, self.ownFloorBlind, self.id)
-	}
 	return fmt.Errorf("%w: group %x", ErrStreamFloorUnheld, self.id)
 }
 
@@ -3485,8 +3494,8 @@ func (self *Group) walkSawTheWholeHistoryLocked(walk *pageWalk) bool {
 	return walk.complete && walk.omitted == nil && walk.firstFailure == nil
 }
 
-// ownFloorHeldByLocked is whether THIS walk may raise [Group.ownFloorHeld]: four clauses, of which
-// the first is the seed's own verdict and the other three are about what the walk could not see.
+// ownFloorHeldByLocked is whether THIS walk may raise [Group.ownFloorHeld]: three clauses, of which
+// the first is the seed's own verdict and the other two are about what the walk could not see.
 //
 // IT IS A SEPARATE PREDICATE FOR THE REASON [Group.walkReconcilesLocked] IS ONE: the gate used to be
 // `if self.walkSawTheWholeHistoryLocked(walk)`, which asks whether the SERVER finished handing over
@@ -3501,11 +3510,7 @@ func (self *Group) walkSawTheWholeHistoryLocked(walk *pageWalk) bool {
 //  2. the whole history, [Group.walkSawTheWholeHistoryLocked]. A page the server called complete
 //     while naming a higher high_water, or a record that did not open, is a hole whose missing
 //     record could be the claim this gate exists to find.
-//  3. NOTHING GIVEN UP ON BLIND, [Group.ownFloorBlind]. Clause 2 is about THIS walk and clears the
-//     moment the record is abandoned -- which is exactly how the second reproduction gets through:
-//     the walk that abandons the row is dirty, the NEXT one is clean and the row is gone. The
-//     abandonment is a fact about the GROUP and outlives the walk that made it.
-//  4. THIS GROUP HAS COVERED AT LEAST ONE RECORD, which is the first reproduction: one clean walk
+//  3. THIS GROUP HAS COVERED AT LEAST ONE RECORD, which is the first reproduction: one clean walk
 //     over an empty page, from a cursor at zero, with the server holding three claims. A group
 //     above epoch zero cannot have an empty history -- the commit that opened its current epoch is
 //     sealed at the epoch below and so is served under item 246's ceiling, and a joiner walks from
@@ -3513,13 +3518,33 @@ func (self *Group) walkSawTheWholeHistoryLocked(walk *pageWalk) bool {
 //     told that there is nothing. It is the group's cursor and not this walk's page, so the
 //     ordinary second Receive over an empty page still raises the gate.
 //
+// THERE WAS A FOURTH CLAUSE AND DELETING IT IS THIS FUNCTION'S MOST IMPORTANT PROPERTY. It was
+// `ownFloorBlind == 0`: one record this group gave up on before it could read its header, ANYWHERE
+// in its history, took the flag away and nothing put it back. Every other clause here is a fact
+// about one walk and clears when a later walk is better; that one was a fact about the GROUP, and
+// because the cursor and the attempt counts are not persisted, a restart re-walks the row, re-spends
+// [maxRecordAttempts] on it and re-derives the veto -- so the refusal came back every time the app
+// opened, in EVERY group, including a group founded by this device alone whose leaf no one else has
+// ever stood at. It was reproduced that way: three founding members, three distinct
+// sender_handles, nothing removed, one bent row, [Group.Send] allowed before the restart and
+// refused for ever after it.
+//
+// WHAT REPLACES IT IS A READING OF THE ROW AND NOT A CLAUSE HERE. The narrow property is *this
+// device must not seal at an index a previous occupant of its leaf may already have claimed*, and a
+// record this build cannot parse is evidence about that only if it is a record under this device's
+// own sender_handle. §4.3.3 says which: the fetch row carries the server-indexed `sender_handle` and
+// `stream_index` BESIDE `record_bytes`, so [Group.noteUnparsedClaimLocked] folds the projection into
+// [Group.ownClaimSeen] and the seed raises the floor past it -- the honest case, a previous occupant
+// on a record format this build cannot read, ends in a SEND rather than in a brick. A row the server
+// will not attribute at all moves [Stats.UnopenedUnattributed] and nothing else; the argument for
+// that is written at the counter and at [Group.noteUnparsedClaimLocked].
+//
 // WHAT IT STILL DOES NOT CATCH, NAMED SO IT IS NOT MISTAKEN FOR CLOSED: a server that hands over
 // SOME rows and silently omits others while declaring a high_water no higher than what it sent.
 // §4.3.4's high_water_record_id is the only omission detector on this path and it is the server's
 // own field, which is item 246's residual and not this gate's to close.
 func (self *Group) ownFloorHeldByLocked(walk *pageWalk, established bool) bool {
-	return established && self.walkSawTheWholeHistoryLocked(walk) &&
-		self.ownFloorBlind == 0 && self.cursor != 0
+	return established && self.walkSawTheWholeHistoryLocked(walk) && self.cursor != 0
 }
 
 // ownHighWaterLocked is the highest stream index this device's DURABLE reserver has ever allocated
@@ -3685,15 +3710,81 @@ func (self *Group) ownClaimedLocked(own [16]byte) uint64 {
 // THE GROUP ID IS COMPARED BECAUSE NOTHING HAS COMPARED IT YET ON THIS PATH: a row from another
 // group is not evidence about this stream.
 func (self *Group) noteOwnClaimLocked(walk *pageWalk, header *message.RecordHeader) {
-	if header.SenderHandle != walk.ownNow || !bytes.Equal(header.GroupId[:], self.id) {
+	if !bytes.Equal(header.GroupId[:], self.id) {
+		return
+	}
+	self.foldOwnClaimLocked(walk, header.SenderHandle, header.StreamIndex)
+}
+
+// noteUnparsedClaimLocked folds THE SERVER'S OWN §4.3.3 PROJECTION of a row this build could not
+// parse into [Group.ownClaimSeen], and answers whether that row was attributed to a stream at all.
+//
+// WHY THE PROJECTION AND NOT NOTHING. `protocol.Record` is `record_bytes` BESIDE the server-indexed
+// projection of its header -- "the server MUST verify that each equals the corresponding field of
+// ParseRecord(record_bytes)" -- and every deployed server fills it from the same `projectionOf` the
+// submit path checks a client's against (message-server `api/fetch.go`, which re-encodes the row it
+// serves out of the very columns it indexed). So a row whose octets this build cannot read still
+// arrives WITH the two facts the floor question needs: whose stream it is on, and at what index. The
+// alternative was the state this function exists to delete -- one unreadable row anywhere in a
+// group's history refusing every [Group.Send] of every later process, in every group, on the
+// strength of a question the row itself answers.
+//
+// IT IS EXACTLY AS TRUSTWORTHY AS THE NUMBER THE SEED ALREADY ACTS ON, which is the whole of the
+// argument and is not a new trade. [Group.ownClaimSeen] is read off a PLAINTEXT header that the
+// server relays and could rewrite; this is read off a plaintext projection of the same header on the
+// same wire. What either buys a hostile server is stream indices this device did not need to spend
+// ([Stats.StreamFloorSeeded]); neither can make a floor go DOWN, because
+// [sdk.StreamStore.SeedStreamIndex] is monotone.
+//
+// AND WHAT A SERVER THAT LIES THE OTHER WAY BUYS IS NOTHING IT DOES NOT ALREADY HOLD. A projection
+// that names some other leaf while the unreadable octets are really this device's leaves the floor
+// below a claim, and the seal that follows is answered REASON_STREAM_INDEX_REUSED and latched as
+// [ErrIdentityInUse] -- which that same server can answer any submit with directly and for no
+// reason at all, as [Group.cloneRefusalLocked] states and accepts. That refusal also DIES WITH THE
+// PROCESS, where the clause this replaces came back at every restart: the conservative direction was
+// the more expensive one.
+//
+// NO GROUP ID IS COMPARED HERE AND THAT IS SAID RATHER THAN HIDDEN. The projection carries none --
+// §4.3.3 indexes a row inside a group -- so what scopes this row to this group is the fetch that
+// asked for it (§4.3.1 names the group) and the record id it came back under. A server that answers
+// one group's fetch with another group's row is the same server that could choose the index outright,
+// which is the trade priced two paragraphs up.
+func (self *Group) noteUnparsedClaimLocked(walk *pageWalk, row *protocol.Record) bool {
+	var handle [16]byte
+	projected := row.GetSenderHandle()
+	if len(projected) != len(handle) {
+		return false
+	}
+	copy(handle[:], projected)
+	if handle != walk.ownNow {
+		// ATTRIBUTED, AND NOT TO THIS DEVICE'S STREAM. It is a claim on somebody else's
+		// numbering and no floor of this device's has to clear it.
+		return true
+	}
+	index := row.GetStreamIndex()
+	if index == 0 {
+		// §5.6 numbers a stream from one, so a projection naming this handle with no index is
+		// the server declining to say WHERE on this device's own stream the row sits -- which is
+		// the same silence as no projection at all.
+		return false
+	}
+	self.foldOwnClaimLocked(walk, handle, index)
+	return true
+}
+
+// foldOwnClaimLocked is the one writer of [Group.ownClaimSeen], because the two readings that reach
+// it -- a parsed header and §4.3.3's projection of one this build could not parse -- must not drift
+// apart on WHICH stream a claim belongs to or on how the number moves.
+func (self *Group) foldOwnClaimLocked(walk *pageWalk, handle [16]byte, index uint64) {
+	if handle != walk.ownNow {
 		return
 	}
 	if self.ownClaimHandle != walk.ownNow {
 		self.ownClaimHandle = walk.ownNow
 		self.ownClaimSeen = 0
 	}
-	if self.ownClaimSeen < header.StreamIndex {
-		self.ownClaimSeen = header.StreamIndex
+	if self.ownClaimSeen < index {
+		self.ownClaimSeen = index
 	}
 }
 
@@ -3774,15 +3865,20 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 		}
 		parsed, err := message.ParseRecord(row.GetRecordBytes())
 		if err != nil {
-			// THE ONE ROAD THAT LOSES THE RECORD'S STREAM INDEX, AND THE GATE HAS TO KNOW. Every
-			// other failure below is downstream of a header this function has already read, so the
-			// index it claims is folded into [Group.ownClaimSeen] whatever happens to the record
-			// afterwards. This one has no header at all: the row cannot be attributed to a handle,
-			// its index is unknown, and once `fail` gives up on it the cursor moves past it and no
-			// later walk asks for it again. Asked at the abandonment rather than at the failure,
-			// because a record that opens on the second attempt loses nothing -- and asked through
-			// `fail`'s OWN decision rather than by re-testing [maxRecordAttempts] here, so the two
-			// cannot come apart.
+			// THE ONE ROAD THAT LOSES THE RECORD'S OWN HEADER, SO THE FLOOR TAKES THE SERVER'S
+			// PROJECTION OF IT. Every other failure below is downstream of a header this function
+			// has already read, so the index it claims is folded into [Group.ownClaimSeen] whatever
+			// happens to the record afterwards. This one has no header this build can read -- and
+			// §4.3.3 puts `sender_handle` and `stream_index` on the row BESIDE `record_bytes`, so
+			// the two facts the floor needs are here anyway. [Group.noteUnparsedClaimLocked] takes
+			// them and argues exactly what trusting them costs; a row the server will not attribute
+			// at all is counted and is not a refusal, because the refusal that used to stand here
+			// was re-derived at every restart and no [Group.Receive] cleared it.
+			//
+			// ASKED AT THE ABANDONMENT AND NOT AT THE FAILURE, because a record that parses on the
+			// second attempt has lost nothing and its own header is the better reading -- and asked
+			// through `fail`'s OWN decision rather than by re-testing [maxRecordAttempts] here, so
+			// the two cannot come apart.
 			//
 			// A CHEAPER HEADER READ IS NOT AVAILABLE AND THAT IS MEASURED, NOT ASSUMED.
 			// message.ParseRecordHeader is decodeRecord with the ciphertexts dropped
@@ -3792,11 +3888,12 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 			// written here would be that second entry point; and for the class that motivates one --
 			// a record_format_version this build does not know -- every field past the version byte
 			// sits at a different offset, so a permissive read would produce a WRONG index rather
-			// than no index. A refusal is worth more than a guess at a floor.
+			// than no index. The server's projection is a number the server INDEXED the row on; a
+			// guess made by re-reading octets at the wrong offsets is not.
 			unopenedBefore := len(self.unopened)
 			fail(recordId, fmt.Errorf("%w: record %d does not parse: %w", ErrRecordOpen, recordId, err))
-			if unopenedBefore < len(self.unopened) && self.ownFloorBlind == 0 {
-				self.ownFloorBlind = recordId
+			if unopenedBefore < len(self.unopened) && !self.noteUnparsedClaimLocked(walk, row) {
+				self.stats.UnopenedUnattributed += 1
 			}
 			continue
 		}
@@ -3812,9 +3909,10 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 		// IT IS STILL BELOW THE two-roads-above SKIP OF A RECORD ALREADY GIVEN UP ON, and what that
 		// ordering costs is now nothing rather than unmeasured: [Group.ownClaimSeen] is cumulative
 		// on the group, so a row abandoned on an earlier walk contributed its index on the walk that
-		// PARSED it and is never forgotten, and a row that never parsed contributes nothing on any
-		// walk and is [Group.ownFloorBlind]'s case instead. Re-parsing a passenger row here could
-		// only re-derive a number this group already holds.
+		// PARSED it and is never forgotten, and a row that never parsed contributed §4.3.3's
+		// projection of its index on the walk that ABANDONED it, through
+		// [Group.noteUnparsedClaimLocked]. Re-parsing a passenger row here could only re-derive a
+		// number this group already holds.
 		self.noteOwnClaimLocked(walk, header)
 		if header.IsCommit {
 			// A5: AN is_commit RECORD IS INGESTED, NOT SKIPPED -- but only the ONE that opens the

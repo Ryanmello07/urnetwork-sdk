@@ -1071,6 +1071,8 @@ func urnet_message_group_stats(self C.uint64_t) *C.char {
 		Pages:             stats.Pages,
 		Unattested:        stats.Unattested,
 		StreamFloorSeeded: stats.StreamFloorSeeded,
+
+		UnopenedUnattributed: stats.UnopenedUnattributed,
 	}, "urnet_message_group_stats")
 }
 
@@ -1681,6 +1683,14 @@ type messageGroupStats struct {
 	// that was added onto a REMOVED member's leaf, which is the walk that stops that device being
 	// refused on its first send and unable to send in that group for the life of the process.
 	StreamFloorSeeded uint64 `json:"stream_floor_seeded"`
+
+	// Records given up on (`unopened`) that the server WOULD NOT ATTRIBUTE TO A STREAM: no
+	// §4.3.3 sender_handle projection of sixteen octets beside the octets it could not parse. A
+	// strict subset of `unopened`, and the only rows about which a device cannot say whether they
+	// spent an index on its own stream. It is EXACTLY ZERO against a server that serves §4.3.3
+	// rows, which every deployed one does; a number here is a server that is not, and what it
+	// costs is the sticky refusal that server could answer any submit with anyway.
+	UnopenedUnattributed uint64 `json:"unopened_unattributed"`
 }
 
 func messageInfoOf(entry messageEntry) *messageInfo {

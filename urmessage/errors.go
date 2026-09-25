@@ -538,26 +538,46 @@ var (
 	// clears it, exactly as [ErrNotReconciled] is cleared, and a group FOUNDED in this process
 	// never has it, because a group id drawn here has no claim under any handle of it.
 	//
-	// ── THE PRODUCT CONTRACT, AND THE SENTENCE ABOUT IT THAT WAS FALSE ───────────────────────
+	// ── THE PRODUCT CONTRACT, AND TWO SENTENCES ABOUT IT THAT WERE FALSE ─────────────────────
 	//
 	// A CALLER THAT JOINS ABOVE EPOCH ONE MUST [Group.Receive] ONCE BEFORE ITS FIRST [Group.Send],
 	// [Group.SetRole] or [Group.AddMemberAndPublish]. That is an obligation on every joiner and not
 	// a fact about reused leaves, so it is written here as one.
 	//
-	// WHAT THIS MODULE'S OWN CALLERS MEASURE, corrected because the first statement of it was
-	// measurably false. The claim made for this gate was "every Device.Join site in cp3b is an
-	// epoch-one join, so nothing needed to change". It is not: cp3b/roles_test.go joins carol under
-	// the header `epoch 3: bob, an admin, adds carol` and asserts epoch 3 over her group two lines
-	// later; cp3b/lostrace_test.go joins carol at 3, dave at 4 and erin at 7; liveprobe checks
-	// `C joined at epoch %d, want 2`. FOUR of cp3b's fourteen Join sites, and liveprobe's, are above
-	// epoch one and are gated. What holds is a property and not the epoch: every one of those
-	// joiners RECEIVES before its first Send. The suites measure that property rather than assert
-	// it -- with this gate in the build a joiner that sent first turns them red -- and it was driven
-	// at the roles site by moving that Send above that Receive, which answers this sentinel by name.
+	// WHAT THIS MODULE'S OWN CALLERS DO, MEASURED AT LAST, because both earlier statements of it
+	// were read off the files and both were false by the same method -- a count of Join SITES with a
+	// property hung on it. The first was *"every Device.Join site in cp3b is an epoch-one join, so
+	// nothing needed to change"*. The second was *"FOUR of cp3b's fourteen Join sites, and
+	// liveprobe's, are above epoch one ... every one of those joiners RECEIVES before its first
+	// Send"*. DRIVEN instead -- a probe on [Device.Join] and on BOTH write doors
+	// ([Group.sendableLocked] and [Group.committableLocked]), over the whole suite, green:
 	//
-	// AND ONE REFUSAL A Receive DOES NOT CLEAR, NAMED WHERE THE PROMISE IS MADE: if this group gave
-	// a record up before it could read its header ([Group.ownFloorBlind]), the index that record
-	// claims is unknown for ever and no later walk asks for it again. The error says so in its own
-	// text, so a caller is never told to retry what cannot succeed.
+	//   - cp3b has FOURTEEN Device.Join sites, all fourteen run, and they run 103 times.
+	//   - EIGHT of the fourteen run ABOVE EPOCH ONE, at epochs 2 to 34, and 46 of the 103 joins are:
+	//     groupchat_test.go twice (both at 2), history_test.go's `hsAddAndJoin` helper -- ONE site,
+	//     39 joins, every epoch from 2 to 34 -- lostrace_test.go three times (3, 4, 7),
+	//     roles_test.go once (3), and streamfloorgate_test.go once (2), which is the site the second
+	//     sentence's own commit added and did not count.
+	//   - Of those 46, THIRTY-SEVEN never reach a write door or a [Group.Receive] at all, EIGHT
+	//     Receive first, and exactly ONE reaches a write door with nothing behind it: the gate's own
+	//     case, which requires this sentinel by name.
+	//
+	// SO THE TRUE PROPERTY IS NOT "EVERY ABOVE-EPOCH-ONE JOINER RECEIVES FIRST" -- that is false at
+	// one site and vacuous at thirty-seven. It is: *no above-epoch-one joiner in this corpus reaches
+	// a write door unreceived except the one case that asserts the refusal.* Which is still measured
+	// rather than asserted -- with this gate in the build a joiner that wrote first would go red --
+	// and it was driven at the roles site by putting that Send above that Receive. liveprobe's third
+	// party is read and not run: it joins at epoch 2 (`C joined at epoch %d, want 2`) and drains
+	// with a Receive before it sends.
+	//
+	// AND THERE IS NO LONGER A REFUSAL A Receive DOES NOT CLEAR, which is the other false sentence.
+	// It said that a record this group gave up on before reading its header left the refusal
+	// standing for ever, in its own text, "so a caller is never told to retry what cannot succeed".
+	// What it was actually doing was refusing EVERY group after EVERY restart on one unreadable row
+	// anywhere in the history -- including groups on a leaf nobody else has ever stood at, where the
+	// gate's subject does not arise. A row this build cannot parse now contributes §4.3.3's own
+	// `sender_handle` and `stream_index` projection of itself
+	// ([Group.noteUnparsedClaimLocked]), so this sentinel means exactly what its text says and
+	// nothing else: Receive once before Send.
 	ErrStreamFloorUnheld = errors.New("urmessage: this group was joined on a leaf that may carry a previous occupant's stream claims and its own floor has not been held against them yet; Receive once before Send")
 )

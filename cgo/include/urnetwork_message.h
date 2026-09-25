@@ -360,7 +360,7 @@ bool urnet_message_group_is_open(uint64_t self);
  * gap_out_of_window, opened_past_epoch, hidden_observer, observer_reaction_refused,
  * role_undeterminable, ingested,
  * commit_refused, commit_refused_own, failed_open, submitted, rebound, pages, unattested,
- * stream_floor_seeded.
+ * stream_floor_seeded, unopened_unattributed.
  *
  * THE LIST ABOVE IS THE JSON'S OWN KEY LIST, IN ITS ORDER, and a go test in this directory reads it
  * off this file and holds it equal to the keys the json carries -- it went stale once, omitting

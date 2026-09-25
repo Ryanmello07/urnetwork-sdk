@@ -35,21 +35,35 @@ import (
 // epoch-two Send is answered nil); set ownFloorHeld false at every Join (the epoch-one control is
 // refused); set it true at every Join (the property is).
 //
-// ── WHAT THE REST OF THIS PACKAGE MEASURES ABOUT THE GATE, AND THE SENTENCE THAT WAS WRONG ───
+// ── WHAT THE REST OF THIS PACKAGE DOES, MEASURED, AFTER TWO SENTENCES THAT WERE WRONG ────────
 //
-// This gate was landed with the claim that "every one of cp3b's 13 real Device.Join sites is an
-// epoch-1 join, so the alpha's own flow is unchanged and cp3b needed no edits". THE COUNT IS RIGHT
-// AND THE PROPERTY ATTRIBUTED TO IT IS FALSE. Four of those sites are above epoch one, by this
-// package's own assertions: roles_test.go joins carol under the header `epoch 3: bob, an admin,
-// adds carol` and runs rolesAssertEpoch(t, 3, groups) over a map holding her group;
-// lostrace_test.go joins carol at 3, dave at 4 (groups["dave"] a few lines on) and erin at 7. So is
-// liveprobe's own third party -- `C joined at epoch %d, want 2`.
+// TWO CLAIMS HAVE BEEN MADE HERE AND BOTH WERE FALSE BY THE SAME METHOD -- a count of Join SITES,
+// read off the files, with a property hung on the count. The first: "every one of cp3b's 13 real
+// Device.Join sites is an epoch-1 join, so the alpha's own flow is unchanged and cp3b needed no
+// edits". The second, which replaced it: "THE COUNT IS RIGHT AND THE PROPERTY ATTRIBUTED TO IT IS
+// FALSE. Four of those sites are above epoch one ... every above-epoch-one joiner here Receives
+// before its first Send."
 //
-// WHAT KEEPS THEM GREEN IS A PROPERTY AND NOT THE EPOCH: every above-epoch-one joiner here Receives
-// -- rolesReceiveAll, or the mesh's own gcReceiveTextMessage -- before its first Send. That is
-// measured rather than asserted, because with this gate in the build a joiner that sent first goes
-// RED; and it was driven at the roles site rather than argued, by putting carol's first Send between
-// her Join and that Receive:
+// DRIVEN RATHER THAN READ. A probe on urmessage.Device.Join and on BOTH write doors -- the send
+// door and the commit door, which are the two readers of ownFloorHeld -- run over this whole suite
+// with it green:
+//
+//   - FOURTEEN Device.Join sites, all fourteen reached, 103 joins between them.
+//   - EIGHT of the fourteen run ABOVE EPOCH ONE, at epochs 2 to 34, and 46 of the 103 joins are:
+//     groupchat_test.go:83 and :270 (both at 2), history_test.go:405 -- ONE site, the hsAddAndJoin
+//     helper, 39 joins, every epoch from 2 to 34 -- lostrace_test.go:100, :123 and :203 (3, 4, 7),
+//     roles_test.go:124 (3), and THIS FILE at :94 (2), which the second sentence's own commit added
+//     and did not count. So the number was four and it is eight.
+//   - Of those 46 joins, THIRTY-SEVEN never reach a write door or a Receive at all, EIGHT Receive
+//     first, and exactly ONE reaches a write door with nothing behind it -- the one below, which
+//     asserts the refusal.
+//
+// SO WHAT KEEPS THIS PACKAGE GREEN IS NOT "EVERY ABOVE-EPOCH-ONE JOINER RECEIVES FIRST": that is
+// false at one site and vacuous at thirty-seven of the rest. It is: NO above-epoch-one joiner here
+// reaches a write door unreceived EXCEPT the one case that requires the refusal. That is still
+// measured rather than asserted -- with this gate in the build a joiner that wrote first goes RED --
+// and it was driven at the roles site rather than argued, by putting carol's first Send between her
+// Join and that Receive:
 //
 //	roles_test.go:130: M-join-send-first: carol's immediate Send answered urmessage: this group was
 //	joined on a leaf that may carry a previous occupant's stream claims and its own floor has not
@@ -57,6 +71,11 @@ import (
 //
 // A Join->Send caller is a real caller and not a hypothetical one, which is why the C ABI states the
 // rule at urnet_message_device_join rather than leaving it to be found.
+//
+// AND THE REFUSAL IS A DELAY AGAIN RATHER THAN A DOOR THAT CAN LOCK. The commit that built the gate
+// also made one record this build could not parse -- anywhere in a group's history -- refuse every
+// Send of every later process, in every group, including groups on a leaf nobody else had stood at.
+// urmessage's own case 5 reproduces that and it is gone: see urmessage.Group.ownFloorHeldByLocked.
 func TestAJoinerAboveEpochOneHoldsItsStreamFloorBeforeItSends(t *testing.T) {
 	world := newWorld(t)
 	ctx := context.Background()

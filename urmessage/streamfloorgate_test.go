@@ -8,21 +8,38 @@
 // [Group.seedOwnStreamLocked], the only code that moves that floor, returned early on three roads
 // the gate could not see. This file is the walks that get through, each with the floor printed beside
 // the flag so that "the gate is up" and "the floor moved" cannot be confused for each other: a clean
-// walk over an empty page (1), a row given up on before its header could be read (2), a reserver
+// walk over an empty page (1), a row this build could not parse at all (2), a reserver
 // that cannot move a floor at all (3), and a claim read by a walk that was not allowed to act on it
 // (4).
 //
-// BOTH CASES ARE THE SAME COHORT AS THE REST OF THE REMOVAL SUITE -- bob spends indices under leaf
+// AND CASE 5 IS THE REPAIR OF WHAT CASE 2's FIRST SHAPE DID, WHICH WAS WORSE THAN THE DEFECT IT
+// CLOSED. That shape was a FOURTH clause on the gate -- one row this build gave up on unparsed,
+// ANYWHERE in a group's history, took [Group.Send] away and nothing put it back -- and because
+// neither the cursor nor the attempt counts are persisted, every restart re-walked the row,
+// re-abandoned it and re-derived the veto. Case 5 drives a group with NO REUSED LEAF AT ALL: three
+// founding members, three distinct sender_handles, nothing ever removed, one bent row. It sent
+// before the restart and was refused for ever after it. Case 2 is now the same row ON THIS DEVICE'S
+// OWN STREAM, and its assertion has moved from a refusal to a FLOOR: §4.3.3's projection says whose
+// stream an unreadable row is on and at what index, so the honest case ends in a send at an index
+// the previous occupant never spent rather than in a brick.
+//
+// MOST CASES ARE THE SAME COHORT AS THE REST OF THE REMOVAL SUITE -- bob spends indices under leaf
 // 1, the leaf is removed, eve is added onto it and derives bob's handle byte for byte, carol at
 // leaf 2 is the control that this build does not derive one handle for every leaf
-// ([newReuseWorld]).
+// ([newReuseWorld]). Case 5 is the OTHER cohort on purpose: [newRotWorld]'s founding three, where
+// no leaf has ever changed hands and the gate's own subject does not arise.
 //
 // WHAT WOULD GO RED: M-gate-empty -- put the gate back to `if self.walkSawTheWholeHistoryLocked(walk)`
-// (cases 1, 2 and 3); M-gate-abandoned -- drop the [Group.ownFloorBlind] clause from
-// [Group.ownFloorHeldByLocked] (case 2); M-gate-cursor -- drop its cursor clause (case 1);
+// (cases 1 and 3); M-gate-cursor -- drop its cursor clause (case 1);
 // M-gate-noseed -- make [Group.seedOwnStreamLocked] answer true when the [StreamIndexSeeder]
 // assertion fails (case 3); M-claim-perwalk -- clear [Group.ownClaimSeen] at the end of
-// [Group.commitWalkLocked], which is what a claim number that lives on the walk does (case 4).
+// [Group.commitWalkLocked], which is what a claim number that lives on the walk does (case 4);
+// M-blind-veto -- put the deleted fourth clause back on [Group.ownFloorHeldByLocked], keyed on any
+// row given up on unparsed (case 5, and case 2's own send); M-proj-ignore -- have
+// [Group.noteUnparsedClaimLocked] fold nothing, which is the build case 2 was written against
+// (case 2's floor and its message_id); M-proj-anyhandle -- have it fold the projection without
+// comparing it to this device's own handle (case 5's floor); M-proj-trustmissing -- have it answer
+// true for a row with no projection (case 2's residual counter).
 //
 // AND ONE CLAUSE THAT IS DELIBERATELY NOT DRIVEN, because a case for it would be a case for nothing:
 // the seed's `!self.reconciled` early return. [Group.commitWalkLocked] sets `reconciled` ABOVE the
@@ -34,8 +51,8 @@
 package urmessage
 
 import (
+	"bytes"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/urnetwork/connect/message"
@@ -79,17 +96,83 @@ func (self *rotWorld) walkRawAt(receiver *rotMember, rows []*protocol.Record, co
 
 // rawRows encodes a page the way the server serves it, and hands back the octets so a case can bend
 // one row before the receiver sees it.
+//
+// IT CARRIES §4.3.3's WHOLE PROJECTION AND NOT `record_bytes` ALONE, WHICH IS A FIXTURE CORRECTION
+// AND NOT A CONVENIENCE. `protocol.Record` is the octets BESIDE the server-indexed projection of
+// their header -- sender_handle, stream_index, epoch, body_hash -- and the deployed server fills
+// every field of it out of the same `projectionOf` the submit path verifies a client's against
+// (message-server `api/fetch.go`, which re-encodes the row it serves from the columns it indexed).
+// A fixture that handed over the octets alone was a server no deployment has: it made a row this
+// build cannot parse a row with NO ATTRIBUTION, which is the one state in which the floor question
+// really is unanswerable, and a gate written against it refused every group in the world.
+// [stripProjection] is how a case asks for that server on purpose.
 func (self *rotWorld) rawRows(page ...*sealed) []*protocol.Record {
 	self.t.Helper()
 	rows := []*protocol.Record{}
 	for _, one := range page {
-		encoded, err := message.EncodeRecord(one.record)
+		row, err := projectionOf(one.record)
 		if err != nil {
-			self.t.Fatalf("encoding record %d: %v", one.recordId, err)
+			self.t.Fatalf("projecting record %d: %v", one.recordId, err)
 		}
-		rows = append(rows, &protocol.Record{RecordId: one.recordId, RecordBytes: encoded})
+		row.RecordId = one.recordId
+		rows = append(rows, row)
 	}
 	return rows
+}
+
+// stripProjection takes §4.3.3's sender_handle and stream_index off one row: a server that hands
+// over a record and will not say whose stream it is on. It is a server that breaks its own MUST, and
+// the one shape in which [Stats.UnopenedUnattributed] moves.
+func stripProjection(rows []*protocol.Record, recordId uint64) {
+	for _, row := range rows {
+		if row.GetRecordId() == recordId {
+			row.SenderHandle = nil
+			row.StreamIndex = 0
+		}
+	}
+}
+
+// ownFloorOf is one member's own durable stream floor for THE HANDLE ITS GROUP SEALS UNDER, read off
+// the reserver that group holds. [reuseWorld.floorOf] is the same number for the reuse cohort's ONE
+// shared handle; this one asks each member about its own, which is what a world where no leaf
+// changed hands needs.
+func (self *rotWorld) ownFloorOf(who *rotMember) uint64 {
+	self.t.Helper()
+	own, err := who.group.session.SenderHandle()
+	if err != nil {
+		self.t.Fatalf("%s's sender handle: %v", who.name, err)
+	}
+	key := messagegroup.StreamKey{SenderHandle: own}
+	copy(key.GroupId[:], self.groupId)
+	high, err := who.group.device.reserver.HighWater(key)
+	if err != nil {
+		self.t.Fatalf("%s's own stream high water: %v", who.name, err)
+	}
+	return high
+}
+
+// bendPastParsing truncates one row's octets so that this build's codec cannot read them, with BOTH
+// directions asserted in the same call: the row parsed before and does not parse after. It is what a
+// record_format_version this build does not know looks like from here.
+func bendPastParsing(t *testing.T, rows []*protocol.Record, recordId uint64) {
+	t.Helper()
+	for _, row := range rows {
+		if row.GetRecordId() != recordId {
+			continue
+		}
+		intact := row.GetRecordBytes()
+		if _, err := message.ParseRecord(intact); err != nil {
+			t.Fatalf("CONTROL FAILED: record %d does not parse intact: %v", recordId, err)
+		}
+		bent := append([]byte(nil), intact[:len(intact)-8]...)
+		if _, err := message.ParseRecord(bent); err == nil {
+			t.Fatalf("CONTROL FAILED: the bent row still parses, so this case is not about a " +
+				"record this build cannot read")
+		}
+		row.RecordBytes = bent
+		return
+	}
+	t.Fatalf("no row with record id %d to bend", recordId)
 }
 
 // floorOf is one member's own durable stream floor for the reused leaf's stream, read off THE
@@ -179,45 +262,56 @@ func TestAWalkThatCoveredNoRecordDoesNotRaiseTheOwnStreamFloorGate(t *testing.T)
 		"floor 0 -> %d", len(world.bobRecords), world.highWater(eve))
 }
 
-// ── 2. A RECORD GIVEN UP ON BEFORE ITS HEADER WAS READ IS A CLAIM AT AN UNKNOWN INDEX ────────
+// ── 2. A ROW THIS BUILD CANNOT PARSE IS STILL A ROW THE SERVER INDEXED ───────────────────────
 
 // THE REACHABLE ONE, AND THERE IS NO ADVERSARY IN IT. One row under the joiner's own sixteen octets
 // is served in a wire shape this build's codec cannot parse -- which is what a record_format_version
 // this build does not know looks like from here, and what msgrepo item 253's rollout window exists
-// to bound.
+// to bound. The previous occupant of this leaf wrote it, so it is the one unreadable row that IS
+// evidence about this device's own floor.
 //
 // THE MECHANISM IS THE RETRY BOUND, NOT THE PARSE. Walks 1 and 2 answer `record N does not parse`
 // and are dirty, so the gate stays down for the right reason. Walk 3 spends the last of
 // [maxRecordAttempts], ABANDONS the row and resolves the cursor PAST it. Walk 4 asks from above it,
-// meets an empty page, is clean by every clause of [Group.walkSawTheWholeHistoryLocked] -- and used
-// to raise the gate with the floor standing exactly where walk 1 left it, one index below the claim
-// the row carried. The first seal then lands on that index, with a message_id byte for byte the
-// previous occupant's, which is the collision the whole gate exists to prevent.
+// meets an empty page and is clean by every clause of [Group.walkSawTheWholeHistoryLocked] -- and
+// the build this file was first written against raised the gate there with the floor standing one
+// index BELOW the claim that row carried, so the first seal landed on the previous occupant's index
+// carrying its message_id byte for byte.
 //
-// SO THE ABANDONMENT IS A FACT ABOUT THE GROUP AND NOT ABOUT ONE WALK. Every other failure in the
-// page loop happens BELOW the header read, so the index the row claims is already folded into
-// [Group.ownClaimSeen] whatever becomes of the record; this one loses it for ever, and the refusal
-// says so by naming the record rather than inviting a caller to Receive again.
+// SO THE ASSERTION IS THE FLOOR AND NOT A REFUSAL, AND THAT IS THIS CASE'S CHANGE. §4.3.3 puts the
+// server's own `sender_handle` and `stream_index` on the row BESIDE the octets, and the abandonment
+// folds them into [Group.ownClaimSeen] ([Group.noteUnparsedClaimLocked]) -- so walk 4's seed moves
+// the floor ONTO the claim and the newcomer sends at an index nobody has spent. The first shape of
+// this repair refused instead, and vetoed the gate for any unparsed row in any group for the life of
+// every later process; case 5 reproduces that as the brick it was.
 //
-// THE CONTROL IS THE SAME FOUR WALKS WITH THE ROW INTACT: the gate goes up, the floor lands on the
-// top claim, and the send is allowed.
-func TestARecordGivenUpOnBeforeItsHeaderWasReadKeepsTheStreamFloorGateDown(t *testing.T) {
+// THE RESIDUAL IS IN THE SAME RUN AND IS MEASURED RATHER THAN CLAIMED CLOSED: the identical page
+// with §4.3.3's projection STRIPPED off that row -- a server breaking its own MUST -- leaves the
+// floor one index low, moves [Stats.UnopenedUnattributed], and the seal that follows DOES collide.
+// That is priced rather than hidden: the same server can answer any submit
+// REASON_STREAM_INDEX_REUSED and latch [ErrIdentityInUse] directly, which
+// [Group.cloneRefusalLocked] already states and accepts -- and that refusal dies with the process,
+// where the deleted veto came back at every restart.
+func TestARowThisBuildCannotParseRaisesTheFloorOffTheServersOwnProjection(t *testing.T) {
 	world := newReuseWorld(t, 3)
 	eve := world.eve
 	top := world.bobRecords[len(world.bobRecords)-1]
 	topClaim := top.record.Header.StreamIndex
 
 	rows := world.rawRows(world.bobRecords...)
-	intact := rows[len(rows)-1].RecordBytes
-	if _, err := message.ParseRecord(intact); err != nil {
-		t.Fatalf("CONTROL FAILED: the previous occupant's top row does not parse intact: %v", err)
+	// THE PROJECTION'S OWN CONTROLS, read off the row rather than assumed: the server attributes
+	// the top row to the very sixteen octets eve now derives -- item 245's defect seen from the
+	// server's side -- and it names the index bob's own header names.
+	if !bytes.Equal(rows[len(rows)-1].GetSenderHandle(), world.handle[:]) {
+		t.Fatalf("CONTROL FAILED: the server's projection of the top row names sender_handle %x "+
+			"and eve derives %x, so this case is not about a row on this device's own stream",
+			rows[len(rows)-1].GetSenderHandle(), world.handle)
 	}
-	bent := append([]byte(nil), intact[:len(intact)-8]...)
-	if _, err := message.ParseRecord(bent); err == nil {
-		t.Fatalf("CONTROL FAILED: the bent row still parses, so this case is not about a record " +
-			"this build cannot read")
+	if rows[len(rows)-1].GetStreamIndex() != topClaim {
+		t.Fatalf("CONTROL FAILED: the projection names stream index %d and the row's own header "+
+			"says %d", rows[len(rows)-1].GetStreamIndex(), topClaim)
 	}
-	rows[len(rows)-1].RecordBytes = bent
+	bendPastParsing(t, rows, top.recordId)
 
 	for at := 1; at <= maxRecordAttempts+1; at += 1 {
 		err := world.walkRaw(eve, rows)
@@ -225,52 +319,93 @@ func TestARecordGivenUpOnBeforeItsHeaderWasReadKeepsTheStreamFloorGateDown(t *te
 			at, eve.group.ownFloorHeld, eve.group.cursor, world.highWater(eve), err)
 	}
 
-	if eve.group.ownFloorHeld {
-		t.Fatalf("the gate is up after the row at stream index %d was given up on unread. The "+
-			"floor stands at %d, the row claimed %d, and the next seal would take the index the "+
-			"previous occupant's line %d is already on",
-			topClaim, world.highWater(eve), topClaim, len(world.bobRecords))
-	}
-	if world.highWater(eve) != topClaim-1 {
-		t.Fatalf("the newcomer's floor stands at %d, want %d: this case is only about the row the "+
-			"walk could not read, so every row it COULD read must still have moved the floor",
-			world.highWater(eve), topClaim-1)
-	}
 	if eve.group.cursor < top.recordId {
 		t.Fatalf("the cursor is at %d and the abandoned row is record %d; this case is about the "+
 			"walk that comes AFTER the record is out of reach", eve.group.cursor, top.recordId)
 	}
-	_, err := eve.group.sendableLocked(KindText)
-	if !errors.Is(err, ErrStreamFloorUnheld) {
-		t.Fatalf("the newcomer's Send answered %v, want ErrStreamFloorUnheld", err)
+	if abandoned := eve.group.UnopenedRecords(); len(abandoned) != 1 {
+		t.Fatalf("CONTROL FAILED: this case needs exactly one row GIVEN UP ON and this group has "+
+			"abandoned %v", abandoned)
 	}
-	if !strings.Contains(err.Error(), "header") {
-		t.Fatalf("the refusal reads %q and does not say that a record was given up on before its "+
-			"header could be read -- a caller told only `Receive once before Send` would retry for "+
-			"ever, because that record is never fetched again", err)
+	if world.highWater(eve) != topClaim {
+		t.Fatalf("the newcomer's floor stands at %d and the row this build could not parse claims "+
+			"%d in the server's own projection of it, so the next seal takes the index the "+
+			"previous occupant's line %d is already on",
+			world.highWater(eve), topClaim, len(world.bobRecords))
 	}
-	t.Logf("the gate stayed down after %d walks, the refusal names the record: %v",
-		maxRecordAttempts+1, err)
+	if !eve.group.ownFloorHeld {
+		t.Fatalf("the gate is down after the floor was moved onto the claim: %v",
+			eve.group.streamFloorRefusalLocked())
+	}
+	if _, err := eve.group.sendableLocked(KindText); err != nil {
+		t.Fatalf("the newcomer's Send answered %v. One row this build cannot parse must not take "+
+			"Send away when the row's own projection says whose stream it is on and where", err)
+	}
+	if unattributed := eve.group.Stats().UnopenedUnattributed; unattributed != 0 {
+		t.Fatalf("Stats.UnopenedUnattributed is %d and the server attributed every row it served",
+			unattributed)
+	}
+	// AND THE SEAL LANDS ABOVE THE CLAIM WITH A message_id THAT IS NOT THE PREVIOUS OCCUPANT'S.
+	// MASTER §8.4.5 expands an id from (group_id, sender_handle, stream_index) and nothing else, so
+	// equal indices under one handle ARE equal ids and a disjoint range is the whole of the fix.
+	first := world.sealDurable(eve, "eve's first line, over a row this build could not read")
+	if first.record.Header.StreamIndex <= topClaim {
+		t.Fatalf("eve's first seal took stream index %d and the previous occupant spent up to %d",
+			first.record.Header.StreamIndex, topClaim)
+	}
+	if bytes.Equal(first.messageId, world.bobIds[len(world.bobIds)-1]) {
+		t.Fatalf("eve's first message_id is byte-identical to the previous occupant's line %d",
+			len(world.bobIds))
+	}
+	t.Logf("the row this build could not parse moved the floor 0 -> %d off §4.3.3's projection, the "+
+		"gate is up, and eve's first seal is at index %d under a message_id of its own",
+		world.highWater(eve), first.record.Header.StreamIndex)
 
-	// ── THE CONTROL: THE SAME FOUR WALKS, ROW INTACT ────────────────────────────────────────
-	fresh := newReuseWorld(t, 3)
+	// ── THE RESIDUAL: THE SAME PAGE FROM A SERVER THAT WILL NOT SAY WHOSE ROW IT IS ─────────
+	residual := newReuseWorld(t, 3)
+	rTop := residual.bobRecords[len(residual.bobRecords)-1]
+	rTopClaim := rTop.record.Header.StreamIndex
+	rRows := residual.rawRows(residual.bobRecords...)
+	bendPastParsing(t, rRows, rTop.recordId)
+	stripProjection(rRows, rTop.recordId)
+	if len(rRows[len(rRows)-1].GetSenderHandle()) != 0 {
+		t.Fatalf("CONTROL FAILED: the projection is still on the row, so this arm is not about a " +
+			"server that will not attribute it")
+	}
 	for at := 1; at <= maxRecordAttempts+1; at += 1 {
-		if err := fresh.walkRaw(fresh.eve, fresh.rawRows(fresh.bobRecords...)); err != nil {
-			t.Fatalf("CONTROL FAILED: walk %d over the intact page answered %v", at, err)
+		if err := residual.walkRaw(residual.eve, rRows); err != nil {
+			t.Logf("residual walk %d: %v", at, err)
 		}
 	}
-	if !fresh.eve.group.ownFloorHeld {
-		t.Fatalf("CONTROL FAILED: the same four walks over an INTACT page did not raise the gate")
+	if !residual.eve.group.ownFloorHeld {
+		t.Fatalf("the gate is down for a row the server would not attribute, which is the refusal "+
+			"this commit deleted: no Receive clears it and every restart re-derives it: %v",
+			residual.eve.group.streamFloorRefusalLocked())
 	}
-	if fresh.highWater(fresh.eve) != topClaim {
-		t.Fatalf("CONTROL FAILED: the floor stands at %d over the intact page, want %d",
-			fresh.highWater(fresh.eve), topClaim)
+	if residual.highWater(residual.eve) != rTopClaim-1 {
+		t.Fatalf("the floor stands at %d with the projection stripped, want %d: the rows the walk "+
+			"COULD read must still have moved it", residual.highWater(residual.eve), rTopClaim-1)
 	}
-	if _, err := fresh.eve.group.sendableLocked(KindText); err != nil {
-		t.Fatalf("CONTROL FAILED: the newcomer's Send over the intact page answered %v", err)
+	if unattributed := residual.eve.group.Stats().UnopenedUnattributed; unattributed != 1 {
+		t.Fatalf("Stats.UnopenedUnattributed is %d for one row served with no sender_handle "+
+			"projection, want 1: a residual a caller cannot see is a residual nobody can act on",
+			unattributed)
 	}
-	t.Logf("CONTROL: the same four walks with the row intact raised the gate and put the floor at %d",
-		fresh.highWater(fresh.eve))
+	collided := residual.sealDurable(residual.eve, "eve's first line, over a row nobody attributed")
+	if collided.record.Header.StreamIndex != rTopClaim {
+		t.Fatalf("the residual seal is at stream index %d and this case PINS the collision at %d, "+
+			"so that closing it turns this red rather than passing silently",
+			collided.record.Header.StreamIndex, rTopClaim)
+	}
+	if !bytes.Equal(collided.messageId, residual.bobIds[len(residual.bobIds)-1]) {
+		t.Fatalf("the residual seal's message_id is not the previous occupant's; this arm exists to " +
+			"measure that collision rather than to describe it")
+	}
+	t.Logf("RESIDUAL: with §4.3.3's projection stripped the floor stops at %d, "+
+		"Stats.UnopenedUnattributed is 1, and the seal at index %d carries the previous occupant's "+
+		"message_id -- the same ErrIdentityInUse that server can answer any submit with directly, "+
+		"and one that dies with this process",
+		residual.highWater(residual.eve), collided.record.Header.StreamIndex)
 }
 
 // ── 3. A RESERVER THAT CANNOT MOVE A FLOOR NEVER HOLDS ONE ───────────────────────────────────
@@ -421,4 +556,113 @@ func TestAClaimReadByACutShortWalkStillRaisesTheFloorOnTheWalkThatSeeds(t *testi
 	}
 	t.Logf("the claim at index %d was read by a cut-short walk and the floor moved 0 -> %d on the "+
 		"clean walk that saw none of those rows", topClaim, world.floorOf(eve))
+}
+
+// ── 5. A ROW THIS BUILD CANNOT PARSE ON SOMEBODY ELSE'S STREAM SAYS NOTHING ABOUT THIS ONE ───
+
+// THE REGRESSION CASE 2's FIRST REPAIR INTRODUCED, WHICH WAS WORSE THAN THE DEFECT IT CLOSED.
+// That repair was a FOURTH clause on [Group.ownFloorHeldByLocked]: while this group had given up on
+// ANY row before reading its header, no walk could raise [Group.ownFloorHeld]. Every other clause
+// there is a fact about ONE walk and clears when a later walk is better; that one was a fact about
+// the GROUP, and neither the cursor nor the attempt counts are persisted -- so a restarted device
+// re-walks the row, spends [maxRecordAttempts] on it again and re-derives the veto. A refusal that no
+// [Group.Receive] clears and that comes back at every restart is the most expensive thing this
+// package can answer, and this one fired in groups the gate's own subject does not arise in at all.
+//
+// THE COHORT IS THE POINT: NO LEAF HERE HAS EVER CHANGED HANDS. [newRotWorld] admits every member in
+// the FOUNDING commit, so nothing has been removed, RFC 9420 §7.7 has had no blank to refill, and
+// the three sender_handles are asserted DISTINCT -- the same query [newReuseWorld] uses to assert
+// the opposite. The unreadable row is ALICE's, and the server says so in its own projection of it.
+//
+// AND THE RESTART IS THE WHOLE MEASUREMENT, BECAUSE IT IS THE ONLY THING THAT CHANGES. The same
+// group, the same page, the same bent row: carol sends while the group is the one this process built,
+// and was refused for ever once the group had come back off the disk, because a restored group's
+// floor is not held until a walk holds it and before this commit that walk never came.
+//
+// WHAT WOULD GO RED: M-blind-veto -- put the fourth clause back; M-proj-anyhandle -- have
+// [Group.noteUnparsedClaimLocked] fold the projection without comparing it to this device's own
+// handle, which moves carol's floor off alice's index.
+func TestARowThisBuildCannotParseOnAnotherStreamDoesNotRefuseThisDevicesSends(t *testing.T) {
+	world := newRotWorld(t, "alice", "bob", "carol")
+	alice, bob, carol := world.member("alice"), world.member("bob"), world.member("carol")
+
+	// ── THE PRECONDITION, MEASURED: THREE MEMBERS, THREE STREAMS, NO LEAF EVER REUSED ───────
+	seen := map[[16]byte]string{}
+	for _, who := range []*rotMember{alice, bob, carol} {
+		own, err := who.group.session.SenderHandle()
+		if err != nil {
+			t.Fatalf("%s's sender handle: %v", who.name, err)
+		}
+		if other, already := seen[own]; already {
+			t.Fatalf("CONTROL FAILED: %s and %s derive one sender_handle %x, so this world has a "+
+				"reused leaf in it and the case below would be measuring the gate's own subject",
+				other, who.name, own)
+		}
+		seen[own] = who.name
+	}
+
+	line := world.sealDurable(alice, "alice's only line, in a shape this build cannot read")
+	rows := world.rawRows(line)
+	bendPastParsing(t, rows, line.recordId)
+	aliceOwn, err := alice.group.session.SenderHandle()
+	if err != nil {
+		t.Fatalf("alice's sender handle: %v", err)
+	}
+	if !bytes.Equal(rows[0].GetSenderHandle(), aliceOwn[:]) {
+		t.Fatalf("CONTROL FAILED: the server's projection of the bent row names %x and alice seals "+
+			"under %x, so this case is not about a row on somebody ELSE's stream",
+			rows[0].GetSenderHandle(), aliceOwn)
+	}
+
+	// ── BEFORE THE RESTART: THE SAME GROUP, THE SAME ROW, AND THE SEND GOES THROUGH ──────────
+	for at := 1; at <= maxRecordAttempts+1; at += 1 {
+		err := world.walkRaw(carol, rows)
+		t.Logf("pre-restart walk %d: ownFloorHeld=%v cursor=%d err=%v",
+			at, carol.group.ownFloorHeld, carol.group.cursor, err)
+	}
+	if _, err := carol.group.sendableLocked(KindText); err != nil {
+		t.Fatalf("CONTROL FAILED: before the restart the same group with the same unreadable row in "+
+			"it answered %v, so this case cannot say what the RESTART changes", err)
+	}
+
+	// ── AND AFTER IT ────────────────────────────────────────────────────────────────────────
+	revived := world.restart(carol)
+	if revived.group.ownFloorHeld {
+		t.Fatalf("CONTROL FAILED: the restored group came back with its floor already held, so the " +
+			"walks below would be raising nothing")
+	}
+	if revived.group.reconciled {
+		t.Fatalf("CONTROL FAILED: the restored group came back reconciled")
+	}
+	for at := 1; at <= maxRecordAttempts+1; at += 1 {
+		err := world.walkRaw(revived, rows)
+		t.Logf("post-restart walk %d: ownFloorHeld=%v cursor=%d abandoned=%v err=%v",
+			at, revived.group.ownFloorHeld, revived.group.cursor,
+			revived.group.UnopenedRecords(), err)
+	}
+	if abandoned := revived.group.UnopenedRecords(); len(abandoned) != 1 {
+		t.Fatalf("CONTROL FAILED: this case needs the row GIVEN UP ON after the restart and this "+
+			"group has abandoned %v", abandoned)
+	}
+	if !revived.group.ownFloorHeld {
+		t.Fatalf("the restored group's floor is still unheld after %d walks over a row that is on "+
+			"ALICE's stream. Nothing clears this -- no Receive, and a restart re-derives it -- so "+
+			"this group can never send again, and NO LEAF IN THIS WORLD HAS EVER CHANGED HANDS: %v",
+			maxRecordAttempts+1, revived.group.streamFloorRefusalLocked())
+	}
+	if _, err := revived.group.sendableLocked(KindText); err != nil {
+		t.Fatalf("the restored group's Send answered %v after the gate rose", err)
+	}
+	if floor := world.ownFloorOf(revived); floor != 0 {
+		t.Fatalf("the floor of a device that has never sealed anything stands at %d. The row the "+
+			"walk could not read is on alice's stream and the index it claims is not a fact about "+
+			"this one", floor)
+	}
+	if unattributed := revived.group.Stats().UnopenedUnattributed; unattributed != 0 {
+		t.Fatalf("Stats.UnopenedUnattributed is %d and the server attributed the row it served",
+			unattributed)
+	}
+	t.Logf("three founding members, three distinct sender_handles, one row this build cannot parse "+
+		"on alice's stream: the restored group holds its floor after %d walks, its own floor is "+
+		"still 0, and Send is allowed", maxRecordAttempts+1)
 }
