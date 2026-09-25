@@ -29,3 +29,7 @@ temp/*
 # agent planning artifacts -- internal workflow, never shipped upstream
 .superpowers/
 docs/superpowers/
+
+# a compiled test binary was tracked at the repo root until 2026-09-24; `go test -c`
+# writes one here by default and it is 20+ MB of build output, not source.
+*.test
