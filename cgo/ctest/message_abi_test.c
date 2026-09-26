@@ -1606,8 +1606,7 @@ int main(void) {
 
     /* AND THE REMOVED DEVICE CANNOT FOLLOW THE EPOCH ITS OWN REMOVAL OPENED. Its fetch still
      * works -- it holds the keys of the epoch it was removed AT -- and the commit it is served
-     * cannot be applied, so it stays where it was. A carrier that would let it say "you were
-     * removed" in so many words is ledger item 257's ruling 52 and is NOT in this step. */
+     * cannot be applied, so it stays where it was. */
     err = NULL;
     uint64_t nothing = urnet_message_group_receive(group_b, ctx, &err);
     printf("      the removed device's receive answered: %s\n", err != NULL ? err : "(no error text)");
@@ -1617,6 +1616,42 @@ int main(void) {
     CHECK(urnet_message_group_epoch(group_b) == epoch_before,
           "the removed device is at epoch %llu, want %llu: it followed its own removal",
           (unsigned long long)urnet_message_group_epoch(group_b), (unsigned long long)epoch_before);
+
+    /* AND THE STATE IT IS LEFT IN CROSSES AS SOMETHING A SCREEN CAN RENDER -- LEDGER RULING 52.
+     * The receive above answers an out_error, which a C caller cannot branch on; this is the half
+     * that makes "you are no longer in this group" a STATE rather than a sentence. The SURVIVOR is
+     * asked the same question in the same breath, so `removed` cannot be a field that is always
+     * true, and the epoch is held against the one B was a member AT rather than the one its removal
+     * opened. Read with no call having had to fail first: A has never seen an error here. */
+    char* removal_b = urnet_message_group_removal(group_b);
+    char* removal_a = urnet_message_group_removal(group_a);
+    REQUIRE(removal_b != NULL && removal_a != NULL, "the removal projection answered NULL for a live group");
+    printf("      removed device: %s\n      the survivor:   %s\n", removal_b, removal_a);
+    CHECK(strstr(removal_b, "\"removed\":true") != NULL,
+          "the removed device's projection does not say so: %s", removal_b);
+    CHECK(strstr(removal_a, "\"removed\":false") != NULL,
+          "CONTROL FAILED: the SURVIVOR's projection does not say removed false, so the clause "
+          "above is satisfied by a field that is always true: %s", removal_a);
+    char removed_epoch[48] = { 0 };
+    snprintf(removed_epoch, sizeof(removed_epoch), "\"removed_epoch\":%llu",
+             (unsigned long long)epoch_before);
+    CHECK(strstr(removal_b, removed_epoch) != NULL,
+          "the removed device's projection does not carry %s: %s", removed_epoch, removal_b);
+    urnet_free_string(removal_b);
+    urnet_free_string(removal_a);
+
+    /* AND ITS SEND DOOR REFUSES, by the same state rather than with an mls sentence about a data
+     * structure: before ruling 52 this answered "an application record's inner MLS frame did not
+     * open: mls: the group is closed and its epoch secrets have been zeroized". */
+    err = NULL;
+    const char* after_removal = "a line from somebody who is not in this group any more";
+    char* refused = urnet_message_group_send(group_b, ctx,
+        (const uint8_t*)after_removal, (int32_t)strlen(after_removal), &err);
+    printf("      the removed device's send answered: %s\n", err != NULL ? err : "(no error text)");
+    CHECK(refused == NULL && err != NULL, "the removed device's send was accepted");
+    if (refused != NULL) { urnet_free_string(refused); }
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+
     printf("      A removed B in one commit: A alone at epoch %llu, B still at %llu\n",
            (unsigned long long)urnet_message_group_epoch(group_a),
            (unsigned long long)urnet_message_group_epoch(group_b));

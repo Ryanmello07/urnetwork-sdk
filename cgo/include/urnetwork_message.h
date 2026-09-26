@@ -71,9 +71,19 @@
  * permit this", "somebody else's commit landed first, fetch and retry" and "the network failed"
  * are three different things for a caller to do next. see the roster section.
  *
- * WHAT IS STILL NOT HERE: receipts, edit, media, group names, contact discovery, removing a
- * member, and adding a member to a group that is already open (the go verb exists; its export
- * does not). they are not built underneath this or not exported here, and they are not stubbed.
+ * AND BEING REMOVED IS A STATE YOU CAN READ, NOT ONLY AN ERROR YOU MIGHT SEE. when a commit takes
+ * THIS device out of a group, every later receive, send and commit verb answers by that name -- and
+ * urnet_message_group_removal reports it directly, with the last epoch this device was a member of,
+ * so a screen can go read-only without having had to make a call fail first. a removed device still
+ * reads the conversation up to that epoch; what it cannot do is follow anything above it, or send.
+ *
+ * WHAT IS STILL NOT HERE: receipts, edit, media, group names, contact discovery, and adding a
+ * member to a group that is already open (the go verb exists; its export does not). they are not
+ * built underneath this or not exported here, and they are not stubbed. ("removing a member" stood
+ * in this list after the verb shipped, two paragraphs under the one that documents it.) TWO
+ * PERMANENT STATES ARE STILL ONLY out_error SENTENCES: a group HALTED on a commit this device
+ * refused as invalid, and one gone DARK because the epoch key wrap never reached it. both are
+ * different screens from a removal, and both are owed the projection the removal now has.
  *
  * SPDX-License-Identifier: MPL-2.0 */
 #ifndef URNETWORK_MESSAGE_H
@@ -415,6 +425,30 @@ bool urnet_message_group_is_open(uint64_t self);
  * counts its own records it has no copy of and cannot show. it exists so that "nothing arrived" and "something arrived and this build would
  * not open it" are two readings rather than one silence. free with urnet_free_string. */
 char* urnet_message_group_stats(uint64_t self);
+/* WHETHER A COMMIT HAS TAKEN THIS DEVICE OUT OF THIS GROUP, as json:
+ *   {"removed":true,"removed_epoch":7}
+ *
+ * THE SHAPE ABOVE IS THE JSON'S OWN KEY LIST, IN ITS ORDER, held by a go test in this directory in
+ * the same way the message and member shapes are. NULL for an unknown handle, which is this abi's
+ * convention; free with urnet_free_string.
+ *
+ * `removed` FALSE IS THE ORDINARY ANSWER and says nothing else about the group's health. TRUE means a
+ * VALID commit this group received removed this device: it is not the same thing as a commit this
+ * device REFUSED (that group is halted and is still a member) and not the same as a wrap that never
+ * arrived (that group followed the commit and holds no keys for the epoch). those two are still only
+ * out_error sentences here.
+ *
+ * WHAT A UI OWES IT. it never clears -- the only way back into the group is to be added again, which
+ * arrives as a new invite and a different group -- so the right shape is a permanent read-only state
+ * and not a retry: disable the composer with an inline reason (Spec C section 5's disabled-composer
+ * rule, and screen 10's read-only variant), and keep the transcript. `removed_epoch` is the LAST epoch
+ * this device was a member of, and the server serves it nothing above that epoch, so it is exactly
+ * where the conversation this device can still read stops.
+ *
+ * READ IT AFTER ANY receive OR send THAT FAILED, and on restore: it is persisted, so a device that was
+ * removed while the app was closed comes back already knowing, and its first receive does not have to
+ * fail for the screen to be right. */
+char* urnet_message_group_removal(uint64_t self);
 bool urnet_message_group_close(uint64_t self, char** out_error);
 
 /* ----- the roster and the two role verbs (MASTER section 11) ----- */

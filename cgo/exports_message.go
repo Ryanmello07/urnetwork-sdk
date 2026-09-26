@@ -1076,6 +1076,40 @@ func urnet_message_group_stats(self C.uint64_t) *C.char {
 	}, "urnet_message_group_stats")
 }
 
+// ── RULING 52's STATE, PROJECTED SO AN APP CAN RENDER IT ────────────────────────────────────
+//
+// WHY THIS IS A GETTER AND NOT A FIELD OF AN ERROR. urmessage answers urmessage.ErrRemovedFromGroup
+// from Receive, from Send and from every commit verb, and a C caller cannot branch on a sentinel: what
+// crosses this boundary is an out_error SENTENCE, plus a commit KIND on the three verbs that have one.
+// A receive that failed because this device is not in the group any more is indistinguishable at the
+// abi from one that failed because the network went away -- and the two are opposite instructions to a
+// UI, since one clears on a retry and the other never will. So the state is readable directly, at any
+// time, with no call having had to fail first.
+//
+// WHY IT IS JSON RATHER THAN A bool BESIDE A uint64_t. The two values are ONE fact read under one lock
+// (see urmessage.Group.Removal), and two getters would let a caller render a pair this group never held
+// at once. The keys are documented in the header and a go test in this directory holds that list
+// against the json's own, exactly as it does for the stats.
+//
+// WHAT IT IS NOT: the other two permanent states. A group that HALTED on an invalid commit (ruling 41)
+// and one that went DARK on a wrap that never arrived (ruling 38) are still only sentences in
+// out_error at this boundary. They are different screens from this one and they are owed their own
+// projection; this export is ruling 52's and says so rather than pretending to be a general one.
+//
+//export urnet_message_group_removal
+func urnet_message_group_removal(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_message_group_removal")
+	self_, ok := resolveHandle[*urmessage.Group](uint64(self), "urnet_message_group_removal")
+	if !ok || self_ == nil {
+		return nil
+	}
+	epoch, removal := self_.Removal()
+	return cJson(&messageGroupRemoval{
+		Removed:      removal != nil,
+		RemovedEpoch: epoch,
+	}, "urnet_message_group_removal")
+}
+
 //export urnet_message_group_close
 func urnet_message_group_close(self C.uint64_t, outError **C.char) C.bool {
 	defer cgoGuard("urnet_message_group_close")
@@ -1614,6 +1648,19 @@ type messageReactionInfo struct {
 
 	// True when THIS device sealed the reaction, which is what a UI highlights.
 	Mine bool `json:"mine"`
+}
+
+// messageGroupRemoval is what urnet_message_group_removal carries: ledger ruling 52's state, under
+// the same snake_case rule as everything else on this boundary.
+//
+// TWO KEYS AND NOT ONE, AND THE SECOND IS NOT DECORATION. `removed` is what a composer is disabled on;
+// `removed_epoch` is the LAST epoch this device was a member of, which is the highest one the server
+// will serve it (item 246's ceiling) and therefore the exact point the transcript it may still read
+// stops at. A screen that says "you are no longer in this group" over a conversation that visibly ends
+// somewhere needs to be able to say where.
+type messageGroupRemoval struct {
+	Removed      bool   `json:"removed"`
+	RemovedEpoch uint64 `json:"removed_epoch"`
 }
 
 // messageGroupStats is urmessage.Stats under the same snake_case rule.

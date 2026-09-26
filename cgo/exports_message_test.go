@@ -962,6 +962,43 @@ func TestTheHeaderDocumentsExactlyTheMemberJsonKeys(t *testing.T) {
 	}
 }
 
+// THE HEADER'S DOCUMENTED REMOVAL JSON IS THE JSON'S OWN, KEY FOR KEY AND IN ORDER -- ledger ruling
+// 52's projection, held by the gate the two above it are held by. It is born with its shape rather
+// than acquiring one after drifting, which is what the stats list did for four counters.
+//
+// AND THE PROJECTION'S OWN VALUES ARE HELD HERE TOO, because a key list says nothing about what goes
+// in it: a group nobody removed must answer removed false at epoch zero, and a group whose state is
+// set must carry the epoch it was removed at rather than the epoch it stands at plus one. The
+// urmessage side of that -- which epoch is filed, and that it survives a restart -- is
+// urmessage/removalstate_test.go's and cp3b's; what this holds is that the boundary carries what it
+// was handed.
+//
+// WHAT WOULD GO RED: add a field to messageGroupRemoval and not to the header's shape, or the
+// reverse; reorder either; have the export report the flag off something other than the error.
+func TestTheHeaderDocumentsExactlyTheRemovalJsonKeys(t *testing.T) {
+	documented := headerJsonKeys(t, "char* urnet_message_group_removal(", "as json:")
+	carried := jsonKeysOf(t, &messageGroupRemoval{})
+	if !reflect.DeepEqual(documented, carried) {
+		t.Fatalf("the header documents the removal keys as\n  %v\nand the json carries\n  %v", documented, carried)
+	}
+	for _, one := range []struct {
+		name  string
+		value messageGroupRemoval
+		want  string
+	}{
+		{"a member", messageGroupRemoval{}, `{"removed":false,"removed_epoch":0}`},
+		{"a removed device", messageGroupRemoval{Removed: true, RemovedEpoch: 7}, `{"removed":true,"removed_epoch":7}`},
+	} {
+		encoded, err := json.Marshal(&one.value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(encoded) != one.want {
+			t.Errorf("%s crosses as %s, want %s", one.name, encoded, one.want)
+		}
+	}
+}
+
 // THE HEADER'S URNET_MESSAGE_GAP_* DEFINES ARE THE GapReason VALUES THIS BUILD PRODUCES, AND THE
 // PRODUCED SET IS DERIVED FROM urmessage's OWN SOURCE.
 //
@@ -1268,6 +1305,15 @@ func TestTheRosterAndTheVerbsRefuseAHandleThatDoesNotResolve(t *testing.T) {
 		}
 		if got := callExportNil(t, urnet_message_group_remove_member, handle, uint64(0), cString("ab"), nil)[0].Int(); int32(got) != messageCommitFailed {
 			t.Errorf("remove_member on handle %d answered kind %d, want FAILED", handle, got)
+		}
+		// AND RULING 52's PROJECTION, WHICH MUST ANSWER NULL AND NOT `{"removed":false,…}`. A json
+		// body here would tell a caller "this device is still a member of that group", which is a
+		// claim about a group this library cannot see -- and it is the unsafe direction of that
+		// claim, because a screen acting on it leaves its composer live.
+		if got := callExport(t, urnet_message_group_removal, handle)[0]; !got.IsNil() {
+			t.Errorf("removal on handle %d answered %q, want NULL: a json body here says this "+
+				"device is still a member of a group this handle does not name",
+				handle, goStringAt(got.UnsafePointer()))
 		}
 		if got := callExport(t, urnet_message_member_list_count, handle)[0].Int(); got != 0 {
 			t.Errorf("member_list_count on handle %d answered %d", handle, got)

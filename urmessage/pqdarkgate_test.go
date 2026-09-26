@@ -372,16 +372,24 @@ func TestTheWrapDarkPartIsOptionalAndRefusesWhatThisBuildDidNotWrite(t *testing.
 				{Leaf: 2, DepartedEpoch: 0, Own: true},
 			}))
 		}
+		// PART TEN, LEDGER RULING 52's REMOVAL, and it is EMPTY at this arity: a ten-part record with
+		// an empty tenth part is what this build writes about a device that is STILL A MEMBER, which
+		// is the ordinary case and belongs in this table beside the removed one.
+		if 10 <= parts {
+			rows = append(rows, nil)
+		}
 		return rows
 	}
 	for _, one := range []struct {
-		name    string
-		parts   [][]byte
-		kind    uint8
-		epoch   uint64
-		witness int
-		leaves  int
-		bad     bool
+		name         string
+		parts        [][]byte
+		kind         uint8
+		epoch        uint64
+		witness      int
+		leaves       int
+		removed      uint8
+		removedEpoch uint64
+		bad          bool
 	}{
 		{name: "five parts: the deployed alpha's disk", parts: base(5, nil), kind: wrapDarkNone},
 		{name: "six parts: written before the wrap_dark part", parts: base(6, nil), kind: wrapDarkNone},
@@ -416,7 +424,24 @@ func TestTheWrapDarkPartIsOptionalAndRefusesWhatThisBuildDidNotWrite(t *testing.
 		// another member's records, which is exactly the defect part nine exists to close.
 		{name: "a leaf ledger row with a flag this build does not define",
 			parts: append(base(8, nil), []byte{0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0x02}), bad: true},
-		{name: "ten parts", parts: append(base(9, nil), nil), bad: true},
+		// PART TEN, LEDGER RULING 52's REMOVAL, in this same table for part nine's reason: the
+		// arity is what tells an old disk from a new one, so each arity is driven here or the
+		// compatibility claim is a sentence. "Ten parts" USED TO BE THE `bad` ROW in this table,
+		// which is what an arity switch looks like the commit before it moves.
+		{name: "ten parts, empty removal: this build, a device that is still a member",
+			parts: base(10, nil), kind: wrapDarkNone, witness: 1, leaves: 2, removed: removedNone},
+		{name: "ten parts, removed", parts: append(base(9, nil), []byte{removedByCommit, 0, 0, 0, 0, 0, 0, 0, 3}),
+			kind: wrapDarkNone, witness: 1, leaves: 2, removed: removedByCommit, removedEpoch: 3},
+		// AND EPOCH ZERO, which is why that part carries a kind octet rather than keying "not
+		// removed" off a zero epoch the way part nine's DepartedEpoch does: this field holds the
+		// epoch a device was STANDING at, and a founder stands at epoch zero.
+		{name: "ten parts, removed at epoch zero", parts: append(base(9, nil), []byte{removedByCommit, 0, 0, 0, 0, 0, 0, 0, 0}),
+			kind: wrapDarkNone, witness: 1, leaves: 2, removed: removedByCommit, removedEpoch: 0},
+		{name: "a removal part of the wrong width",
+			parts: append(base(9, nil), []byte{removedByCommit, 0, 0, 0, 0}), bad: true},
+		{name: "a removal kind this build does not name",
+			parts: append(base(9, nil), []byte{0x7f, 0, 0, 0, 0, 0, 0, 0, 3}), bad: true},
+		{name: "eleven parts", parts: append(base(10, nil), nil), bad: true},
 	} {
 		t.Run(one.name, func(t *testing.T) {
 			record, err := groupRecordOf("a-group", one.parts)
@@ -451,6 +476,16 @@ func TestTheWrapDarkPartIsOptionalAndRefusesWhatThisBuildDidNotWrite(t *testing.
 					"given; collapsing the two would invent an occupancy table for a disk that "+
 					"has none, and [Device.restoreOne] acts on that distinction",
 					len(record.Leaves), one.leaves)
+			}
+			// AND RULING 52's PART, THE SAME WAY: a record written before it says nothing about a
+			// removal, and one written by this build says what it was given. Collapsing the two
+			// would hand a restore a device that reads as a member because its disk is old.
+			if record.RemovedKind != one.removed || record.RemovedEpoch != one.removedEpoch {
+				t.Fatalf("decoded removal kind %d at epoch %d, want kind %d at epoch %d",
+					record.RemovedKind, record.RemovedEpoch, one.removed, one.removedEpoch)
+			}
+			if (removedErrorOf(record.RemovedKind, record.RemovedEpoch) == nil) != (one.removed == removedNone) {
+				t.Fatalf("a record naming removal kind %d rebuilt the wrong state", one.removed)
 			}
 			if one.leaves == 2 {
 				// AND THE ROWS COME BACK AS THEY WENT IN, BOTH FIELDS, BOTH VALUES. A decoder

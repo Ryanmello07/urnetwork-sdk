@@ -499,6 +499,21 @@ var pqSecretSinks = map[string]pqSecretSink{
 		carries: []string{"ledger"},
 		why:     "that decoded leaf ledger landing on the record.",
 	},
+	"groupRecordOf|call decodeRemoval": {
+		carries: []string{"parts"},
+		why: "part TEN going to ruling 52's removal decoder, for the two decoders above it: the " +
+			"record's parts are seeded whole and this walk does not tell one part from another. What " +
+			"that part holds is one kind octet and one epoch -- whether a commit removed this device " +
+			"and the last epoch it was a member at -- and no key material of any kind.",
+	},
+	"groupRecordOf|assign record.RemovedKind": {
+		carries: []string{"kind"},
+		why:     "that decoder's kind octet landing on the record.",
+	},
+	"groupRecordOf|assign record.RemovedEpoch": {
+		carries: []string{"epoch"},
+		why:     "the epoch beside it.",
+	},
 	"sortLeafOccupancy|assign rows[?]": {
 		carries: []string{"rows", "row"},
 		why: "the insertion sort's own two writes, which is what a sort IS. It is in this census " +

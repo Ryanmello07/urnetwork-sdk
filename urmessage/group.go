@@ -1211,6 +1211,42 @@ type Group struct {
 	// haltedEpoch is the epoch [Group.halted] left this group standing at -- n, the epoch it did
 	// NOT move off. Meaningless while halted is nil, and the two are written in one place.
 	haltedEpoch uint64
+
+	// removed is RULING 52's THIRD STATE: a VALID commit this group received took this device out
+	// of the group. It is [ErrRemovedFromGroup] wrapping mls's own answer, and nothing else.
+	//
+	// IT IS A THIRD FIELD AND NOT A THIRD KIND OF ONE OF THE TWO ABOVE, which is the ruling. Three
+	// states, three subjects, and the group stands at a different place in each:
+	//
+	//   - VALID commit, wrap missing        -> [Group.wrapDark] at n+1. Followed; holds no keys.
+	//   - INVALID commit (unrotated removal) -> [Group.halted] at n.   Refused; still a member.
+	//   - VALID commit that REMOVED THIS DEVICE -> THIS, at n. Not refused, not followed, and not a
+	//     member: there is no n+1 for this device to be in or to be dark at, and the fan-out its own
+	//     removal opened never addressed it (ledger item 258's derivation).
+	//
+	// IT IS STICKY AND PERSISTED FOR THE REASON THE HALT IS, and the measurement is the same shape
+	// one ruling along: the sentinel is available for exactly ONE walk in the life of the handle,
+	// because mls closes the group and zeroizes its epoch secrets when it answers, so the second
+	// walk's Process answers `the group is closed` and the third spends [maxRecordAttempts] and
+	// resolves the cursor PAST the record. See [ErrRemovedFromGroup] for the four walks as measured.
+	// Part TEN of [GroupRecord] carries it, so the state does not have to be re-derived from a
+	// record mls can no longer be asked about.
+	//
+	// AND IT IS NOT A REFUSAL OF THE GROUP'S HISTORY. The rows at and below removedEpoch still
+	// fetch under this device's own read_key and still open, so the walk runs, delivers what it
+	// opens, and answers this at the end -- which is what lets a client render the transcript it
+	// is entitled to beside the sentence that says it is over. Driven end to end, across a real
+	// restart, by cp3b's
+	// TestARemovedDeviceIsToldSoByNameOnEveryWalkAndStillIsAfterARestart.
+	removed error
+
+	// removedEpoch is the epoch [Group.removed] left this group standing at -- n, the last epoch
+	// this device was a member of, and the highest one item 246's ceiling will serve it. It is
+	// [Group.haltedEpoch]'s reading and not [LeafOccupancy.DepartedEpoch]'s: the epoch the commit
+	// OPENED is n+1 and is an epoch this device has no state for, so it is the wrong number to
+	// render and the wrong number to ask the server for. Meaningless while removed is nil, and the
+	// two are written in one place.
+	removedEpoch uint64
 }
 
 // ── founding and joining ─────────────────────────────────────────────────────────────────────
@@ -1784,6 +1820,15 @@ func (self *Group) committableLocked() error {
 	if self.session == nil {
 		return ErrNoMemberAdded
 	}
+	// A DEVICE THIS GROUP REMOVED COMMITS NOTHING -- RULING 52, and it is first for
+	// [Group.commitWalkLocked]'s reason: it is the only clause here that is not about how this
+	// device is doing in a group it is in. It is also the only one mls would refuse anyway, which is
+	// exactly why it belongs by name: a closed group answers `the group is closed and its epoch
+	// secrets have been zeroized` to every commit verb, which is a sentence about a data structure
+	// where what the caller needs is a sentence about a membership.
+	if self.removed != nil {
+		return self.removed
+	}
 	if self.identityInUse != nil {
 		return self.identityInUse
 	}
@@ -2215,6 +2260,46 @@ func (self *Group) haltLocked(refusal error) error {
 	return self.halted
 }
 
+// removedLocked records RULING 52's state, PERSISTS IT, and answers the sentence the caller returns.
+//
+// IT IS [Group.haltLocked]'s SHAPE AND NOT ITS FIELD, deliberately. The two functions are the same
+// three statements -- set the field once, write the record, answer the sentinel -- because a state
+// that survives a restart is exactly those three statements and a second spelling of them is the
+// site that forgets one. What they must NOT share is the field: ruling 52's whole content is that a
+// valid commit that removed this device is a different state from a commit this device refused, and
+// one field with two meanings is how the two become one sentence again.
+//
+// THE CAUSE IS CARRIED AND IT IS mls's OWN. `cause` is the error [mls.Group.ApplyCommit] answered,
+// which carries mls.ErrRemovedFromGroup, and it is wrapped rather than replaced so a caller that
+// branches on the MLS-level fact keeps its answer. That matters across the restart too, which is why
+// [removedErrorOf] re-wraps the same sentinel from the persisted octets: a caller must not get one
+// answer before a restart and another after it for a state that did not change.
+//
+// AND IT IS WRITTEN TO THE DISK HERE, at the same point and for the same reason the halt is: this
+// path RETURNS before [Group.enterEpochLocked]'s step (7) is reached, because not entering the epoch
+// is the whole of what happened. The epoch does not move, so this is not an epoch change and does
+// not go through that door.
+//
+// A STORE THAT WILL NOT TAKE THE RECORD DOES NOT SWALLOW THE STATE, for the halt's reason: the
+// sentinel stays intact so errors.Is answers [ErrRemovedFromGroup], and the persist failure is
+// carried inside it, because a removal that did not reach the disk is a removal this device forgets
+// at its next start -- and what it forgets it into is a group that looks caught up and silent.
+func (self *Group) removedLocked(cause error) error {
+	if self.removed == nil {
+		self.removed = fmt.Errorf("%w: group %x, at epoch %d: %w",
+			ErrRemovedFromGroup, self.id, self.epoch, cause)
+		self.removedEpoch = self.epoch
+	}
+	if !self.opened {
+		return self.removed
+	}
+	if err := self.device.persistGroup(self.groupRecordLocked(true)); err != nil {
+		return fmt.Errorf("%w -- and this could not be persisted, so a restart would come back to a group that reads caught up and silent: %v",
+			self.removed, err)
+	}
+	return self.removed
+}
+
 // ── sending ──────────────────────────────────────────────────────────────────────────────────
 
 // Send seals one line of text as a DURABLE record and submits it.
@@ -2432,6 +2517,17 @@ func (self *Group) sendableLocked(kind ContentKind) (string, error) {
 	}
 	if !self.opened {
 		return "", ErrGroupNotOpen
+	}
+	// A DEVICE THIS GROUP REMOVED SENDS NOTHING -- RULING 52, and it is the first of the sticky
+	// clauses for [Group.commitWalkLocked]'s reason. What it replaces was measured: a removed
+	// device's Send answered `urmessage: sealing a message: messagegroup: an application record's
+	// inner MLS frame did not open: mls: the group is closed and its epoch secrets have been
+	// zeroized` -- a sentence about a data structure, arriving after the seal was attempted, that
+	// carries neither mls.ErrRemovedFromGroup nor any sentinel a caller could branch on. The
+	// removal is the one refusal a composer has to be able to read by name, because it is the one
+	// that is never going to clear.
+	if self.removed != nil {
+		return "", self.removed
 	}
 	// BEFORE THE REBIND AND BEFORE THE SEAL, because the seal is the irreversible half: a
 	// record sealed under a reused (key, nonce) exists whatever this method then returns.
@@ -3337,16 +3433,23 @@ type pageWalk struct {
 // arm skip; a sixth arm added tomorrow has to say what its error is, and
 // [TestEveryErrorReceiveAnswersComesOutOfTheWalksOwnCommit] refuses one that answers around it.
 //
-// THE ORDER THE FIVE ERRORS ARE RETURNED IN IS A DECISION, and the two ahead of `fetchErr` are
+// THE ORDER THE SIX ERRORS ARE RETURNED IN IS A DECISION, and the three ahead of `fetchErr` are
 // ahead of it for the same reason they are ahead of each other: they are STICKY refusals about
 // THIS DEVICE'S OWN PERMANENT STATE, and the transport refusal is a symptom of them.
 //
+//  0. THE REMOVAL, ruling 52, which is FIRST and is the only one of the six that is not about how
+//     this device is doing in a group it is in: it says it is not in the group. Every other answer
+//     below is downstream of that -- an identity refusal is about a stream this device will never
+//     seal in again, a dark wrap is about an epoch it is not in, and a transport refusal is what
+//     the server says to a member it no longer has. And nothing is lost by saying it first: the
+//     MLS group is closed, so a removed device cannot seal at all and cannot produce the collision
+//     the identity refusal exists to prevent.
 //  1. the identity refusal, because it is the only one that stops this device sealing and because
 //     carrying on would carry on producing the collision;
 //  2. the wrap that never arrived, ruling 38's diagnosis, which is the CAUSE of the fetch refusal
-//     below rather than a competitor with it;
+//     below rather than a competitor with it, with ruling 41's halt ahead of it;
 //  3. the transport's own refusal, which is what stopped THIS walk and is the more proximate
-//     answer for every group that is not in one of the two states above;
+//     answer for every group that is not in one of the states above;
 //  4. the record that did not open, which is the existing contract and names a specific record;
 //  5. the server that held records back, which moves [Stats.Omitted] whether or not it is
 //     returned.
@@ -3378,6 +3481,23 @@ func (self *Group) commitWalkLocked(walk *pageWalk, fetchErr error) error {
 		if held, found := self.heldLocked(one.MessageId); found {
 			walk.opened[index] = held
 		}
+	}
+	// ── 0. THE REMOVAL, RULING 52, AHEAD OF EVERYTHING INCLUDING THE RECONCILIATION ─────────────
+	//
+	// IT IS ABOVE THE RECONCILE BLOCK AND NOT MERELY ABOVE THE RETURNS, and that is the one thing
+	// this position decides. The reconciliation's conclusion is "every index on the server under
+	// this device's handle is one my reserver allocated", which exists to license [Group.Send]; a
+	// device this group removed will never send again whatever it concludes, so running the block
+	// would be spending a store read and a permanent flag on a question that has no consumer. The
+	// floor seed below it is the same read for the same consumer.
+	//
+	// WHAT IS ABOVE THIS LINE IS EVERYTHING THE WALK ACTUALLY DID: the cursor, the peer heads, the
+	// effect rebuild and the re-read of the messages this walk opened. A removed device still gets
+	// its page -- the rows at and below the epoch it was removed at are served under its own
+	// read_key and open under its own schedule -- so the sentence below arrives BESIDE the history
+	// it is entitled to rather than instead of it.
+	if self.removed != nil {
+		return self.removed
 	}
 	if self.walkReconcilesLocked(walk) {
 		// THE RECONCILIATION. It runs once per restored group, on the first walk of this
@@ -3992,7 +4112,33 @@ func (self *Group) openPageLocked(fetched *protocol.FetchResponse, walk *pageWal
 				walk.blocked = true
 				continue
 			}
+			// AND A GROUP THIS COMMIT REMOVED DOES NOT PROCESS IT AGAIN EITHER -- RULING 52, and
+			// the clause is the halt's for one reason it shares and one it does not. Shared: the
+			// removing commit is the first record above this cursor and always will be, so every
+			// later walk meets it, and re-processing cannot re-derive the answer -- mls closed the
+			// group and zeroized its epoch secrets when it answered, so the second Process answers
+			// `the group is closed and its epoch secrets have been zeroized`. Not shared, and it is
+			// the sharper half: a removal is the ONE record a device cannot open and must not
+			// retry. Three attempts and a cursor bump is the shape of a transient, and what it
+			// produced here was measured -- [ErrRecordAbandoned] on the third walk and nil on every
+			// walk after it, so the device that had been thrown out of the group read as caught up
+			// and silent for ever. See [ErrRemovedFromGroup].
+			if self.removed != nil {
+				walk.blocked = true
+				continue
+			}
 			if err := self.ingestCommitLocked(walk, parsed); err != nil {
+				if errors.Is(err, ErrRemovedFromGroup) {
+					// REMOVED BY A VALID COMMIT, WHICH IS NOT A RECORD THAT DID NOT OPEN. It
+					// opened, it verified and it was authorized; what it did was end this
+					// device's membership. The walk's sentence is [Group.removed], answered by
+					// [Group.commitWalkLocked] above every other refusal, and what this arm owes
+					// is that the cursor stays BELOW the commit -- so `fail` is not called, no
+					// attempt is spent, [Stats.Unopened] does not move and the record is never
+					// abandoned. The clause above is what meets it on every later walk.
+					walk.blocked = true
+					continue
+				}
 				if errors.Is(err, ErrRemovalWithoutRotation) {
 					// REFUSED BY RULE, WHICH IS NOT A RECORD THAT DID NOT OPEN. The walk's
 					// sentence is [Group.halted], answered by [Group.commitWalkLocked] above
@@ -4782,7 +4928,23 @@ func (self *Group) ingestCommitLocked(walk *pageWalk, parsed *message.Record) (e
 	}
 	// (4) apply it: the handle enters the epoch the commit opens, and mls persists that epoch's
 	// state HERE -- the first of the two writers of epoch state.
+	//
+	// AND THE ONE FAILURE HERE THAT IS NOT A FAILURE: RULING 52. mls.ErrRemovedFromGroup is what
+	// [mls.Group.ApplyCommit] answers when the commit it just validated removed THIS client's own
+	// leaf -- a valid commit, correctly signed, authorized by every §11 rule at step (3), which
+	// this device cannot enter because it is not in the tree the commit produced. Naming it as
+	// "could not follow a commit" is naming the wrong subject: nothing failed, the membership
+	// ended. [Group.removedLocked] takes it, and it is taken HERE rather than at the walk because
+	// this is the one place the answer is still mls's own: mls has closed the group and zeroized
+	// its epoch secrets by the time this returns, so a second ask answers `the group is closed`
+	// and the fact is gone for the rest of the process.
+	//
+	// THE STAGED EPOCH IS STILL ERASED, by the defer above, which runs on this return like any
+	// other. DiscardProcessed after a failed ApplyCommit is the arm that door exists for.
 	if err := self.handle.ApplyCommit(processed); err != nil {
+		if errors.Is(err, mls.ErrRemovedFromGroup) {
+			return self.removedLocked(err)
+		}
 		return fmt.Errorf("%w: applying the commit: %w", ErrCommitIngest, err)
 	}
 	newEpoch := self.handle.Epoch()
@@ -6642,6 +6804,33 @@ func (self *Group) IdentityInUse() error {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 	return self.identityInUse
+}
+
+// Removal is RULING 52's state: the epoch this device was removed at, and the refusal that says so,
+// or (0, nil) while this device is still a member.
+//
+// NON-NIL MEANS A VALID COMMIT TOOK THIS DEVICE OUT OF THE GROUP. It is sticky, persisted and
+// permanent -- every [Group.Receive], [Group.Send] and commit verb answers it, this process and
+// every one after it -- and it is [ErrRemovedFromGroup] wrapping mls's own answer, so a caller can
+// errors.Is either. It is the one refusal in this package that will never clear: the repair is to be
+// added to the group again, which is a new leaf at a new epoch and therefore a different group value.
+//
+// THE EPOCH IS THE LAST ONE THIS DEVICE WAS A MEMBER OF, which is also the highest one item 246's
+// ceiling will serve it, so the history at and below it still fetches and still opens. That is what
+// makes Spec C screen 10's read-only variant renderable rather than a blank pane: the transcript is
+// there, the composer is not.
+//
+// IT IS ONE CALL AND NOT TWO BECAUSE THE TWO VALUES ARE ONE FACT. A separate epoch getter would be a
+// second lock acquisition, and a caller that read the flag in one and the epoch in the other would
+// be rendering a pair this group never held at once. The state is written once, so today they could
+// not disagree; the signature is what keeps that true of tomorrow.
+func (self *Group) Removal() (uint64, error) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if self.removed == nil {
+		return 0, nil
+	}
+	return self.removedEpoch, self.removed
 }
 
 // Reconciled reports whether this group has compared its own stream position against the server's

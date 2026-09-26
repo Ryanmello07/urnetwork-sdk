@@ -512,6 +512,7 @@ EXPORTS
 	urnet_message_group_open
 	urnet_message_group_react
 	urnet_message_group_receive
+	urnet_message_group_removal
 	urnet_message_group_remove_member
 	urnet_message_group_send
 	urnet_message_group_send_reply

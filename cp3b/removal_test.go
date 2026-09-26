@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/urnetwork/connect/mls"
@@ -420,4 +421,253 @@ func TestTheAdminThatRemovedSomebodyStillReadsTheirHistoryAfterARestart(t *testi
 	}
 	t.Logf("the removing admin restarted, re-walked its whole history and still opens both of the " +
 		"removed member's lines, with no malformed gap")
+}
+
+// ── LEDGER RULING 52: WHAT THE REMOVED DEVICE IS LEFT WITH, OVER A REAL SERVER AND A REAL RESTART ──
+
+// A REMOVED DEVICE IS TOLD BY NAME ON EVERY WALK AND ON EVERY SEND, AND STILL IS AFTER A RESTART.
+//
+// WHAT WAS THERE BEFORE THIS, MEASURED THROUGH THIS HARNESS AT sdk ca89760 AND NOT REASONED. The
+// removed device's walks answered, in order: the mls sentence wrapped in the generic
+// ErrCommitIngest; `the group is closed and its epoch secrets have been zeroized`; ErrRecordAbandoned
+// with Stats.Unopened at 1; and then NIL, for ever, with Stats.Omitted at zero -- because item 246's
+// ceiling serves the rows at and below the epoch it was removed at and calls the page COMPLETE with a
+// ceiling-relative high water, so the omission predicate had nothing to report. Its Send answered
+// `sealing a message: messagegroup: an application record's inner MLS frame did not open: mls: the
+// group is closed…`, which carries no sentinel at all. A device thrown out of a group was
+// indistinguishable from one that was caught up and quiet, with a live composer, for ever.
+//
+// WHY THIS CASE IS IN THIS MODULE AND NOT IN urmessage's OWN SUITE. Three of its four clauses need
+// things that package cannot reach: a real [urmessage.Group.Send] (the submit goes through
+// `*sdk.MessageTransport`, a concrete type with no stub), a real [urmessage.Group.Receive] over a
+// FETCH, and a real restart -- two directories reopened with nothing crossing but the disk. The
+// walk's own behaviour and the store's codec are held one module over in
+// urmessage/removalstate_test.go.
+//
+// THE FOUR CLAUSES. (1) Four consecutive Receives answer [urmessage.ErrRemovedFromGroup], carrying
+// mls.ErrRemovedFromGroup and NOT the generic ErrCommitIngest, with Stats.Unopened and
+// UnopenedRecords empty throughout -- the walk does not spend three attempts on the record and
+// resolve past it. (2) Send answers the same name. (3) The device still READS: both of its own lines
+// and the survivor's are in its log, because it holds the keys of the epoch it was removed at, which
+// is what makes a read-only transcript renderable. (4) After a restart it answers the state BEFORE
+// any walk -- [urmessage.Group.Removal] on the restored group, with no Receive yet -- which is the
+// only assertion that can tell a persisted state from one re-derived off the wire, since the
+// removing commit is still the first record above a cursor nothing persists.
+//
+// THE INLINE CONTROL IS THE SURVIVOR OF THE SAME COMMIT: carol receives cleanly, follows to the new
+// epoch, sends, and reads (0, nil) from Removal -- in this case, over this commit. Without it every
+// clause above is satisfied by a state set on every ingest.
+//
+// WHAT WOULD GO RED: drop the mls.ErrRemovedFromGroup arm at ApplyCommit (clause 1's first walk);
+// drop the `self.removed` clause in the walk's is_commit arm (walks 2 to 4); drop the send door's
+// clause (clause 2); stop writing part ten, or drop it from the restore (clause 4, which is the ONLY
+// clause a re-derivation cannot fake); set the state on any ingest (the control).
+func TestARemovedDeviceIsToldSoByNameOnEveryWalkAndStillIsAfterARestart(t *testing.T) {
+	world := newWorld(t)
+	ctx := context.Background()
+
+	alice := world.newPersona(t, "alice")
+	bob := world.newPersona(t, "bob")
+	carol := world.newPersona(t, "carol")
+	for _, who := range []*persona{alice, bob, carol} {
+		if err := who.device.Connect(ctx); err != nil {
+			t.Fatalf("%s's Connect: %v", who.name, err)
+		}
+	}
+	groupId := newGroupId(t)
+	aliceGroup, bobGroup := openPair(t, ctx, alice, bob, groupId)
+	// the third member, so the SURVIVOR control is somebody other than the committer
+	carolGroup := removalAdd(t, ctx, "alice", aliceGroup, carol.device, "carol")
+	groups := map[string]*urmessage.Group{"alice": aliceGroup, "bob": bobGroup, "carol": carolGroup}
+	rolesReceiveAll(t, ctx, groups)
+	rolesAssertEpoch(t, 2, groups)
+
+	// the line the removed device must still be able to read afterwards, and the survivor's
+	if _, err := bobGroup.Send(ctx, bobsFirstLine); err != nil {
+		t.Fatalf("bob's Send: %v", err)
+	}
+	if _, err := carolGroup.Send(ctx, carolsLineBeforeTheRemoval); err != nil {
+		t.Fatalf("carol's Send: %v", err)
+	}
+	rolesReceiveAll(t, ctx, groups)
+	held := gcTextsPresent(bobGroup.Messages())
+	for _, text := range []string{bobsFirstLine, carolsLineBeforeTheRemoval} {
+		if !held[text] {
+			t.Fatalf("CONTROL FAILED: before the removal bob's log does not hold %q, so clause 3 "+
+				"below would be about records that never arrived: %s", text, textsOf(bobGroup.Messages()))
+		}
+	}
+	bobId := rolesIdentityOf(t, bobGroup)
+	removedAt := bobGroup.Epoch()
+
+	// ── THE REMOVAL ─────────────────────────────────────────────────────────────────────────────
+	if err := aliceGroup.RemoveMember(ctx, bobId); err != nil {
+		t.Fatalf("alice's RemoveMember of bob: %v", err)
+	}
+	opened := removedAt + 1
+	if got := aliceGroup.Epoch(); got != opened {
+		t.Fatalf("alice is at epoch %d after the removal, want %d", got, opened)
+	}
+
+	// ── THE CONTROL FIRST, OVER THE SAME COMMIT: THE SURVIVOR IS UNAFFECTED ─────────────────────
+	if _, err := carolGroup.Receive(ctx); err != nil {
+		t.Fatalf("CONTROL FAILED: the survivor's Receive over the removal answered %v; every clause "+
+			"below would then be about a commit nobody could follow", err)
+	}
+	if got := carolGroup.Epoch(); got != opened {
+		t.Fatalf("CONTROL FAILED: the survivor is at epoch %d after the removal, want %d", got, opened)
+	}
+	if epoch, state := carolGroup.Removal(); state != nil || epoch != 0 {
+		t.Errorf("the SURVIVOR of the removal reads (%d, %v) from Removal: the state is being set for "+
+			"a member the commit left in the group", epoch, state)
+	}
+	if _, err := carolGroup.Send(ctx, carolsLineAfterTheRemoval); err != nil {
+		t.Errorf("CONTROL FAILED: the survivor's Send after the removal answered %v, so the send "+
+			"refusal below is satisfied by a group nobody can write to", err)
+	}
+
+	// ── CLAUSE 1: FOUR WALKS, EVERY ONE BY NAME, AND NOT ONE ATTEMPT SPENT ──────────────────────
+	//
+	// [Stats.FailedOpen] IS THE DISCRIMINATOR AND [Stats.Unopened] IS NOT, which was MEASURED here
+	// rather than reasoned: a mutant that sent the removing commit through `fail()` was caught by
+	// this file's urmessage twin and PASSED here, because the sticky clause one level out means only
+	// ONE attempt is ever spent and [maxRecordAttempts] is never reached -- so nothing is ever
+	// abandoned and `Unopened` stays 0 over a walk that did treat the removal as a record that did
+	// not open. The counter that moves on the FIRST attempt is the one that has to be asserted.
+	failedOpenBefore := bobGroup.Stats().FailedOpen
+	for walk := 1; walk <= 4; walk += 1 {
+		_, err := bobGroup.Receive(ctx)
+		removalAssertRemoved(t, fmt.Sprintf("walk %d", walk), err)
+		stats := bobGroup.Stats()
+		if stats.FailedOpen != failedOpenBefore {
+			t.Errorf("after walk %d the removed device has spent %d open attempt(s) on the removing "+
+				"commit (FailedOpen %d -> %d): a removal is the one record a device cannot open and "+
+				"must not retry, and three attempts plus a cursor bump is what made walk 4 answer nil "+
+				"before ruling 52", walk, stats.FailedOpen-failedOpenBefore, failedOpenBefore, stats.FailedOpen)
+		}
+		if stats.Unopened != 0 || len(bobGroup.UnopenedRecords()) != 0 {
+			t.Errorf("after walk %d the removed device holds %d unopened record(s) %v: the removing "+
+				"commit was abandoned", walk, stats.Unopened, bobGroup.UnopenedRecords())
+		}
+		if got := bobGroup.Epoch(); got != removedAt {
+			t.Errorf("after walk %d the removed device is at epoch %d, want %d", walk, got, removedAt)
+		}
+		if epoch, state := bobGroup.Removal(); state == nil || epoch != removedAt {
+			t.Errorf("after walk %d Removal answers (%d, %v), want (%d, non-nil)", walk, epoch, state, removedAt)
+		}
+	}
+
+	// ── CLAUSE 2: SEND ─────────────────────────────────────────────────────────────────────────
+	_, sendErr := bobGroup.Send(ctx, "a line from somebody who is not in this group any more")
+	removalAssertRemoved(t, "Send", sendErr)
+
+	// ── CLAUSE 3: IT STILL READS WHAT IT IS ENTITLED TO ────────────────────────────────────────
+	held = gcTextsPresent(bobGroup.Messages())
+	for _, text := range []string{bobsFirstLine, carolsLineBeforeTheRemoval} {
+		if !held[text] {
+			t.Errorf("the removed device's log has lost %q. It holds the keys of the epoch it was "+
+				"removed at, so the transcript up to that epoch is exactly what Spec C screen 10's "+
+				"read-only variant renders: %s", text, textsOf(bobGroup.Messages()))
+		}
+	}
+	if held[carolsLineAfterTheRemoval] {
+		t.Errorf("the removed device opened a line sealed at the epoch its own removal opened, which "+
+			"it holds no keys for: %s", textsOf(bobGroup.Messages()))
+	}
+
+	// ── CLAUSE 4: THE RESTART, AND THE STATE IS READ BEFORE ANY WALK ────────────────────────────
+	bob = world.restart(t, bob)
+	if err := bob.device.Connect(ctx); err != nil {
+		t.Fatalf("the restarted bob's Connect: %v", err)
+	}
+	restored, err := bob.device.Restore(ctx)
+	if err != nil {
+		t.Fatalf("the restarted bob's Restore: %v. A device a commit removed is still a device whose "+
+			"own history is on this disk, so a restore that refused the group would take the "+
+			"transcript away with the membership", err)
+	}
+	if len(restored) != 1 {
+		t.Fatalf("the restarted bob restored %d group(s), want 1", len(restored))
+	}
+	bobGroup = restored[0]
+	// THE ONE ASSERTION A RE-DERIVATION CANNOT FAKE: no Receive has run in this process, and the
+	// removing commit is still sitting above a cursor nothing persists, so a state read here came
+	// off part ten of the group record and from nowhere else.
+	epoch, state := bobGroup.Removal()
+	if state == nil {
+		t.Fatalf("the restored group reads (%d, nil) from Removal BEFORE its first Receive: the state "+
+			"did not survive the process. Such a device comes back reading as caught up and silent "+
+			"until some walk happens to re-derive it, which is the state ruling 52 exists to end", epoch)
+	}
+	if epoch != removedAt {
+		t.Errorf("the restored group was removed at epoch %d, want %d", epoch, removedAt)
+	}
+	if !errors.Is(state, urmessage.ErrRemovedFromGroup) || !errors.Is(state, mls.ErrRemovedFromGroup) {
+		t.Errorf("the restored state is %v; it must carry urmessage.ErrRemovedFromGroup AND mls's own "+
+			"sentinel, because the cause is a value and not state a restart can invalidate", state)
+	}
+	if got := bobGroup.Epoch(); got != removedAt {
+		t.Errorf("the restored group is at epoch %d, want %d", got, removedAt)
+	}
+	// and then its walks and its sends, after the restart, still answer by name
+	for walk := 1; walk <= 2; walk += 1 {
+		_, err := bobGroup.Receive(ctx)
+		removalAssertRemoved(t, fmt.Sprintf("walk %d after the restart", walk), err)
+	}
+	_, sendErr = bobGroup.Send(ctx, "a line from somebody who is not in this group any more, after a restart")
+	removalAssertRemoved(t, "Send after the restart", sendErr)
+	if got := bobGroup.Stats().Unopened; got != 0 {
+		t.Errorf("the restarted removed device holds %d unopened record(s) after re-walking its whole "+
+			"history, want 0", got)
+	}
+	t.Logf("the removed device answered ErrRemovedFromGroup on four walks and a send, kept both "+
+		"lines of the conversation up to epoch %d, came back from a restart already knowing before "+
+		"its first fetch, and the survivor of the same commit is at epoch %d and still sending",
+		removedAt, opened)
+}
+
+const (
+	carolsLineBeforeTheRemoval = "carol's line, sealed while the device this case removes was still a member"
+	carolsLineAfterTheRemoval  = "carol's line at the epoch the removal opened, which the removed device holds no keys for"
+)
+
+// removalAssertRemoved holds RULING 52's whole predicate over one answer: it IS the removal, it
+// carries mls's own cause, and it is none of the three states the ruling says it must be
+// distinguishable from.
+//
+// IT IS A HELPER BECAUSE THE PREDICATE IS THE POINT AND IT IS ASKED SEVEN TIMES in one case; a
+// clause spelled seven times is six chances for one of them to be the weaker spelling.
+func removalAssertRemoved(t *testing.T, what string, err error) {
+	t.Helper()
+	if !errors.Is(err, urmessage.ErrRemovedFromGroup) {
+		t.Errorf("%s answered %v, want urmessage.ErrRemovedFromGroup", what, err)
+		return
+	}
+	if !errors.Is(err, mls.ErrRemovedFromGroup) {
+		t.Errorf("%s does not carry mls.ErrRemovedFromGroup, which is the cause: %v", what, err)
+	}
+	// NAMED AND NOT GENERIC: ErrCommitIngest is what a bent ciphertext answers too, and a caller
+	// that saw it here would read a membership that ended as a transient worth retrying.
+	if errors.Is(err, urmessage.ErrCommitIngest) {
+		t.Errorf("%s also answers ErrCommitIngest, so a removal cannot be told from a commit that "+
+			"did not open: %v", what, err)
+	}
+	for _, other := range []struct {
+		name string
+		err  error
+	}{
+		{"ErrRemovalWithoutRotation (ruling 41's halt: a commit this device REFUSED)", urmessage.ErrRemovalWithoutRotation},
+		{"ErrNoWrapForEpoch (ruling 38: a commit it FOLLOWED with no keys)", urmessage.ErrNoWrapForEpoch},
+		{"ErrWrapUnreadable", urmessage.ErrWrapUnreadable},
+		{"ErrOrphanWrap", urmessage.ErrOrphanWrap},
+		{"ErrRecordAbandoned (a record that did not open)", urmessage.ErrRecordAbandoned},
+		{"ErrFetchRefused (the transport)", urmessage.ErrFetchRefused},
+		{"ErrNotReconciled", urmessage.ErrNotReconciled},
+		{"ErrStreamFloorUnheld", urmessage.ErrStreamFloorUnheld},
+	} {
+		if errors.Is(err, other.err) {
+			t.Errorf("%s also answers %s; ruling 52's whole content is that this state is "+
+				"distinguishable from that one: %v", what, other.name, err)
+		}
+	}
 }

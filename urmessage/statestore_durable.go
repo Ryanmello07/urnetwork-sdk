@@ -290,7 +290,9 @@ type GroupRecord struct {
 	// WHY IT IS STILL WRITTEN, which is the whole of what an OLD STORE does. A record written
 	// before rotation has five parts and this field is part two; one written before the
 	// wrap_dark part has six, the sixth being the table; and one written by this build has
-	// seven. The reader takes both arities: on a five-part record it
+	// TEN. (That count was written as "seven" and stayed there while parts eight, nine and ten
+	// landed -- so it is stated as the arity [groupRecordOf] actually switches on, which is the
+	// only place this number is checkable.) The reader takes every arity: on a five-part record it
 	// files this one scalar at the epoch the record names and leaves connect's group-lifetime
 	// premise standing, which answers every past epoch out of that one value -- the behaviour of
 	// every build before this one, exactly. So a device whose disk was written by the deployed
@@ -431,6 +433,39 @@ type GroupRecord struct {
 	// has ever been. Item 242's ruling 7 caps that at 1,000 leaves in v1, and a row is thirteen
 	// octets.
 	Leaves []LeafOccupancy
+
+	// ── RULING 52: THIS DEVICE IS NOT A MEMBER OF THIS GROUP ANY MORE ───────────────────────
+	//
+	// LEDGER ITEM 257's RULING 52, AND IT IS PART TEN. A valid commit this group received removed
+	// this device. [GroupRecord.WrapDarkKind] two fields up carries ruling 41's two outcomes in one
+	// octet because they are two disjoint answers to ONE decision this package takes; this is a
+	// third state taken at a different step by a different party -- mls, applying a commit this
+	// package had already authorized -- and it gets its own part for the reason
+	// [Group.removedLocked] gets its own function.
+	//
+	// WHY IT IS ON THE DISK, AND THIS IS THE WHOLE OF THE RULING. The state is available for exactly
+	// ONE walk in the life of an MLS handle: mls closes the group and zeroizes its epoch secrets as
+	// it answers, so the next walk's Process answers `the group is closed` and the walk after that
+	// abandons the record. Measured over a real server at sdk ca89760, the fourth Receive and every
+	// one after it answered NIL with [Stats.Omitted] at zero -- item 246's ceiling serves the rows at
+	// and below the removal epoch and calls the page complete with a ceiling-relative high water, so
+	// the omission predicate has nothing to report. A device thrown out of a group read as caught up
+	// and silent, for ever, with a live composer. Persisting the state is what makes the answer
+	// survive the one walk that can derive it.
+	//
+	// WHICH of the two ways, as the octet [removedByCommit] spells, or zero for "this device is
+	// still a member". It is the kind and not the sentence, for [GroupRecord.WrapDarkKind]'s reason.
+	RemovedKind uint8
+
+	// The epoch [RemovedKind] was taken at: the LAST epoch this device was a member of, not the
+	// epoch the removing commit opened. Meaningless when that is zero.
+	//
+	// IT IS THE LOWER OF THE TWO NUMBERS ON PURPOSE. The epoch the commit opened is one this device
+	// holds no state for and one item 246's ceiling will not serve it, so it is the wrong number to
+	// render and the wrong number to put in a fetch. The epoch here is the one whose keys this
+	// device still holds, whose rows it may still read, and whose transcript Spec C screen 10's
+	// read-only variant shows.
+	RemovedEpoch uint64
 }
 
 // LeafOccupancy is one row of [GroupRecord.Leaves]: one leaf of one group, whether THIS DEVICE has
@@ -483,6 +518,29 @@ const (
 	// resolution can return and holds each against a written disposition: a NEW refusal landing
 	// here fails that gate rather than quietly becoming this.
 	wrapDarkUnfollowable uint8 = 5
+)
+
+// The values of [GroupRecord.RemovedKind]. Zero is "still a member" and is not a kind, for
+// [wrapDarkNone]'s reason, and they are numbered here once for the same reason those are.
+const (
+	removedNone uint8 = 0
+
+	// removedByCommit: a VALID commit this group received took this device's last leaf out of the
+	// tree, and [mls.Group.ApplyCommit] said so. It is the only way this state is reached today, and
+	// it is a KIND rather than a bare flag so that a second way -- a group the owner dissolves, a
+	// server that drops a member by some future ruling -- has somewhere to land without an eleventh
+	// part, and so that epoch ZERO stays representable beside it.
+	removedByCommit uint8 = 1
+
+	// removedUnnamed is NOT WRITTEN AND IS NOT READ: it exists so that [removedKindOf] has a value
+	// for "this device is out of the group and the reason is not one this build persists by name",
+	// and so that [encodeRemoval] can REFUSE it. [wrapDarkUnfollowable] takes the opposite road --
+	// it is a real catch-all that is written -- because that field has many producers and a refusal
+	// there would turn a new refusal into a failed persist. This field has ONE producer, which
+	// wraps [ErrRemovedFromGroup] itself, so a value that reaches here is a bug in this package and
+	// not a state on a disk; failing the write is the loud reading, and persisting "still a member"
+	// over it is the silent one this part exists to close.
+	removedUnnamed uint8 = 255
 )
 
 // EpochPqSecret is one row of [GroupRecord.PqSecrets]: an epoch and the post-quantum half its
@@ -1629,9 +1687,18 @@ func (self *DurableStateStore) PutGroupRecord(record *GroupRecord) error {
 	// this store answering, on the caller's behalf, the one question [Device.restoreOne] answers
 	// where a handle can actually be derived.
 	ledger := encodeLeafOccupancy(record.Leaves)
+	// THE TENTH PART, AND IT IS WRITTEN ON EVERY RECORD FOR THE SEVENTH THROUGH NINTH'S REASON: the
+	// reader tells shapes apart by ARITY, so a part written only for a device that had been removed
+	// would make "nine parts" mean "this build, still a member" and give two records of one group two
+	// shapes -- and the one record that would then be short is the one written by the group this
+	// state is about. Nine octets when removed, empty when not.
+	removal, err := encodeRemoval(record.RemovedKind, record.RemovedEpoch)
+	if err != nil {
+		return err
+	}
 	return self.writeRecord(self.groupRecordPath(record.GroupId), stateKindGroupRecord,
 		record.GroupId, record.PqSecret, record.GroupHandleKey, epochOctets[:], flags, table, dark,
-		witness, ledger)
+		witness, ledger, removal)
 }
 
 // encodeWrapDark is [GroupRecord.WrapDarkKind] and [GroupRecord.WrapDarkEpoch] as the one octet
@@ -1672,6 +1739,59 @@ func decodeWrapDark(part []byte) (uint8, uint64, error) {
 	case wrapDarkNoWrap, wrapDarkUnreadable, wrapDarkOrphan, wrapDarkRemoval, wrapDarkUnfollowable:
 	default:
 		return 0, 0, fmt.Errorf("%w: the wrap_dark part names kind %d, which is not one this build names",
+			ErrStateStoreFormat, part[0])
+	}
+	return part[0], binary.BigEndian.Uint64(part[1:]), nil
+}
+
+// encodeRemoval is [GroupRecord.RemovedKind] and [GroupRecord.RemovedEpoch] as the one octet string
+// part TEN carries: empty for a device that is still a member, or u8(kind) ‖ u64(epoch).
+//
+// IT IS [encodeWrapDark]'s SHAPE AND NOT A SHARED CALL, for [sortEpochPqSecretWitness]'s reason one
+// field over: the two parts carry different kind spaces, and one function taking whichever space its
+// caller happened to mean is a place a wrap_dark kind could be written into the removal part and read
+// back as a removal. Nine octets when removed, empty when not, on EVERY record.
+//
+// THE KIND IS REFUSED RATHER THAN CLAMPED, and the refusal reaches further here than it does for the
+// wrap: [removedKindOf] answers [removedUnnamed] for a non-nil state whose sentinel this build does
+// not recognise, which cannot happen from inside this package and would be a bug if it did. Refusing
+// it fails the persist loudly. Writing [removedNone] instead would record "this device is still a
+// member" over a device that is not, which is the silence part ten exists to end.
+func encodeRemoval(kind uint8, epoch uint64) ([]byte, error) {
+	switch kind {
+	case removedNone:
+		return nil, nil
+	case removedByCommit:
+	default:
+		return nil, fmt.Errorf("%w: removal kind %d is not one this build names", ErrStateStoreFormat, kind)
+	}
+	encoded := make([]byte, 0, 1+8)
+	encoded = append(encoded, kind)
+	var epochOctets [8]byte
+	binary.BigEndian.PutUint64(epochOctets[:], epoch)
+	return append(encoded, epochOctets[:]...), nil
+}
+
+// decodeRemoval reads what [encodeRemoval] wrote, and refuses anything else.
+//
+// AN EMPTY PART IS "still a member" AND IS THE ONLY SHORT SHAPE ADMITTED, for [decodeWrapDark]'s
+// reason: a part of any other length is a record this build did not write, and answering "still a
+// member" for it would be answering the most comfortable thing about a file that has been altered.
+//
+// AND EPOCH ZERO IS A LEGAL VALUE HERE, which is why the kind octet is carried at all rather than a
+// bare epoch with zero standing for "not removed". No commit OPENS epoch zero, so
+// [LeafOccupancy.DepartedEpoch] can use zero as its sentinel; this field holds the epoch a device was
+// STANDING at, and a group's founder stands at epoch zero until its first commit is merged.
+func decodeRemoval(part []byte) (uint8, uint64, error) {
+	if len(part) == 0 {
+		return removedNone, 0, nil
+	}
+	if len(part) != 1+8 {
+		return 0, 0, fmt.Errorf("%w: the removal part is %d octets and it is either empty or %d",
+			ErrStateStoreFormat, len(part), 1+8)
+	}
+	if part[0] != removedByCommit {
+		return 0, 0, fmt.Errorf("%w: the removal part names kind %d, which is not one this build names",
 			ErrStateStoreFormat, part[0])
 	}
 	return part[0], binary.BigEndian.Uint64(part[1:]), nil
@@ -1749,8 +1869,8 @@ func (self *DurableStateStore) GroupRecords() ([]*GroupRecord, error) {
 // reader's arity switch, its two refusals and its field reads are one unit anyway, and splitting
 // them out is what the writer ([DurableStateStore.PutGroupRecord]) already did.
 func groupRecordOf(name string, parts [][]byte) (*GroupRecord, error) {
-	if len(parts) < 5 || 9 < len(parts) {
-		return nil, fmt.Errorf("%w: the group record in %s carries %d parts, want 9, the 8 a store written before the leaf ledger holds, the 7 a store written before the pq_secret witness holds, the 6 a store written before the wrap_dark part holds, or the 5 a store written before the pq_secret table holds",
+	if len(parts) < 5 || 10 < len(parts) {
+		return nil, fmt.Errorf("%w: the group record in %s carries %d parts, want 10, the 9 a store written before the removal part holds, the 8 a store written before the leaf ledger holds, the 7 a store written before the pq_secret witness holds, the 6 a store written before the wrap_dark part holds, or the 5 a store written before the pq_secret table holds",
 			ErrStateStoreFormat, name, len(parts))
 	}
 	if len(parts[3]) != 8 || len(parts[4]) != 1 {
@@ -1801,12 +1921,30 @@ func groupRecordOf(name string, parts [][]byte) (*GroupRecord, error) {
 	// group_handle_key expansion, and this function decodes octets. [Device.restoreOne] is where the
 	// one leaf this device stands at becomes the set, which is what every build before this one
 	// held. What such a device loses is named at [GroupRecord.Leaves].
-	if len(parts) == 9 {
+	if 9 <= len(parts) {
 		ledger, err := decodeLeafOccupancy(parts[8])
 		if err != nil {
 			return nil, fmt.Errorf("%w: the group record in %s: %w", ErrStateStoreFormat, name, err)
 		}
 		record.Leaves = ledger
+	}
+	// AND A RECORD WITH NO REMOVAL PART SAYS THIS DEVICE IS STILL A MEMBER, which is evidence and not
+	// a default: it was written by a build in which a removed device's state died with the process, so
+	// there is nothing on that disk to recover and nothing to invent. What such a device loses is
+	// named at [GroupRecord.RemovedKind] and it is bounded to ONE WALK rather than to the device: the
+	// removing commit is still the first record above its cursor, the cursor is not persisted, and the
+	// MLS state on the disk still stands at the epoch before the removal -- so the first
+	// [Group.Receive] after the restore re-derives the state from mls and [Group.removedLocked] writes
+	// part ten. Until that walk runs the group reads as a member, which is exactly what every build
+	// before this one held. Driven by
+	// TestAStoreWrittenBeforeTheRemovalPartStillStartsAndTheFirstWalkFilesTheRemoval.
+	if len(parts) == 10 {
+		kind, epoch, err := decodeRemoval(parts[9])
+		if err != nil {
+			return nil, fmt.Errorf("%w: the group record in %s: %w", ErrStateStoreFormat, name, err)
+		}
+		record.RemovedKind = kind
+		record.RemovedEpoch = epoch
 	}
 	return record, nil
 }

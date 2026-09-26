@@ -205,6 +205,63 @@ var (
 	// of all three arms; the arm's own clause, carried in the wrapped message, says which.
 	ErrRemovalWithoutRotation = errors.New("urmessage: a commit that removes a member could only be followed on a pq_secret THIS DEVICE has already held, so the removed member keeps the post-quantum half of that epoch's storage root and has not been removed from a quantum adversary at all; this device has refused the commit and is halted at the epoch it was at -- this is a statement about this receiver's own history and not about the group, and a member admitted later would not have refused")
 
+	// ── RULING 52: THE THIRD STATE, AND IT IS A *VALID* COMMIT ─────────────────────────────────
+	//
+	// A commit this group received TOOK THIS DEVICE OUT OF THE GROUP. Ledger item 257's ruling 52
+	// is written as what this is NOT, and each clause is a different field it must not be confused
+	// with:
+	//
+	//   - NOT an eighth [GapReason]. Ruling 16 closed that set, and a gap is a record that arrived
+	//     and would not render. This record arrived, opened, verified against its committer and
+	//     was judged VALID by every §11 rule -- and then ended the membership.
+	//   - NOT [Group.halted]. Ruling 41's halt is a commit this device REFUSED as invalid, and it
+	//     is the honest answer to a removal nobody rotated for. This commit is valid; refusing it
+	//     would be refusing arithmetic.
+	//   - NOT [Group.wrapDark]. A dark group followed a valid commit into an epoch whose wrap did
+	//     not reach it, so it holds the epoch and not the keys. This device does not hold the
+	//     epoch at all, and nothing in it was ever addressed to it -- by construction, since
+	//     ledger item 258's derivation shuts a removed leaf out of the fan-out its own removal
+	//     opens.
+	//
+	// So it is a third thing with its own field ([Group.removed]), its own persisted part (part
+	// TEN of [GroupRecord]) and this sentinel.
+	//
+	// WHAT A DEVICE SAW BEFORE THIS SENTINEL EXISTED, MEASURED AT sdk ca89760 OVER A REAL SERVER
+	// AND NOT REASONED. Four walks, in this order, and then silence for ever:
+	//
+	//	1st Receive: ErrCommitIngest: applying the commit: mls: this client was removed by the commit
+	//	2nd Receive: ErrCommitIngest: processing the commit: mls: the group is closed and its epoch secrets have been zeroized
+	//	3rd Receive: ErrRecordAbandoned: record 7, after 3 attempts: <the 2nd sentence>
+	//	4th Receive: nil. 5th: nil. Every later one: nil.
+	//
+	// Four things are wrong with that and this sentinel is the answer to all four. The one walk
+	// that named the cause named it as a GENERIC failure to follow a commit, which is the same
+	// sentinel a bent ciphertext answers. The SECOND walk lost the cause altogether --
+	// mls.ErrRemovedFromGroup is unreachable once the handle has closed itself, exactly as ruling
+	// 41's refusal became `ratchet generation already consumed` on its second walk. The third
+	// spent [maxRecordAttempts] and resolved the cursor PAST the record, as though a removal were
+	// a record that did not open. And from the fourth on the device was INDISTINGUISHABLE FROM
+	// CAUGHT-UP-AND-SILENT: nil error, [Stats.Omitted] at zero -- item 246's ceiling serves the
+	// rows at and below the epoch it was removed at and calls the page COMPLETE with a
+	// ceiling-relative high water, so the omission predicate has nothing to report -- and a
+	// composer the user could still type into.
+	//
+	// WHAT A CALLER DOES WITH IT. It is STICKY, PERSISTED and PERMANENT: every later [Group.Receive],
+	// [Group.Send] and commit door answers it, the next process reads it off the group record rather
+	// than re-deriving it, and the walk keeps the cursor BELOW the removing commit instead of giving
+	// up on it. The group is not broken and its history is not lost -- this device holds the keys of
+	// the epoch it was removed at, so the transcript up to that epoch still fetches and still opens,
+	// which is what Spec C screen 10's read-only variant renders. The only way back in is to be
+	// added again, which is a new leaf and a new epoch.
+	//
+	// AND THE PRECEDENCE AGAINST THE HALT IS DECIDED BY THE COMMIT'S VALIDITY, not by which field
+	// is read first. [Group.ingestCommitLocked]'s step (3a) refuses an unrotated removal BEFORE
+	// ApplyCommit, so a removal this device judges INVALID halts it and never reaches this state --
+	// correctly, because a commit this device refused did not remove it from anything. This state is
+	// reachable only from the one arm where mls has applied the commit to its own tree and answered
+	// that this client is no longer in the group.
+	ErrRemovedFromGroup = errors.New("urmessage: a commit this group received removed this device from the group: it is a VALID commit, not one this device refused and not a wrap that did not arrive, and this device is not a member any more -- it holds the keys of the epoch it was removed at, so the history up to that epoch still reads, and it can neither follow anything above it nor send again in this group until it is added back")
+
 	// The role model refused a commit, on either arm: MASTER §11's "refused by the committing
 	// client, and rejected by every receiving client on validation". On RECEIPT it is an ingested
 	// commit this device would not follow (ledger item 242's R1, [authorizeCommit] on every

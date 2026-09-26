@@ -428,6 +428,14 @@ func (self *Group) groupRecordLocked(opened bool) *GroupRecord {
 	if self.halted != nil {
 		diagnosis, at = self.halted, self.haltedEpoch
 	}
+	// AND RULING 52's STATE IN ITS OWN TWO FIELDS, which is the ruling and not a tidiness. The
+	// column above carries the dark states AND the halt because ruling 41 made those two disjoint
+	// outcomes of ONE decision, so one octet with two disjoint kinds cannot hand a reader two
+	// diagnoses that disagree. A removal is not a third outcome of that decision: it is a valid
+	// commit this device is not in the result of, decided at a different step, by mls rather than by
+	// this package. Folding it in would put "this device is not a member" behind a field named for a
+	// wrap that did not arrive, and [restoredDiagnosisOf] would grow a third position in a function
+	// whose whole argument is that one octet decides between TWO.
 	return &GroupRecord{
 		GroupId:         self.id,
 		PqSecret:        self.pqSecretLocked(),
@@ -439,7 +447,52 @@ func (self *Group) groupRecordLocked(opened bool) *GroupRecord {
 		WrapDarkKind:    wrapDarkKindOf(diagnosis),
 		WrapDarkEpoch:   at,
 		Leaves:          self.leafLedgerRecordsLocked(),
+		RemovedKind:     removedKindOf(self.removed),
+		RemovedEpoch:    self.removedEpoch,
 	}
+}
+
+// removedKindOf is [removedByCommit] for RULING 52's state and [removedNone] for nil, as
+// [GroupRecord.RemovedKind] spells it.
+//
+// IT IS errors.Is AND NOT A SECOND FLAG ON [Group], for [wrapDarkKindOf]'s reason: a wrapped error
+// keeps its kind, so there is no boolean beside [Group.removed] that could come to disagree with it.
+//
+// AND THERE IS NO "NOT REMOVED" CATCH-ALL, which is the one place this differs from [wrapDarkKindOf].
+// That function needs a widest-true-sentence arm because the resolution has many refusals and a new
+// one must not be persisted as healthy. This field has exactly one writer -- [Group.removedLocked],
+// reached from exactly one place, ApplyCommit's mls.ErrRemovedFromGroup arm -- and that writer wraps
+// [ErrRemovedFromGroup] itself, so a non-nil value that does not carry the sentinel is not a state
+// this package can reach. Mapping it to [removedNone] would persist the ABSENCE of a state that is
+// present, which is this part's own defect arriving through a default arm; [removedUnnamed] is
+// refused by name at [encodeRemoval] instead, so such a persist fails loudly.
+func removedKindOf(err error) uint8 {
+	if err == nil {
+		return removedNone
+	}
+	if errors.Is(err, ErrRemovedFromGroup) {
+		return removedByCommit
+	}
+	return removedUnnamed
+}
+
+// removedErrorOf rebuilds RULING 52's state from the two things [GroupRecord] persists about it, and
+// answers nil for every kind that is not a removal.
+//
+// IT SAYS THAT IT IS RESTORED, in the sentence, for [wrapDarkErrorOf]'s reason: the string is a thing
+// one build wrote, and what a caller acts on is the sentinel.
+//
+// AND IT CARRIES mls.ErrRemovedFromGroup TOO, which [wrapDarkErrorOf] does for none of its kinds and
+// which is deliberate here. The MLS-level fact is not state a restart can invalidate: the commit that
+// removed this device is still in the log, mls answered what it answered, and a caller that branches
+// on that name must not read `true` before a restart and `false` after it about a state that did not
+// change. It is a sentinel value re-wrapped, not a diagnosis invented.
+func removedErrorOf(kind uint8, epoch uint64) error {
+	if kind != removedByCommit {
+		return nil
+	}
+	return fmt.Errorf("%w: at epoch %d, restored from this group's record: a commit removed this device in an earlier process and it has not been a member since; the history at and below that epoch still reads and nothing above it ever will: %w",
+		ErrRemovedFromGroup, epoch, mls.ErrRemovedFromGroup)
 }
 
 // leafLedgerRecordsLocked is [Group.ownHandles] and [Group.departedAt] as the one table part nine

@@ -757,9 +757,13 @@ func TestADeviceRestoredFromAStoreWithNoLeafLedgerStillStarts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the group record back: %v", err)
 	}
-	if len(parts) != 9 {
-		t.Fatalf("this build wrote %d parts and this case strips the ninth; if the arity has "+
-			"moved, the fixture is no longer an old store", len(parts))
+	// THE ARITY IS READ AND NOT ASSUMED, and this case's fixture is the first EIGHT parts however
+	// many this build writes: part ten (ruling 52's removal) landed after this case was written, and
+	// an equality against the total would have made every later part a red suite here rather than at
+	// the arity switch that owns the question.
+	if len(parts) < 9 {
+		t.Fatalf("this build wrote %d parts and this case strips everything from the ninth up; if "+
+			"the arity has fallen below nine, the fixture is no longer an old store", len(parts))
 	}
 	if len(parts[8]) == 0 {
 		t.Fatalf("CONTROL FAILED: the ninth part this build wrote is EMPTY, so stripping it " +

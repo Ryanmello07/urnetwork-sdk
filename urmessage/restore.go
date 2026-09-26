@@ -351,6 +351,17 @@ func (self *Device) restoreOne(store DeviceStore, record *GroupRecord, nonce []b
 		wrapDarkEpoch: record.WrapDarkEpoch,
 		halted:        restoredHalt,
 		haltedEpoch:   record.WrapDarkEpoch,
+		// AND RULING 52's STATE, OUT OF ITS OWN PART AND NOT OUT OF THE COLUMN ABOVE. A device a
+		// commit removed comes back knowing it, which is the whole of why part ten exists: mls can be
+		// asked only ONCE -- it closes the group and zeroizes its epoch secrets as it answers -- and
+		// what the walk did with that answer before this field existed was spend [maxRecordAttempts]
+		// on the record and then go quiet for ever. [removedErrorOf] answers nil for a record that is
+		// not removed AND for a record written before part ten, which is a disk carrying nothing about
+		// this rather than a device that is certainly still a member; [GroupRecord.RemovedKind] prices
+		// that, and the price is one WALK and not one device, because the removing commit is still the
+		// first record above a cursor that is not persisted.
+		removed:      removedErrorOf(record.RemovedKind, record.RemovedEpoch),
+		removedEpoch: record.RemovedEpoch,
 		// AND NOT RECONCILED. This is the one place a [Group] is built over an identity that
 		// existed before this process did, so it is the one place a SECOND copy of that
 		// identity is possible. [Group.Send] refuses until [Group.Receive] has walked this
