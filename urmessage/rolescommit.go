@@ -24,9 +24,18 @@
 // and compares the receiver's decision field for field.
 //
 // THE VERBS. [Group.AddMemberAndPublish] (group.go) is gated on it for ruling 1; [Group.SetRole]
-// and [Group.TransferOwnership] are new and are the two policy commits §11's table names, each
-// one CommitPolicy through the seam, merged and published down the road the add already walks.
-// There is no Remove verb: removal is its own track, gated on ledger items 243, 244 and 245.
+// and [Group.TransferOwnership] are the two policy commits §11's table names, each one CommitPolicy
+// through the seam, merged and published down the road the add already walks; and
+// [Group.RemoveMember] is the removal track's product verb (ledger item 258, ruling 49), one
+// CommitRemoveWithExtensions carrying every leaf the named identity holds AND the policy that drops
+// its entry, down the same road.
+//
+// REMOVAL IS WHERE THIS FILE'S SEND-SIDE DERIVATION STOPPED BEING UNDRIVEN. Item 242's R2 filed the
+// gap in its own words -- "a send-side test of R2/R3/R6a/caps over `outgoingCommit{removeLeaves}`,
+// which no verb reaches yet" -- and the field has been on [outgoingCommit] since R2 with nothing
+// writing it. [Group.RemoveMember] is the first writer, so R2 ("a member or an observer may not
+// remove") and R3 ("only the owner may remove an admin") are decided on this arm for the first time
+// from a product call rather than from the pure table.
 //
 // THE READ SURFACE. [Group.Members] and [Group.MyRole] are the roles as this device reads them,
 // under the live policy with an unnamed identity a MEMBER (ruling 8): what a roster shows, and what
@@ -165,9 +174,14 @@ func (self *Group) liveContextLocked() (*liveContext, error) {
 // outgoingCommit is what a commit this device is about to build WOULD do: the Adds it carries as
 // the encoded key packages, the leaves it removes, and the policy body it installs -- nil for a
 // commit that keeps the list the group has. It is the send side's spelling of the three vectors
-// and the post-commit list [messagegroup.EngineProcessed] reports for an ingested commit. No verb
-// writes removeLeaves until the removal track lands (ledger items 243, 244, 245); it is on the
-// shape so that the decision built here is the receiver's whole decision and not two thirds of it.
+// and the post-commit list [messagegroup.EngineProcessed] reports for an ingested commit.
+//
+// removeLeaves IS WRITTEN BY [Group.RemoveMember] AND BY NOTHING ELSE, and it stood here unwritten
+// from R2 (2026-09-22) until ledger item 258 -- on the shape so that the decision built here was
+// the receiver's WHOLE decision and not two thirds of it, and therefore judged by rules nothing
+// drove from a verb. One verb writes it now, and it writes removeLeaves and policy TOGETHER: a
+// removal that left the identity's policy entry standing would be refused by R0c, on this side, as
+// a phantom.
 type outgoingCommit struct {
 	addKeyPackages [][]byte
 	removeLeaves   []uint32
@@ -180,22 +194,29 @@ type outgoingCommit struct {
 // product would refuse on receipt is one it must not build. A refusal is counted in
 // [Stats.CommitRefusedOwn] and answered as [ErrCommitUnauthorized] wrapping the rule, exactly as a
 // receiver would answer the same commit, and the caller builds nothing.
-func (self *Group) authorizeOutgoingLocked(intent *outgoingCommit) error {
+//
+// IT ANSWERS THE DECISION IT TOOK, for the reason [Group.authorizeCommitLocked] answers its own on
+// the other arm: a caller that needs a field of the value it has just judged reads it off THAT
+// value rather than deriving it a second time. [Group.RemoveMember] is that caller -- the
+// post-commit extension list it hands the seam IS [CommitAuthorization.ExtensionsAfter], so the
+// list the commit installs and the list the rules ran over are one value and cannot come to
+// disagree. [Group.AddMemberAndPublish] and the two policy verbs want only the refusal.
+func (self *Group) authorizeOutgoingLocked(intent *outgoingCommit) (*CommitAuthorization, error) {
 	decision, err := self.outgoingAuthorizationLocked(intent)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := authorizeCommit(decision); err != nil {
 		self.stats.CommitRefusedOwn += 1
-		return fmt.Errorf("%w: %w", ErrCommitUnauthorized, err)
+		return nil, fmt.Errorf("%w: %w", ErrCommitUnauthorized, err)
 	}
 	if authorizer := self.device.commitAuthorizer; authorizer != nil {
 		if err := authorizer(decision); err != nil {
 			self.stats.CommitRefusedOwn += 1
-			return fmt.Errorf("%w: %w", ErrCommitUnauthorized, err)
+			return nil, fmt.Errorf("%w: %w", ErrCommitUnauthorized, err)
 		}
 	}
-	return nil
+	return decision, nil
 }
 
 // outgoingAuthorizationLocked builds the [CommitAuthorization] a commit doing what intent says
@@ -434,6 +455,150 @@ func (self *Group) TransferOwnership(ctx context.Context, identityPub []byte) er
 	return self.commitPolicyAndPublishLocked(ctx, body)
 }
 
+// ── the removal verb ─────────────────────────────────────────────────────────────────────────
+
+// RemoveMember takes one identity out of this group -- every leaf it holds and its entry in the
+// policy, in ONE commit -- and publishes the epoch that commit opens. It is the removal track's
+// product verb (ledger item 258, ruling 49: "one identity-keyed call removes ALL of that identity's
+// leaves in one commit"), and its shape is [Group.SetRole]'s and [Group.TransferOwnership]'s so
+// that cgo projects it through the URNET_MESSAGE_COMMIT_* kinds those two established.
+//
+// ONE CALL, EVERY LEAF. An identity may hold up to ten device leaves (§11, ruling 7) and removing
+// some of them is not removing the member: the ones left standing still read every epoch and still
+// write. So the leaves are found off the MEMBERSHIP -- the same roster [Group.Members] answers and
+// the same one every receiver reads the commit against -- and they go into one Remove vector. A
+// per-leaf verb is [Group.RemoveDevice]'s shape, which ruling 50 put in its own track after this
+// one ships: that verb is keyed on leaves, runs once per group the identity belongs to, and owes a
+// partial-success state machine. This one is keyed on an identity in one group and has no partial
+// state, because one commit either lands or does not.
+//
+// AND THE POLICY LEAVES WITH THE TREE, WHICH IS WHY THIS VERB IS NOT A CommitRemove. MASTER §6's
+// urmessage_group_policy is keyed by credential identity and nothing ever drops an entry, so a bare
+// Remove of the last leaf of an identity any SetRole has NAMED leaves the group naming an identity
+// with no leaf -- R0c's phantom, refused by every honest receiver, which is exactly how the OWNER
+// was unable to remove an ADMIN before this (item 242's R2 filed it). So the live policy's entry for
+// that identity is dropped, the full post-commit extension list is built the way [Group.SetRole]
+// builds it -- mls's own ExtensionsWithGroupPolicy over the live list, 0xF001 replaced in place and
+// 0x0003 required_capabilities kept -- and the Remove and the GroupContextExtensions ride ONE commit
+// through the seam's CommitRemoveWithExtensions, whose proposal order is fixed inside it (ruling
+// 51). THE LIST HANDED TO THE SEAM IS THE LIST THE RULES RAN OVER: it is read off the decision
+// [Group.authorizeOutgoingLocked] answered rather than derived a second time, so an edit cannot make
+// the judged list and the installed list two values.
+//
+// THE REFUSALS ARE THE RECEIVERS' OWN AND THEY LAND BEFORE ANYTHING IS BUILT. The send-side
+// decision is [authorizeCommit] over the value this commit WOULD produce, so a call this device's
+// peers would refuse is one it does not make: R2 answers a MEMBER's or an OBSERVER's attempt
+// ([ErrCommitRemoveByNonAdmin]), R3 answers anybody but the owner removing an ADMIN
+// ([mls.ErrAdminRemovedByNonOwner]), R0c answers a policy left naming the departed, and ruling 7's
+// caps are judged over the post-commit tree. Each is [ErrCommitUnauthorized] wrapping the rule,
+// counted once in [Stats.CommitRefusedOwn], with no commit staged, no record sealed and no round
+// trip spent. R6a is not reachable from here and saying so is the honest half: it judges ADDED
+// leaves and a removal declares none.
+//
+// THREE REQUESTS ARE REFUSED BY NAME INSTEAD, IN THIS ORDER, each because the predicate's sentence
+// would be about something other than what was asked, and each true whoever asks. [ErrNoSuchMember]:
+// an identity with no leaf would build a commit with no Remove proposal, which is the seam's refusal
+// about a vector rather than an answer about a person. [ErrRemoveOwner]: an owner's leaf is removed
+// by nobody (ruling 11), and the policy this verb would build has no owner for mls to encode.
+// [ErrRemoveSelf]: leaving is not this verb (rulings 11 and 48), and the naive path surfaces R6c's
+// "a leaf's identity changed across the commit" to somebody who pressed Leave.
+//
+// THE OWNER'S COMES BEFORE THE SELF ONE, which is the whole reason there are two: an OWNER pressing
+// Leave must be told to hand the group over, not to ask an admin. MASTER §11 rules it -- "the leave
+// action is refused for an OWNER until ownership has been transferred to a current member; the
+// client offers the transfer in the same flow rather than reporting a bare failure" -- and
+// [ErrRemoveSelf]'s sentence is the wrong one for it.
+//
+// AND THE ORDER OF THOSE THREE AGAINST THE PREDICATE IS NOT [Group.SetRole]'s, deliberately. SetRole
+// answers its caller check FIRST, "so that a member is still answered R4 and not this", because the
+// predicate CANNOT decide SetRole's case (ruling 15). Here the predicate decides every authority
+// question and nothing is taken from it; what is answered first is the set of requests for which NO
+// commit exists at all. A MEMBER asking to remove the OWNER is therefore answered [ErrRemoveOwner]
+// and not R3: "nobody removes the owner, transfer first" is true and names the door, where "only the
+// owner may remove an admin" would invite a member to think some admin could.
+//
+// WHAT THE EPOCH IT OPENS COSTS THE REMOVED MEMBER, which is the whole point of the verb.
+// [Group.publishCommitLocked] draws a FRESH pq_secret for that epoch and fans it out to the leaves
+// [Group.wrapTargetsAtLocked] enumerates -- the live tree minus the leaves the STAGED COMMIT
+// removes, read off the seam's own [messagegroup.PendingEpoch] and not off anything this verb
+// passes down (ruling 51). So the removed identity holds no pq_secret for the epoch its own removal
+// opens, therefore no storage_root, therefore neither that epoch's read key nor its write key: it
+// can neither follow the group nor write to it, and that denial survives an adversary who later
+// breaks X25519 while holding an archive (item 243, ruling 42's clause (a)).
+// TestTheRemovedMembersOwnRemovalOpensAnEpochItCannotDerive drives it from this verb with a
+// survivor's agreement as the inline control.
+func (self *Group) RemoveMember(ctx context.Context, identityPub []byte) error {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if err := self.committableLocked(); err != nil {
+		return err
+	}
+	members, err := self.membersLocked()
+	if err != nil {
+		return err
+	}
+	// EVERY LEAF THE NAMED IDENTITY HOLDS, in leaf order, with the role it holds and whether one of
+	// those leaves is this device's own. The own-leaf reading is [Member.Mine] -- the LEAF and not
+	// the device's stored identity -- because what must not go into the Remove vector is a leaf:
+	// RFC 9420 §12.4 forbids a committer removing itself (mls.ErrRemoveCommitter), which is ruling
+	// 11's "no identity's last leaf ever leaves in its own commit" one layer down.
+	leaves := []uint32{}
+	role := ""
+	mine := false
+	for _, member := range members {
+		if !bytes.Equal(member.IdentityPub, identityPub) {
+			continue
+		}
+		mine = mine || member.Mine
+		role = member.Role
+		leaves = append(leaves, member.LeafIndex)
+	}
+	// THE THREE BY-NAME REFUSALS, IN THIS ORDER, AND THE ORDER IS THE ARGUMENT. Each is about the
+	// SUBJECT rather than about the caller's authority, so each is true whoever asks -- and the
+	// owner's comes before the self one because an OWNER pressing Leave must be told to hand the
+	// group over (MASTER §11: "the leave action is refused for an OWNER until ownership has been
+	// transferred"), which is a different sentence from "ask an admin to remove you" and the only
+	// one that is true for it.
+	if len(leaves) == 0 {
+		return fmt.Errorf("%w: %x", ErrNoSuchMember, identityPub)
+	}
+	if role == mls.RoleOwner.String() {
+		return fmt.Errorf("%w: %x holds %d leaf/leaves", ErrRemoveOwner, identityPub, len(leaves))
+	}
+	if mine {
+		return fmt.Errorf("%w: leaves %v include this device's own", ErrRemoveSelf, leaves)
+	}
+	// THE POLICY THE COMMIT INSTALLS: the live one with that identity's entry gone. RemoveRole is
+	// a no-op for an identity the policy never named, which is every non-founder of every group
+	// no SetRole has touched (item 242) -- so the list this builds is byte identical to the live
+	// one for such a member, and the commit still carries it. One shape, and R0b holds the rest of
+	// the list identical either way.
+	policy, err := self.editablePolicyLocked()
+	if err != nil {
+		return err
+	}
+	policy.RemoveRole(identityPub)
+	body, err := policyBodyOf(policy)
+	if err != nil {
+		return err
+	}
+	// THE DECISION OVER BOTH VECTORS AT ONCE, before the connection is consulted and before
+	// anything is staged. removeLeaves and policy are set together for R0c's sake: judged apart,
+	// the Remove would be authorized and the phantom would be somebody else's refusal.
+	decision, err := self.authorizeOutgoingLocked(&outgoingCommit{removeLeaves: leaves, policy: body})
+	if err != nil {
+		return err
+	}
+	if err := self.rebindLocked(); err != nil {
+		return err
+	}
+	commit, _, _, err := self.handle.CommitRemoveWithExtensions(leaves, decision.ExtensionsAfter)
+	if err != nil {
+		return fmt.Errorf("urmessage: CommitRemoveWithExtensions: %w", err)
+	}
+	return self.publishCommitLocked(ctx, commit)
+}
+
 // editablePolicyLocked is the live policy as a value the verbs may write into: freshly decoded off
 // this group's own context, so nothing it shares is the epoch the group is running. A group whose
 // context carries no valid policy has no policy to edit and is refused with the decode's reason:
@@ -473,7 +638,7 @@ func policyBodyOf(policy *mls.GroupPolicyExtension) ([]byte, error) {
 // exactly where it was, the live policy still the one every receiver holds, and the verb ready to
 // be asked again after [Group.Receive] has followed the winner.
 func (self *Group) commitPolicyAndPublishLocked(ctx context.Context, policy []byte) error {
-	if err := self.authorizeOutgoingLocked(&outgoingCommit{policy: policy}); err != nil {
+	if _, err := self.authorizeOutgoingLocked(&outgoingCommit{policy: policy}); err != nil {
 		return err
 	}
 	if err := self.rebindLocked(); err != nil {

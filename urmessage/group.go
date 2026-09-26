@@ -1733,7 +1733,7 @@ func (self *Group) AddMemberAndPublish(ctx context.Context, keyPackage []byte) (
 	// (0) THE SEND-SIDE AUTHORIZATION, before the connection is consulted and before anything is
 	// built: a refusal is a fact about this group and this device's role, and it costs no round
 	// trip and touches no session.
-	if err := self.authorizeOutgoingLocked(&outgoingCommit{addKeyPackages: [][]byte{keyPackage}}); err != nil {
+	if _, err := self.authorizeOutgoingLocked(&outgoingCommit{addKeyPackages: [][]byte{keyPackage}}); err != nil {
 		return nil, err
 	}
 	if err := self.rebindLocked(); err != nil {
@@ -2069,6 +2069,29 @@ func (self *Group) publishCommitLocked(ctx context.Context, commit []byte) error
 		return fmt.Errorf("urmessage: advancing the session to epoch %d: %w", newEpoch, err)
 	}
 	self.commit = append([]byte(nil), commit...)
+	// (4a) WHAT THIS DEVICE'S OWN COMMIT TOOK OUT OF THE GROUP, FILED AND PRUNED -- THE TWO LINES
+	// [Group.ingestCommitLocked]'s step (5a) has run since ledger item 245, ON THE ARM THAT INGESTS
+	// SOMEBODY ELSE'S COMMIT. Until [Group.RemoveMember] there was no verb that could put a leaf in
+	// `pending.RemovedLeaves` here, so the committer's own arm owed nothing; the day the removal verb
+	// ships, the ADMIN that removes somebody is the one device in the group that does not learn it
+	// from an ingest, and the two costs land on it exactly as they would on a receiver:
+	//
+	//   - THE FILING. The removed member's records sit BELOW this commit in record order and are the
+	//     whole of its half of the conversation. The cursor is not persisted, so this device re-walks
+	//     them at its next restart -- and without [Group.departedAt], [Group.leavesAtLocked] cannot
+	//     resolve the sender_handle they carry once the leaf is out of the membership: each takes the
+	//     fail() road and is abandoned after [maxRecordAttempts]. The admin who removed somebody
+	//     would be the ONE member of the group that loses their history.
+	//   - THE PRUNE, and it must precede [Group.crossEpochLadderLocked] for that function's own
+	//     reason: it re-tracks a ladder for every entry of [Group.peerHeads] at the new epoch, so a
+	//     head left behind here installs a receiver ratchet for a leaf that no longer stands in this
+	//     group, positioned at the removed member's last index -- which §7.7's next Add then refills.
+	//
+	// The order and the argument are step (5a)'s, and the vector is the STAGED commit's own
+	// `pending.RemovedLeaves`: the same field the fan-out above took its exclusion from, so the
+	// leaves this device stops wrapping to and the leaves it files as departed are one read.
+	self.noteDepartedLeavesLocked(pending.RemovedLeaves, newEpoch)
+	self.pruneRemovedLaddersLocked(pending.RemovedLeaves)
 	if err := self.crossEpochLadderLocked(newEpoch); err != nil {
 		return err
 	}

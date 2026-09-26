@@ -368,7 +368,7 @@ func TestAMembersRoleVerbsAreRefusedOnTheSendSideAndNothingIsBuilt(t *testing.T)
 	allowed := func(t *testing.T, who *roleMember, what string, intent *outgoingCommit) {
 		t.Helper()
 		before := who.group.Stats()
-		if err := who.group.authorizeOutgoingLocked(intent); err != nil {
+		if _, err := who.group.authorizeOutgoingLocked(intent); err != nil {
 			t.Errorf("%s's %s was refused on the send side: %v", who.name, what, err)
 		}
 		if after := who.group.Stats(); after.CommitRefusedOwn != before.CommitRefusedOwn {
@@ -473,7 +473,7 @@ func TestTheVerbsRefuseAMalformedRequestByNameAndCountNothing(t *testing.T) {
 	}
 	// the control: the same request with a settable role reaches the rules, and the owner's
 	// decision on it is allowed
-	if err := owner.group.authorizeOutgoingLocked(&outgoingCommit{policy: func() []byte {
+	if _, err := owner.group.authorizeOutgoingLocked(&outgoingCommit{policy: func() []byte {
 		promotion := world.policyOf(owner)
 		promotion.SetRole(bob.dev.identityPub, mls.RoleAdmin)
 		body, err := policyBodyOf(promotion)

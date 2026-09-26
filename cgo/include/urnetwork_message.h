@@ -31,6 +31,7 @@
  *
  * THESE CALLS BLOCK AND YOU SHOULD NOT BE ON A UI THREAD. urnet_message_device_connect,
  * _group_open, _group_send, _group_receive, _group_set_role, _group_transfer_ownership,
+ * _group_remove_member,
  * _device_restore and _device_create_group/_join all wait on the network. connect's budget
  * DEFAULTS TO 90 SECONDS, because a reconnecting client is not routed to by the operator for
  * about sixty (measured). run them on a thread of your own and pass a urnet_message_context
@@ -63,7 +64,9 @@
  * THE ROLE MODEL CROSSES TOO (MASTER section 11). every member has a role -- owner, admin, member
  * or observer -- and the library refuses, on both sides, a commit the committer's role does not
  * permit: urnet_message_group_members is the roster with a role per row, _group_my_role is what
- * THIS device may do, and _group_set_role and _group_transfer_ownership are the two policy verbs.
+ * THIS device may do, _group_set_role and _group_transfer_ownership are the two policy verbs, and
+ * _group_remove_member takes one identity out of the group -- every device leaf it holds and its
+ * entry in the policy -- in one commit.
  * a verb answers a URNET_MESSAGE_COMMIT_* KIND rather than a bool, because "your role does not
  * permit this", "somebody else's commit landed first, fetch and retry" and "the network failed"
  * are three different things for a caller to do next. see the roster section.
@@ -130,9 +133,9 @@ extern "C" {
 #define URNET_MESSAGE_GAP_UNSUPPORTED   "unsupported"
 #define URNET_MESSAGE_GAP_OUT_OF_WINDOW "out_of_window"
 
-/* what urnet_message_group_set_role and urnet_message_group_transfer_ownership answer. out_error is
- * set on everything but OK. BRANCH ON THE KIND AND SHOW THE TEXT: the kind is what to do next and
- * the text is why.
+/* what urnet_message_group_set_role, urnet_message_group_transfer_ownership and
+ * urnet_message_group_remove_member answer. out_error is set on everything but OK. BRANCH ON THE
+ * KIND AND SHOW THE TEXT: the kind is what to do next and the text is why.
  *
  * REFUSED: this device's role does not permit the change (MASTER section 11). nothing was built,
  * nothing moved for anybody, the stats' commit_refused_own moved by one, and retrying answers the
@@ -143,7 +146,10 @@ extern "C" {
  * INVALID: the request was malformed and refused by name before any rule was reached -- a role
  * that is not "admin", "member" or "observer", a set_role naming the owner's own identity (both
  * because ownership moves through transfer_ownership), a transfer to the identity that already
- * owns the group, an identity_pub_hex that is not hex. nothing counted. it is a caller bug.
+ * owns the group, a remove_member naming the identity that OWNS the group or THIS device's own
+ * identity or an identity no leaf carries, an identity_pub_hex that is not hex. nothing counted.
+ * it is a caller bug, and the text names the door: transfer ownership first, or -- for your own
+ * identity -- ask an admin, because no identity's last leaf ever leaves in its own commit.
  * FAILED: everything else -- the transport, a group that is not open or not yet reconciled, a
  * closed handle. FAILED with out_error left NULL is an unknown self or ctx handle, which this abi
  * logs by name rather than reporting.
@@ -438,6 +444,17 @@ int32_t urnet_message_group_set_role(uint64_t self, uint64_t ctx, const char* id
  * a stranger is REFUSED, the current owner is INVALID, and anybody but the owner calling this is
  * REFUSED. answers a URNET_MESSAGE_COMMIT_* kind. */
 int32_t urnet_message_group_transfer_ownership(uint64_t self, uint64_t ctx, const char* identity_pub_hex, char** out_error);
+/* take one identity out of the group: EVERY device leaf it holds and its entry in the group's
+ * policy, in ONE commit. BLOCKS on the submit and takes a cancel handle. identity_pub_hex is the
+ * identity_pub a member info carries, so a roster row is all a caller needs -- one call per PERSON
+ * and not one per device, because a removal that left one of somebody's devices in the group would
+ * have removed nobody. answers a URNET_MESSAGE_COMMIT_* kind: a member or an observer is REFUSED,
+ * and only the owner may remove an admin. the OWNER's identity is INVALID -- transfer ownership
+ * first, and the outgoing owner is then an admin the new owner may remove -- and so is THIS
+ * device's own identity, which is a leave and not a removal. after it lands, the removed identity
+ * can neither read the group nor write to it: the epoch the removal opens runs on a fresh secret
+ * that is delivered to every other member and not to it. re-read the roster afterwards. */
+int32_t urnet_message_group_remove_member(uint64_t self, uint64_t ctx, const char* identity_pub_hex, char** out_error);
 
 /* ----- the list handles ----- */
 

@@ -1140,10 +1140,16 @@ const (
 	messageCommitFailed  int32 = 4
 )
 
-// messageCommitKindOf is the projection of a policy verb's error onto the kinds above. The order
+// messageCommitKindOf is the projection of a commit verb's error onto the kinds above. The order
 // matters only where two sentinels could both match, and none do: ErrCommitLost wraps
-// ErrSubmitRefused and not ErrCommitUnauthorized; the two INVALID sentinels wrap nothing of the
-// others.
+// ErrSubmitRefused and not ErrCommitUnauthorized; the INVALID sentinels wrap nothing of the others.
+//
+// THE INVALID SET IS EVERY REQUEST A VERB REFUSES BY NAME BEFORE A RULE IS REACHED, and it grew by
+// three with urnet_message_group_remove_member (ledger item 258): urmessage.ErrRemoveSelf,
+// urmessage.ErrRemoveOwner and urmessage.ErrNoSuchMember. Each is a caller bug rather than a role
+// answer -- nothing is built, nothing is counted, and retrying answers the same -- which is exactly
+// what the header's INVALID paragraph promises, and what keeps them off REFUSED, whose contract says
+// "this device's role does not permit the change" and whose counter moved.
 func messageCommitKindOf(err error) int32 {
 	switch {
 	case err == nil:
@@ -1152,7 +1158,9 @@ func messageCommitKindOf(err error) int32 {
 		return messageCommitRefused
 	case errors.Is(err, urmessage.ErrCommitLost):
 		return messageCommitLost
-	case errors.Is(err, urmessage.ErrRoleNotSettable), errors.Is(err, urmessage.ErrAlreadyOwner), errors.Is(err, errIdentityNotHex):
+	case errors.Is(err, urmessage.ErrRoleNotSettable), errors.Is(err, urmessage.ErrAlreadyOwner),
+		errors.Is(err, urmessage.ErrRemoveSelf), errors.Is(err, urmessage.ErrRemoveOwner),
+		errors.Is(err, urmessage.ErrNoSuchMember), errors.Is(err, errIdentityNotHex):
 		return messageCommitInvalid
 	}
 	return messageCommitFailed
@@ -1307,6 +1315,38 @@ func urnet_message_group_transfer_ownership(self C.uint64_t, ctx C.uint64_t, ide
 	identity, err := messageIdentityOf(identityPubHex)
 	if err == nil {
 		err = self_.TransferOwnership(ctx_, identity)
+	}
+	setErrorOut(outError, err)
+	return C.int32_t(messageCommitKindOf(err))
+}
+
+// urnet_message_group_remove_member takes one identity out of the group -- EVERY device leaf it
+// holds and its entry in the group's policy, in ONE commit -- and BLOCKS on the submit. It answers a
+// URNET_MESSAGE_COMMIT_* kind; see the decision above. identity_pub_hex is the identity_pub a member
+// info carries, so a roster row is the whole of what a caller needs.
+//
+// Who may remove whom is MASTER section 11's table and is decided by the SAME predicate every
+// receiver runs, before anything is built: a member or an observer is REFUSED, and only the owner may
+// remove an admin. Three requests are INVALID rather than REFUSED, each refused by name: the
+// identity that OWNS the group (ownership moves through urnet_message_group_transfer_ownership
+// first, and the outgoing owner is then an admin the new owner may remove), THIS device's own
+// identity (leaving is a product flow and not this call -- ledger item 257's ruling 48 -- and the
+// text says so), and an identity no leaf carries.
+//
+//export urnet_message_group_remove_member
+func urnet_message_group_remove_member(self C.uint64_t, ctx C.uint64_t, identityPubHex *C.char, outError **C.char) C.int32_t {
+	defer cgoGuard("urnet_message_group_remove_member")
+	self_, ok := resolveHandle[*urmessage.Group](uint64(self), "urnet_message_group_remove_member")
+	if !ok || self_ == nil {
+		return C.int32_t(messageCommitFailed)
+	}
+	ctx_, ok := messageCtx(ctx, "urnet_message_group_remove_member")
+	if !ok {
+		return C.int32_t(messageCommitFailed)
+	}
+	identity, err := messageIdentityOf(identityPubHex)
+	if err == nil {
+		err = self_.RemoveMember(ctx_, identity)
 	}
 	setErrorOut(outError, err)
 	return C.int32_t(messageCommitKindOf(err))

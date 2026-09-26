@@ -367,6 +367,15 @@ func (self *rotWorld) rotate(committer *rotMember,
 	if err := group.session.AdvanceEpoch(pqNext); err != nil {
 		self.t.Fatalf("%s advancing to epoch %d: %v", committer.name, pending.Epoch, err)
 	}
+	// production's step (4a), which arrived with [Group.RemoveMember]: a committer files what
+	// its own commit took out of the group and prunes the departed leaves' ladder heads,
+	// BEFORE the re-track below, exactly as the ingest arm's step (5a) does. It is here so a
+	// removal case in this file runs against the state production leaves; no case here may
+	// read [Group.departedAt] at a committer as evidence about the publish path, because this
+	// line is the harness's. The functions are held in removemember_test.go and the call site
+	// end to end in cp3b.
+	group.noteDepartedLeavesLocked(pending.RemovedLeaves, pending.Epoch)
+	group.pruneRemovedLaddersLocked(pending.RemovedLeaves)
 	if err := group.crossEpochLadderLocked(pending.Epoch); err != nil {
 		self.t.Fatalf("%s crossing the epoch: %v", committer.name, err)
 	}

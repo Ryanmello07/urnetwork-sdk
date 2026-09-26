@@ -758,6 +758,12 @@ func TestTheCommitKindProjectionTellsTheThreeAnswersApart(t *testing.T) {
 		{"a wrapped ErrCommitLost", fmt.Errorf("SetRole: %w", lost), messageCommitLost},
 		{"ErrRoleNotSettable", fmt.Errorf("%w: %q", urmessage.ErrRoleNotSettable, "king"), messageCommitInvalid},
 		{"ErrAlreadyOwner", urmessage.ErrAlreadyOwner, messageCommitInvalid},
+		// the three RemoveMember refuses by name before any rule is reached (ledger item 258).
+		// Each is INVALID and not REFUSED: nothing was built and nothing was counted, so a caller
+		// that showed "your role does not permit this" would be inventing a role answer.
+		{"ErrRemoveSelf", fmt.Errorf("%w: leaves [3] include this device's own", urmessage.ErrRemoveSelf), messageCommitInvalid},
+		{"ErrRemoveOwner", fmt.Errorf("%w: ab holds 1 leaf/leaves", urmessage.ErrRemoveOwner), messageCommitInvalid},
+		{"ErrNoSuchMember", fmt.Errorf("%w: ab", urmessage.ErrNoSuchMember), messageCommitInvalid},
 		{"an identity that is not hex", fmt.Errorf("%w: odd length", errIdentityNotHex), messageCommitInvalid},
 		{"ErrSubmitRefused alone", urmessage.ErrSubmitRefused, messageCommitFailed},
 		{"ErrNotConnected", urmessage.ErrNotConnected, messageCommitFailed},
@@ -1260,6 +1266,9 @@ func TestTheRosterAndTheVerbsRefuseAHandleThatDoesNotResolve(t *testing.T) {
 		if got := callExportNil(t, urnet_message_group_transfer_ownership, handle, uint64(0), cString("ab"), nil)[0].Int(); int32(got) != messageCommitFailed {
 			t.Errorf("transfer_ownership on handle %d answered kind %d, want FAILED", handle, got)
 		}
+		if got := callExportNil(t, urnet_message_group_remove_member, handle, uint64(0), cString("ab"), nil)[0].Int(); int32(got) != messageCommitFailed {
+			t.Errorf("remove_member on handle %d answered kind %d, want FAILED", handle, got)
+		}
 		if got := callExport(t, urnet_message_member_list_count, handle)[0].Int(); got != 0 {
 			t.Errorf("member_list_count on handle %d answered %d", handle, got)
 		}
@@ -1274,6 +1283,9 @@ func TestTheRosterAndTheVerbsRefuseAHandleThatDoesNotResolve(t *testing.T) {
 	defer handleRelease(group)
 	if got := callExportNil(t, urnet_message_group_set_role, group, unknown, cString("ab"), cString("admin"), nil)[0].Int(); int32(got) != messageCommitFailed {
 		t.Errorf("set_role with an unknown ctx answered kind %d, want FAILED", got)
+	}
+	if got := callExportNil(t, urnet_message_group_remove_member, group, unknown, cString("ab"), nil)[0].Int(); int32(got) != messageCommitFailed {
+		t.Errorf("remove_member with an unknown ctx answered kind %d, want FAILED", got)
 	}
 
 	// the member list handle bounds its index and answers the row's json in between

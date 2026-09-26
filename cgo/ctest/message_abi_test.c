@@ -1491,6 +1491,137 @@ int main(void) {
           (unsigned long long)urnet_message_group_epoch(group_a), (unsigned long long)urnet_message_group_epoch(group_b));
   }
 
+  step("REMOVE_MEMBER: four INVALID requests by name, then the owner takes the admin out in ONE "
+       "commit and the removed device can no longer follow the group");
+  {
+    /* THE IDENTITIES ARE RE-READ OFF THE ROSTER RATHER THAN CARRIED DOWN, because the roster is
+     * the whole of what a caller has: identity_pub_hex is the field a member info carries and is
+     * passed back as is. One call per PERSON, not one per device.
+     *
+     * WHAT IS NOT HERE, said rather than glossed: a REFUSED removal. In a two-member group every
+     * removal a non-owner could ask for names the OWNER, which is INVALID by name and not a role
+     * answer, so REFUSED needs a third member -- the kind projection is held in Go
+     * (TestTheCommitKindProjectionTellsTheThreeAnswersApart) and the refusal end to end in cp3b. */
+    char own_role[32], their_role[32], own_hex[160], their_hex[160];
+    char* err = NULL;
+    uint64_t roster = urnet_message_group_members(group_a, &err);
+    REQUIRE(roster != 0, "A's group answered no roster before the removal");
+    REQUIRE(roster_row(roster, true, own_role, sizeof(own_role), own_hex, sizeof(own_hex)),
+            "A's roster does not mark exactly one row as A's own");
+    REQUIRE(roster_row(roster, false, their_role, sizeof(their_role), their_hex, sizeof(their_hex)),
+            "A's roster does not hold exactly one row that is not A's own");
+    CHECK(urnet_release(roster), "releasing A's roster answered false");
+    CHECK(strcmp(own_role, "owner") == 0, "A reads its own role as %s before the removal", own_role);
+    CHECK(strcmp(their_role, "admin") == 0, "A reads B as %s before the removal, want admin", their_role);
+
+    uint64_t epoch_before = urnet_message_group_epoch(group_a);
+    int refused_a_pre = counter_of(group_a, "commit_refused_own");
+    int refused_b_pre = counter_of(group_b, "commit_refused_own");
+    int submitted_a_pre = submitted_by(group_a);
+    int32_t kind = 0;
+
+    /* (1) THE OWNER'S OWN IDENTITY, asked by the owner: INVALID, and the text names
+     * transfer_ownership. MASTER section 11 refuses a leave to an OWNER until the group has been
+     * handed over, so this is not "ask an admin" either. */
+    err = NULL;
+    kind = urnet_message_group_remove_member(group_a, ctx, own_hex, &err);
+    printf("      A asking to remove itself answered kind %d: %s\n", (int)kind, err != NULL ? err : "(no error text)");
+    CHECK(kind == URNET_MESSAGE_COMMIT_INVALID && err != NULL,
+          "A removing its own (owner) identity answered kind %d, want %d (INVALID) with out_error",
+          (int)kind, URNET_MESSAGE_COMMIT_INVALID);
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+
+    /* (2) THE OWNER'S IDENTITY, asked by the admin: INVALID for the same reason, whoever asks */
+    kind = urnet_message_group_remove_member(group_b, ctx, own_hex, &err);
+    CHECK(kind == URNET_MESSAGE_COMMIT_INVALID && err != NULL,
+          "B removing the owner answered kind %d, want %d (INVALID) with out_error",
+          (int)kind, URNET_MESSAGE_COMMIT_INVALID);
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+
+    /* (3) THIS DEVICE'S OWN IDENTITY: leaving is a product flow and not this call */
+    kind = urnet_message_group_remove_member(group_b, ctx, their_hex, &err);
+    printf("      B asking to remove itself answered kind %d: %s\n", (int)kind, err != NULL ? err : "(no error text)");
+    CHECK(kind == URNET_MESSAGE_COMMIT_INVALID && err != NULL,
+          "B removing its own identity answered kind %d, want %d (INVALID) with out_error",
+          (int)kind, URNET_MESSAGE_COMMIT_INVALID);
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+
+    /* (4) AN IDENTITY NO LEAF CARRIES, and an identity_pub_hex that is not hex at all */
+    kind = urnet_message_group_remove_member(group_a, ctx,
+        "0000000000000000000000000000000000000000000000000000000000000000", &err);
+    CHECK(kind == URNET_MESSAGE_COMMIT_INVALID && err != NULL,
+          "removing an identity that holds no leaf answered kind %d, want %d (INVALID) with out_error",
+          (int)kind, URNET_MESSAGE_COMMIT_INVALID);
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+    kind = urnet_message_group_remove_member(group_a, ctx, "not hex at all", &err);
+    CHECK(kind == URNET_MESSAGE_COMMIT_INVALID && err != NULL,
+          "remove_member with a non-hex identity answered kind %d, want %d (INVALID) with out_error",
+          (int)kind, URNET_MESSAGE_COMMIT_INVALID);
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+
+    /* NOTHING WAS BUILT AND NOTHING WAS COUNTED AS A ROLE REFUSAL: INVALID is a caller bug */
+    CHECK(counter_of(group_a, "commit_refused_own") == refused_a_pre &&
+          counter_of(group_b, "commit_refused_own") == refused_b_pre,
+          "an INVALID remove_member was counted as a role refusal: A %d -> %d, B %d -> %d",
+          refused_a_pre, counter_of(group_a, "commit_refused_own"),
+          refused_b_pre, counter_of(group_b, "commit_refused_own"));
+    CHECK(submitted_by(group_a) == submitted_a_pre,
+          "A submitted %d record(s) over five INVALID requests", submitted_by(group_a) - submitted_a_pre);
+    CHECK(urnet_message_group_epoch(group_a) == epoch_before &&
+          urnet_message_group_epoch(group_b) == epoch_before,
+          "an epoch moved over the INVALID requests: A %llu, B %llu",
+          (unsigned long long)urnet_message_group_epoch(group_a),
+          (unsigned long long)urnet_message_group_epoch(group_b));
+
+    /* and the zero handle is FAILED with out_error left NULL, this abi's convention */
+    kind = urnet_message_group_remove_member(0, ctx, their_hex, &err);
+    CHECK(kind == URNET_MESSAGE_COMMIT_FAILED && err == NULL,
+          "remove_member on handle 0 answered kind %d with out_error %s, want %d (FAILED) and NULL",
+          (int)kind, err != NULL ? err : "NULL", URNET_MESSAGE_COMMIT_FAILED);
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+
+    /* THE OWNER REMOVES THE ADMIN: OK, ONE epoch, and A's roster is one row -- its own */
+    kind = urnet_message_group_remove_member(group_a, ctx, their_hex, &err);
+    if (kind != URNET_MESSAGE_COMMIT_OK) {
+      show_error("A's removal of B", err);
+      err = NULL;
+    }
+    REQUIRE(kind == URNET_MESSAGE_COMMIT_OK, "A's remove_member of B answered kind %d", (int)kind);
+    CHECK(err == NULL, "an OK verb set an out_error");
+    CHECK(urnet_message_group_epoch(group_a) == epoch_before + 1,
+          "A is at epoch %llu after ONE removal commit, want %llu",
+          (unsigned long long)urnet_message_group_epoch(group_a), (unsigned long long)(epoch_before + 1));
+    err = NULL;
+    roster = urnet_message_group_members(group_a, &err);
+    REQUIRE(roster != 0, "A's group answered no roster after the removal");
+    CHECK(urnet_message_member_list_count(roster) == 1,
+          "A reads %d member(s) after removing the only other one, want 1",
+          (int)urnet_message_member_list_count(roster));
+    CHECK(roster_row(roster, true, own_role, sizeof(own_role), own_hex, sizeof(own_hex)) &&
+          strcmp(own_role, "owner") == 0,
+          "A's own row after the removal reads %s", own_role);
+    CHECK(!roster_row(roster, false, their_role, sizeof(their_role), their_hex, sizeof(their_hex)),
+          "A's roster still holds a row that is not its own after the removal");
+    CHECK(urnet_release(roster), "releasing A's roster answered false");
+
+    /* AND THE REMOVED DEVICE CANNOT FOLLOW THE EPOCH ITS OWN REMOVAL OPENED. Its fetch still
+     * works -- it holds the keys of the epoch it was removed AT -- and the commit it is served
+     * cannot be applied, so it stays where it was. A carrier that would let it say "you were
+     * removed" in so many words is ledger item 257's ruling 52 and is NOT in this step. */
+    err = NULL;
+    uint64_t nothing = urnet_message_group_receive(group_b, ctx, &err);
+    printf("      the removed device's receive answered: %s\n", err != NULL ? err : "(no error text)");
+    CHECK(err != NULL, "the removed device's receive came back clean, so it followed its own removal");
+    if (nothing != 0) { urnet_release(nothing); }
+    if (err != NULL) { urnet_free_string(err); err = NULL; }
+    CHECK(urnet_message_group_epoch(group_b) == epoch_before,
+          "the removed device is at epoch %llu, want %llu: it followed its own removal",
+          (unsigned long long)urnet_message_group_epoch(group_b), (unsigned long long)epoch_before);
+    printf("      A removed B in one commit: A alone at epoch %llu, B still at %llu\n",
+           (unsigned long long)urnet_message_group_epoch(group_a),
+           (unsigned long long)urnet_message_group_epoch(group_b));
+  }
+
   step("A GAP IS NOT A MESSAGE WITH NO TEXT, which is the whole of ledger item 236");
   {
     /* the four entries are built in Go -- see urnet_message_loopback_gap_list, and the reason

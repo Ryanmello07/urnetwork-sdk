@@ -495,6 +495,24 @@ type seamMember struct {
 // seamMember stands one up and says Hello through its own transport.
 func (self *world) seamMember(t *testing.T, ctx context.Context, name string) *seamMember {
 	t.Helper()
+	return self.seamMemberClaiming(t, ctx, name, nil)
+}
+
+// seamMemberClaiming is [world.seamMember] whose CREDENTIAL carries an identity that is not the one
+// it signs with, which is the only way this module can put TWO LEAVES OF ONE IDENTITY in a group: an
+// urmessage.Device mints one identity per state store and there is no door onto a second leaf for it.
+//
+// IT IS NOT A FORGERY WHEN THAT IDENTITY COMMITS ITS OWN ADD. MASTER section 11's self-service rule
+// gives every member its own device leaves, and R6a requires an Add claiming an identity already in
+// the group to be committed BY that identity -- so a claiming key package added by the real device
+// that holds the identity is a second DEVICE of that member and is followed by every honest
+// receiver, while the same package added by anybody else is refused
+// (TestAnAddClaimingTheOwnersIdentityByAnAdminIsRefused, one module over). `claimed` nil is
+// [world.seamMember]: a member whose credential is its own signer.
+func (self *world) seamMemberClaiming(t *testing.T, ctx context.Context, name string,
+	claimed []byte) *seamMember {
+
+	t.Helper()
 	client := self.connectClient(t)
 	transport := self.transport(t, client)
 	streamStore, err := sdk.OpenStreamStore(t.TempDir())
@@ -523,7 +541,11 @@ func (self *world) seamMember(t *testing.T, ctx context.Context, name string) *s
 	if err != nil {
 		t.Fatalf("%s: the leaf keys extension: %v", name, err)
 	}
-	engine, err := messagegroup.NewConnectMlsEngine(crypto, stateStore, signer, mls.BasicCredential(signerPub), leafKeys.ExtensionData)
+	credential := signerPub
+	if claimed != nil {
+		credential = append([]byte(nil), claimed...)
+	}
+	engine, err := messagegroup.NewConnectMlsEngine(crypto, stateStore, signer, mls.BasicCredential(credential), leafKeys.ExtensionData)
 	if err != nil {
 		t.Fatalf("%s: the engine: %v", name, err)
 	}
@@ -532,11 +554,13 @@ func (self *world) seamMember(t *testing.T, ctx context.Context, name string) *s
 		t.Fatalf("%s's Hello: %v %v", name, reason, err)
 	}
 	return &seamMember{
-		name:        name,
-		transport:   transport,
-		reserver:    sdk.NewStreamIndexReserver(streamStore),
-		engine:      engine,
-		identityPub: append([]byte(nil), signerPub...),
+		name:      name,
+		transport: transport,
+		reserver:  sdk.NewStreamIndexReserver(streamStore),
+		engine:    engine,
+		// the identity this member is KNOWN BY, which is its credential's and not its signer's:
+		// the roster, the policy and every role decision are keyed on the credential identity.
+		identityPub: append([]byte(nil), credential...),
 	}
 }
 

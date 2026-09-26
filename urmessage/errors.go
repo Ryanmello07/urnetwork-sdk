@@ -289,7 +289,7 @@ var (
 	//
 	// A role refusal on the send side is NEVER one of these: it is [ErrCommitUnauthorized]
 	// wrapping the rule above, the receivers' own sentence, because the send side judges by the
-	// same predicate. These two name a REQUEST that is malformed before any rule is reached.
+	// same predicate. These four name a REQUEST that is malformed before any rule is reached.
 
 	// [Group.SetRole] was asked for "owner", for a name this profile does not define, or to
 	// set the role of the identity that OWNS the group. Ownership moves through
@@ -304,6 +304,48 @@ var (
 	// and then to admin -- has no owner at all, and R0a's answer to that describes a broken
 	// policy rather than a pointless request.
 	ErrAlreadyOwner = errors.New("urmessage: that identity already owns this group")
+
+	// [Group.RemoveMember] WAS ASKED FOR THIS DEVICE'S OWN IDENTITY, AND LEAVING IS NOT THIS VERB
+	// (ledger item 257's rulings 11 and 48). The verb is keyed on an IDENTITY and removes every
+	// leaf that identity holds, so the identity's own call always carries this device's own leaf --
+	// and RFC 9420 §12.4 forbids a committer removing itself (mls.ErrRemoveCommitter), which is
+	// ruling 11's "no identity's last leaf ever leaves in its own commit" enforced one layer down.
+	//
+	// IT IS REFUSED BY NAME AND BEFORE ANYTHING IS BUILT, and the reason is the SENTENCE rather
+	// than the outcome. A naive path reaches the refusal anyway: the send-side predicate would
+	// answer R6c's [ErrCommitIdentityChanged] -- "a leaf's identity changed across the commit" --
+	// because the committer's own leaf is declared removed and still standing after. That is a
+	// true sentence about a malformed commit and the WRONG sentence for somebody who pressed
+	// Leave, which is the surface ruling 48 made product: a leave request the app states, with
+	// mute-and-hide locally, and an admin's Remove as its MLS half. So the text names the door.
+	//
+	// IT IS NOT [Group.RemoveDevice] EITHER, which ruling 50 put in its own track: that verb is
+	// keyed on LEAVES, is one commit per group the identity belongs to, and has a partial-success
+	// state machine. A member revoking one of its OTHER devices is its business (§11's
+	// self-service rule, ruling 2) and it is not reachable through an identity-keyed call.
+	ErrRemoveSelf = errors.New("urmessage: RemoveMember does not remove your own identity: no identity's last leaf ever leaves in its own commit, so ask an admin or the owner of this group to remove you")
+
+	// [Group.RemoveMember] NAMED THE IDENTITY THAT OWNS THE GROUP, and no commit removes it
+	// (ruling 11: "an OWNER's leaf is removed by nobody"). MASTER §11 states the product half --
+	// "an owner must hand the group over before leaving. The leave action is refused for an OWNER
+	// until ownership has been transferred to a current member" -- so the owner's own leaf leaves
+	// in a Remove the NEW owner commits, by which time that identity is an ADMIN (ruling 4) and is
+	// an ordinary subject of this verb.
+	//
+	// IT IS REFUSED BY NAME AND BEFORE THE PREDICATE, for [ErrRoleNotSettable]'s reason at
+	// [Group.SetRole]: the policy this verb would build drops the named identity's entry, and
+	// dropping the OWNER's leaves a policy with no owner, which mls's own encoder refuses as
+	// [mls.ErrNoOwner] -- a sentence about a broken policy for what is a request at the wrong
+	// door. R3 would also refuse the commit at every receiver when the committer is not the owner
+	// ([mls.ErrAdminRemovedByNonOwner]); this answers the owner's OWN call as well, which R3
+	// cannot, and it names the verb that does move ownership.
+	ErrRemoveOwner = errors.New("urmessage: that identity owns this group, and an owner's leaf is removed by nobody: transfer ownership first with TransferOwnership, and the outgoing owner becomes an admin the new owner may remove")
+
+	// [Group.RemoveMember] named an identity no leaf of this group carries. It is refused by name
+	// before anything is built: with no leaf to remove the commit would carry no Remove proposal
+	// at all, and the seam's own refusal for that (messagegroup.ErrEngineCommitRemoveEmpty) is a
+	// sentence about an empty proposal vector where the caller asked about a person.
+	ErrNoSuchMember = errors.New("urmessage: no leaf of this group carries that identity")
 
 	// THIS DEVICE HOLDS OBSERVER IN THIS GROUP, SO IT MAY READ AND MAY NOT SEND (MASTER §11, spec
 	// C §5.6, ledger item 242's R4). It is answered by [Group.Send], [Group.SendReply],
