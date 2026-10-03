@@ -5,27 +5,10 @@ clean:
 	rm -rf dist
 	rm -rf build
 
-# The OpenAPI spec of record, beside sdk in the monoroot. Override with
-# OPENAPI_SPEC=path to generate from another copy.
-OPENAPI_SPEC ?= ../../connect/api/bringyour.yml
-
-# Generate TypeScript types from Go structs, and the api client from the
-# OpenAPI spec
-generate_types: generate_openapi
+# Generate TypeScript types from Go structs
+generate_types:
 	export PATH="$$PATH:/usr/local/go/bin:$$HOME/go/bin"; \
 	go run gen_types.go;
-
-# Generate src/generated/openapi.ts + client.ts from the OpenAPI spec. The
-# output is committed so npm consumers build without connect; this target
-# fails (clearly) when the spec is missing.
-generate_openapi:
-	export PATH="$$PATH:/usr/local/go/bin:$$HOME/go/bin"; \
-	go run gen_openapi.go -spec "$(OPENAPI_SPEC)";
-
-# Fail when the committed generated client differs from a fresh generation
-check_openapi:
-	export PATH="$$PATH:/usr/local/go/bin:$$HOME/go/bin"; \
-	go run gen_openapi.go -spec "$(OPENAPI_SPEC)" -check;
 
 # Build the WASM binary and the Go JS runtime support file.
 #
@@ -79,7 +62,7 @@ build: generate_types build_bundle
 	npm ci && \
 	npm run build;
 
-.PHONY: package check-package smoke publish generate_types generate_openapi check_openapi
+.PHONY: package check-package smoke publish
 package: build
 	go -C ../packaging run . npm package
 check-package:

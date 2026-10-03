@@ -18,7 +18,6 @@ EXPORTS
 	urnet_api_account_preferences_update
 	urnet_api_add_auth
 	urnet_api_add_auth_logout_listener
-	urnet_api_add_client_refresh_integrity_listener
 	urnet_api_add_jwt_refresh_listener
 	urnet_api_auth_code_create
 	urnet_api_auth_code_login
@@ -30,7 +29,6 @@ EXPORTS
 	urnet_api_auth_verify
 	urnet_api_auth_verify_send
 	urnet_api_auth_wallet_challenge
-	urnet_api_auth_wallet_challenge_sync
 	urnet_api_change_network_name
 	urnet_api_check_balance_code
 	urnet_api_claim_network_name
@@ -68,7 +66,6 @@ EXPORTS
 	urnet_api_list_api_keys
 	urnet_api_network_block_location
 	urnet_api_network_check
-	urnet_api_network_client_registration_endpoint
 	urnet_api_network_create
 	urnet_api_network_delete
 	urnet_api_network_unblock_location
@@ -162,7 +159,6 @@ EXPORTS
 	urnet_client_event_queue_pending_count
 	urnet_client_event_queue_set_app_version
 	urnet_client_event_queue_set_locale
-	urnet_client_refresh_integrity_notice_close_api_if_current
 	urnet_collapse_host_names
 	urnet_collapse_host_names_list
 	urnet_compare_points_leaderboard_keys
@@ -315,7 +311,6 @@ EXPORTS
 	urnet_device_get_ingress_contract_details
 	urnet_device_get_ingress_contract_stats
 	urnet_device_get_instance_id
-	urnet_device_get_licenses
 	urnet_device_get_local_override_app_ids
 	urnet_device_get_log_verbosity
 	urnet_device_get_network_peers
@@ -381,7 +376,6 @@ EXPORTS
 	urnet_device_local_get_first_load_timeline_json
 	urnet_device_local_get_key_material
 	urnet_device_local_get_last_local_state_save_result
-	urnet_device_local_get_memory_stats
 	urnet_device_local_get_pinned_app_ids
 	urnet_device_local_get_probe_results
 	urnet_device_local_get_provide_secret_keys
@@ -484,14 +478,12 @@ EXPORTS
 	urnet_device_local_take_memory_samples_json
 	urnet_device_local_transfer_diag_defer_timeout_resend
 	urnet_device_local_transfer_diag_lane_rule
-	urnet_device_local_transfer_diagnostic_snapshot_json
 	urnet_device_local_tunnel_dns_addresses_ipv4
 	urnet_device_local_tunnel_dns_addresses_ipv6
 	urnet_device_local_tunnel_dns_setting
 	urnet_device_local_tunnel_local_address
 	urnet_device_local_tunnel_local_address_ipv6
 	urnet_device_local_wait_for_close
-	urnet_device_local_write_memory_owner_census
 	urnet_device_open_socket
 	urnet_device_reconnect
 	urnet_device_refresh_token
@@ -662,7 +654,6 @@ EXPORTS
 	urnet_get_extender_store_read_only
 	urnet_get_filtered_locations_from_result
 	urnet_get_fips140_enabled
-	urnet_get_licenses
 	urnet_get_log_dir
 	urnet_get_log_root
 	urnet_get_log_verbosity
@@ -831,7 +822,6 @@ EXPORTS
 	urnet_network_space_manager_get_network_space
 	urnet_network_space_manager_get_network_spaces
 	urnet_network_space_manager_import_network_space_from_json
-	urnet_network_space_manager_migrate_network_space
 	urnet_network_space_manager_remove_network_space
 	urnet_network_space_manager_set_active_network_space
 	urnet_network_space_manager_update_network_space
@@ -978,7 +968,6 @@ EXPORTS
 	urnet_service_host_name
 	urnet_service_url
 	urnet_set_control_ip_family_policy
-	urnet_set_device_rpc_h1_plus_enabled
 	urnet_set_egress_interface_index
 	urnet_set_extender_store_read_only
 	urnet_set_log_dir
@@ -987,7 +976,6 @@ EXPORTS
 	urnet_set_memory_limit
 	urnet_set_memory_profile_rate
 	urnet_set_message_pool_memory_targets
-	urnet_set_transfer_diagnostic_snapshots_enabled
 	urnet_short_ss58
 	urnet_sn_claim_transactions_for
 	urnet_sn_claims_for

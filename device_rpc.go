@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	// "runtime/debug"
@@ -63,10 +62,6 @@ type DeviceRecreatedListener interface {
 }
 
 type deviceRpcSettings struct {
-	// Native custom RPC framing, on by default (SetDeviceRpcH1PlusEnabled).
-	// Browsers ignore this setting and always use WebSocket.
-	EnableH1Plus        bool
-	H1PlusStats         *connect.H1PlusStats
 	RpcCallTimeout      time.Duration
 	RpcConnectTimeout   time.Duration
 	RpcReconnectTimeout time.Duration
@@ -138,16 +133,6 @@ type deviceRpcSettings struct {
 	DeviceLocalSettings
 }
 
-// H1+ is opt-out, so the zero value leaves it enabled
-var deviceRpcH1PlusDisabled atomic.Bool
-
-// SetDeviceRpcH1PlusEnabled sets whether subsequently created native RPC
-// sessions use authenticated urnetwork-framerxl/1 with WebSocket fallback.
-// Enabled by default; pass false to opt out. Browsers always skip the custom
-// attempt. The connect process-wide H1+ disable switch remains authoritative
-// for all sessions.
-func SetDeviceRpcH1PlusEnabled(enabled bool) { deviceRpcH1PlusDisabled.Store(!enabled) }
-
 // deviceRpcDefaultAddress is the default localhost rpc address, used by both
 // the DeviceLocal listener and the DeviceRemote dialer when no explicit
 // transport is set. A var so the test harness can point an entire test process
@@ -190,7 +175,6 @@ func (self *deviceRpcSettings) httpMaxConcurrent() int {
 
 func defaultDeviceRpcSettings() *deviceRpcSettings {
 	return &deviceRpcSettings{
-		EnableH1Plus:      !deviceRpcH1PlusDisabled.Load(),
 		RpcCallTimeout:    60 * time.Second,
 		RpcConnectTimeout: 30 * time.Second,
 		// Full-jitter over one second previously averaged two attempts per
@@ -353,9 +337,6 @@ type DeviceRemote struct {
 	state DeviceRemoteState
 	// last observed values
 	lastKnownState DeviceRemoteState
-	// Guarded by stateLock. A status RPC must not replace a notification or
-	// another status reply published while it was in flight.
-	contractStatusRevision uint64
 
 	// last observed post quantum identity values. Read-only data (there are
 	// no setters), so these are cached outside the settable
@@ -945,7 +926,6 @@ func (self *DeviceRemote) run() {
 				defer self.stateLock.Unlock()
 
 				self.lastKnownState = syncResponse.State
-				self.contractStatusRevision++
 				self.syncError = ""
 				self.remoteConnected = true
 				if self.settings.BrowserStateOnly {
@@ -1646,31 +1626,28 @@ func (self *DeviceRemote) GetTunnelStarted() bool {
 
 func (self *DeviceRemote) GetContractStatus() *ContractStatus {
 	self.stateLock.Lock()
-	service := self.service
-	revision := self.contractStatusRevision
-	self.stateLock.Unlock()
+	defer self.stateLock.Unlock()
 
-	// Picker HTTP dispatch and response delivery also need stateLock. Never
-	// hold it while waiting for a synchronous status read from the extension.
-	var status *DeviceRemoteContractStatus
-	var err error
-	if service != nil {
-		status, err = rpcCallNoArg[*DeviceRemoteContractStatus](
-			service, "DeviceLocalRpc.GetContractStatus",
-			func() { self.closeServiceInstance(service) },
+	contractStatus, success := func() (*ContractStatus, bool) {
+		if self.service == nil {
+			return nil, false
+		}
+
+		status, err := rpcCallNoArg[*DeviceRemoteContractStatus](self.service, "DeviceLocalRpc.GetContractStatus", self.closeService)
+		if err != nil {
+			return nil, false
+		}
+		contractStatus := status.ContractStatus
+		self.lastKnownState.ContractStatus.Set(contractStatus)
+		return contractStatus, true
+	}()
+	if success {
+		return contractStatus
+	} else {
+		return self.state.ContractStatus.Get(
+			self.lastKnownState.ContractStatus.Get(nil),
 		)
 	}
-
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if err == nil && status != nil && self.service == service && self.contractStatusRevision == revision {
-		self.lastKnownState.ContractStatus.Set(status.ContractStatus)
-		self.contractStatusRevision++
-		return status.ContractStatus
-	}
-	return self.state.ContractStatus.Get(
-		self.lastKnownState.ContractStatus.Get(nil),
-	)
 }
 
 func (self *DeviceRemote) GetWindowStatus() *WindowStatus {
@@ -1697,11 +1674,6 @@ func (self *DeviceRemote) GetWindowStatus() *WindowStatus {
 			self.lastKnownState.WindowStatus.Get(nil),
 		)
 	}
-}
-
-// the license list is embedded in this process's SDK; no rpc needed
-func (self *DeviceRemote) GetLicenses(app string) *LicenseInfoList {
-	return GetLicenses(app)
 }
 
 func (self *DeviceRemote) GetStats() *DeviceStats {
@@ -4198,7 +4170,6 @@ func (self *DeviceRemote) contractStatusChanged(contractStatus *ContractStatus) 
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.lastKnownState.ContractStatus.Set(contractStatus)
-		self.contractStatusRevision++
 		return listenerList(self.contractStatusChangeListeners)
 	}()
 	for _, contractStatusChangeListener := range listenerList {
@@ -7920,10 +7891,8 @@ type DeviceRemotePacketStats struct {
 
 //gomobile:noexport
 type TransportPacketStatsRpc struct {
-	TransportType              TransportType
-	Stats                      *PacketStatsRpc
-	H1WebSocketConnectionCount int64
-	H1PlusConnectionCount      int64
+	TransportType TransportType
+	Stats         *PacketStatsRpc
 }
 
 // PacketStatsRpc is the explicit gob mirror. TransportPacketStatsList keeps
@@ -7971,10 +7940,8 @@ func newPacketStatsRpc(stats *PacketStats, includeTransportStats bool) *PacketSt
 				continue
 			}
 			rpc.TransportStats = append(rpc.TransportStats, &TransportPacketStatsRpc{
-				TransportType:              transportStats.TransportType,
-				Stats:                      newPacketStatsRpc(transportStats.Stats, false),
-				H1WebSocketConnectionCount: transportStats.H1WebSocketConnectionCount,
-				H1PlusConnectionCount:      transportStats.H1PlusConnectionCount,
+				TransportType: transportStats.TransportType,
+				Stats:         newPacketStatsRpc(transportStats.Stats, false),
 			})
 		}
 	}
@@ -8006,10 +7973,8 @@ func (self *PacketStatsRpc) toPacketStats(includeTransportStats bool) *PacketSta
 				continue
 			}
 			stats.TransportStats.Add(&TransportPacketStats{
-				TransportType:              transportStats.TransportType,
-				Stats:                      transportStats.Stats.toPacketStats(false),
-				H1WebSocketConnectionCount: transportStats.H1WebSocketConnectionCount,
-				H1PlusConnectionCount:      transportStats.H1PlusConnectionCount,
+				TransportType: transportStats.TransportType,
+				Stats:         transportStats.Stats.toPacketStats(false),
 			})
 		}
 	}

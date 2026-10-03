@@ -1,7 +1,6 @@
 package sdk
 
 import (
-	"runtime/debug"
 	"testing"
 	"time"
 )
@@ -90,7 +89,7 @@ func TestMobileMemoryReclaimerGatesTargetFlightAndCooldown(t *testing.T) {
 	snapshot := mobileMemoryReclaimSnapshot{}
 	reclaimCount := 0
 	reclaimer := &mobileMemoryReclaimer{
-		targetByteCount:         func() int64 { return 20 },
+		targetByteCount:         20,
 		physicalTargetByteCount: func() int64 { return 40 },
 		maxPoolOutstanding:      2,
 		quietRetry:              mobileIdleMemoryTrimRetryDelay,
@@ -192,8 +191,6 @@ func TestMobileRuntimePressureTransitionSignalsEachCeilingCrossing(t *testing.T)
 }
 
 func TestMobileRuntimePressureCrossingArmsOneQuietEpoch(t *testing.T) {
-	previousLimit := debug.SetMemoryLimit(32 << 20)
-	t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
 	previousStarted := mobileIdleMemoryTrimmerStarted.Load()
 	previousArmed := mobileRuntimePressureArmed.Load()
 	t.Cleanup(func() {
@@ -333,7 +330,7 @@ func TestMobileMemoryReclaimerReclaimsUnderSettledOwnership(t *testing.T) {
 	snapshot := mobileMemoryReclaimSnapshot{runtimeByteCount: 30, poolOutstanding: 2359}
 	reclaimCount := 0
 	reclaimer := &mobileMemoryReclaimer{
-		targetByteCount:    func() int64 { return 24 },
+		targetByteCount:    24,
 		maxPoolOutstanding: mobileIdleMemoryMaxOutstandingPoolCount,
 		quietRetry:         mobileIdleMemoryTrimRetryDelay,
 		cooldown:           time.Minute,

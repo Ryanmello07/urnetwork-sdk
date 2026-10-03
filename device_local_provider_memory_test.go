@@ -1,4 +1,3 @@
-// Exercises atomic provider admission and ownership through retry and teardown.
 package sdk
 
 import (
@@ -15,16 +14,6 @@ import (
 	"github.com/urnetwork/connect/protocol"
 )
 
-// Mirror the bounded Connect graph, including its separate prepaid control
-// and ordinary-ingress workspaces. The extra 32 KiB remains inside the same
-// NAT/root ceilings, including the tighter iOS sizing profile.
-const (
-	providerMemoryTestNatByteCount      ByteCount = 256 * 1024
-	providerMemoryTestProviderByteCount ByteCount = 576 * 1024
-	providerMemoryTestStatsByteCount    ByteCount = 1024
-)
-
-// Owns all retry and retirement work until cleanup shuts admission and joins it.
 func providerMemoryTestDevice(t *testing.T, target ByteCount) (*DeviceLocal, *connect.Client) {
 	t.Helper()
 	device, _ := transferMemoryTestDevice(t, target)
@@ -62,7 +51,7 @@ func TestDeviceLocalProviderMemoryPermanentPolicyRefusal(t *testing.T) {
 			}
 			device.stateLock.Lock()
 			err := device.ensureRemoteUserNatProviderWithLock()
-			refused := device.remoteUserNatProvider == nil && device.remoteUserNatProviderLocalUserNat == nil && device.remoteUserNatProviderMemoryWaitDone == nil
+			refused := device.remoteUserNatProvider == nil && device.remoteUserNatProviderLocalUserNat == nil && !device.remoteUserNatProviderMemoryWait
 			device.stateLock.Unlock()
 			var policyError *connect.NatMemoryPolicyError
 			if !errors.As(err, &policyError) || !refused || factoryCalls.Load() != 0 {
@@ -76,87 +65,52 @@ func TestDeviceLocalProviderMemoryPermanentPolicyRefusal(t *testing.T) {
 	}
 }
 
-// Exactly one missing stats claim defers the complete provider graph. Retry
-// completion must be observable while unrelated device lifecycle work is live.
 func TestDeviceLocalProviderMemoryRequiredStatsAdmissionRetries(t *testing.T) {
 	for _, targetMiB := range []ByteCount{20, 28} {
-		device, _ := providerMemoryTestDevice(t, targetMiB*1024*1024)
-		memory := device.transferMemory
-		// Exactly enough for NAT+provider, but not the required subscription.
-		held := memory.root.TotalByteCount() - providerMemoryTestNatByteCount - providerMemoryTestProviderByteCount
-		if !memory.client.TryReserve(held) {
-			t.Fatal("sibling fill failed")
-		}
-		defer func() { memory.client.Release(held) }()
-		device.applyProvideMemorySharesWithLock(true)
-		capacityNotify := memory.nat.CapacityNotify()
-		otherWorkRelease := make(chan struct{})
-		defer close(otherWorkRelease)
-		device.stateLock.Lock()
-		// Force the distinction between this constructor and a device-wide join.
-		device.startLifecycleWorkerWithLock(func() { <-otherWorkRelease })
-		err := device.ensureRemoteUserNatProviderWithLock()
-		admissionDone := device.remoteUserNatProviderMemoryWaitDone
-		refused := device.remoteUserNatProvider == nil && device.remoteUserNatProviderLocalUserNat != nil && admissionDone != nil
-		device.stateLock.Unlock()
-		if !errors.Is(err, connect.ErrNatMemoryBudget) || !refused || memory.nat.UsedByteCount() != providerMemoryTestNatByteCount {
-			t.Fatalf("%d MiB stats refusal installed incomplete generation: %v", targetMiB, err)
-		}
-		// Refusal must not allocate then release partial provider ownership:
-		// either a release or its pending wake would make the retry spin.
-		select {
-		case <-capacityNotify:
-			t.Fatal("required stats refusal notified its own retry")
-		default:
-		}
-		if stats := memory.nat.Stats(); stats.ReservedByteCount != providerMemoryTestNatByteCount || stats.ReleasedByteCount != 0 {
-			t.Fatalf("required stats refusal changed provider ownership: %+v", stats)
-		}
-		memory.client.Release(providerMemoryTestStatsByteCount)
-		held -= providerMemoryTestStatsByteCount
-		waitProviderRotationBarrier(t, admissionDone, "required subscription retry")
-		device.stateLock.Lock()
-		installed := device.remoteUserNatProvider != nil && device.providerPacketStatsSub != nil && device.remoteUserNatProviderMemoryWaitDone == nil
-		device.stateLock.Unlock()
-		if !installed || memory.nat.UsedByteCount() != providerMemoryTestNatByteCount+providerMemoryTestProviderByteCount+providerMemoryTestStatsByteCount {
-			t.Fatalf("%d MiB drained sibling did not admit complete provider graph: used=%d", targetMiB, memory.nat.UsedByteCount())
-		}
-	}
-}
-
-// A refused constructor can be closed with its local NAT still admitted.
-// Closing admission precedes both the retry join and asynchronous retirement.
-func TestDeviceLocalProviderMemoryPendingAdmissionClose(t *testing.T) {
-	device, _ := providerMemoryTestDevice(t, 20*1024*1024)
-	memory := device.transferMemory
-	held := memory.root.TotalByteCount() - providerMemoryTestNatByteCount - providerMemoryTestProviderByteCount
-	if !memory.client.TryReserve(held) {
-		t.Fatal("sibling fill failed")
-	}
-	defer memory.client.Release(held)
-	device.applyProvideMemorySharesWithLock(true)
-	device.stateLock.Lock()
-	err := device.ensureRemoteUserNatProviderWithLock()
-	admissionDone := device.remoteUserNatProviderMemoryWaitDone
-	device.stateLock.Unlock()
-	if !errors.Is(err, connect.ErrNatMemoryBudget) || admissionDone == nil {
-		t.Fatalf("required stats admission was not deferred: %v", err)
-	}
-
-	device.stateLock.Lock()
-	device.closed = true
-	device.provideMode = ProvideModeNone
-	device.closeRemoteUserNatProviderWithLock()
-	device.stateLock.Unlock()
-	device.cancel()
-	waitProviderRotationBarrier(t, admissionDone, "closed subscription retry")
-	device.lifecycleWorkers.Wait()
-
-	device.stateLock.Lock()
-	retired := device.remoteUserNatProvider == nil && device.remoteUserNatProviderLocalUserNat == nil && device.remoteUserNatProviderMemoryWaitDone == nil
-	device.stateLock.Unlock()
-	if stats := memory.nat.Stats(); !retired || stats.UsedByteCount != 0 || stats.ReservedByteCount != stats.ReleasedByteCount || memory.root.UsedByteCount() != held {
-		t.Fatalf("closed pending admission retained provider ownership: %+v", stats)
+		t.Run(fmt.Sprint(targetMiB), func(t *testing.T) {
+			device, _ := providerMemoryTestDevice(t, targetMiB*1024*1024)
+			memory := device.transferMemory
+			// Exactly enough for NAT+provider, but not the required subscription.
+			held := memory.root.TotalByteCount() - (256+512)*1024
+			if !memory.client.TryReserve(held) {
+				t.Fatal("sibling fill failed")
+			}
+			defer func() { memory.client.Release(held) }()
+			device.applyProvideMemorySharesWithLock(true)
+			device.stateLock.Lock()
+			err := device.ensureRemoteUserNatProviderWithLock()
+			refused := device.remoteUserNatProvider == nil && device.remoteUserNatProviderLocalUserNat != nil && device.remoteUserNatProviderMemoryWait
+			generation := device.remoteUserNatProviderGeneration
+			device.stateLock.Unlock()
+			if !errors.Is(err, connect.ErrNatMemoryBudget) || !refused || memory.nat.UsedByteCount() != 256*1024 {
+				t.Fatalf("stats refusal installed incomplete generation: %v", err)
+			}
+			reserved := memory.nat.Stats().ReservedByteCount
+			// No self-generated release notification or rebuild loop is possible:
+			// atomic refusal has allocated neither provider nor registration.
+			select {
+			case <-time.After(20 * time.Millisecond):
+			case <-device.ctx.Done():
+				t.Fatal("unexpected cancellation")
+			}
+			device.stateLock.Lock()
+			spun := device.remoteUserNatProviderGeneration != generation
+			device.stateLock.Unlock()
+			if spun || memory.nat.Stats().ReservedByteCount != reserved {
+				t.Fatal("required stats refusal spun build/retire workers")
+			}
+			memory.client.Release(1024)
+			held -= 1024
+			joined := make(chan struct{})
+			go func() { device.lifecycleWorkers.Wait(); close(joined) }()
+			waitProviderRotationBarrier(t, joined, "required subscription retry")
+			device.stateLock.Lock()
+			installed := device.remoteUserNatProvider != nil && device.providerPacketStatsSub != nil && !device.remoteUserNatProviderMemoryWait
+			device.stateLock.Unlock()
+			if !installed || memory.nat.UsedByteCount() != (256+512+1)*1024 {
+				t.Fatal("drained sibling did not admit complete provider graph")
+			}
+		})
 	}
 }
 
@@ -208,7 +162,7 @@ func TestDeviceLocalProviderMemoryCapturedStatsCloseAndFinalSnapshot(t *testing.
 }
 
 func TestDeviceLocalProviderMemoryWorstSupportedOverlapProfiles(t *testing.T) {
-	for _, targetMiB := range []ByteCount{20, 24, 28} {
+	for _, targetMiB := range []ByteCount{20, 28} {
 		t.Run(fmt.Sprint(targetMiB), func(t *testing.T) {
 			device, client := providerMemoryTestDevice(t, targetMiB*1024*1024)
 			memory := device.transferMemory
@@ -235,11 +189,8 @@ func TestDeviceLocalProviderMemoryWorstSupportedOverlapProfiles(t *testing.T) {
 				t.Cleanup(provider.Close)
 				providers = append(providers, provider)
 			}
-			const exactOverlap = 3*providerMemoryTestNatByteCount + 2*(providerMemoryTestProviderByteCount+providerMemoryTestStatsByteCount)
-			if exactOverlap != 1922*1024 {
-				t.Fatal("old/new ordinary ingress workspaces are missing from overlap ledger")
-			}
-			if memory.nat.UsedByteCount() != exactOverlap || memory.root.UsedByteCount() != exactOverlap || memory.nat.Available() != memory.nat.TotalByteCount()-exactOverlap {
+			const exactOverlap = (3*256 + 2*(512+1)) * 1024
+			if memory.nat.UsedByteCount() != exactOverlap || memory.root.UsedByteCount() != exactOverlap || memory.nat.Available() < 254*1024 {
 				t.Fatal("fallback+old/new provider graph escaped shared profile ledger")
 			}
 			addr, stop := startUdpEchoServer(t)

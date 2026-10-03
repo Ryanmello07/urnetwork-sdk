@@ -41,10 +41,9 @@ type Api struct {
 	httpGetRawOwner        *deviceAuthPublicationGate
 	httpPostStreamRawOwner *deviceAuthPublicationGate
 
-	jwtRefreshListeners             *connect.CallbackList[JwtRefreshListener]
-	authLogoutListeners             *connect.CallbackList[AuthLogoutListener]
-	clientRefreshIntegrityListeners *connect.CallbackList[ClientRefreshIntegrityListener]
-	tokenManager                    *apiTokenManager
+	jwtRefreshListeners *connect.CallbackList[JwtRefreshListener]
+	authLogoutListeners *connect.CallbackList[AuthLogoutListener]
+	tokenManager        *apiTokenManager
 }
 
 // Delivers at most one terminal result. Marking delivery before entering the
@@ -120,24 +119,20 @@ func newApi(
 		httpPostRaw:    nil,
 		httpGetRaw:     nil,
 
-		jwtRefreshListeners:             connect.NewCallbackList[JwtRefreshListener](),
-		authLogoutListeners:             connect.NewCallbackList[AuthLogoutListener](),
-		clientRefreshIntegrityListeners: connect.NewCallbackList[ClientRefreshIntegrityListener](),
+		jwtRefreshListeners: connect.NewCallbackList[JwtRefreshListener](),
+		authLogoutListeners: connect.NewCallbackList[AuthLogoutListener](),
 	}
 	api.tokenManager = newApiTokenManager(cancelCtx, api)
 	return api
 }
 
 // newSession creates independently owned credential and refresh state while
-// reusing this API's network strategy and request seams.
+// reusing this API's network strategy and request seams. Hosted multi-device
+// processes use one session per device so a refresh or close cannot mutate a
+// sibling device, while every session still shares the NetworkSpace's dialer
+// and connection-selection core.
 func (self *Api) newSession(ctx context.Context) *Api {
-	return self.newSessionWithStrategy(ctx, self.clientStrategy)
-}
-
-// Hosted devices keep the immutable NetworkSpace metadata and API request
-// seams, but give each credential session its own control dial/DoH owner.
-func (self *Api) newSessionWithStrategy(ctx context.Context, strategy *connect.ClientStrategy) *Api {
-	session := newApi(ctx, strategy, self.apiUrl)
+	session := newApi(ctx, self.clientStrategy, self.apiUrl)
 	session.setHttpPostRaw(self.getHttpPostRaw())
 	session.setHttpGetRaw(self.getHttpGetRaw())
 	session.setHttpPostStreamRaw(self.getHttpPostStreamRaw())
@@ -423,11 +418,6 @@ type WalletAuthArgs struct {
 	Signature  string `json:"wallet_signature,omitempty"`
 	Message    string `json:"wallet_message,omitempty"`
 	Blockchain string `json:"blockchain,omitempty"`
-	// Nonce is the legacy /auth/wallet-nonce anti-replay token, echoed as
-	// `wallet_nonce`. Deprecated and inert on the server: replay protection
-	// now comes from the /auth/wallet-challenge message that Message carries
-	// verbatim (AuthWalletChallenge). New callers leave it empty.
-	Nonce string `json:"wallet_nonce,omitempty"`
 }
 
 // `model.AuthLoginResult`
@@ -470,11 +460,6 @@ type AuthWalletChallengeCallback connect.ApiCallback[*AuthWalletChallengeResult]
 type AuthWalletChallengeArgs struct {
 	WalletAddress string     `json:"wallet_address,omitempty"`
 	Blockchain    Blockchain `json:"blockchain,omitempty"`
-	// Purpose is informational: the ur.io wallet bridge sends "connect" when
-	// the challenge proves a subnet claim wallet (POST /sn/wallet) rather than
-	// a sign-in. The server pins the challenge to the blockchain and address
-	// only; the miner CLI sends the same value so the request matches the app.
-	Purpose string `json:"purpose,omitempty"`
 }
 
 // `model.WalletAuthChallengeResult`
@@ -502,28 +487,6 @@ func (self *Api) AuthWalletChallenge(authWalletChallenge *AuthWalletChallengeArg
 			callback,
 		)
 	})
-}
-
-// AuthWalletChallengeSyncWithContext is the blocking form, for CLI callers
-// that fetch a challenge to sign locally (the miner's `provider wallet set`).
-// The route is public: the jwt is not needed and is sent only when one is set.
-//
-//gomobile:noexport
-func (self *Api) AuthWalletChallengeSyncWithContext(ctx context.Context, args *AuthWalletChallengeArgs) (*AuthWalletChallengeResult, error) {
-	return connect.HttpPostWithRawFunction(
-		ctx,
-		self.getHttpPostRaw(),
-		fmt.Sprintf("%s/auth/wallet-challenge", self.apiUrl),
-		args,
-		self.GetByJwt(),
-		&AuthWalletChallengeResult{},
-		connect.NewNoopApiCallback[*AuthWalletChallengeResult](),
-	)
-}
-
-//gomobile:noexport
-func (self *Api) AuthWalletChallengeSync(args *AuthWalletChallengeArgs) (*AuthWalletChallengeResult, error) {
-	return self.AuthWalletChallengeSyncWithContext(self.ctx, args)
 }
 
 type AuthLoginWithPasswordCallback connect.ApiCallback[*AuthLoginWithPasswordResult]
@@ -686,23 +649,17 @@ func (self *Api) NetworkCheck(networkCheck *NetworkCheckArgs, callback NetworkCh
 type NetworkCreateCallback connect.ApiCallback[*NetworkCreateResult]
 
 type NetworkCreateArgs struct {
-	UserName    string `json:"user_name,omitempty"`
-	UserAuth    string `json:"user_auth,omitempty"`
-	AuthJwt     string `json:"auth_jwt,omitempty"`
-	AuthJwtType string `json:"auth_jwt_type,omitempty"`
-	Password    string `json:"password,omitempty"`
-	NetworkName string `json:"network_name,omitempty"`
-	Terms       bool   `json:"terms"`
-	// GuestMode is not read by the server (guest networks are no longer
-	// created by /auth/network-create); it is kept because the Android and
-	// Apple sign-up flows still set it, and the server ignores unknown fields.
-	GuestMode        bool   `json:"guest_mode"`
-	VerifyOtpNumeric bool   `json:"verify_use_numeric,omitempty"`
-	ReferralCode     string `json:"referral_code,omitempty"`
-	// BalanceCode is a transfer balance code redeemed into the new network as
-	// part of sign-up (the same secret RedeemBalanceCode takes).
-	BalanceCode string          `json:"balance_code,omitempty"`
-	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
+	UserName         string          `json:"user_name,omitempty"`
+	UserAuth         string          `json:"user_auth,omitempty"`
+	AuthJwt          string          `json:"auth_jwt,omitempty"`
+	AuthJwtType      string          `json:"auth_jwt_type,omitempty"`
+	Password         string          `json:"password,omitempty"`
+	NetworkName      string          `json:"network_name,omitempty"`
+	Terms            bool            `json:"terms"`
+	GuestMode        bool            `json:"guest_mode"`
+	VerifyOtpNumeric bool            `json:"verify_use_numeric,omitempty"`
+	ReferralCode     string          `json:"referral_code,omitempty"`
+	WalletAuth       *WalletAuthArgs `json:"wallet_auth,omitempty"`
 	// ProductUpdatesOptOut is the sign-up form's "Periodic product updates"
 	// line UNTICKED. The wire field is product_updates (see MarshalJSON in
 	// onboarding_api.go): false here sends product_updates true, so the zero
@@ -712,20 +669,14 @@ type NetworkCreateArgs struct {
 
 type NetworkCreateResult struct {
 	Network              *NetworkCreateResultNetwork      `json:"network,omitempty"`
-	UserAuth             string                           `json:"user_auth,omitempty"`
 	Seedphrase           string                           `json:"seedphrase,omitempty"`
 	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
 	Error                *NetworkCreateResultError        `json:"error,omitempty"`
-	// IsPro is true when the new network was created with the Pro
-	// entitlement (e.g. from a Pro balance code)
-	IsPro bool `json:"is_pro,omitempty"`
 }
 
 type NetworkCreateResultNetwork struct {
 	ByJwt       string `json:"by_jwt,omitempty"`
-	NetworkId   *Id    `json:"network_id,omitempty"`
 	NetworkName string `json:"network_name,omitempty"`
-	IsPro       bool   `json:"is_pro,omitempty"`
 }
 
 type NetworkCreateResultVerification struct {
@@ -754,9 +705,7 @@ func (self *Api) NetworkCreate(networkCreate *NetworkCreateArgs, callback Networ
  * Delete network
  */
 
-type NetworkDeleteResult struct {
-	Error *ApiError `json:"error,omitempty"`
-}
+type NetworkDeleteResult struct{}
 
 type NetworkDeleteCallback connect.ApiCallback[*NetworkDeleteResult]
 
@@ -785,14 +734,6 @@ type AuthNetworkClientArgs struct {
 	// unchanged.
 	DeviceDescription string `json:"description"`
 	DeviceSpec        string `json:"device_spec"`
-
-	// Roles and Principal are the identity roles and principal assigned to
-	// the client at creation, immutable after. Only a network-level session
-	// may set them; when omitted the session's own roles and principal (e.g.
-	// from an auth code) are inherited. The values have no meaning to the
-	// network itself.
-	Roles     *StringList `json:"roles,omitempty"`
-	Principal string      `json:"principal,omitempty"`
 
 	ProxyConfig *ProxyConfig `json:"proxy_config,omitempty"`
 
@@ -862,17 +803,24 @@ func (self *Api) AuthNetworkClientSync(authNetworkClient *AuthNetworkClientArgs)
 
 type GetNetworkClientsCallback connect.ApiCallback[*NetworkClientsResult]
 
+type NetworkClientResident struct {
+	ClientId              *Id      `json:"client_id"`
+	InstanceId            *Id      `json:"instance_id"`
+	ResidentId            *Id      `json:"resident_id"`
+	ResidentHost          string   `json:"resident_host"`
+	ResidentService       string   `json:"resident_service"`
+	ResidentBlock         string   `json:"resident_block"`
+	ResidentInternalPorts *IntList `json:"resident_internal_ports"`
+}
+
 type NetworkClientsResult struct {
 	Clients *NetworkClientInfoList `json:"clients"`
 }
 
 type NetworkClientInfo struct {
-	ClientId *Id `json:"client_id"`
-	// SourceClientId is set on a child client created on behalf of another
-	// client; the network's device list only carries top-level clients
-	SourceClientId *Id `json:"source_client_id,omitempty"`
-	DeviceId       *Id `json:"device_id"`
-	NetworkId      *Id `json:"network_id"`
+	ClientId  *Id `json:"client_id"`
+	DeviceId  *Id `json:"device_id"`
+	NetworkId *Id `json:"network_id"`
 	// see the naming note on AuthNetworkClientArgs.DeviceDescription
 	DeviceDescription string `json:"description"`
 	DeviceName        string `json:"device_name"`
@@ -881,50 +829,9 @@ type NetworkClientInfo struct {
 	CreateTime *Time `json:"create_time"`
 	AuthTime   *Time `json:"auth_time"`
 
-	// the identity roles and principal assigned at creation
-	// (AuthNetworkClientArgs.Roles / Principal)
-	Roles     *StringList `json:"roles,omitempty"`
-	Principal string      `json:"principal,omitempty"`
-
-	ProvideMode ProvideMode `json:"provide_mode"`
-	// ProxyClient carries the hosted proxy device's credentials; only the
-	// /network/proxies listing fills it, /network/clients never does
-	ProxyClient *ProxyClient                 `json:"proxy_client,omitempty"`
+	Resident    *NetworkClientResident       `json:"resident,omitempty"`
+	ProvideMode ProvideMode                  `json:"provide_mode"`
 	Connections *NetworkClientConnectionList `json:"connections"`
-}
-
-// `model.ProxyClient`: the credentials of a hosted proxy device
-type ProxyClient struct {
-	ChangeId       int64  `json:"change_id,omitempty"`
-	CreateTime     *Time  `json:"create_time"`
-	ProxyId        *Id    `json:"proxy_id"`
-	ClientId       *Id    `json:"client_id"`
-	InstanceId     *Id    `json:"instance_id"`
-	SocksProxyUrl  string `json:"socks_proxy_url"`
-	HttpProxyUrl   string `json:"http_proxy_url"`
-	HttpsProxyUrl  string `json:"https_proxy_url"`
-	ApiBaseUrl     string `json:"api_base_url"`
-	AuthToken      string `json:"auth_token"`
-	ProxyHost      string `json:"proxy_host"`
-	Block          string `json:"block"`
-	HttpProxyPort  int    `json:"http_proxy_port"`
-	HttpsProxyPort int    `json:"https_proxy_port"`
-	SocksProxyPort int    `json:"socks_proxy_port"`
-	ApiPort        int    `json:"api_port"`
-
-	WgConfig *WgConfig `json:"wg_config"`
-}
-
-// `model.WgConfig`: the WireGuard leg of a hosted proxy, nil when the plan
-// does not include it
-type WgConfig struct {
-	WgProxyPort      int    `json:"wg_proxy_port"`
-	ClientPrivateKey string `json:"client_private_key"`
-	ClientPublicKey  string `json:"client_public_key"`
-	ProxyPublicKey   string `json:"proxy_public_key"`
-	ClientIpv4       string `json:"client_ipv4"`
-	// Config is the complete client-side wg-quick configuration
-	Config string `json:"config"`
 }
 
 type NetworkClientConnection struct {
@@ -987,29 +894,18 @@ type FindLocationsArgs struct {
 	// in other words `len(Query) * (1 - MaxDistanceFraction)` length the query must match
 	MaxDistanceFraction       float32 `json:"max_distance_fraction,omitempty"`
 	EnableMaxDistanceFraction bool    `json:"enable_max_distance_fraction,omitempty"`
-	// RankMode is the provider ranking the location counts are taken from,
-	// "quality" (the default) or "speed" (the FindProviders2Args.RankMode
-	// values)
-	RankMode string `json:"rank_mode,omitempty"`
 }
 
 type FindLocationsResult struct {
+	Specs *ProviderSpecList `json:"specs"`
 	// this includes groups that show up in the location results
 	// all `ProviderCount` are from inside the location results
 	// groups are suggestions that can be used to broaden the search
 	Groups *LocationGroupResultList `json:"groups"`
 	// this includes all parent locations that show up in the location results
 	// every `CityId`, `RegionId`, `CountryId` will have an entry
-	Locations *LocationResultList `json:"locations"`
-	// direct devices
-	Devices *LocationDeviceResultList `json:"devices"`
-
-	// location stats over the returned locations
-	CountryCount       int `json:"country_count"`
-	RegionCount        int `json:"region_count"`
-	CityCount          int `json:"city_count"`
-	StableCount        int `json:"stable_count"`
-	StrongPrivacyCount int `json:"strong_privacy_count"`
+	Locations *LocationResultList       `json:"locations"`
+	Devices   *LocationDeviceResultList `json:"devices"`
 }
 
 type LocationResult struct {
@@ -1046,21 +942,9 @@ type LocationDeviceResult struct {
 }
 
 func (self *Api) GetProviderLocations(callback FindLocationsCallback) {
-	self.getProviderLocations(self.ctx, callback)
-}
-
-// The public API is scoped to the API lifetime. Controllers additionally pass
-// their request lifetime so closing or replacing a search cancels its I/O.
-func (self *Api) getProviderLocations(ctx context.Context, callback FindLocationsCallback) {
-	runAsyncApiRequest(locationsResultCallback(callback), func(callback connect.ApiCallback[*FindLocationsResult]) {
-		ctx, cancel := self.locationsRequestContext(ctx)
-		defer cancel()
-		if err := ctx.Err(); err != nil {
-			callback.Result(nil, err)
-			return
-		}
+	go connect.HandleError(func() {
 		connect.HttpGetWithRawFunction(
-			ctx,
+			self.ctx,
 			self.getHttpGetRaw(),
 			fmt.Sprintf("%s/network/provider-locations", self.apiUrl),
 			self.GetByJwt(),
@@ -1071,19 +955,9 @@ func (self *Api) getProviderLocations(ctx context.Context, callback FindLocation
 }
 
 func (self *Api) FindProviderLocations(findLocations *FindLocationsArgs, callback FindLocationsCallback) {
-	self.findProviderLocations(self.ctx, findLocations, callback)
-}
-
-func (self *Api) findProviderLocations(ctx context.Context, findLocations *FindLocationsArgs, callback FindLocationsCallback) {
-	runAsyncApiRequest(locationsResultCallback(callback), func(callback connect.ApiCallback[*FindLocationsResult]) {
-		ctx, cancel := self.locationsRequestContext(ctx)
-		defer cancel()
-		if err := ctx.Err(); err != nil {
-			callback.Result(nil, err)
-			return
-		}
+	go connect.HandleError(func() {
 		connect.HttpPostWithRawFunction(
-			ctx,
+			self.ctx,
 			self.getHttpPostRaw(),
 			fmt.Sprintf("%s/network/find-provider-locations", self.apiUrl),
 			findLocations,
@@ -1094,78 +968,17 @@ func (self *Api) findProviderLocations(ctx context.Context, findLocations *FindL
 	})
 }
 
-func (self *Api) locationsRequestContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	requestCtx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(self.ctx, cancel)
-	if self.ctx.Err() != nil {
-		cancel()
-	}
-	return requestCtx, func() {
-		stop()
-		cancel()
-	}
-}
-
-var errLocationsResultInvalid = errors.New("provider locations response is invalid")
-
-func locationsResultCallback(callback FindLocationsCallback) connect.ApiCallback[*FindLocationsResult] {
-	return connect.NewApiCallback(func(result *FindLocationsResult, err error) {
-		if err == nil {
-			if result == nil {
-				err = errLocationsResultInvalid
-			} else {
-				// Empty result sections may be omitted or encoded as null. The
-				// exported list wrappers need concrete empty lists for Len/Get.
-				if result.Groups == nil {
-					result.Groups = NewLocationGroupResultList()
-				}
-				if result.Locations == nil {
-					result.Locations = NewLocationResultList()
-				}
-				if result.Devices == nil {
-					result.Devices = NewLocationDeviceResultList()
-				}
-				// JSON null is valid inside an array but cannot be rendered as a
-				// location. Reject it before entering a platform's callback.
-				for i := 0; i < result.Groups.Len(); i++ {
-					if result.Groups.Get(i) == nil {
-						err = errLocationsResultInvalid
-					}
-				}
-				for i := 0; i < result.Locations.Len(); i++ {
-					if result.Locations.Get(i) == nil {
-						err = errLocationsResultInvalid
-					}
-				}
-				for i := 0; i < result.Devices.Len(); i++ {
-					if result.Devices.Get(i) == nil {
-						err = errLocationsResultInvalid
-					}
-				}
-			}
-		}
-		callback.Result(result, err)
-	})
-}
-
-// errFindRoutesRemoved is the immediate failure for the two find methods
-// whose server routes no longer exist, replacing the 404 round-trip.
-var errFindRoutesRemoved = errors.New(
-	"the /network/find-locations and /network/find-providers server routes " +
-		"were removed (server commit 978e15eb); use FindProviderLocations and " +
-		"FindProviders2; this call fails without contacting the server",
-)
-
-// FindLocations searched locations without provider counts.
-//
-// Deprecated: the server route POST /network/find-locations was removed
-// (server commit 978e15eb) with no remaining handler, so every call 404s.
-// The method now fails immediately with a clear error instead of making the
-// doomed round-trip; it is kept only for ABI compatibility. Use
-// FindProviderLocations.
 func (self *Api) FindLocations(findLocations *FindLocationsArgs, callback FindLocationsCallback) {
-	runAsyncApiRequest[*FindLocationsResult](callback, func(callback connect.ApiCallback[*FindLocationsResult]) {
-		callback.Result(nil, errFindRoutesRemoved)
+	go connect.HandleError(func() {
+		connect.HttpPostWithRawFunction(
+			self.ctx,
+			self.getHttpPostRaw(),
+			fmt.Sprintf("%s/network/find-locations", self.apiUrl),
+			findLocations,
+			self.GetByJwt(),
+			&FindLocationsResult{},
+			callback,
+		)
 	})
 }
 
@@ -1182,16 +995,17 @@ type FindProvidersResult struct {
 	ClientIds *IdList `json:"client_ids,omitempty"`
 }
 
-// FindProviders found provider client ids for one location.
-//
-// Deprecated: the server route POST /network/find-providers was removed
-// (server commit 978e15eb) with no remaining handler, so every call 404s.
-// The method now fails immediately with a clear error instead of making the
-// doomed round-trip; it is kept only for ABI compatibility. Use
-// FindProviders2.
 func (self *Api) FindProviders(findProviders *FindProvidersArgs, callback FindProvidersCallback) {
-	runAsyncApiRequest[*FindProvidersResult](callback, func(callback connect.ApiCallback[*FindProvidersResult]) {
-		callback.Result(nil, errFindRoutesRemoved)
+	go connect.HandleError(func() {
+		connect.HttpPostWithRawFunction(
+			self.ctx,
+			self.getHttpPostRaw(),
+			fmt.Sprintf("%s/network/find-providers", self.apiUrl),
+			findProviders,
+			self.GetByJwt(),
+			&FindProvidersResult{},
+			callback,
+		)
 	})
 }
 
@@ -1225,50 +1039,12 @@ func (self *ProviderSpec) toConnectProviderSpec() *connect.ProviderSpec {
 
 type FindProviders2Callback connect.ApiCallback[*FindProviders2Result]
 
-// The FindProviders2Args.RankMode values.
-const (
-	RankModeQuality = "quality"
-	RankModeSpeed   = "speed"
-)
-
-// The FindProviders2Args.IpFamily capability filters, in the connect
-// vocabulary; the exact categories are IpFamilyDualstack, IpFamilyV4Only and
-// IpFamilyV6Only (ip_family.go).
-const (
-	IpFamilyFilterV4Capable = "v4-capable"
-	IpFamilyFilterV6Capable = "v6-capable"
-)
-
 type FindProviders2Args struct {
-	Specs *ProviderSpecList `json:"specs"`
-	Count int               `json:"count"`
-	// ForceCount asks for exactly Count providers; otherwise the server
-	// loads at least a minimum block (20) to reduce db activity
-	ForceCount       bool    `json:"force_count,omitempty"`
-	ExcludeClientIds *IdList `json:"exclude_client_ids"`
-	// ExcludeDestinations excludes multi-hop destinations; the last id of
-	// each entry is the excluded final destination
-	ExcludeDestinations *MultiHopIdList `json:"exclude_destinations,omitempty"`
-	// RankMode is RankModeQuality (the default) or RankModeSpeed
-	RankMode     string `json:"rank_mode,omitempty"`
-	ForceMinimum bool   `json:"force_minimum,omitempty"`
-	// IpFamily filters providers by proven address family: "" and
-	// IpFamilyFilterV4Capable (dualstack first, then v4-only),
-	// IpFamilyFilterV6Capable (dualstack first, then v6-only), or the exact
-	// categories IpFamilyDualstack, IpFamilyV4Only, IpFamilyV6Only.
-	IpFamily string `json:"ip_family,omitempty"`
-}
-
-// MultiHopIdList is a list of multi-hop ids, each an ordered *IdList
-// (intermediaries first, destination last).
-type MultiHopIdList struct {
-	exportedList[*IdList]
-}
-
-func NewMultiHopIdList() *MultiHopIdList {
-	return &MultiHopIdList{
-		exportedList: *newExportedList[*IdList](),
-	}
+	Specs            *ProviderSpecList `json:"specs"`
+	Count            int               `json:"count"`
+	ExcludeClientIds *IdList           `json:"exclude_client_ids"`
+	RankMode         string            `json:"rank_mode,omitempty"`
+	ForceMinimum     bool              `json:"force_minimum,omitempty"`
 }
 
 type FindProviders2Result struct {
@@ -1276,51 +1052,10 @@ type FindProviders2Result struct {
 }
 
 type FindProvidersProvider struct {
-	ClientId                *Id `json:"client_id"`
-	EstimatedBytesPerSecond int `json:"estimated_bytes_per_second"`
-	// HasEstimatedBytesPerSecond is false when the provider has no speed
-	// test, in which case EstimatedBytesPerSecond is not an estimate
-	HasEstimatedBytesPerSecond bool `json:"has_estimated_bytes_per_second"`
-	// Tier is the provider's band in the requested RankMode, 0 best; a
-	// provider named by client id carries 0 since it bypasses discovery
-	Tier int `json:"tier"`
-	// IntermediaryIds is reserved for future multi-hop routes (the
-	// intermediaries to reach ClientId through, in order). Find-providers
-	// never returns multi-hop routes today, so this is always absent/empty.
-	IntermediaryIds       *IdList `json:"intermediary_ids,omitempty"`
-	NetworkOnly           bool    `json:"network_only,omitempty"`
-	ReputationFailedNames string  `json:"reputation_failed_names,omitempty"`
-	// Location is the provider's location, nil when the server does not
-	// know it
-	Location *ProviderLocation `json:"location,omitempty"`
-	// IpFamily is the provider's proven category, IpFamilyDualstack,
-	// IpFamilyV4Only or IpFamilyV6Only; empty for a fixed client-id spec,
-	// which bypasses discovery
-	IpFamily string `json:"ip_family,omitempty"`
-}
-
-// `model.ProviderLocation`: the location of a provider client, resolved from
-// its active connection. Coordinate objects are nil when unknown.
-type ProviderLocation struct {
-	Country     string `json:"country,omitempty"`
-	CountryCode string `json:"country_code,omitempty"`
-	Region      string `json:"region,omitempty"`
-	City        string `json:"city,omitempty"`
-
-	CountryLocationId *Id `json:"country_location_id,omitempty"`
-	RegionLocationId  *Id `json:"region_location_id,omitempty"`
-	CityLocationId    *Id `json:"city_location_id,omitempty"`
-
-	// the region centroid and the city centroid
-	RegionCoordinates *LocationCoordinates `json:"region_coordinates,omitempty"`
-	CityCoordinates   *LocationCoordinates `json:"city_coordinates,omitempty"`
-}
-
-// A wgs84 point. Zero is a valid coordinate; absence is expressed by a nil
-// LocationCoordinates, never by (0, 0).
-type LocationCoordinates struct {
-	Lat float64 `json:"lat"`
-	Lon float64 `json:"lon"`
+	ClientId                *Id    `json:"client_id"`
+	EstimatedBytesPerSecond int    `json:"estimated_bytes_per_second"`
+	NetworkOnly             bool   `json:"network_only,omitempty"`
+	ReputationFailedNames   string `json:"reputation_failed_names,omitempty"`
 }
 
 func (self *Api) FindProviders2(findProviders2 *FindProviders2Args, callback FindProviders2Callback) {
@@ -1524,8 +1259,6 @@ type CircleWalletInfo struct {
 	BlockchainSymbol     string    `json:"blockchain_symbol"`
 	CreateDate           string    `json:"create_date"`
 	BalanceUsdcNanoCents NanoCents `json:"balance_usdc_nano_cents"`
-	// Address is the wallet's on-chain address
-	Address string `json:"address"`
 }
 
 type WalletBalanceCallback connect.ApiCallback[*WalletBalanceResult]
@@ -1615,21 +1348,9 @@ type TransferBalance struct {
 	StartTime             string    `json:"start_time"`
 	EndTime               string    `json:"end_time"`
 	StartBalanceByteCount ByteCount `json:"start_balance_byte_count"`
-	// how much money the platform made after subtracting fees. The wire name
-	// is `net_revenue_nano_cents` (an earlier tag, `net_revenue`, never
-	// matched the server and left this 0 in every app).
-	NetRevenue NanoCents `json:"net_revenue_nano_cents"`
-	// the subsidized part of NetRevenue
-	SubsidyNetRevenue NanoCents `json:"subsidy_net_revenue_nano_cents,omitempty"`
-	BalanceByteCount  ByteCount `json:"balance_byte_count"`
-	// PurchaseToken is the store purchase the balance came from, when any
-	PurchaseToken string `json:"purchase_token,omitempty"`
-	// Paid means the balance carries revenue. It is NOT the same as Pro: a
-	// data code is paid but data-only.
-	Paid bool `json:"paid,omitempty"`
-	// Pro means the balance carries the Pro entitlement. A network is Pro iff
-	// it has an in-window balance with this set.
-	Pro bool `json:"pro,omitempty"`
+	// how much money the platform made after subtracting fees
+	NetRevenue       NanoCents `json:"net_revenue"`
+	BalanceByteCount ByteCount `json:"balance_byte_count"`
 }
 
 type SubscriptionBalanceCallback connect.ApiCallback[*SubscriptionBalanceResult]
@@ -1816,14 +1537,11 @@ type GetNetworkReferralCodeResult struct {
 	// The referral program terms, from the server's pro.yml: the one place the
 	// cap and bonus live. All zero when the server reports none (no pro.yml: no
 	// cap, no grant); apps keep their display defaults then.
-	MaxReferrals          int   `json:"max_referrals"`
-	BonusPerReferralBytes int64 `json:"bonus_per_referral_bytes"`
-	ReferredBonusBytes    int64 `json:"referred_bonus_bytes"`
-	BonusPeriodSeconds    int64 `json:"bonus_period_seconds"`
-	// HasReferralNetwork says this network is a referee and therefore receives
-	// ReferredBonusBytes even when it has no outgoing referrals.
-	HasReferralNetwork bool                         `json:"has_referral_network"`
-	Error              *GetNetworkReferralCodeError `json:"error,omitempty"`
+	MaxReferrals          int                          `json:"max_referrals"`
+	BonusPerReferralBytes int64                        `json:"bonus_per_referral_bytes"`
+	ReferredBonusBytes    int64                        `json:"referred_bonus_bytes"`
+	BonusPeriodSeconds    int64                        `json:"bonus_period_seconds"`
+	Error                 *GetNetworkReferralCodeError `json:"error,omitempty"`
 }
 
 // BonusGibPerDay is the referrer's bonus per referral as whole GiB per day,
@@ -1890,9 +1608,8 @@ type ValidateReferralCodeArgs struct {
 }
 
 type ValidateReferralCodeResult struct {
-	IsValid  bool      `json:"is_valid"`
-	IsCapped bool      `json:"is_capped"`
-	Error    *ApiError `json:"error,omitempty"`
+	IsValid  bool `json:"is_valid"`
+	IsCapped bool `json:"is_capped"`
 }
 
 type ValidateReferralCodeCallback connect.ApiCallback[*ValidateReferralCodeResult]
@@ -2048,36 +1765,12 @@ func (self *Api) RemoveWallet(
  */
 
 type FeedbackSendArgs struct {
-	Uses      *FeedbackSendUses  `json:"uses,omitempty"`
 	Needs     *FeedbackSendNeeds `json:"needs"`
 	StarCount int                `json:"star_count"`
 }
 
-// FeedbackSendUses is how the user uses URnetwork (the feedback form's
-// "I use it for" line)
-type FeedbackSendUses struct {
-	Personal bool `json:"personal"`
-	Business bool `json:"business"`
-}
-
-// FeedbackSendNeeds is what the user needs from URnetwork: the form's tick
-// boxes plus the free-text Other
 type FeedbackSendNeeds struct {
-	Private          bool   `json:"private"`
-	Safe             bool   `json:"safe"`
-	Global           bool   `json:"global"`
-	Collaborate      bool   `json:"collaborate"`
-	AppControl       bool   `json:"app_control"`
-	BlockDataBrokers bool   `json:"block_data_brokers"`
-	BlockAds         bool   `json:"block_ads"`
-	Focus            bool   `json:"focus"`
-	ConnectServers   bool   `json:"connect_servers"`
-	RunServers       bool   `json:"run_servers"`
-	PreventCyber     bool   `json:"prevent_cyber"`
-	Audit            bool   `json:"audit"`
-	ZeroTrust        bool   `json:"zero_trust"`
-	Visualize        bool   `json:"visualize"`
-	Other            string `json:"other"`
+	Other string `json:"other"`
 }
 
 type FeedbackSendResult struct {
@@ -2229,11 +1922,6 @@ func (self *Api) AuthCodeLoginSyncWithContext(ctx context.Context, args *AuthCod
 type AuthCodeCreateArgs struct {
 	DurationMinutes float64 `json:"duration_minutes,omitempty"`
 	Uses            int     `json:"uses,omitempty"`
-	// Roles and Principal are carried by every login minted from this code
-	// (see AuthNetworkClientArgs.Roles). Only a network-level session may
-	// set them; when omitted the session's own are inherited.
-	Roles     *StringList `json:"roles,omitempty"`
-	Principal string      `json:"principal,omitempty"`
 }
 
 type AuthCodeCreateResult struct {
@@ -2418,12 +2106,7 @@ type LeaderboardEarner struct {
 
 type LeaderboardResult struct {
 	Earners *LeaderboardEarnersList `json:"earners"`
-	// Rank is the caller network's leaderboard position (1 = top earner), 0
-	// when the network has no ranked payouts; Total is the number of ranked
-	// networks. Both come from the same ranking the leaderboard is cut from.
-	Rank  int               `json:"rank"`
-	Total int               `json:"total"`
-	Error *LeaderboardError `json:"error,omitempty"`
+	Error   *LeaderboardError       `json:"error,omitempty"`
 }
 
 type LeaderboardError struct {
@@ -2450,10 +2133,6 @@ func (self *Api) GetLeaderboard(args *GetLeaderboardArgs, callback GetLeaderboar
  * Get Network Leaderboard ranking
  */
 
-// NetworkRanking is the wire shape of /network/ranking's `network_ranking`:
-// the server's `controller.NetworkRankingWithPoints`, which embeds
-// `model.NetworkRanking` (the three data-leaderboard fields) and adds the
-// points-leaderboard fields flattened beside them.
 type NetworkRanking struct {
 	NetMiBCount       float32 `json:"net_mib_count"`
 	LeaderboardRank   int     `json:"leaderboard_rank"`
@@ -2557,19 +2236,17 @@ type GetPointsLeaderboardArgs struct {
 // `DisplayName` is the network name, or empty when `Anonymous` (the app then
 // shows its localized "Anonymous"); `EmojiTag` shows either way.
 type PointsLeaderboardRow struct {
-	NetworkId   *Id    `json:"network_id"`
-	NetworkName string `json:"network_name,omitempty"`
-	EmojiTag    string `json:"emoji_tag,omitempty"`
-	Anonymous   bool   `json:"anonymous"`
-	// ContainsProfanity flags a public name the apps may mask
-	ContainsProfanity bool    `json:"contains_profanity,omitempty"`
-	TotalPoints       float64 `json:"total_points"`
-	BlocksWithPoints  int64   `json:"blocks_with_points"`
-	Streak            int64   `json:"streak"`
-	LongestStreak     int64   `json:"longest_streak"`
-	RankPoints        int64   `json:"rank_points"`
-	RankBlocks        int64   `json:"rank_blocks"`
-	RankStreak        int64   `json:"rank_streak"`
+	NetworkId        *Id     `json:"network_id"`
+	NetworkName      string  `json:"network_name,omitempty"`
+	EmojiTag         string  `json:"emoji_tag,omitempty"`
+	Anonymous        bool    `json:"anonymous"`
+	TotalPoints      float64 `json:"total_points"`
+	BlocksWithPoints int64   `json:"blocks_with_points"`
+	Streak           int64   `json:"streak"`
+	LongestStreak    int64   `json:"longest_streak"`
+	RankPoints       int64   `json:"rank_points"`
+	RankBlocks       int64   `json:"rank_blocks"`
+	RankStreak       int64   `json:"rank_streak"`
 	// Position is the row's 1-based place in the requested sort's total order
 	// (ranks tie, positions never do): the seek coordinate and the key the
 	// view controller keeps its loaded window by.
@@ -2586,13 +2263,10 @@ type PointsLeaderboardRow struct {
 }
 
 // PointsLeaderboardMe is the caller's own row plus its opt-in state. On the
-// wire it is the row's fields with `points_leaderboard_public` and `ranked`
-// beside them. Ranked is false when the network has no points yet (the row
-// fields are then zero).
+// wire it is the row's fields with `points_leaderboard_public` beside them.
 type PointsLeaderboardMe struct {
 	Row                     *PointsLeaderboardRow
 	PointsLeaderboardPublic bool
-	Ranked                  bool
 }
 
 func (self *PointsLeaderboardMe) UnmarshalJSON(b []byte) error {
@@ -2602,14 +2276,12 @@ func (self *PointsLeaderboardMe) UnmarshalJSON(b []byte) error {
 	}
 	var flags struct {
 		PointsLeaderboardPublic bool `json:"points_leaderboard_public"`
-		Ranked                  bool `json:"ranked"`
 	}
 	if err := json.Unmarshal(b, &flags); err != nil {
 		return err
 	}
 	self.Row = row
 	self.PointsLeaderboardPublic = flags.PointsLeaderboardPublic
-	self.Ranked = flags.Ranked
 	return nil
 }
 
@@ -2625,7 +2297,6 @@ func (self *PointsLeaderboardMe) MarshalJSON() ([]byte, error) {
 		}
 	}
 	fields["points_leaderboard_public"] = self.PointsLeaderboardPublic
-	fields["ranked"] = self.Ranked
 	return json.Marshal(fields)
 }
 
@@ -2679,9 +2350,7 @@ type SetPointsLeaderboardPublicArgs struct {
 }
 
 type SetPointsLeaderboardPublicResult struct {
-	// the opt-in state after the call
-	PointsLeaderboardPublic bool                             `json:"points_leaderboard_public"`
-	Error                   *SetPointsLeaderboardPublicError `json:"error,omitempty"`
+	Error *SetPointsLeaderboardPublicError `json:"error,omitempty"`
 }
 
 type SetPointsLeaderboardPublicError struct {
@@ -2745,7 +2414,6 @@ func (self *Api) SetEmojiTag(args *SetEmojiTagArgs, callback SetEmojiTagCallback
  */
 
 type AccountPoint struct {
-	AccountPointId   *Id        `json:"account_point_id"`
 	NetworkId        *Id        `json:"network_id"`
 	Event            string     `json:"event"`
 	PointValue       NanoPoints `json:"point_value"`
@@ -2844,7 +2512,6 @@ func (self *Api) NetworkUnblockLocation(args *NetworkUnblockLocationArgs, callba
 
 type GetNetworkBlockedLocationsResult struct {
 	BlockedLocations *BlockedLocationsList `json:"blocked_locations"`
-	Error            *ApiError             `json:"error,omitempty"`
 }
 
 type GetNetworkBlockedLocationsCallback connect.ApiCallback[*GetNetworkBlockedLocationsResult]
@@ -3134,20 +2801,19 @@ type RefreshJwtCallback connect.ApiCallback[*RefreshJwtResult]
 
 func (self *Api) RefreshJwt(callback RefreshJwtCallback) {
 	runAsyncApiRequest[*RefreshJwtResult](callback, func(callback connect.ApiCallback[*RefreshJwtResult]) {
-		result, err := self.refreshJwtSyncWithContext(self.ctx)
-		callback.Result(result, err)
+		connect.HttpGetWithRawFunction(
+			self.ctx,
+			self.getHttpGetRaw(),
+			fmt.Sprintf("%s/auth/refresh", self.apiUrl),
+			self.GetByJwt(),
+			&RefreshJwtResult{},
+			callback,
+		)
 	})
 }
 
 func (self *Api) RefreshJwtSync() (*RefreshJwtResult, error) {
 	return self.refreshJwtSyncWithContext(self.ctx)
-}
-
-// Headless startup owns a finite refresh attempt separately from API lifetime.
-//
-//gomobile:noexport
-func (self *Api) RefreshJwtSyncWithContext(ctx context.Context) (*RefreshJwtResult, error) {
-	return self.refreshJwtSyncWithContext(ctx)
 }
 
 // refreshJwtSyncWithContext bounds the request to the caller's ctx, so a
@@ -3158,27 +2824,14 @@ func (self *Api) refreshJwtSyncWithContext(ctx context.Context) (*RefreshJwtResu
 }
 
 func (self *Api) refreshJwtSyncWithContextAndJwt(ctx context.Context, byJwt string) (*RefreshJwtResult, error) {
-	if ctx == nil {
-		return nil, &ClientControlResponseError{detail: "refresh context is absent"}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	raw, err := self.getHttpGetRaw()(ctx, fmt.Sprintf("%s/auth/refresh", self.apiUrl), byJwt)
-	if err != nil {
-		if transientClientControlRequestError(err) {
-			return nil, &ClientControlUnavailableError{cause: err}
-		}
-		return nil, err
-	}
-	var result *RefreshJwtResult
-	if err := decodeClientControlJson(raw, &result); err != nil {
-		return nil, err
-	}
-	if result == nil || result.Error == nil && result.ByJwt == "" || result.Error != nil && (result.ByJwt != "" || result.Error.Message == "") {
-		return nil, &ClientControlResponseError{detail: "refresh must contain exactly one complete success or refusal"}
-	}
-	return result, nil
+	return connect.HttpGetWithRawFunction(
+		ctx,
+		self.getHttpGetRaw(),
+		fmt.Sprintf("%s/auth/refresh", self.apiUrl),
+		byJwt,
+		&RefreshJwtResult{},
+		connect.NewNoopApiCallback[*RefreshJwtResult](),
+	)
 }
 
 /**
@@ -3561,16 +3214,12 @@ type DeleteApiKeyResult struct {
 
 type DeleteApiKeyCallback connect.ApiCallback[*DeleteApiKeyResult]
 
-// DeleteApiKey removes one api key by id (POST /account/api-key/remove).
-// An earlier form issued a GET with no body, which the server route never
-// accepted.
-func (self *Api) DeleteApiKey(args *DeleteApiKeyArgs, callback DeleteApiKeyCallback) {
+func (self *Api) DeleteApiKey(callback DeleteApiKeyCallback) {
 	go connect.HandleError(func() {
-		connect.HttpPostWithRawFunction(
+		connect.HttpGetWithRawFunction(
 			self.ctx,
-			self.getHttpPostRaw(),
+			self.getHttpGetRaw(),
 			fmt.Sprintf("%s/account/api-key/remove", self.apiUrl),
-			args,
 			self.GetByJwt(),
 			&DeleteApiKeyResult{},
 			callback,
@@ -3698,9 +3347,6 @@ type ChangeNetworkNameCallback connect.ApiCallback[*ChangeNetworkNameResult]
 
 type ChangeNetworkNameArgs struct {
 	NewName string `json:"new_name"`
-	// NetworkName is an alias of NewName the server also accepts (it reads
-	// network_name first, then new_name); callers set one or the other
-	NetworkName string `json:"network_name,omitempty"`
 }
 
 type ChangeNetworkNameResult struct {
@@ -3732,8 +3378,6 @@ type ClaimNetworkNameCallback connect.ApiCallback[*ClaimNetworkNameResult]
 
 type ClaimNetworkNameArgs struct {
 	NewName string `json:"new_name"`
-	// see ChangeNetworkNameArgs.NetworkName
-	NetworkName string `json:"network_name,omitempty"`
 }
 
 type ClaimNetworkNameResult struct {

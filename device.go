@@ -288,11 +288,6 @@ type PacketStats struct {
 type TransportPacketStats struct {
 	TransportType TransportType
 	Stats         *PacketStats
-	// Live negotiated H1 connections, independent of the cumulative byte
-	// counters. Both can be nonzero in a mixed provider window. Zero for other
-	// transport types and older SDK peers. H1+ remains TransportTypeH1.
-	H1WebSocketConnectionCount int64
-	H1PlusConnectionCount      int64
 }
 
 type TransportPacketStatsList struct {
@@ -496,11 +491,6 @@ type Device interface {
 	GetApi() *Api
 
 	GetStats() *DeviceStats
-
-	// GetLicenses returns the open source licenses and data attributions the
-	// app must publish, for `app` (one of the LicenseApp* constants). The
-	// list is embedded in the SDK (license.yml) and needs no network.
-	GetLicenses(app string) *LicenseInfoList
 
 	GetShouldShowRatingDialog() bool
 

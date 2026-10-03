@@ -562,17 +562,13 @@ func (self *apiTokenManager) refreshTokenWithContext(ctx context.Context, byJwt 
 		// A 401 over the api connection is the auth layer rejecting the jwt
 		// itself (expired or unparseable): confirmed invalid
 		var statusErr *connect.HttpStatusError
-		if ConfirmedClientRefreshRejection(err) {
-			self.api.logger().Errorf("[api-token]jwt rejected by the api (%d): logging out", http.StatusUnauthorized)
+		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusUnauthorized {
+			self.api.logger().Errorf("[api-token]jwt rejected by the api (%d): logging out", statusErr.StatusCode)
 			if self.api.rejectByJwt(byJwt, authGeneration) {
 				return apiTokenRefreshOutcome{loggedOut: true}
 			} else {
 				return apiTokenRefreshOutcome{stale: true}
 			}
-		}
-		var invalid *ClientControlResponseError
-		if errors.As(err, &invalid) {
-			self.api.reportClientRefreshIntegrity(byJwt, authGeneration)
 		}
 
 		return apiTokenRefreshOutcome{
@@ -601,7 +597,6 @@ func (self *apiTokenManager) refreshTokenWithContext(ctx context.Context, byJwt 
 		return apiTokenRefreshOutcome{err: fmt.Errorf("failed to refresh JWT: empty JWT returned")}
 	}
 	if err := validateRefreshedClientJwt(byJwt, result.ByJwt); err != nil {
-		self.api.reportClientRefreshIntegrity(byJwt, authGeneration)
 		return apiTokenRefreshOutcome{err: fmt.Errorf("failed to refresh JWT: %w", err)}
 	}
 

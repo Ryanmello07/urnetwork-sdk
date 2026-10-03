@@ -27,13 +27,21 @@ const (
 	testUrlSpaceHost        = "space.example"
 )
 
-// Installs in-process discovery on every network client this test builds,
-// and turns the client and the node on for the test.
+// Installs an in-process resolver and hello on every network client this test
+// builds, so a live client never leaves the machine, and turns the client and
+// the node on for the test.
 func testEnableUrlSpaceExtenderNetwork(t *testing.T) {
 	t.Helper()
 	testEnableExtenderNode(t)
 	extenderNetworkClientEnabled = true
-	extenderNetworkClientConfigure = testConfigureInProcessExtenderNetworkClient
+	extenderNetworkClientConfigure = func(settings *connect.ExtenderNetworkClientSettings) {
+		settings.ResolveDns = func(ctx context.Context, name string) ([]netip.Addr, error) {
+			return nil, nil
+		}
+		settings.Hello = func(ctx context.Context) (*connect.ExtenderHelloResult, error) {
+			return &connect.ExtenderHelloResult{}, nil
+		}
+	}
 	t.Cleanup(func() {
 		extenderNetworkClientEnabled = false
 		extenderNetworkClientConfigure = nil

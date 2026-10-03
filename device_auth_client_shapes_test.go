@@ -43,10 +43,12 @@ func testingAuthClientShapeSpace(t *testing.T) *testingAuthClientShape {
 	t.Cleanup(networkSpace.close)
 	api := networkSpace.GetApi()
 	// The real API commit and constructor-installed device listener below
-	// run synchronously. Stop only the independent timer/network worker;
-	// manual refresh requests still need the API's live ownership context.
-	api.tokenManager.Close()
-	testingAwaitAuthBoundary(t, api.tokenManager.done)
+	// run synchronously. The independent timer/network worker is not needed.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := api.CloseAndWait(ctx); err != nil {
+		t.Fatal("could not join the unused automatic API worker")
+	}
 	return &testingAuthClientShape{
 		networkSpace: networkSpace,
 		localState:   networkSpace.asyncLocalState.localState,

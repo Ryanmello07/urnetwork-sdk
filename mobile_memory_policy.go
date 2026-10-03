@@ -318,7 +318,6 @@ func applyMobileLowMemoryPlatformTransportSettingsForPlatform(
 		!mobileMemoryPolicyEnabledForPlatform(memoryTargetByteCount, mobile) {
 		return
 	}
-	connect.ApplyMobilePlatformTransportMemoryPolicy(settings, memoryTargetByteCount)
 	settings.H1AckPriorityBufferSize = mobileTargetScaledCount(
 		mobileH1AckPriorityBufferSize,
 		memoryTargetByteCount,

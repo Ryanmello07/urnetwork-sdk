@@ -37,7 +37,6 @@ func generateTypes() error {
 		sdk.NetExtender{},
 		sdk.ProxyAuthResult{},
 		sdk.ProxyConfigResult{},
-		sdk.WgConfig{},
 
 		/**
 		 * Api types
@@ -107,7 +106,6 @@ func generateTypes() error {
 		sdk.LocationGroupResult{},
 		sdk.LocationDeviceResult{},
 		sdk.FilteredLocations{},
-		sdk.RegionGroup{},
 		sdk.ConnectLocationId{},
 		sdk.ConnectLocation{},
 		sdk.ProxyDeviceState{},
@@ -268,8 +266,6 @@ func goTypeToTypeScript(t reflect.Type) string {
 			return "LocationGroupResult[]"
 		case "sdk.ConnectLocationList":
 			return "ConnectLocation[]"
-		case "sdk.RegionGroupList":
-			return "RegionGroup[]"
 		case "sdk.PublicAccountApiKeyList":
 			return "PublicAccountApiKey[]"
 		case "sdk.Int64List":
@@ -292,9 +288,8 @@ func goTypeToTypeScript(t reflect.Type) string {
 			// custom json: an object keyed by surface
 			return "Record<string, ExperimentAssignment>"
 		case "sdk.PointsLeaderboardMe":
-			// custom json: the row's fields with points_leaderboard_public and
-			// ranked beside them
-			return "PointsLeaderboardRow & { points_leaderboard_public: boolean; ranked: boolean }"
+			// custom json: the row's fields with points_leaderboard_public beside them
+			return "PointsLeaderboardRow & { points_leaderboard_public: boolean }"
 		default:
 			return t.Name()
 		}

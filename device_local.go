@@ -177,10 +177,6 @@ func newDeviceLocalPlatformTransportSettings(
 	settings := connect.DefaultPlatformTransportSettingsWithMemoryTarget(
 		memoryTargetByteCount,
 	)
-	// Both provider and destination carriers need the mobile ownership policy;
-	// applying it only in the destination generator leaves a larger provider
-	// target on the desktop carrier path.
-	applyMobileLowMemoryPlatformTransportSettings(settings, memoryTargetByteCount)
 	settings.PlatformTransportBudget = platformTransportBudget
 	if altUrl = strings.TrimSpace(altUrl); altUrl != "" {
 		settings.AltUrl = altUrl
@@ -493,16 +489,6 @@ func (self *DeviceLocalSettings) SetNetworkPeersEpochMillis(millis int64) {
 // are reachable through the *Millis accessor pairs at the end of this file,
 // so an app can set them; the other three are Go-construction only.
 type DeviceLocalSettings struct {
-	// Explicit platform-owned authorities. Nil retains the application HTTP
-	// path. These are captured per device and never installed on a shared API.
-	//gomobile:noexport Go-only local control authorities.
-	ClientCredentials connect.NetworkClientCredentials
-	//gomobile:noexport Go-only local control authority.
-	ClientControl connect.NetworkClientControl
-	//gomobile:noexport Go-only local discovery authority.
-	ProviderDiscovery connect.NetworkProviderDiscovery
-	//gomobile:noexport Go-only private API authority.
-	LocalApi LocalDeviceApi
 	// Diagnostic-only injection of the existing allocator-error return path.
 	testingTakeLocalAddress func() (netip.Addr, bool)
 	// Constructor seams observe admission ordering without creating a client.
@@ -583,11 +569,6 @@ type DeviceLocalSettings struct {
 	// carrier ports and point the activation at an in-process operator through
 	// it; production takes the fixed carrier ports and the space's own urls.
 	providerExtenderSettings func(settings *deviceLocalExtenderSettings)
-	// providerPingReporterSettings, when set, adjusts the settings of the
-	// reporter the provider's attested probes go to before it is built
-	// (GEOMAP §2.5). Tests read the url, credential and strategy it posts with
-	// through it; production posts to the space's api url.
-	providerPingReporterSettings func(settings *connect.ExtenderPingReporterSettings)
 	// testingBeforeExtenderProvideWatch, when set, runs in the provider
 	// extender status watch's goroutine before the watch waits on anything. A
 	// test holds it to land a change before the watch runs; production never
@@ -674,12 +655,11 @@ type DeviceLocal struct {
 
 	networkSpace *NetworkSpace
 	// api is the credential session used by this device. Ordinary app devices
-	// use the NetworkSpace API directly. Hosted devices own both a credential
-	// session and a control strategy, so neither authentication nor dial/DoH
-	// admission can cross device boundaries.
-	api                *Api
-	ownsApi            bool
-	ownsClientStrategy bool
+	// use the NetworkSpace API directly. Hosted devices own a private session
+	// over the shared NetworkSpace strategy so credentials and teardown cannot
+	// cross device boundaries.
+	api     *Api
+	ownsApi bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -691,11 +671,6 @@ type DeviceLocal struct {
 	// Explicit key saves are separate from preference autosave. Capture and
 	// commit one current value at a time without holding callback/native locks.
 	providerKeySaveLock sync.Mutex
-	// Serializes the hand-over of the provide mode to the provider, each
-	// reading the mode afresh, so the last hand-over carries the mode as it is
-	// now and a stale one never lands after it: the provider's attestor
-	// follows what it is handed. Always taken before stateLock.
-	providerProvideModeLock sync.Mutex
 	// Test-only barriers surround the final owner admission and real commit.
 	// The former is outside auth locks; the latter runs under paired locks.
 	testingBeforeProviderKeySaveAdmission func(string)
@@ -789,8 +764,6 @@ type DeviceLocal struct {
 	// outside the mobile policy; its goroutine follows self.ctx.
 	memorySampler                 *mobileMemorySampler
 	platformTransportReceiveStats *connect.PlatformTransportReceiveStats
-	// Shared by every outbound window/generation, separate from provider H1.
-	h1ConnectionStats connect.H1ConnectionStats
 	// transferDiagStats is the shared p2p data-plane counter set of the
 	// build-time transfer diagnostic seam (transfer_diag.go); nil unless on.
 	transferDiagStats *connect.P2pDataPlaneStats
@@ -848,10 +821,8 @@ type DeviceLocal struct {
 	// is derived from MemoryTargetByteCount.
 	platformTransportBudget *connect.PlatformTransportBudget
 	transferMemory          *deviceLocalTransferMemory
-	// At most one deferred constructor waits for shared root space. Its channel
-	// joins that admission worker without waiting on unrelated device work.
-	// Guarded by stateLock; nil means no admission worker is pending.
-	remoteUserNatProviderMemoryWaitDone <-chan struct{}
+	// At most one deferred remote-NAT constructor waits for shared root space.
+	remoteUserNatProviderMemoryWait bool
 
 	// dohServerScoresSeed is the per-DoH-server success ordering carried into
 	// each mux build: loaded from local storage at construction (the last
@@ -1288,12 +1259,6 @@ func newDeviceLocalWithOverridesForPlatform(
 	// Runtime-owned stores must not leak into a reusable caller settings value.
 	settingsCopy := *settings
 	settings = &settingsCopy
-	if settings.LocalApi != nil && !settings.HostedIncompatible {
-		return nil, errors.New("local device API requires an isolated hosted session")
-	}
-	if settings.LocalApi != nil && settings.AllowProvider {
-		return nil, errors.New("local device API supports hosted source devices only")
-	}
 	if settings.KeyMaterial != nil {
 		applyDeviceLocalKeyMaterial(&settings.ClientSettings, settings.KeyMaterial)
 		// the extender identity belongs to the space, not to the client
@@ -1305,8 +1270,6 @@ func newDeviceLocalWithOverridesForPlatform(
 	// resolve the device logger. all nested components and clients follow it.
 	log := settings.logger()
 	settings.ClientSettings.Log = log
-	dnsShareByteCount, _, _, providerShareByteCount := deviceMemoryShares(settings)
-	dnsMemoryTarget := connect.NewMemoryTarget(dnsShareByteCount)
 
 	// Prepare client auth without changing the serving device or durable store.
 	// Daemons commit their empty store only when construction can succeed; a
@@ -1327,22 +1290,12 @@ func newDeviceLocalWithOverridesForPlatform(
 	// apiUrl := networkSpace.apiUrl
 	clientStrategy := networkSpace.clientStrategy
 	ownsApi := false
-	ownedClientStrategyTransferred := false
 	if settings.HostedIncompatible {
-		// Proxy devices share immutable network metadata, not mutable API
-		// credentials or control-plane dial/DoH admission limits.
-		clientStrategy = networkSpace.newHostedClientStrategy(dnsMemoryTarget)
-		api = api.newSessionWithStrategy(ctx, clientStrategy)
-		if settings.LocalApi != nil {
-			api.setHttpGetRaw(settings.LocalApi.Get)
-			api.setHttpPostRaw(settings.LocalApi.Post)
-		}
+		// The proxy shares one NetworkSpace across unrelated customers. Reuse
+		// its strategy/request core, but isolate mutable credentials, refresh
+		// listeners, and the refresh worker in a device-owned API session.
+		api = api.newSession(ctx)
 		ownsApi = true
-		defer func() {
-			if !ownedClientStrategyTransferred {
-				clientStrategy.Close()
-			}
-		}()
 	}
 
 	preparedAuth, err := api.prepareDeviceAuth(authLocalState, byJwt, instanceId, time.Now(), authPublication)
@@ -1373,6 +1326,8 @@ func newDeviceLocalWithOverridesForPlatform(
 	// sized them from its default, and the caller may have overridden
 	// MemoryTargetByteCount (or disabled providing, folding the provider
 	// share into the client share) since
+	dnsShareByteCount, _, _, providerShareByteCount :=
+		deviceMemoryShares(settings)
 	platformTransportBudget := connect.NewPlatformTransportBudgetForMemoryTarget(
 		settings.MemoryTargetByteCount,
 	)
@@ -1413,9 +1368,6 @@ func newDeviceLocalWithOverridesForPlatform(
 		settings.ClientSettings.EncryptionSettings = &encryption
 	}
 
-	// Acceptance-only counters must be present before provider/window settings
-	// are copied into live clients. The default path allocates nothing.
-	transferDiagStats := prepareTransferDiag(&settings.ClientSettings)
 	var provider *deviceLocalProvider
 	if settings.AllowProvider {
 		if settings.testingBeforeProviderConstruction != nil {
@@ -1489,20 +1441,18 @@ func newDeviceLocalWithOverridesForPlatform(
 	}
 
 	deviceLocal := &DeviceLocal{
-		networkSpace:       networkSpace,
-		api:                api,
-		ownsApi:            ownsApi,
-		ownsClientStrategy: settings.HostedIncompatible,
-		ctx:                ctx,
-		cancel:             cancel,
-		byJwt:              byJwt,
-		subprotocols:       newDeviceLocalSubprotocols(ctx, log),
+		networkSpace: networkSpace,
+		api:          api,
+		ownsApi:      ownsApi,
+		ctx:          ctx,
+		cancel:       cancel,
+		byJwt:        byJwt,
+		subprotocols: newDeviceLocalSubprotocols(ctx, log),
 		// apiUrl:            apiUrl,
 		deviceDescription:      deviceDescription,
 		deviceSpec:             deviceSpec,
 		appVersion:             appVersion,
 		settings:               settings,
-		transferDiagStats:      transferDiagStats,
 		peerKeyPinStore:        peerKeyPinStore,
 		log:                    log,
 		clientId:               clientId,
@@ -1519,7 +1469,7 @@ func newDeviceLocalWithOverridesForPlatform(
 		windowIdentityStoreGenerations: newWindowIdentityStoreGenerations(),
 		// the dns share of the device memory target; one live budget for the
 		// life of the device (see the field doc)
-		dnsMemoryTarget:           dnsMemoryTarget,
+		dnsMemoryTarget:           connect.NewMemoryTarget(dnsShareByteCount),
 		platformTransportBudget:   platformTransportBudget,
 		transferMemory:            transferMemory,
 		generatorFunc:             settings.GeneratorFunc,
@@ -1746,6 +1696,7 @@ func newDeviceLocalWithOverridesForPlatform(
 		mobile,
 	)
 	deviceLocal.updateMobilePacketPerformanceModeWithLock()
+	deviceLocal.startTransferDiag()
 	if deviceLocal.mobilePacketPressure != nil {
 		deviceLocal.platformTransportReceiveStats =
 			&connect.PlatformTransportReceiveStats{}
@@ -1757,23 +1708,7 @@ func newDeviceLocalWithOverridesForPlatform(
 			<-memorySamplerDone
 		}()
 	}
-	deviceLocal.startTransferDiag()
 
-	// a providing device attests its measured distance to the extenders it
-	// probes and reports those measurements itself (connect/DESIGNNOTES4.md
-	// §1, connect/GEOMAP.md §2.5). A device that does not provide never
-	// identifies itself to an extender, so the provider installs the attestor
-	// only when its provide mode leaves none, and clears it when the mode
-	// returns to none or the provider closes: a device built with a provider
-	// but provide mode none -- what every app build is -- probes to rank only.
-	// A hosted device enables none: it never provides, and its space is shared
-	// across unrelated customers, whose probes it would attest -- and report --
-	// in this tenant's name.
-	if provider != nil && !settings.HostedIncompatible {
-		provider.enableProbeAttestor(log, settings.providerPingReporterSettings)
-	}
-
-	ownedClientStrategyTransferred = true
 	return deviceLocal, nil
 }
 
@@ -2783,10 +2718,6 @@ func (self *DeviceLocal) GetStats() *DeviceStats {
 	return self.stats
 }
 
-func (self *DeviceLocal) GetLicenses(app string) *LicenseInfoList {
-	return GetLicenses(app)
-}
-
 func (self *DeviceLocal) GetShouldShowRatingDialog() bool {
 	if !self.stats.GetUserSuccess() {
 		return false
@@ -3442,10 +3373,9 @@ func (self *DeviceLocal) canReferChanged(canRefer bool) {
 
 func (self *DeviceLocal) provideModeChanged(provideMode ProvideMode) {
 	// self.assertNotLockOwner()
-	// the provider's transports and its attestor follow the mode: a public
-	// provider dials the platform directly (EXTENDER.md J4), and only a
-	// providing one attests its probes (connect/DESIGNNOTES4.md §1)
-	self.updateProviderProvideMode()
+	// the provider's transports follow the mode: a public provider dials the
+	// platform directly (EXTENDER.md J4)
+	self.updateProviderProvideMode(provideMode)
 	for _, listener := range self.provideModeChangeListeners.Get() {
 		connect.HandleError(func() {
 			listener.ProvideModeChanged(provideMode)
@@ -3453,25 +3383,14 @@ func (self *DeviceLocal) provideModeChanged(provideMode ProvideMode) {
 	}
 }
 
-// Hands the provide mode as it is now to the provider, which rebuilds its
-// transports when the public flag flips (J4) and attests only while the mode
-// is not none (connect/DESIGNNOTES4.md §1). The mode is read here rather than
-// taken from the change that prompted the hand-over, since two changes may
-// deliver out of order. Never called with the device lock held.
-func (self *DeviceLocal) updateProviderProvideMode() {
-	self.providerProvideModeLock.Lock()
-	defer self.providerProvideModeLock.Unlock()
-
-	var provider *deviceLocalProvider
-	var closed bool
-	var provideMode ProvideMode
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		provider = self.provider
-		closed = self.closed
-		provideMode = self.provideMode
-	}()
+// Hands the current provide mode to the provider, which rebuilds its
+// transports when the public flag flips (J4). Never called with the device
+// lock held.
+func (self *DeviceLocal) updateProviderProvideMode(provideMode ProvideMode) {
+	self.stateLock.Lock()
+	provider := self.provider
+	closed := self.closed
+	self.stateLock.Unlock()
 	if closed || provider == nil {
 		return
 	}
@@ -4360,7 +4279,6 @@ func (self *DeviceLocal) applyDestination(
 	sameTransport := false
 	locationChanged := false
 	closed := false
-	contractStatusChanged := false
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -4387,16 +4305,6 @@ func (self *DeviceLocal) applyDestination(
 		if self.contractStatusSub != nil {
 			self.contractStatusSub()
 			self.contractStatusSub = nil
-		}
-		// the contract status summarizes the multi client being torn down, so
-		// it goes with the subscription. Otherwise a latched error (e.g.
-		// insufficient balance) outlives the connection that reported it, and
-		// while disconnected no new contract result can ever clear it, so the
-		// UI keeps asking to subscribe after the balance has been refreshed
-		self.orderedContractStatusUpdates = []*contractStatusUpdate{}
-		if self.netContractStatus == nil || *self.netContractStatus != (ContractStatus{}) {
-			self.netContractStatus = &ContractStatus{}
-			contractStatusChanged = true
 		}
 		if self.windowMonitorSub != nil {
 			self.windowMonitorSub()
@@ -4507,9 +4415,6 @@ func (self *DeviceLocal) applyDestination(
 				generator = self.generatorFunc(connectSpecs)
 			} else {
 				apiGeneratorSettings := connect.DefaultApiMultiClientGeneratorSettings()
-				apiGeneratorSettings.ClientCredentials = self.settings.ClientCredentials
-				apiGeneratorSettings.ClientControl = self.settings.ClientControl
-				apiGeneratorSettings.ProviderDiscovery = self.settings.ProviderDiscovery
 				apiGeneratorSettings.PlatformTransportSettingsGenerator = func() *connect.PlatformTransportSettings {
 					settings := newDeviceLocalPlatformTransportSettings(
 						self.settings.MemoryTargetByteCount,
@@ -4523,7 +4428,6 @@ func (self *DeviceLocal) applyDestination(
 						self.settings.MemoryTargetByteCount,
 					)
 					settings.ReceiveStats = self.platformTransportReceiveStats
-					settings.H1ConnectionStats = &self.h1ConnectionStats
 					return settings
 				}
 				transportMode, modePreferences := toConnectTransportPolicy(self.transportSettings, false)
@@ -4550,7 +4454,6 @@ func (self *DeviceLocal) applyDestination(
 							self.clientStrategy,
 						)
 						shareDevicePeerKeyPinStore(clientSettings, &self.settings.ClientSettings)
-						applyLocalDeviceApiKeyFetchers(clientSettings, self.settings.LocalApi, self.networkSpace.apiUrl)
 						// share the device budgets so every window client's
 						// queues draw from the same pools. Stamped before the
 						// mobile policy so the policy caps the receive hold
@@ -4810,9 +4713,6 @@ func (self *DeviceLocal) applyDestination(
 		self.windowStatusChanged(self.GetWindowStatus())
 		self.providerIdentitiesChanged()
 		self.connectedProviderLocationsChanged()
-		if contractStatusChanged {
-			self.contractStatusChanged(self.GetContractStatus())
-		}
 		if provideChanged {
 			self.provideModeChanged(self.GetProvideMode())
 			self.provideChanged(self.GetProvideEnabled())
@@ -5320,9 +5220,6 @@ func (self *DeviceLocal) Close() {
 			if self.ownsApi {
 				_ = self.api.CloseAndWait(context.Background())
 			}
-			if self.ownsClientStrategy {
-				self.clientStrategy.Close()
-			}
 			close(self.lifecycleDone)
 		}()
 	})
@@ -5403,9 +5300,6 @@ func (self *DeviceLocal) close() {
 	if self.provider != nil {
 		provider := self.provider
 		self.subprotocols.attach(nil)
-		// the close also takes the provider's attestor off the space, so
-		// nothing attests in its name once it is gone; the join closes its
-		// reporter
 		provider.Close()
 		self.provider = nil
 		self.startLifecycleWorkerWithLock(func() {
@@ -5779,20 +5673,18 @@ func (self *DeviceLocal) ensureRemoteUserNatProviderWithLock() error {
 // One worker retries both NAT and provider-graph admission. Capture notify
 // before either attempt; a permanent policy error never starts/spins a retry.
 func (self *DeviceLocal) waitRemoteUserNatProviderMemoryWithLock(capacityNotify <-chan struct{}) {
-	if capacityNotify == nil || self.remoteUserNatProviderMemoryWaitDone != nil {
+	if capacityNotify == nil || self.remoteUserNatProviderMemoryWait {
 		return
 	}
-	workerDone := make(chan struct{})
-	self.remoteUserNatProviderMemoryWaitDone = workerDone
+	self.remoteUserNatProviderMemoryWait = true
 	self.lifecycleWorkers.Add(1)
 	go func() {
 		defer self.lifecycleWorkers.Done()
-		defer close(workerDone)
 		for {
 			select {
 			case <-self.ctx.Done():
 				self.stateLock.Lock()
-				self.remoteUserNatProviderMemoryWaitDone = nil
+				self.remoteUserNatProviderMemoryWait = false
 				self.stateLock.Unlock()
 				return
 			case <-capacityNotify:
@@ -5804,7 +5696,7 @@ func (self *DeviceLocal) waitRemoteUserNatProviderMemoryWithLock(capacityNotify 
 				self.remoteUserNatProvider != nil || self.remoteUserNatProviderRotationPending ||
 				(err != nil && !errors.Is(err, connect.ErrNatMemoryBudget))
 			if done {
-				self.remoteUserNatProviderMemoryWaitDone = nil
+				self.remoteUserNatProviderMemoryWait = false
 			}
 			self.stateLock.Unlock()
 			if done {
@@ -6026,7 +5918,7 @@ func (self *DeviceLocal) transportSettingsChanged(transportSettings *TransportSe
 }
 
 func (self *DeviceLocal) GetTransportStatus() *TransportStatus {
-	return transportStatusForBudget(self.GetTransportSettings(), false, self.platformTransportBudget)
+	return transportStatus(self.GetTransportSettings(), false)
 }
 
 func (self *DeviceLocal) AddTransportStatusChangeListener(listener TransportStatusChangeListener) Sub {
@@ -6115,7 +6007,7 @@ func (self *DeviceLocal) GetProviderTransportSettings() *TransportSettings {
 }
 
 func (self *DeviceLocal) GetProviderTransportStatus() *TransportStatus {
-	return transportStatusForBudget(self.GetProviderTransportSettings(), true, self.platformTransportBudget)
+	return transportStatus(self.GetProviderTransportSettings(), true)
 }
 
 func (self *DeviceLocal) AddProviderTransportStatusChangeListener(listener ProviderTransportStatusChangeListener) Sub {
@@ -6279,7 +6171,6 @@ func packetStatsFromConnect(packetStats *connect.PacketStats) *PacketStats {
 // the client route stats: the multi client counters plus the fallback local route
 func (self *DeviceLocal) clientPacketStatsFromConnect(packetStats *connect.PacketStats) *PacketStats {
 	stats := packetStatsFromConnect(packetStats)
-	applyH1ConnectionStats(stats, self.h1ConnectionStats.Snapshot())
 	stats.LocalEgressPacketCount += self.localFallbackEgressPacketCount.Load()
 	stats.LocalEgressByteCount += ByteCount(self.localFallbackEgressByteCount.Load())
 	stats.LocalIngressPacketCount += self.localFallbackIngressPacketCount.Load()
@@ -6358,17 +6249,7 @@ func (self *DeviceLocal) GetProviderPacketStats() *PacketStats {
 	if self.provider == nil {
 		return nil
 	}
-	return self.providerPacketStatsFromConnect(self.combinedProviderConnectPacketStatsWithLock())
-}
-
-// Called with stateLock. The provider collector spans overlapping migration
-// generations and is separate from outbound client connections.
-func (self *DeviceLocal) providerPacketStatsFromConnect(packetStats *connect.PacketStats) *PacketStats {
-	stats := packetStatsFromConnect(packetStats)
-	if self.provider != nil {
-		applyH1ConnectionStats(stats, self.provider.h1ConnectionStats.Snapshot())
-	}
-	return stats
+	return packetStatsFromConnect(self.combinedProviderConnectPacketStatsWithLock())
 }
 
 // Applies a current provider epoch. A nonnil provider/generation pair makes
@@ -6391,7 +6272,7 @@ func (self *DeviceLocal) updateProviderPacketStatsForGeneration(
 		}
 		combined := self.providerPacketStatsBase
 		addConnectPacketStats(&combined, packetStats)
-		netPacketStats = self.providerPacketStatsFromConnect(&combined)
+		netPacketStats = packetStatsFromConnect(&combined)
 		trafficByteCount := packetStatsTrafficByteCount(netPacketStats)
 		trafficDelta = packetStatsTrafficDelta(
 			self.mobileMemoryProviderTrafficByteCount,

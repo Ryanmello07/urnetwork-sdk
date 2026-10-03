@@ -89,13 +89,12 @@ type deviceRpcListener interface {
 	Accept(ctx context.Context) (forward net.Conn, reverse net.Conn, err error)
 }
 
-// DeviceRpcWs is the historical name of the gomobile-bindable binary carrier
-// interface (with deviceRpcWs). Implemented by the gorilla connection and by
-// connect.FramedMessageConn for explicitly negotiated FramerXl, and by the
+// DeviceRpcWs is the subset of the websocket connection the mux uses (with
+// deviceRpcWs). Implemented by the gorilla connection natively and by the
 // browser websocket shim under js (see device_rpc_platform_js.go), where the
 // write-control ping is a zero-length binary message since browsers cannot
-// send protocol pings. The mux uses only binary messages and serialized empty
-// heartbeats on every carrier; it never asks FramerXl to emulate WS controls.
+// send protocol pings (the read loop discards zero-length messages, so native
+// peers tolerate it).
 type DeviceRpcWs interface {
 	WriteMessage(messageType int, data []byte) error
 	Close() error
@@ -133,12 +132,6 @@ type deviceRpcMux struct {
 	// pooled, tag-prefixed frames pending write. drained and returned to the
 	// pool on teardown.
 	send chan []byte
-
-	// Exclusive to writeLoop, like the underlying carrier's writer. Reusing
-	// these descriptors avoids a heap-allocated 32-entry slice array on every
-	// ready flush. Clear every borrowed payload reference before returning its
-	// ownership; neither a completed nor failed flush may retain a message.
-	writeMessages [32][]byte
 
 	// Admission closes before the writer joins producers and drains send.
 	// Only external Write calls register; the write loop never joins itself.
@@ -318,13 +311,6 @@ func (self *deviceRpcMux) writeLoop() {
 		case <-self.ctx.Done():
 			return
 		case b := <-self.send:
-			if writer, ok := self.ws.(interface{ WriteMessages([][]byte) error }); ok {
-				if err := self.writeReadyMessages(writer, b); err != nil {
-					self.log.Infof("[mux]write done = %s", err)
-					return
-				}
-				continue
-			}
 			if 0 < self.writeTimeout {
 				self.ws.SetWriteDeadline(time.Now().Add(self.writeTimeout))
 			}
@@ -368,14 +354,18 @@ func (self *deviceRpcMux) readLoop() {
 	}()
 
 	for {
-		messageType, message, err := self.readMessage()
+		messageType, r, err := self.ws.NextReader()
 		if err != nil {
 			self.log.Infof("[mux]read done = %s", err)
 			return
 		}
 		if messageType != DeviceRpcWsBinary {
-			connect.MessagePoolReturn(message)
 			continue
+		}
+		message, err := connect.MessagePoolReadAllLimit(r, self.maxFrameBytes)
+		if err != nil {
+			self.log.Infof("[mux]read all done = %s", err)
+			return
 		}
 		if 0 < self.readTimeout {
 			self.ws.SetReadDeadline(time.Now().Add(self.readTimeout))
@@ -403,53 +393,6 @@ func (self *deviceRpcMux) readLoop() {
 			return
 		}
 	}
-}
-
-func (self *deviceRpcMux) readMessage() (int, []byte, error) {
-	if reader, ok := self.ws.(interface{ ReadPooledMessage() (int, []byte, error) }); ok {
-		return reader.ReadPooledMessage()
-	}
-	kind, reader, err := self.ws.NextReader()
-	if err != nil || kind != DeviceRpcWsBinary {
-		return kind, nil, err
-	}
-	message, err := connect.MessagePoolReadAllLimit(reader, self.maxFrameBytes)
-	return kind, message, err
-}
-
-func (self *deviceRpcMux) writeReadyMessages(writer interface{ WriteMessages([][]byte) error }, first []byte) error {
-	messages := &self.writeMessages
-	messages[0] = first
-	count, total := 1, len(first)
-	defer func() {
-		for i, message := range messages[:count] {
-			messages[i] = nil
-			connect.MessagePoolReturn(message)
-			self.sendBytes.release(len(message))
-		}
-	}()
-drain:
-	for count < len(messages) && total < 12*1024 {
-		select {
-		case <-self.ctx.Done():
-			return io.ErrClosedPipe
-		case message := <-self.send:
-			messages[count] = message
-			count++
-			total += len(message)
-		default:
-			break drain
-		}
-	}
-	if self.ctx.Err() != nil {
-		return io.ErrClosedPipe
-	}
-	if self.writeTimeout > 0 {
-		if err := self.ws.SetWriteDeadline(time.Now().Add(self.writeTimeout)); err != nil {
-			return err
-		}
-	}
-	return writer.WriteMessages(messages[:count])
 }
 
 // compile check that deviceRpcMuxConn conforms to net.Conn
@@ -865,7 +808,7 @@ func (self *WebsocketDeviceRpcDialer) dial(ctx context.Context, netDialContext f
 	if self.log.V(2).Enabled() {
 		self.log.Infof("[dr]dial %s (mtls=%t)", u.String(), self.useMtls)
 	}
-	carrier, err := connect.DialH1Messages(ctx, u.String(), nil, dialer, connect.H1FramerXlProtocol, int(self.settings.maxFrameBytes()), self.settings.EnableH1Plus && self.useMtls, self.settings.H1PlusStats)
+	ws, _, err := dialer.DialContext(ctx, u.String(), nil)
 	if err != nil {
 		// Reserve the outage before calling the external logger. Error text
 		// can change without recovery, and another Dial may finish meanwhile.
@@ -876,7 +819,7 @@ func (self *WebsocketDeviceRpcDialer) dial(ctx context.Context, netDialContext f
 	}
 	self.dialFailed.Store(false)
 	self.log.Infof("[dr]dial %s connected", u.String())
-	mux := newDeviceRpcMux(ctx, carrier.(deviceRpcWs), self.settings)
+	mux := newDeviceRpcMux(ctx, ws, self.settings)
 	return mux.conns[deviceRpcStreamForward], mux.conns[deviceRpcStreamReverse], nil
 }
 
@@ -959,9 +902,7 @@ func (self *WebsocketDeviceRpcListener) ensureStarted() error {
 	serveMux := http.NewServeMux()
 	serveMux.HandleFunc("/", self.handle)
 	self.httpServer = &http.Server{
-		Handler:           serveMux,
-		ReadHeaderTimeout: self.settings.RpcConnectTimeout,
-		MaxHeaderBytes:    32 * 1024,
+		Handler: serveMux,
 		// handshake/connection failures on this localhost listener are not
 		// actionable and a misconfigured client should not spam logs
 		ErrorLog: log.New(io.Discard, "", 0),
@@ -1008,35 +949,7 @@ func (self *WebsocketDeviceRpcListener) ensureStarted() error {
 }
 
 func (self *WebsocketDeviceRpcListener) handle(w http.ResponseWriter, r *http.Request) {
-	var ws deviceRpcWs
-	var err error
-	if connect.IsFramedUpgrade(r, connect.H1FramerXlProtocol) {
-		if !self.settings.EnableH1Plus || !connect.H1PlusAvailable() {
-			http.Error(w, "upgrade unavailable", http.StatusUpgradeRequired)
-			return
-		}
-		// The listener's TLS handshake already verifies the exact client
-		// certificate pin. Never add an unauthenticated raw upgrade locally.
-		if self.clientCertPem == "" || r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		if err = connect.ValidateFramedUpgradeRequest(r, connect.H1FramerXlProtocol); err != nil {
-			http.Error(w, "invalid upgrade", http.StatusBadRequest)
-			return
-		}
-		conn, upgradeErr := connect.AcceptFramedUpgrade(w, r, connect.H1FramerXlProtocol, self.settings.RpcConnectTimeout)
-		if upgradeErr != nil {
-			return
-		}
-		ws, err = connect.NewFramedMessageConn(conn, connect.H1FramerXlProtocol, int(self.settings.maxFrameBytes()), self.settings.H1PlusStats)
-		if err != nil {
-			conn.Close()
-			return
-		}
-	} else {
-		ws, err = self.upgrader.Upgrade(w, r, nil)
-	}
+	ws, err := self.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		self.log.Infof("[dlrpc]ws upgrade err = %s", err)
 		return

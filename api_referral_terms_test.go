@@ -16,8 +16,7 @@ func TestReferralTermsDisplayHelpers(t *testing.T) {
 		"max_referrals": 20,
 		"bonus_per_referral_bytes": 3221225472,
 		"referred_bonus_bytes": 3221225472,
-		"bonus_period_seconds": 86400,
-		"has_referral_network": true
+		"bonus_period_seconds": 86400
 	}`), &result)
 	if err != nil {
 		t.Fatal(err)
@@ -30,9 +29,6 @@ func TestReferralTermsDisplayHelpers(t *testing.T) {
 	}
 	if gib := result.ReferredBonusGibPerDay(); gib != 3 {
 		t.Fatalf("referred bonus gib/day: %d", gib)
-	}
-	if !result.HasReferralNetwork {
-		t.Fatal("linked referee state was not decoded")
 	}
 	if paid := result.PaidReferrals(25); paid != 20 {
 		t.Fatalf("paid referrals over the cap: %d", paid)

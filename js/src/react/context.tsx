@@ -7,7 +7,7 @@ import React, {
   useState,
   type ReactNode,
 } from "react";
-import { URNetworkAPI, type URNetworkAPIConfig } from "../api";
+import { URNetworkAPI } from "../api";
 
 interface URNetworkAPIContextValue {
   api: URNetworkAPI;
@@ -19,7 +19,7 @@ const URNetworkAPIContext = createContext<URNetworkAPIContextValue | null>(
 
 export interface URNetworkAPIProviderProps {
   children: ReactNode;
-  config?: URNetworkAPIConfig;
+  config?: { baseURL?: string; token?: string };
 }
 
 /**

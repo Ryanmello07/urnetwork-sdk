@@ -33,9 +33,9 @@ func TestMemoryStatsAllocatorAccounting(t *testing.T) {
 func TestMobileMemoryRuntimeSnapshotUsesCallerStorageWithoutAllocation(t *testing.T) {
 	var reader mobileMemoryRuntimeReader
 	var snapshot mobileMemoryRuntimeSnapshot
-	reader.read(&snapshot, nil)
+	reader.read(&snapshot)
 	if allocations := testing.AllocsPerRun(25, func() {
-		reader.read(&snapshot, nil)
+		reader.read(&snapshot)
 	}); allocations != 0 {
 		t.Fatalf("mobile runtime snapshot allocations/run = %.2f, want 0", allocations)
 	}

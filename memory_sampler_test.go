@@ -10,7 +10,6 @@ import (
 
 func TestMobileMemoryRuntimeReaderConcurrent(t *testing.T) {
 	reader := &mobileMemoryRuntimeReader{}
-	budget := connect.DefaultPlatformTransportBudget()
 	var workers sync.WaitGroup
 	for range 4 {
 		workers.Add(1)
@@ -18,7 +17,7 @@ func TestMobileMemoryRuntimeReaderConcurrent(t *testing.T) {
 			defer workers.Done()
 			for range 40 {
 				var snapshot mobileMemoryRuntimeSnapshot
-				reader.read(&snapshot, budget)
+				reader.read(&snapshot)
 				if snapshot.totalByteCount <= 0 || snapshot.transportBudgetTotalByteCount <= 0 {
 					t.Error("concurrent runtime reader returned an incomplete sample")
 				}
@@ -180,10 +179,6 @@ func TestMobileDeviceMemorySampleHotPathDoesNotAllocate(t *testing.T) {
 	}
 	if sample.DeviceTrackedByteCount != 654 {
 		t.Fatalf("tracked bytes = %d, want queue ownership 654", sample.DeviceTrackedByteCount)
-	}
-	if sample.GoHeapAllocByteCount <= 0 || sample.GoStackInuseByteCount <= 0 ||
-		sample.GoHeapUnusedByteCount < 0 || sample.GoHeapFreeByteCount < 0 {
-		t.Fatalf("allocator classes were not copied into the device sample: %+v", sample)
 	}
 	if sample.ResendQueueUsedByteCount != 111 || sample.ResendQueueCapacityByteCount != 2048 {
 		t.Fatalf(

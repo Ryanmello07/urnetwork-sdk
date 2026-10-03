@@ -14,7 +14,6 @@ const initialFilteredLocations: FilteredLocations = {
   cities: [],
   regions: [],
   devices: [],
-  region_groups: [],
 };
 
 export function useProviderList() {
@@ -164,10 +163,6 @@ export function useProviderList() {
       cities: cities,
       regions: regions,
       devices: devices,
-      // this TS port of the sdk grouping does not nest cities under regions;
-      // URNetwork#filteredLocations (the sdk's own grouping, via the wasm)
-      // returns regionGroups
-      region_groups: [],
     };
   };
 

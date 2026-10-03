@@ -34,7 +34,6 @@ public interface Raw extends Library {
   interface urnet_check_balance_code_cb extends Callback { void invoke(Pointer a0, String a1, String a2); }
   interface urnet_claim_network_name_cb extends Callback { void invoke(Pointer a0, String a1, String a2); }
   interface urnet_client_events_send_cb extends Callback { void invoke(Pointer a0, String a1, String a2); }
-  interface urnet_client_refresh_integrity_cb extends Callback { void invoke(Pointer a0, long a1); }
   interface urnet_commit_cb extends Callback { void invoke(Pointer a0, byte a1); }
   interface urnet_connect_change_cb extends Callback { void invoke(Pointer a0, byte a1); }
   interface urnet_connect_location_change_cb extends Callback { void invoke(Pointer a0, String a1); }
@@ -239,7 +238,6 @@ public interface Raw extends Library {
   void urnet_api_account_preferences_update(long a0, String a1, urnet_account_preferences_set_cb a2, Pointer a3);
   void urnet_api_add_auth(long a0, String a1, urnet_add_auth_cb a2, Pointer a3);
   long urnet_api_add_auth_logout_listener(long a0, urnet_auth_logout_cb a1, Pointer a2);
-  long urnet_api_add_client_refresh_integrity_listener(long a0, urnet_client_refresh_integrity_cb a1, Pointer a2);
   long urnet_api_add_jwt_refresh_listener(long a0, urnet_jwt_refresh_cb a1, Pointer a2);
   void urnet_api_auth_code_create(long a0, String a1, urnet_auth_code_create_cb a2, Pointer a3);
   void urnet_api_auth_code_login(long a0, String a1, urnet_auth_code_login_cb a2, Pointer a3);
@@ -251,7 +249,6 @@ public interface Raw extends Library {
   void urnet_api_auth_verify(long a0, String a1, urnet_auth_verify_cb a2, Pointer a3);
   void urnet_api_auth_verify_send(long a0, String a1, urnet_auth_verify_send_cb a2, Pointer a3);
   void urnet_api_auth_wallet_challenge(long a0, String a1, urnet_auth_wallet_challenge_cb a2, Pointer a3);
-  Pointer urnet_api_auth_wallet_challenge_sync(long a0, String a1, PointerByReference a2);
   void urnet_api_change_network_name(long a0, String a1, urnet_change_network_name_cb a2, Pointer a3);
   void urnet_api_check_balance_code(long a0, String a1, urnet_check_balance_code_cb a2, Pointer a3);
   void urnet_api_claim_network_name(long a0, String a1, urnet_claim_network_name_cb a2, Pointer a3);
@@ -262,7 +259,7 @@ public interface Raw extends Library {
   void urnet_api_create_solana_payment_intent(long a0, String a1, urnet_solana_payment_intent_cb a2, Pointer a3);
   void urnet_api_create_stripe_checkout_session(long a0, String a1, urnet_stripe_create_checkout_session_cb a2, Pointer a3);
   void urnet_api_create_stripe_payment_intent(long a0, String a1, urnet_stripe_payment_intent_cb a2, Pointer a3);
-  void urnet_api_delete_api_key(long a0, String a1, urnet_delete_api_key_cb a2, Pointer a3);
+  void urnet_api_delete_api_key(long a0, urnet_delete_api_key_cb a1, Pointer a2);
   void urnet_api_device_set_name(long a0, String a1, urnet_device_set_name_cb a2, Pointer a3);
   void urnet_api_find_locations(long a0, String a1, urnet_find_locations_cb a2, Pointer a3);
   void urnet_api_find_provider_locations(long a0, String a1, urnet_find_locations_cb a2, Pointer a3);
@@ -289,7 +286,6 @@ public interface Raw extends Library {
   void urnet_api_list_api_keys(long a0, urnet_list_api_keys_cb a1, Pointer a2);
   void urnet_api_network_block_location(long a0, String a1, urnet_network_block_location_cb a2, Pointer a3);
   void urnet_api_network_check(long a0, String a1, urnet_network_check_cb a2, Pointer a3);
-  Pointer urnet_api_network_client_registration_endpoint(long a0, PointerByReference a1);
   void urnet_api_network_create(long a0, String a1, urnet_network_create_cb a2, Pointer a3);
   void urnet_api_network_delete(long a0, urnet_network_delete_cb a1, Pointer a2);
   void urnet_api_network_unblock_location(long a0, String a1, urnet_network_unblock_location_cb a2, Pointer a3);
@@ -377,7 +373,6 @@ public interface Raw extends Library {
   long urnet_client_event_queue_pending_count(long a0);
   void urnet_client_event_queue_set_app_version(long a0, String a1);
   void urnet_client_event_queue_set_locale(long a0, String a1);
-  byte urnet_client_refresh_integrity_notice_close_api_if_current(long a0);
   long urnet_connect_grid_get_height(long a0);
   Pointer urnet_connect_grid_get_provider_grid_point_by_client_id(long a0, String a1);
   Pointer urnet_connect_grid_get_provider_grid_point_list(long a0);
@@ -500,7 +495,6 @@ public interface Raw extends Library {
   Pointer urnet_device_get_ingress_contract_details(long a0);
   Pointer urnet_device_get_ingress_contract_stats(long a0);
   Pointer urnet_device_get_instance_id(long a0);
-  Pointer urnet_device_get_licenses(long a0, String a1);
   Pointer urnet_device_get_local_override_app_ids(long a0);
   long urnet_device_get_log_verbosity(long a0);
   Pointer urnet_device_get_network_peers(long a0);
@@ -595,7 +589,6 @@ public interface Raw extends Library {
   Pointer urnet_device_local_get_first_load_timeline_json(long a0);
   long urnet_device_local_get_key_material(long a0);
   long urnet_device_local_get_last_local_state_save_result(long a0);
-  Pointer urnet_device_local_get_memory_stats(long a0);
   Pointer urnet_device_local_get_pinned_app_ids(long a0);
   Pointer urnet_device_local_get_probe_results(long a0);
   Pointer urnet_device_local_get_provide_secret_keys(long a0);
@@ -613,7 +606,6 @@ public interface Raw extends Library {
   Pointer urnet_device_local_memory_used(long a0);
   long urnet_device_local_migrate_exit(long a0, String a1);
   void urnet_device_local_network_changed(long a0);
-  void urnet_device_local_network_quality_changed(long a0);
   void urnet_device_local_notify_network_change(long a0);
   long urnet_device_local_open_account_preferences_view_controller(long a0);
   long urnet_device_local_open_account_view_controller(long a0);
@@ -679,14 +671,12 @@ public interface Raw extends Library {
   Pointer urnet_device_local_take_memory_samples_json(long a0);
   byte urnet_device_local_transfer_diag_defer_timeout_resend(long a0);
   byte urnet_device_local_transfer_diag_lane_rule(long a0);
-  Pointer urnet_device_local_transfer_diagnostic_snapshot_json(long a0, PointerByReference a1);
   Pointer urnet_device_local_tunnel_dns_addresses_ipv4(long a0);
   Pointer urnet_device_local_tunnel_dns_addresses_ipv6(long a0);
   Pointer urnet_device_local_tunnel_dns_setting(long a0);
   Pointer urnet_device_local_tunnel_local_address(long a0);
   Pointer urnet_device_local_tunnel_local_address_ipv6(long a0);
   byte urnet_device_local_wait_for_close(long a0, long a1);
-  byte urnet_device_local_write_memory_owner_census(long a0, String a1, PointerByReference a2);
   byte urnet_device_local_key_material_is_empty(long a0);
   void urnet_device_local_key_material_set_extender_key_seed(long a0, Pointer a1, int a2);
   Pointer urnet_device_local_load_result_get_default_error(long a0);
@@ -958,7 +948,6 @@ public interface Raw extends Library {
   long urnet_network_space_manager_get_network_space(long a0, String a1);
   Pointer urnet_network_space_manager_get_network_spaces(long a0);
   long urnet_network_space_manager_import_network_space_from_json(long a0, String a1, PointerByReference a2);
-  byte urnet_network_space_manager_migrate_network_space(long a0, String a1, String a2);
   byte urnet_network_space_manager_remove_network_space(long a0, long a1);
   void urnet_network_space_manager_set_active_network_space(long a0, long a1);
   long urnet_network_space_manager_update_network_space(long a0, String a1, urnet_network_space_update_cb a2, Pointer a3);
@@ -1162,7 +1151,6 @@ public interface Raw extends Library {
   byte urnet_get_extender_store_read_only();
   Pointer urnet_get_filtered_locations_from_result(String a0, String a1);
   byte urnet_get_fips140_enabled();
-  Pointer urnet_get_licenses(String a0);
   Pointer urnet_get_log_dir();
   Pointer urnet_get_log_root();
   long urnet_get_log_verbosity();
@@ -1240,7 +1228,6 @@ public interface Raw extends Library {
   Pointer urnet_service_host_name(String a0, String a1, String a2);
   Pointer urnet_service_url(String a0, String a1, String a2, String a3);
   void urnet_set_control_ip_family_policy(long a0);
-  void urnet_set_device_rpc_h1_plus_enabled(byte a0);
   void urnet_set_egress_interface_index(long a0, long a1);
   void urnet_set_extender_store_read_only(byte a0);
   byte urnet_set_log_dir(String a0, PointerByReference a1);
@@ -1249,7 +1236,6 @@ public interface Raw extends Library {
   void urnet_set_memory_limit(long a0);
   void urnet_set_memory_profile_rate(long a0);
   void urnet_set_message_pool_memory_targets(long a0, long a1);
-  byte urnet_set_transfer_diagnostic_snapshots_enabled(byte a0);
   Pointer urnet_short_ss58(String a0);
   Pointer urnet_sn_claim_transactions_for(String a0, String a1, String a2, PointerByReference a3);
   void urnet_sn_claims_for(String a0, String a1, long a2, urnet_sn_claims_cb a3, Pointer a4);

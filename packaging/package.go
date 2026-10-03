@@ -238,8 +238,7 @@ func buildPackage(language string, m nativeManifest, out string) {
 	case "csharp":
 		stageNative(language, stage, m)
 		d := requireDotnet()
-		// Shared Roslyn/MSBuild servers would outlive this packaging command.
-		command(stage, d.environment(nil), d.executable, "pack", "--disable-build-servers", "-c", "Release", "-o", artifacts)
+		command(stage, d.environment(nil), d.executable, "pack", "-c", "Release", "-o", artifacts)
 	case "rust":
 		e := map[string]string{}
 		if assets := os.Getenv("SDK_RUST_RELEASE_ASSETS"); assets != "" {
