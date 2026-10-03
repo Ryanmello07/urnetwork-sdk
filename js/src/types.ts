@@ -40,6 +40,31 @@ export interface ProxyConfigResult {
  * Device socket methods shared by local/proxy and remote device wrappers.
  */
 export interface Device extends SocketDevice {
+  /** see LicenseInfo */
+  getLicenses(app: LicenseApp): LicenseInfo[];
+}
+
+/** the app a license list is for (sdk LicenseApp* constants) */
+export type LicenseApp = "android" | "apple" | "windows" | "linux" | "web" | "extension";
+
+/**
+ * One component an app includes, and the license and notice that must be
+ * published with it (sdk.LicenseInfo, embedded from sdk/license.yml).
+ */
+export interface LicenseInfo {
+  name: string;
+  version: string;
+  kind: "data" | "software" | "font";
+  /** the collector the entry came from: go, maven, swiftpm, npm-web, npm-extension, extra */
+  origin: string;
+  url: string;
+  /** SPDX expression; empty when the text is not a standard license */
+  spdx: string;
+  /** newline separated */
+  copyright: string;
+  /** a notice that must be shown verbatim (e.g. the MaxMind attribution); usually empty */
+  notice: string;
+  text: string;
 }
 
 /**
@@ -198,6 +223,8 @@ export interface DeviceRemote extends SocketDevice, SubprotocolDevice {
   getRemoteConnected(): boolean;
   getClientId(): string;
   getInstanceId(): string;
+  /** see LicenseInfo */
+  getLicenses(app: LicenseApp): LicenseInfo[];
   /** Last explicit RPC sync refusal; empty while pending or after success. */
   getSyncError(): string;
   /** A random tag of 1–3 distinct emoji to prefill the emoji-tag editor with; count 0 or omitted picks the length at random. */
@@ -452,6 +479,28 @@ export interface PacketStats {
   blockIngressByteCount: number;
 }
 
+/** Traffic share plus live carrier selection; H1+ retains transportType "h1". */
+export interface TransportShare {
+  transportType: string;
+  h1WebSocketConnectionCount: number;
+  h1PlusConnectionCount: number;
+  egressByteCount: number;
+  ingressByteCount: number;
+  egressPacketCount: number;
+  ingressPacketCount: number;
+  share: number;
+  boundary: number;
+  percent: number;
+  used: boolean;
+  enabled: boolean;
+}
+
+export interface TransportDistribution {
+  shares: TransportShare[];
+  byteCount: number;
+  active: boolean;
+}
+
 /**
  * ContractViewController — throughput over the window, for the client feed and
  * the PROVIDER feed (the account's provider-statistics surface). Listener is
@@ -467,6 +516,8 @@ export interface ContractViewController {
   getProviderThroughputPoints(): ThroughputPoint[];
   getPacketStats(): PacketStats | null;
   getProviderPacketStats(): PacketStats | null;
+  getTransportDistribution(): TransportDistribution | null;
+  getProviderTransportDistribution(): TransportDistribution | null;
   getWindowDurationSeconds(): number;
   setWindowDurationSeconds(seconds: number): void;
 
@@ -534,6 +585,20 @@ export interface FilteredLocations {
   regions: ConnectLocationInfo[];
   cities: ConnectLocationInfo[];
   devices: ConnectLocationInfo[];
+  /**
+   * `regions` and `cities` nested for a search result: each region with the
+   * cities in it, in `regions` order, then one group with `region: null`
+   * holding the cities whose region is not in the result. Set only when
+   * searching (a non-empty filter), like regions and cities; empty otherwise.
+   */
+  regionGroups: RegionGroupInfo[];
+}
+
+/** one region of a search result and the cities in it */
+export interface RegionGroupInfo {
+  /** null for the cities whose region is not in the result (label it e.g. "Other") */
+  region: ConnectLocationInfo | null;
+  cities: ConnectLocationInfo[];
 }
 
 /**

@@ -102,6 +102,11 @@ type deviceLocalProvider struct {
 	// build and join external objects. It is always taken before stateLock,
 	// which guards only the pointer a status read sees.
 	extenderLock sync.Mutex
+	// attestorLock serializes the probe attestor's install and clear, which
+	// both call the network space: whichever runs last leaves the space as
+	// the provide mode is then. It is always taken before stateLock and
+	// never held by anything the space calls.
+	attestorLock sync.Mutex
 
 	stateLock sync.Mutex
 	// the extender role while it runs (G2), nil while provide or the setting
@@ -110,6 +115,20 @@ type deviceLocalProvider struct {
 	// why the role could not start while it was asked to run, empty while it
 	// runs or was not asked to (N3)
 	extenderStartError string
+	// the attestor this provider installed on the space's network client and
+	// the reporter its attested probes go to (GEOMAP §2.5), set only while
+	// the provide mode is not none and nil otherwise: a device that does not
+	// provide never identifies itself to an extender (connect/DESIGNNOTES4.md
+	// §1). A clear takes the attestor off the space, and the reporter is
+	// joined by the provider's join.
+	probeAttestor *connect.ExtenderProbeAttestor
+	pingReporter  *connect.ExtenderPingReporter
+	// whether this provider may attest at all, which the device grants once
+	// unless it is hosted, and the log and reporter settings an install
+	// builds with
+	probeAttestorEnabled  bool
+	probeAttestorLog      connect.Logger
+	pingReporterConfigure func(settings *connect.ExtenderPingReporterSettings)
 	// the device's effective provide mode, which decides whether the standby
 	// dials direct (J4). The device hands it over on every change.
 	provideMode ProvideMode
@@ -123,6 +142,7 @@ type deviceLocalProvider struct {
 	auth                  *connect.ClientAuth
 	authVersion           uint64
 	platformTransport     migratablePlatformTransport
+	h1ConnectionStats     connect.H1ConnectionStats
 	migrationWorkers      sync.WaitGroup
 	closeOnce             sync.Once
 	joinOnce              sync.Once
@@ -275,6 +295,7 @@ func newDeviceLocalProviderWithOverrides(
 	// the provider proves both address families through its family-pinned
 	// transports (IPV6.md A1, A4); nothing else runs on the provider yet, so
 	// the transport is installed without the lock
+	platformTransportSettings.H1ConnectionStats = &provider.h1ConnectionStats
 	provider.platformTransport = provider.newProviderPlatformTransport(
 		auth,
 		targetMode,
@@ -346,12 +367,14 @@ func (self *deviceLocalProvider) standbyClientStrategy(
 // sees the change and repeats with the new mode instead of installing a
 // generation built for the old one.
 func (self *deviceLocalProvider) setProvideMode(provideMode ProvideMode) {
+	changed := false
 	flipped := func() bool {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		if self.closed || self.provideMode == provideMode {
 			return false
 		}
+		changed = true
 		flipped := provideModeIncludesPublic(self.provideMode) !=
 			provideModeIncludesPublic(provideMode)
 		self.provideMode = provideMode
@@ -360,6 +383,11 @@ func (self *deviceLocalProvider) setProvideMode(provideMode ProvideMode) {
 		}
 		return flipped
 	}()
+	if changed {
+		// the attestor follows the mode: installed when it leaves none,
+		// cleared when it returns to none
+		self.updateProbeAttestor()
+	}
 	if flipped {
 		self.requestPlatformTransportMigration(time.Now())
 	}
@@ -756,6 +784,10 @@ func (self *deviceLocalProvider) Close() {
 		extender := self.extender
 		self.extender = nil
 		self.stateLock.Unlock()
+		// nothing may attest in this provider's name once it is gone. The
+		// clear waits out an install in flight, since both are made under the
+		// attestor lock, and it clears this provider's own attestor only
+		self.updateProbeAttestor()
 		if extender != nil {
 			self.migrationWorkers.Add(1)
 			go connect.HandleError(func() {
@@ -1077,8 +1109,8 @@ func (self *deviceLocalProvider) extenderSettings() (*deviceLocalExtenderSetting
 	return settings, nil
 }
 
-// The client jwt of this provider, read at each activation so a refresh is
-// picked up by the next one (G3).
+// The client jwt of this provider, read at each activation and at each ping
+// report so a refresh is picked up by the next one (G3, GEOMAP §2.5).
 func (self *deviceLocalProvider) byJwt() string {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -1086,6 +1118,108 @@ func (self *deviceLocalProvider) byJwt() string {
 		return ""
 	}
 	return self.auth.ByJwt
+}
+
+// Lets this provider attest its probes while it provides (DESIGNNOTES4.md §1
+// and GEOMAP §2.5 of connect), with configure, when set, adjusting the
+// reporter's settings before each is built. The device calls it once, after
+// the provider is built, unless the device is hosted. Nothing is installed
+// until the provide mode leaves none.
+func (self *deviceLocalProvider) enableProbeAttestor(
+	log connect.Logger,
+	configure func(settings *connect.ExtenderPingReporterSettings),
+) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.probeAttestorEnabled = true
+		self.probeAttestorLog = log
+		self.pingReporterConfigure = configure
+	}()
+	self.updateProbeAttestor()
+}
+
+// Brings the attestor in line with the provide mode (connect/DESIGNNOTES4.md
+// §1 constraint 2, GEOMAP §2.5). While this provider provides in any mode, the
+// space's network client attests its probes under this provider's client id
+// and client key, and this provider reports them to the operator itself,
+// batched, under its own client credential; once the mode returns to none, or
+// the provider closes, the attestor comes off the space and the reporter is
+// joined by the provider's join. A space with no network client yet keeps the
+// pair for the first one a settings change builds (K6).
+//
+// Transitions are serialized by the attestor lock and each reads the mode
+// afresh, so whichever runs last leaves the space as the mode is then, and a
+// close cannot land between an install's read and its write. The space is
+// called under the attestor lock only, never under the state lock.
+func (self *deviceLocalProvider) updateProbeAttestor() {
+	self.attestorLock.Lock()
+	defer self.attestorLock.Unlock()
+
+	install := false
+	var log connect.Logger
+	var configure func(settings *connect.ExtenderPingReporterSettings)
+	var clearedAttestor *connect.ExtenderProbeAttestor
+	var clearedPingReporter *connect.ExtenderPingReporter
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		attesting := self.probeAttestorEnabled && !self.closed && self.provideMode != ProvideModeNone
+		switch {
+		case attesting && self.probeAttestor == nil:
+			install = true
+			log = self.probeAttestorLog
+			configure = self.pingReporterConfigure
+		case !attesting && self.probeAttestor != nil:
+			clearedAttestor = self.probeAttestor
+			clearedPingReporter = self.pingReporter
+			self.probeAttestor = nil
+			self.pingReporter = nil
+		}
+	}()
+
+	if clearedAttestor != nil {
+		// clears this provider's own attestor only: of two devices sharing a
+		// space, the other's stays
+		self.networkSpace.clearExtenderProbeAttestor(clearedAttestor)
+		// joined by the provider's join, so a close requested from a callback
+		// never waits on a post in flight; what the reporter still held is a
+		// measurement, dropped rather than posted on the way out
+		self.migrationWorkers.Add(1)
+		go connect.HandleError(func() {
+			defer self.migrationWorkers.Done()
+			clearedPingReporter.Close()
+		})
+		return
+	}
+	if !install || self.networkSpace == nil || self.client == nil {
+		return
+	}
+	keyManager := self.client.ClientKeyManager()
+	if keyManager == nil {
+		return
+	}
+
+	reporterSettings := connect.DefaultExtenderPingReporterSettings()
+	reporterSettings.Log = log
+	reporterSettings.ApiUrl = self.networkSpace.apiUrl
+	// a getter, so the refresh SetByJwt hands the transports reaches the
+	// next report as well
+	reporterSettings.ByJwt = self.byJwt
+	// the space's strategy, which every other api call of this provider takes
+	reporterSettings.ClientStrategy = self.clientStrategy
+	if configure != nil {
+		configure(reporterSettings)
+	}
+	pingReporter := connect.NewExtenderPingReporter(self.ctx, reporterSettings)
+	attestor := connect.NewExtenderProbeProviderAttestor(self.client.ClientId(), keyManager.Sign)
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.probeAttestor = attestor
+		self.pingReporter = pingReporter
+	}()
+	self.networkSpace.setExtenderProbeAttestor(attestor, pingReporter)
 }
 
 // The provider extender status (F3). A provider with no role reports a

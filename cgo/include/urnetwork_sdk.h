@@ -162,6 +162,8 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_EXTENDER_ROLE_FEED "feed"
 #define URNET_EXTENDER_ROLE_MEMBER "member"
 #define URNET_IP_FAMILY_DUALSTACK "dualstack"
+#define URNET_IP_FAMILY_FILTER_V4_CAPABLE "v4-capable"
+#define URNET_IP_FAMILY_FILTER_V6_CAPABLE "v6-capable"
 #define URNET_IP_FAMILY_LABEL_BOTH "both"
 #define URNET_IP_FAMILY_LABEL_V4 "v4"
 #define URNET_IP_FAMILY_LABEL_V6 "v6"
@@ -173,6 +175,15 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_IP_PROTOCOL_TCP 2
 #define URNET_IP_PROTOCOL_UDP 1
 #define URNET_IP_PROTOCOL_UNKNOWN 0
+#define URNET_LICENSE_APP_ANDROID "android"
+#define URNET_LICENSE_APP_APPLE "apple"
+#define URNET_LICENSE_APP_EXTENSION "extension"
+#define URNET_LICENSE_APP_LINUX "linux"
+#define URNET_LICENSE_APP_WEB "web"
+#define URNET_LICENSE_APP_WINDOWS "windows"
+#define URNET_LICENSE_KIND_DATA "data"
+#define URNET_LICENSE_KIND_FONT "font"
+#define URNET_LICENSE_KIND_SOFTWARE "software"
 #define URNET_LOCAL_STORAGE_DIRECTORY_PERMISSIONS 448
 #define URNET_LOCAL_STORAGE_FILE_PERMISSIONS 384
 #define URNET_LOCATIONS_ERROR "LOCATIONS_ERROR"
@@ -186,6 +197,7 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_LOG_VERBOSITY_VERBOSE 1
 #define URNET_MATIC "MATIC"
 #define URNET_MAX_CLIENT_EVENTS_PER_CALL 200
+#define URNET_NETWORK_CLIENT_REGISTRATION_SCHEMA "urnetwork-client-registration-v1"
 #define URNET_OFFER_DECLINE_CONTROL_BACK "back"
 #define URNET_OFFER_DECLINE_CONTROL_FREE_PLAN_LINK "free_plan_link"
 #define URNET_OFFER_DECLINE_CONTROL_SYSTEM_DISMISS "system_dismiss"
@@ -248,6 +260,8 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_PURCHASE_REPORT_STATUS_INVALID "invalid"
 #define URNET_PURCHASE_REPORT_STATUS_PENDING "pending"
 #define URNET_PURCHASE_REPORT_STATUS_WRONG_NETWORK "wrong_network"
+#define URNET_RANK_MODE_QUALITY "quality"
+#define URNET_RANK_MODE_SPEED "speed"
 #define URNET_ROUTING_TIER_FULL 2
 #define URNET_ROUTING_TIER_LIGHT 1
 #define URNET_ROUTING_TIER_OFF 0
@@ -380,6 +394,8 @@ typedef void (*urnet_check_balance_code_cb)(void* user_data, const char* result_
 typedef void (*urnet_claim_network_name_cb)(void* user_data, const char* result_json, const char* err_param);
 /* ClientEventsSendCallback */
 typedef void (*urnet_client_events_send_cb)(void* user_data, const char* result_json, const char* err_param);
+/* ClientRefreshIntegrityListener */
+typedef void (*urnet_client_refresh_integrity_cb)(void* user_data, uint64_t notice);
 /* CommitCallback */
 typedef void (*urnet_commit_cb)(void* user_data, bool success);
 /* ConnectChangeListener */
@@ -713,6 +729,7 @@ void urnet_api_account_preferences_get(uint64_t self, urnet_account_preferences_
 void urnet_api_account_preferences_update(uint64_t self, const char* account_preferences_json, urnet_account_preferences_set_cb callback_result, void* callback_user_data);
 void urnet_api_add_auth(uint64_t self, const char* args_json, urnet_add_auth_cb callback_result, void* callback_user_data);
 uint64_t urnet_api_add_auth_logout_listener(uint64_t self, urnet_auth_logout_cb listener_auth_logout, void* listener_user_data);
+uint64_t urnet_api_add_client_refresh_integrity_listener(uint64_t self, urnet_client_refresh_integrity_cb listener_client_refresh_invalid, void* listener_user_data);
 uint64_t urnet_api_add_jwt_refresh_listener(uint64_t self, urnet_jwt_refresh_cb listener_jwt_refreshed, void* listener_user_data);
 void urnet_api_auth_code_create(uint64_t self, const char* code_create_args_json, urnet_auth_code_create_cb callback_result, void* callback_user_data);
 void urnet_api_auth_code_login(uint64_t self, const char* args_json, urnet_auth_code_login_cb callback_result, void* callback_user_data);
@@ -724,6 +741,7 @@ void urnet_api_auth_password_reset(uint64_t self, const char* auth_password_rese
 void urnet_api_auth_verify(uint64_t self, const char* auth_verify_json, urnet_auth_verify_cb callback_result, void* callback_user_data);
 void urnet_api_auth_verify_send(uint64_t self, const char* auth_verify_send_json, urnet_auth_verify_send_cb callback_result, void* callback_user_data);
 void urnet_api_auth_wallet_challenge(uint64_t self, const char* auth_wallet_challenge_json, urnet_auth_wallet_challenge_cb callback_result, void* callback_user_data);
+char* urnet_api_auth_wallet_challenge_sync(uint64_t self, const char* args_json, char** out_error);
 void urnet_api_change_network_name(uint64_t self, const char* args_json, urnet_change_network_name_cb callback_result, void* callback_user_data);
 void urnet_api_check_balance_code(uint64_t self, const char* args_json, urnet_check_balance_code_cb callback_result, void* callback_user_data);
 void urnet_api_claim_network_name(uint64_t self, const char* args_json, urnet_claim_network_name_cb callback_result, void* callback_user_data);
@@ -734,7 +752,7 @@ void urnet_api_create_api_key(uint64_t self, const char* args_json, urnet_create
 void urnet_api_create_solana_payment_intent(uint64_t self, const char* args_json, urnet_solana_payment_intent_cb callback_result, void* callback_user_data);
 void urnet_api_create_stripe_checkout_session(uint64_t self, const char* args_json, urnet_stripe_create_checkout_session_cb callback_result, void* callback_user_data);
 void urnet_api_create_stripe_payment_intent(uint64_t self, const char* args_json, urnet_stripe_payment_intent_cb callback_result, void* callback_user_data);
-void urnet_api_delete_api_key(uint64_t self, urnet_delete_api_key_cb callback_result, void* callback_user_data);
+void urnet_api_delete_api_key(uint64_t self, const char* args_json, urnet_delete_api_key_cb callback_result, void* callback_user_data);
 void urnet_api_device_set_name(uint64_t self, const char* device_set_name_json, urnet_device_set_name_cb callback_result, void* callback_user_data);
 void urnet_api_find_locations(uint64_t self, const char* find_locations_json, urnet_find_locations_cb callback_result, void* callback_user_data);
 void urnet_api_find_provider_locations(uint64_t self, const char* find_locations_json, urnet_find_locations_cb callback_result, void* callback_user_data);
@@ -761,6 +779,7 @@ void urnet_api_get_transfer_stats(uint64_t self, urnet_get_transfer_stats_cb cal
 void urnet_api_list_api_keys(uint64_t self, urnet_list_api_keys_cb callback_result, void* callback_user_data);
 void urnet_api_network_block_location(uint64_t self, const char* args_json, urnet_network_block_location_cb callback_result, void* callback_user_data);
 void urnet_api_network_check(uint64_t self, const char* network_check_json, urnet_network_check_cb callback_result, void* callback_user_data);
+char* urnet_api_network_client_registration_endpoint(uint64_t self, char** out_error);
 void urnet_api_network_create(uint64_t self, const char* network_create_json, urnet_network_create_cb callback_result, void* callback_user_data);
 void urnet_api_network_delete(uint64_t self, urnet_network_delete_cb callback_result, void* callback_user_data);
 void urnet_api_network_unblock_location(uint64_t self, const char* args_json, urnet_network_unblock_location_cb callback_result, void* callback_user_data);
@@ -857,6 +876,10 @@ void urnet_client_event_queue_new_session(uint64_t self);
 int64_t urnet_client_event_queue_pending_count(uint64_t self);
 void urnet_client_event_queue_set_app_version(uint64_t self, const char* app_version);
 void urnet_client_event_queue_set_locale(uint64_t self, const char* locale);
+
+/* ----- ClientRefreshIntegrityNotice ----- */
+
+bool urnet_client_refresh_integrity_notice_close_api_if_current(uint64_t self);
 
 /* ----- ConnectGrid ----- */
 
@@ -994,6 +1017,7 @@ char* urnet_device_get_extender_status(uint64_t self);
 char* urnet_device_get_ingress_contract_details(uint64_t self);
 char* urnet_device_get_ingress_contract_stats(uint64_t self);
 char* urnet_device_get_instance_id(uint64_t self);
+char* urnet_device_get_licenses(uint64_t self, const char* app);
 char* urnet_device_get_local_override_app_ids(uint64_t self);
 int64_t urnet_device_get_log_verbosity(uint64_t self);
 char* urnet_device_get_network_peers(uint64_t self);
@@ -1091,6 +1115,7 @@ char* urnet_device_local_get_exits(uint64_t self);
 char* urnet_device_local_get_first_load_timeline_json(uint64_t self);
 uint64_t urnet_device_local_get_key_material(uint64_t self);
 uint64_t urnet_device_local_get_last_local_state_save_result(uint64_t self);
+char* urnet_device_local_get_memory_stats(uint64_t self);
 char* urnet_device_local_get_pinned_app_ids(uint64_t self);
 char* urnet_device_local_get_probe_results(uint64_t self);
 char* urnet_device_local_get_provide_secret_keys(uint64_t self);
@@ -1174,12 +1199,14 @@ void urnet_device_local_sync_sn_wallet(uint64_t self, urnet_sn_get_wallet_cb cal
 char* urnet_device_local_take_memory_samples_json(uint64_t self);
 bool urnet_device_local_transfer_diag_defer_timeout_resend(uint64_t self);
 bool urnet_device_local_transfer_diag_lane_rule(uint64_t self);
+char* urnet_device_local_transfer_diagnostic_snapshot_json(uint64_t self, char** out_error);
 char* urnet_device_local_tunnel_dns_addresses_ipv4(uint64_t self);
 char* urnet_device_local_tunnel_dns_addresses_ipv6(uint64_t self);
 char* urnet_device_local_tunnel_dns_setting(uint64_t self);
 char* urnet_device_local_tunnel_local_address(uint64_t self);
 char* urnet_device_local_tunnel_local_address_ipv6(uint64_t self);
 bool urnet_device_local_wait_for_close(uint64_t self, int64_t timeout_milliseconds);
+bool urnet_device_local_write_memory_owner_census(uint64_t self, const char* path, char** out_error);
 
 /* ----- DeviceLocalKeyMaterial ----- */
 
@@ -1508,6 +1535,7 @@ uint64_t urnet_network_space_manager_get_active_network_space(uint64_t self);
 uint64_t urnet_network_space_manager_get_network_space(uint64_t self, const char* key_json);
 char* urnet_network_space_manager_get_network_spaces(uint64_t self);
 uint64_t urnet_network_space_manager_import_network_space_from_json(uint64_t self, const char* network_space_json, char** out_error);
+bool urnet_network_space_manager_migrate_network_space(uint64_t self, const char* from_key_json, const char* to_key_json);
 bool urnet_network_space_manager_remove_network_space(uint64_t self, uint64_t network_space);
 void urnet_network_space_manager_set_active_network_space(uint64_t self, uint64_t network_space);
 uint64_t urnet_network_space_manager_update_network_space(uint64_t self, const char* key_json, urnet_network_space_update_cb callback_update, void* callback_user_data);
@@ -1759,6 +1787,7 @@ char* urnet_get_extender_color_hex(const char* ip);
 bool urnet_get_extender_store_read_only(void);
 char* urnet_get_filtered_locations_from_result(const char* result_json, const char* filter);
 bool urnet_get_fips140_enabled(void);
+char* urnet_get_licenses(const char* app);
 char* urnet_get_log_dir(void);
 char* urnet_get_log_root(void);
 int64_t urnet_get_log_verbosity(void);
@@ -1836,6 +1865,7 @@ char* urnet_selectable_transport_modes(void);
 char* urnet_service_host_name(const char* key_json, const char* values_json, const char* service);
 char* urnet_service_url(const char* key_json, const char* values_json, const char* scheme, const char* service);
 void urnet_set_control_ip_family_policy(int64_t policy);
+void urnet_set_device_rpc_h1_plus_enabled(bool enabled);
 void urnet_set_egress_interface_index(int64_t index4, int64_t index6);
 void urnet_set_extender_store_read_only(bool read_only);
 bool urnet_set_log_dir(const char* log_dir, char** out_error);
@@ -1844,6 +1874,7 @@ bool urnet_set_log_verbosity(int64_t level, char** out_error);
 void urnet_set_memory_limit(int64_t limit);
 void urnet_set_memory_profile_rate(int64_t byte_count);
 void urnet_set_message_pool_memory_targets(int64_t packet_pool_byte_count, int64_t large_object_pool_byte_count);
+bool urnet_set_transfer_diagnostic_snapshots_enabled(bool enabled);
 char* urnet_short_ss58(const char* address);
 char* urnet_sn_claim_transactions_for(const char* settings_json, const char* coldkey_ss58, const char* epochs_json, char** out_error);
 void urnet_sn_claims_for(const char* settings_json, const char* coldkey_ss58, int64_t from_epoch, urnet_sn_claims_cb callback_result, void* callback_user_data);
@@ -1905,6 +1936,8 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   network_id: string (uuid) | null
  *   payout_byte_count: number
  *   payout_nano_cents: number
+ *   subsidy_payout_nano_cents: number
+ *   reliability_subsidy_nano_cents: number
  *   min_sweep_time: string (rfc3339) | null
  *   create_time: string (rfc3339) | null
  *   payment_record?: string
@@ -1926,6 +1959,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  */
 
 /* AccountPoint (json):
+ *   account_point_id: string (uuid) | null
  *   network_id: string (uuid) | null
  *   event: string
  *   point_value: number
@@ -1994,6 +2028,8 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 /* AuthCodeCreateArgs (json):
  *   duration_minutes?: number
  *   uses?: number
+ *   roles?: StringList | null
+ *   principal?: string
  */
 
 /* AuthCodeCreateError (json):
@@ -2069,6 +2105,8 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   source_client_id?: string (uuid) | null
  *   description: string
  *   device_spec: string
+ *   roles?: StringList | null
+ *   principal?: string
  *   proxy_config?: ProxyConfig | null
  *   time_zone?: string
  *   locale?: string
@@ -2121,6 +2159,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 /* AuthWalletChallengeArgs (json):
  *   wallet_address?: string
  *   blockchain?: string
+ *   purpose?: string
  */
 
 /* AuthWalletChallengeResult (json):
@@ -2197,6 +2236,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 
 /* ChangeNetworkNameArgs (json):
  *   new_name: string
+ *   network_name?: string
  */
 
 /* ChangeNetworkNameError (json):
@@ -2246,10 +2286,12 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   blockchain_symbol: string
  *   create_date: string
  *   balance_usdc_nano_cents: number
+ *   address: string
  */
 
 /* ClaimNetworkNameArgs (json):
  *   new_name: string
+ *   network_name?: string
  */
 
 /* ClaimNetworkNameError (json):
@@ -2448,6 +2490,10 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   error?: ApiError | null
  */
 
+/* DeleteApiKeyArgs (json):
+ *   id: string (uuid) | null
+ */
+
 /* DeleteApiKeyResult (json):
  *   error?: ApiError | null
  */
@@ -2463,6 +2509,15 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  */
 
 /* DeviceLocalMemoryUsage (json):
+ *   PeerKeyPinBudgetByteCount: number
+ *   PeerKeyPinUsedByteCount: number
+ *   PeerKeyPinReservedByteCount: number
+ *   PeerKeyPinReleasedByteCount: number
+ *   PeerKeyPinCount: number
+ *   PeerKeyPinCapacityRefusals: number
+ *   PeerKeyPinPersistenceFailures: number
+ *   PeerKeyPinRollbackRefusals: number
+ *   PeerKeyPinStateFailures: number
  *   TargetByteCount: number
  *   DnsByteCount: number
  *   ClientSendByteCount: number
@@ -2471,16 +2526,34 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   PackQueueCapacityByteCount: number
  *   ProviderSendByteCount: number
  *   ProviderReceiveByteCount: number
+ *   TransferRootBudgetByteCount: number
+ *   TransferRootUsedByteCount: number
+ *   TransferRootReservedByteCount: number
+ *   TransferRootReleasedByteCount: number
+ *   ClientTransferBudgetByteCount: number
+ *   ClientTransferUsedByteCount: number
+ *   ProviderTransferBudgetByteCount: number
+ *   ProviderTransferUsedByteCount: number
+ *   NatBudgetByteCount: number
+ *   NatUsedByteCount: number
+ *   NatReservedByteCount: number
+ *   NatReleasedByteCount: number
  *   PlatformTransportBudgetByteCount: number
  *   PlatformTransportUsedByteCount: number
  *   PlatformTransportMaxCount: number
  *   PlatformTransportUsedCount: number
  *   PlatformTransportPendingH1Count: number
  *   PlatformTransportPendingH1Bytes: number
+ *   PlatformTransportReservedBytes: number
+ *   PlatformTransportReleasedBytes: number
  *   PlatformTransportPendingHandoffCount: number
  *   PlatformTransportActiveHandoffCount: number
  *   PlatformTransportHandoffByteCount: number
  *   PlatformTransportHandoffCount: number
+ *   PlatformTransportHandoffID: number
+ *   PlatformTransportHandoffFromClass: string
+ *   PlatformTransportHandoffToClass: string
+ *   PlatformTransportHandoffH1ByteCount: number
  *   ProviderWindowKnown: boolean
  *   ProviderWindowMinSatisfied: boolean
  *   PlatformTransportPreemptedH3Count: number
@@ -2661,6 +2734,13 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   LastActivationRefused: boolean
  *   RevokedTime: number
  *   DnsPorts: string
+ *   PeerPingCount: number
+ *   PeerPingCosignedCount: number
+ *   PeerPingRejectedCount: number
+ *   PeerPingUnknownCount: number
+ *   LastPeerPingTime: number
+ *   LimitedBySubnetsCount: number
+ *   LimitedBySourceCount: number
  *   ConnectionCount: number
  */
 
@@ -2717,16 +2797,36 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  */
 
 /* FeedbackSendArgs (json):
+ *   uses?: FeedbackSendUses | null
  *   needs: FeedbackSendNeeds | null
  *   star_count: number
  */
 
 /* FeedbackSendNeeds (json):
+ *   private: boolean
+ *   safe: boolean
+ *   global: boolean
+ *   collaborate: boolean
+ *   app_control: boolean
+ *   block_data_brokers: boolean
+ *   block_ads: boolean
+ *   focus: boolean
+ *   connect_servers: boolean
+ *   run_servers: boolean
+ *   prevent_cyber: boolean
+ *   audit: boolean
+ *   zero_trust: boolean
+ *   visualize: boolean
  *   other: string
  */
 
 /* FeedbackSendResult (json):
  *   feedback_id: string (uuid) | null
+ */
+
+/* FeedbackSendUses (json):
+ *   personal: boolean
+ *   business: boolean
  */
 
 /* FilteredLocations (json):
@@ -2736,27 +2836,36 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   Cities: ConnectLocationList | null
  *   Regions: ConnectLocationList | null
  *   Devices: ConnectLocationList | null
+ *   RegionGroups: RegionGroupList | null
  */
 
 /* FindLocationsArgs (json):
  *   query: string
  *   max_distance_fraction?: number
  *   enable_max_distance_fraction?: boolean
+ *   rank_mode?: string
  */
 
 /* FindLocationsResult (json):
- *   specs: ProviderSpecList | null
  *   groups: LocationGroupResultList | null
  *   locations: LocationResultList | null
  *   devices: LocationDeviceResultList | null
+ *   country_count: number
+ *   region_count: number
+ *   city_count: number
+ *   stable_count: number
+ *   strong_privacy_count: number
  */
 
 /* FindProviders2Args (json):
  *   specs: ProviderSpecList | null
  *   count: number
+ *   force_count?: boolean
  *   exclude_client_ids: IdList | null
+ *   exclude_destinations?: MultiHopIdList | null
  *   rank_mode?: string
  *   force_minimum?: boolean
+ *   ip_family?: string
  */
 
 /* FindProviders2Result (json):
@@ -2773,8 +2882,13 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 /* FindProvidersProvider (json):
  *   client_id: string (uuid) | null
  *   estimated_bytes_per_second: number
+ *   has_estimated_bytes_per_second: boolean
+ *   tier: number
+ *   intermediary_ids?: IdList | null
  *   network_only?: boolean
  *   reputation_failed_names?: string
+ *   location?: ProviderLocation | null
+ *   ip_family?: string
  */
 
 /* FindProvidersProviderList (json):
@@ -2815,6 +2929,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 
 /* GetNetworkBlockedLocationsResult (json):
  *   blocked_locations: BlockedLocationsList | null
+ *   error?: ApiError | null
  */
 
 /* GetNetworkRankingError (json):
@@ -2846,6 +2961,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   bonus_per_referral_bytes: number
  *   referred_bonus_bytes: number
  *   bonus_period_seconds: number
+ *   has_referral_network: boolean
  *   error?: GetNetworkReferralCodeError | null
  */
 
@@ -2921,12 +3037,35 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 
 /* LeaderboardResult (json):
  *   earners: LeaderboardEarnersList | null
+ *   rank: number
+ *   total: number
  *   error?: LeaderboardError | null
+ */
+
+/* LicenseInfo (json):
+ *   Name: string
+ *   Version: string
+ *   Kind: string
+ *   Origin: string
+ *   Url: string
+ *   Spdx: string
+ *   Copyright: string
+ *   Notice: string
+ *   Text: string
+ */
+
+/* LicenseInfoList (json):
+ *   = LicenseInfo | null[]
  */
 
 /* ListApiKeysResult (json):
  *   api_keys?: PublicAccountApiKeyList | null
  *   error?: ApiError | null
+ */
+
+/* LocationCoordinates (json):
+ *   lat: number
+ *   lon: number
  */
 
 /* LocationDeviceResult (json):
@@ -3042,6 +3181,10 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   GCPauseTotalNanoseconds: number
  */
 
+/* MultiHopIdList (json):
+ *   = IdList | null[]
+ */
+
 /* NetExtender (json):
  *   ip: string
  *   secret: string
@@ -3083,6 +3226,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 
 /* NetworkClientInfo (json):
  *   client_id: string (uuid) | null
+ *   source_client_id?: string (uuid) | null
  *   device_id: string (uuid) | null
  *   network_id: string (uuid) | null
  *   description: string
@@ -3090,23 +3234,15 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   device_spec: string
  *   create_time: string (rfc3339) | null
  *   auth_time: string (rfc3339) | null
- *   resident?: NetworkClientResident | null
+ *   roles?: StringList | null
+ *   principal?: string
  *   provide_mode: number
+ *   proxy_client?: ProxyClient | null
  *   connections: NetworkClientConnectionList | null
  */
 
 /* NetworkClientInfoList (json):
  *   = NetworkClientInfo | null[]
- */
-
-/* NetworkClientResident (json):
- *   client_id: string (uuid) | null
- *   instance_id: string (uuid) | null
- *   resident_id: string (uuid) | null
- *   resident_host: string
- *   resident_service: string
- *   resident_block: string
- *   resident_internal_ports: IntList | null
  */
 
 /* NetworkClientsResult (json):
@@ -3124,14 +3260,17 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   guest_mode: boolean
  *   verify_use_numeric?: boolean
  *   referral_code?: string
+ *   balance_code?: string
  *   wallet_auth?: WalletAuthArgs | null
  */
 
 /* NetworkCreateResult (json):
  *   network?: NetworkCreateResultNetwork | null
+ *   user_auth?: string
  *   seedphrase?: string
  *   verification_required?: NetworkCreateResultVerification | null
  *   error?: NetworkCreateResultError | null
+ *   is_pro?: boolean
  */
 
 /* NetworkCreateResultError (json):
@@ -3140,7 +3279,9 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 
 /* NetworkCreateResultNetwork (json):
  *   by_jwt?: string
+ *   network_id?: string (uuid) | null
  *   network_name?: string
+ *   is_pro?: boolean
  */
 
 /* NetworkCreateResultVerification (json):
@@ -3148,6 +3289,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  */
 
 /* NetworkDeleteResult (json):
+ *   error?: ApiError | null
  */
 
 /* NetworkPeer (json):
@@ -3222,7 +3364,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  */
 
 /* NetworkUser (json):
- *   userId: string (uuid) | null
+ *   user_id: string (uuid) | null
  *   user_name: string
  *   user_auth?: string
  *   verified: boolean
@@ -3337,6 +3479,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 /* PointsLeaderboardMe (json):
  *   Row: PointsLeaderboardRow | null
  *   PointsLeaderboardPublic: boolean
+ *   Ranked: boolean
  */
 
 /* PointsLeaderboardResult (json):
@@ -3357,6 +3500,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   network_name?: string
  *   emoji_tag?: string
  *   anonymous: boolean
+ *   contains_profanity?: boolean
  *   total_points: number
  *   blocks_with_points: number
  *   streak: number
@@ -3480,6 +3624,18 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   = ProviderIdentity | null[]
  */
 
+/* ProviderLocation (json):
+ *   country?: string
+ *   country_code?: string
+ *   region?: string
+ *   city?: string
+ *   country_location_id?: string (uuid) | null
+ *   region_location_id?: string (uuid) | null
+ *   city_location_id?: string (uuid) | null
+ *   region_coordinates?: LocationCoordinates | null
+ *   city_coordinates?: LocationCoordinates | null
+ */
+
 /* ProviderSpec (json):
  *   location_id?: string (uuid) | null
  *   location_group_id?: string (uuid) | null
@@ -3496,26 +3652,57 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   password: string
  */
 
+/* ProxyClient (json):
+ *   change_id?: number
+ *   create_time: string (rfc3339) | null
+ *   proxy_id: string (uuid) | null
+ *   client_id: string (uuid) | null
+ *   instance_id: string (uuid) | null
+ *   socks_proxy_url: string
+ *   http_proxy_url: string
+ *   https_proxy_url: string
+ *   api_base_url: string
+ *   auth_token: string
+ *   proxy_host: string
+ *   block: string
+ *   http_proxy_port: number
+ *   https_proxy_port: number
+ *   socks_proxy_port: number
+ *   api_port: number
+ *   wg_config: WgConfig | null
+ */
+
 /* ProxyConfig (json):
  *   lock_caller_ip: boolean
  *   lock_ip_list: string[]
  *   enable_socks: boolean
  *   enable_http: boolean
  *   http_require_auth: boolean
+ *   https_require_auth: boolean
+ *   enable_wg: boolean
  *   initial_device_state: ProxyDeviceState | null
  */
 
 /* ProxyConfigResult (json):
  *   expiration_time: string (rfc3339)
  *   keepalive_seconds: number
+ *   change_id?: number
+ *   create_time?: string (rfc3339) | null
+ *   proxy_id?: string (uuid) | null
+ *   client_id?: string (uuid) | null
+ *   instance_id?: string (uuid) | null
  *   http_proxy_url?: string
  *   https_proxy_url?: string
  *   socks_proxy_url?: string
+ *   api_base_url?: string
  *   proxy_host?: string
- *   sock_proxy_port?: number
+ *   block?: string
+ *   socks_proxy_port?: number
  *   http_proxy_port?: number
  *   https_proxy_port?: number
+ *   api_port?: number
  *   auth_token?: string
+ *   wg_config?: WgConfig | null
  *   http_proxy_auth: ProxyAuthResult | null
  *   socks_proxy_auth: ProxyAuthResult | null
  */
@@ -3528,6 +3715,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 /* ProxyDeviceState (json):
  *   location: ConnectLocation | null
  *   performance_profile: PerformanceProfile | null
+ *   country_code?: string
  */
 
 /* PublicAccountApiKey (json):
@@ -3592,6 +3780,15 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 /* RegenerateSeedphraseResult (json):
  *   seedphrase: string
  *   error?: ApiError | null
+ */
+
+/* RegionGroup (json):
+ *   Region: ConnectLocation | null
+ *   Cities: ConnectLocationList | null
+ */
+
+/* RegionGroupList (json):
+ *   = RegionGroup | null[]
  */
 
 /* RegionalDnsServer (json):
@@ -3794,6 +3991,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  */
 
 /* SetPointsLeaderboardPublicResult (json):
+ *   points_leaderboard_public: boolean
  *   error?: SetPointsLeaderboardPublicError | null
  */
 
@@ -3891,6 +4089,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   uid?: number
  *   rank?: number
  *   epoch: number
+ *   netuid: number
  *   source: string
  *   error?: SnError | null
  */
@@ -4184,8 +4383,12 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   start_time: string
  *   end_time: string
  *   start_balance_byte_count: number
- *   net_revenue: number
+ *   net_revenue_nano_cents: number
+ *   subsidy_net_revenue_nano_cents?: number
  *   balance_byte_count: number
+ *   purchase_token?: string
+ *   paid?: boolean
+ *   pro?: boolean
  */
 
 /* TransferBalanceList (json):
@@ -4221,6 +4424,8 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 /* TransportPacketStats (json):
  *   TransportType: string
  *   Stats: PacketStats | null
+ *   H1WebSocketConnectionCount: number
+ *   H1PlusConnectionCount: number
  */
 
 /* TransportPacketStatsList (json):
@@ -4234,6 +4439,8 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 
 /* TransportShare (json):
  *   TransportType: string
+ *   H1WebSocketConnectionCount: number
+ *   H1PlusConnectionCount: number
  *   EgressByteCount: number
  *   IngressByteCount: number
  *   EgressPacketCount: number
@@ -4332,6 +4539,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 /* ValidateReferralCodeResult (json):
  *   is_valid: boolean
  *   is_capped: boolean
+ *   error?: ApiError | null
  */
 
 /* VerifyAppleTransactionArgs (json):
@@ -4378,6 +4586,7 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   wallet_signature?: string
  *   wallet_message?: string
  *   blockchain?: string
+ *   wallet_nonce?: string
  */
 
 /* WalletBalanceResult (json):
@@ -4422,6 +4631,15 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 
 /* WalletValidateAddressResult (json):
  *   valid?: boolean
+ */
+
+/* WgConfig (json):
+ *   wg_proxy_port: number
+ *   client_private_key: string
+ *   client_public_key: string
+ *   proxy_public_key: string
+ *   client_ipv4: string
+ *   config: string
  */
 
 /* WindowSizeSettings (json):

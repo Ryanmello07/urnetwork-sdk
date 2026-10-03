@@ -26,6 +26,75 @@ type FilteredLocations struct {
 	Cities      *ConnectLocationList
 	Regions     *ConnectLocationList
 	Devices     *ConnectLocationList
+	// RegionGroups is Regions and Cities nested for a grouped search result:
+	// each region with the cities in it, in Regions order, then (Region nil)
+	// the cities whose region is not in the result. Set only when searching,
+	// like Regions and Cities; empty otherwise.
+	RegionGroups *RegionGroupList
+}
+
+// RegionGroup is one region of a search result and the cities in it.
+type RegionGroup struct {
+	// nil for the group of cities whose region is not in the result; the app
+	// labels it (e.g. "Other")
+	Region *ConnectLocation
+	Cities *ConnectLocationList
+}
+
+type RegionGroupList struct {
+	exportedList[*RegionGroup]
+}
+
+func NewRegionGroupList() *RegionGroupList {
+	return &RegionGroupList{
+		exportedList: *newExportedList[*RegionGroup](),
+	}
+}
+
+// groupCitiesByRegion nests sorted cities under sorted regions. A city belongs
+// to a region by the region's location id, or by region name when the result
+// carries no id. Every city lands in exactly one group.
+func groupCitiesByRegion(regions []*ConnectLocation, cities []*ConnectLocation) *RegionGroupList {
+	groups := NewRegionGroupList()
+	assigned := map[*ConnectLocation]bool{}
+	for _, region := range regions {
+		var regionId *Id
+		if region.ConnectLocationId != nil {
+			regionId = region.ConnectLocationId.LocationId
+		}
+		regionCities := NewConnectLocationList()
+		for _, city := range cities {
+			if assigned[city] {
+				continue
+			}
+			inRegion := false
+			if regionId != nil && city.RegionLocationId != nil {
+				inRegion = city.RegionLocationId.Cmp(regionId) == 0
+			} else if city.Region != "" && region.Name != "" {
+				inRegion = city.Region == region.Name
+			}
+			if inRegion {
+				assigned[city] = true
+				regionCities.Add(city)
+			}
+		}
+		groups.Add(&RegionGroup{
+			Region: region,
+			Cities: regionCities,
+		})
+	}
+	otherCities := NewConnectLocationList()
+	for _, city := range cities {
+		if !assigned[city] {
+			otherCities.Add(city)
+		}
+	}
+	if 0 < otherCities.Len() {
+		groups.Add(&RegionGroup{
+			Cities: otherCities,
+		})
+	}
+	return groups
 }
 
 // type FilteredLocationsStateListener interface {
@@ -34,6 +103,12 @@ type FilteredLocations struct {
 
 type FilteredLocationsListener interface {
 	FilteredLocationsChanged(locations *FilteredLocations, state FilterLocationsState)
+}
+
+type locationsNotification struct {
+	sequenceNumber int64
+	locations      *FilteredLocations
+	state          FilterLocationsState
 }
 
 type LocationsViewController struct {
@@ -48,11 +123,13 @@ type LocationsViewController struct {
 
 	stateLock sync.Mutex
 
-	nextFilterSequenceNumber     int64
-	previousFilterSequenceNumber int64
+	nextFilterSequenceNumber int64
+	filterCancel             context.CancelFunc
 
 	filteredLocations     *FilteredLocations
 	filteredLocationState FilterLocationsState
+	notifying             bool
+	pendingNotification   *locationsNotification
 
 	filteredLocationListeners *connect.CallbackList[FilteredLocationsListener]
 	// filteredLocationsStateListeners *connect.CallbackList[FilteredLocationsStateListener]
@@ -66,10 +143,7 @@ func newLocationsViewController(ctx context.Context, device Device) *LocationsVi
 		cancel: cancel,
 		device: device,
 
-		nextFilterSequenceNumber:     0,
-		previousFilterSequenceNumber: 0,
-		filteredLocations:            nil,
-		filteredLocationState:        LocationsError,
+		filteredLocationState: LocationsError,
 
 		filteredLocationListeners: connect.NewCallbackList[FilteredLocationsListener](),
 		// filteredLocationsStateListeners: connect.NewCallbackList[FilteredLocationsStateListener](),
@@ -126,12 +200,40 @@ func (self *LocationsViewController) GetFilteredLocationState() FilterLocationsS
 	return self.filteredLocationState
 }
 
-func (self *LocationsViewController) filteredLocationsChanged(locations *FilteredLocations, state FilterLocationsState) {
-	for _, listener := range self.filteredLocationListeners.Get() {
-		connect.HandleError(func() {
-			listener.FilteredLocationsChanged(locations, state)
-		})
+func (self *LocationsViewController) filteredLocationsChanged(sequenceNumber int64, locations *FilteredLocations, state FilterLocationsState) {
+	self.stateLock.Lock()
+	if self.ctx.Err() != nil || self.nextFilterSequenceNumber != sequenceNumber {
+		self.stateLock.Unlock()
+		return
 	}
+	// A slow listener cannot accumulate requests or let a replacement event
+	// overtake the callback already running. Keep only the newest pending
+	// snapshot; a reentrant FilterLocations call enqueues and returns.
+	self.pendingNotification = &locationsNotification{sequenceNumber, locations, state}
+	if self.notifying {
+		self.stateLock.Unlock()
+		return
+	}
+	self.notifying = true
+	for self.pendingNotification != nil {
+		notification := self.pendingNotification
+		self.pendingNotification = nil
+		self.stateLock.Unlock()
+		for _, listener := range self.filteredLocationListeners.Get() {
+			self.stateLock.Lock()
+			current := self.ctx.Err() == nil && self.nextFilterSequenceNumber == notification.sequenceNumber
+			self.stateLock.Unlock()
+			if !current {
+				break
+			}
+			connect.HandleError(func() {
+				listener.FilteredLocationsChanged(notification.locations, notification.state)
+			})
+		}
+		self.stateLock.Lock()
+	}
+	self.notifying = false
+	self.stateLock.Unlock()
 }
 
 func (self *LocationsViewController) AddFilteredLocationsListener(listener FilteredLocationsListener) Sub {
@@ -157,66 +259,64 @@ func (self *LocationsViewController) AddFilteredLocationsListener(listener Filte
 // }
 
 func (self *LocationsViewController) FilterLocations(filter string) {
-	// api call, call callback
 	filter = strings.TrimSpace(filter)
 
-	// locationsVcLog("FILTER LOCATIONS %s", filter)
-	// self.filterLocationsStateChanged(LocationsLoading)
+	self.stateLock.Lock()
+	if self.ctx.Err() != nil {
+		self.stateLock.Unlock()
+		return
+	}
+	previousCancel := self.filterCancel
+	requestCtx, cancel := context.WithCancel(self.ctx)
+	self.filterCancel = cancel
+	self.nextFilterSequenceNumber++
+	filterSequenceNumber := self.nextFilterSequenceNumber
+	self.filteredLocationState = LocationsLoading
+	snapshotLocations := self.filteredLocations
+	self.stateLock.Unlock()
+	if previousCancel != nil {
+		previousCancel()
+	}
 
-	var filterSequenceNumber int64
-	var snapshotLocations *FilteredLocations
-	var snapshotState FilterLocationsState
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.nextFilterSequenceNumber += 1
-		filterSequenceNumber = self.nextFilterSequenceNumber
-
-		self.filteredLocationState = LocationsLoading
-		snapshotLocations = self.filteredLocations
-		snapshotState = self.filteredLocationState
-	}()
-
-	self.filteredLocationsChanged(snapshotLocations, snapshotState)
-
-	// locationsVcLog("POST FILTER LOCATIONS %s", filter)
+	self.filteredLocationsChanged(filterSequenceNumber, snapshotLocations, LocationsLoading)
 
 	callback := FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
 		func(result *FindLocationsResult, err error) {
-			// locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
-
+			defer cancel()
 			update := false
 			var notifyLocations *FilteredLocations
 			var notifyState FilterLocationsState
 			func() {
 				self.stateLock.Lock()
 				defer self.stateLock.Unlock()
-				if self.previousFilterSequenceNumber < filterSequenceNumber {
-					self.previousFilterSequenceNumber = filterSequenceNumber
+				// A transport can return after cancellation. Only the latest
+				// requested query may change this controller's rows or state.
+				if requestCtx.Err() == nil && self.nextFilterSequenceNumber == filterSequenceNumber {
+					self.filterCancel = nil
 					update = true
-					if err == nil {
+					if err == nil && result != nil {
 						self.setFilteredLocationsFromResult(result, filter)
 					} else {
 						self.filteredLocationState = LocationsError
-						self.filteredLocations = nil
+						// Keep the last successful rows available during an outage.
 					}
 					notifyLocations = self.filteredLocations
 					notifyState = self.filteredLocationState
 				}
 			}()
 			if update {
-				self.filteredLocationsChanged(notifyLocations, notifyState)
+				self.filteredLocationsChanged(filterSequenceNumber, notifyLocations, notifyState)
 			}
 		},
 	))
 
 	if filter == "" {
-		self.getApi().GetProviderLocations(callback)
+		self.getApi().getProviderLocations(requestCtx, callback)
 	} else {
 		findLocations := &FindLocationsArgs{
 			Query: filter,
 		}
-		self.getApi().FindProviderLocations(findLocations, callback)
+		self.getApi().findProviderLocations(requestCtx, findLocations, callback)
 	}
 }
 
@@ -334,12 +434,13 @@ func GetFilteredLocationsFromResult(result *FindLocationsResult, filter string) 
 	exportedDevices.addAll(devices...)
 
 	filteredLocations := &FilteredLocations{
-		BestMatches: exportedBestMatches,
-		Promoted:    exportedPromoted,
-		Countries:   exportedCountries,
-		Cities:      exportedCities,
-		Regions:     exportedRegions,
-		Devices:     exportedDevices,
+		BestMatches:  exportedBestMatches,
+		Promoted:     exportedPromoted,
+		Countries:    exportedCountries,
+		Cities:       exportedCities,
+		Regions:      exportedRegions,
+		Devices:      exportedDevices,
+		RegionGroups: groupCitiesByRegion(regions, cities),
 	}
 
 	return filteredLocations

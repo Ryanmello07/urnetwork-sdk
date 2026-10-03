@@ -2,7 +2,13 @@ package sdk
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 )
@@ -35,6 +41,55 @@ func newSharedNetworkSpaceTestDevice(
 		t.Fatal(err)
 	}
 	return device
+}
+
+// Closing a hosted device cancels its data-plane context before the generated
+// clients finish their final authenticated contract retirement. That work must
+// still be able to use this device's private control strategy until its join
+// completes; parenting the strategy to the device context drops the request.
+func TestHostedDeviceControlStrategySurvivesDataPlaneCancellation(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	roots := x509.NewCertPool()
+	roots.AddCert(server.Certificate())
+	settings := connect.DefaultClientStrategySettings()
+	settings.EnableResilient = false
+	settings.ConnectSettings.TlsConfig = &tls.Config{RootCAs: roots}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	platformURL := "wss" + strings.TrimPrefix(server.URL, "https")
+	networkSpace := NewNetworkSpaceWithUrls(ctx, server.URL, platformURL, settings)
+	defer networkSpace.close()
+	device := newSharedNetworkSpaceTestDevice(t, networkSpace, "synthetic-device-token", true)
+	strategy := device.clientStrategy
+
+	// Hold one synthetic retirement worker so the test observes the interval
+	// after data-plane cancellation but before strategy-owner teardown.
+	releaseRetirement := make(chan struct{})
+	device.stateLock.Lock()
+	device.startLifecycleWorkerWithLock(func() { <-releaseRetirement })
+	device.stateLock.Unlock()
+	defer func() {
+		close(releaseRetirement)
+		joinCtx, joinCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer joinCancel()
+		if err := device.CloseAndWait(joinCtx); err != nil {
+			t.Errorf("join hosted device: %v", err)
+		}
+	}()
+	device.Close()
+
+	requestCtx, requestCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer requestCancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, server.URL+"/retire", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := strategy.HttpParallel(request); err != nil {
+		t.Fatalf("private control strategy lost final request after data-plane cancellation: %v", err)
+	}
 }
 
 // TestDeviceLocalTeardownUnsubscribesFromSharedApi deterministically pins the
@@ -105,6 +160,12 @@ func TestHostedDeviceLocalSessionsIsolateSharedApiLifecycle(t *testing.T) {
 
 	if firstApi == sharedApi || secondApi == sharedApi || firstApi == secondApi {
 		t.Fatal("hosted devices shared mutable API credential sessions")
+	}
+	if first.clientStrategy == networkSpace.clientStrategy || second.clientStrategy == networkSpace.clientStrategy || first.clientStrategy == second.clientStrategy {
+		t.Fatal("hosted devices shared control-plane dial pacing or DoH admission")
+	}
+	if firstApi.clientStrategy != first.clientStrategy || secondApi.clientStrategy != second.clientStrategy {
+		t.Fatal("hosted API did not use its device-owned control strategy")
 	}
 	if first.platformTransportBudget == second.platformTransportBudget {
 		t.Fatal("hosted devices shared one platform-carrier admission budget")

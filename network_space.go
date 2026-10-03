@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/glog"
 )
 
 // a network space is a set of server and app configurations
@@ -233,11 +234,21 @@ type NetworkSpace struct {
 	// stateLock guards the node, which the provider extender role replaces
 	// while the space is running (G2), the extender identity seed of a space
 	// that keeps no local state, the extender network client, which a settings
-	// change restarts in place (K6), and the extender fields of `values`,
-	// which that change rewrites. Every other field of `values` is written
-	// once at construction.
+	// change restarts in place (K6), the attestor installed on that client,
+	// and the extender fields of `values`, which that change rewrites. Every
+	// other field of `values` is written once at construction.
 	stateLock sync.Mutex
 	closed    bool
+	// The attesting provider of the device that provides in this space, and
+	// the reporter its probes go to (connect/DESIGNNOTES4.md §1, GEOMAP §2.5).
+	// Nil while no device in the space provides: a provider installs the pair
+	// when its provide mode leaves none and clears it when the mode returns
+	// to none or it closes. The space keeps the pair rather than leaving it
+	// on the client alone, because a settings change replaces the client in
+	// place (K6) and the replacement must attest exactly as the one it
+	// replaced, no more and no less.
+	extenderProbeAttestor *connect.ExtenderProbeAttestor
+	extenderProbeReporter *connect.ExtenderPingReporter
 	// The extender identity of a space with no local state (B1): the seed an
 	// embedder supplied through the device's key material, else one generated
 	// at first use. A space with local state keeps `.extender_key` instead,
@@ -316,6 +327,42 @@ func (self *NetworkSpace) getExtenderNetworkClient() *connect.ExtenderNetworkCli
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return self.extenderNetworkClient
+}
+
+// Installs the attesting provider, and the reporter its probes go to, on the
+// refresh loop this space runs now and on every replacement a settings change
+// builds (K6), a space with no loop yet keeping the pair for its first. Only a
+// providing device calls this, when its provide mode leaves none: a device
+// that does not provide never identifies itself to an extender. The client
+// is written under the space lock, which orders an install, a clear and a
+// replacement, so none of them can land between another's read and its write.
+func (self *NetworkSpace) setExtenderProbeAttestor(
+	attestor *connect.ExtenderProbeAttestor,
+	reporter *connect.ExtenderPingReporter,
+) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.extenderProbeAttestor = attestor
+	self.extenderProbeReporter = reporter
+	if self.extenderNetworkClient != nil {
+		self.extenderNetworkClient.SetProbeAttestor(attestor, reporter)
+	}
+}
+
+// Clears the attestor a provider installed, when its provide mode returns to
+// none or it closes, and nothing installed after it: of two devices that
+// share a space, the one that stops must not leave the other ranking only.
+func (self *NetworkSpace) clearExtenderProbeAttestor(attestor *connect.ExtenderProbeAttestor) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if attestor == nil || self.extenderProbeAttestor != attestor {
+		return
+	}
+	self.extenderProbeAttestor = nil
+	self.extenderProbeReporter = nil
+	if self.extenderNetworkClient != nil {
+		self.extenderNetworkClient.SetProbeAttestor(nil, nil)
+	}
 }
 
 // A copy of this space's values. The extender fields are replaced in place by
@@ -687,6 +734,11 @@ func (self *NetworkSpace) applyExtenderValues(values *NetworkSpaceValues) bool {
 				return false
 			}
 			self.extenderNetworkClient = networkClient
+			// the replacement attests exactly as the client it replaced did,
+			// in the same scope, so a provider's close cannot land in between
+			if networkClient != nil && self.extenderProbeAttestor != nil {
+				networkClient.SetProbeAttestor(self.extenderProbeAttestor, self.extenderProbeReporter)
+			}
 			return true
 		}()
 		if !installed && networkClient != nil {
@@ -810,6 +862,28 @@ func NewPlatformNetworkSpace(
 		NetExposeServerHostNames: true,
 	}
 	return newNetworkSpaceWithConnectSettings(ctx, key, values, "", connectSettings)
+}
+
+// newHostedClientStrategy gives one hosted DeviceLocal its own control-plane
+// dial pacing, internal DoH cache and concurrency slots. Its parent context
+// is the NetworkSpace, not the device's data-plane context: the device cancels
+// data flow before generated clients finish their final contract retirement.
+// DeviceLocal explicitly closes this private strategy after those joins. It
+// reuses only immutable settings and the shared read-only extender directory.
+func (self *NetworkSpace) newHostedClientStrategy(dnsMemoryTarget *connect.MemoryTarget) *connect.ClientStrategy {
+	settings := *self.clientStrategySettings
+	dohSettings := settings.DohSettings
+	if dohSettings == nil {
+		dohSettings = connect.DefaultDohSettings()
+	}
+	privateDohSettings := *dohSettings
+	privateDohSettings.MemoryTarget = dnsMemoryTarget
+	settings.DohSettings = &privateDohSettings
+	strategy := connect.NewClientStrategy(self.ctx, &settings)
+	if customExtenders := self.clientStrategy.CustomExtenders(); len(customExtenders) > 0 {
+		strategy.SetCustomExtenders(customExtenders)
+	}
+	return strategy
 }
 
 func testing_newNetworkSpace(ctx context.Context) (networkSpace *NetworkSpace, byJwt string, returnErr error) {
@@ -1606,7 +1680,9 @@ func (self *NetworkSpaceManager) load() error {
 	return nil
 }
 
-func (self *NetworkSpaceManager) envStoragePath(key *NetworkSpaceKey) string {
+// envStoragePathFor is the storage directory for key, computed without
+// touching the disk. `envStoragePath` is the variant that materializes it.
+func (self *NetworkSpaceManager) envStoragePathFor(key *NetworkSpaceKey) string {
 	if self.storagePath == "" {
 		return ""
 	}
@@ -1619,7 +1695,15 @@ func (self *NetworkSpaceManager) envStoragePath(key *NetworkSpaceKey) string {
 	if safeEnv == "" || safeEnv == "." || safeEnv == ".." {
 		safeEnv = "default"
 	}
-	envStoragePath := filepath.Join(self.storagePath, "network_spaces", safeHost, safeEnv)
+	return filepath.Join(self.storagePath, "network_spaces", safeHost, safeEnv)
+}
+
+func (self *NetworkSpaceManager) envStoragePath(key *NetworkSpaceKey) string {
+	if self.storagePath == "" {
+		return ""
+	}
+	envStoragePath := self.envStoragePathFor(key)
+	safeEnv := filepath.Base(envStoragePath)
 
 	// Best-effort migration: before host-scoped storage existed, state lived at
 	// `network_spaces/<env>` (no host segment). If an install still has state
@@ -1898,6 +1982,164 @@ func (self *NetworkSpaceManager) RemoveNetworkSpace(networkSpace *NetworkSpace) 
 		self.networkSpacesChanged()
 	}
 	return changed
+}
+
+// MigrateNetworkSpace moves the space stored under fromKey to toKey, keeping
+// its values, its local state, and its active selection: the env storage
+// directory is renamed from the fromKey path to the toKey path, the fromKey
+// entry in the persisted space list is replaced by a toKey entry with the same
+// values, and the active space is re-pointed when it was fromKey. A
+// MigrationHostName equal to the new key's host is cleared, since that
+// migration is complete. No other space (a custom server, for example) is
+// touched.
+//
+// Returns true when the space was moved. Returns false, having changed
+// nothing, when no space is stored under fromKey, when a space already exists
+// under toKey, when the keys are equal, or when the toKey storage directory
+// already holds state on disk without a space record (it is not overwritten;
+// the stored space keeps its fromKey). A second call after a successful move
+// finds fromKey missing and returns false, so the call is idempotent and safe
+// on every launch.
+//
+// Contract for embedders: call this at startup BEFORE creating or binding the
+// bundled space (before `UpdateNetworkSpace`, `SetActiveNetworkSpace`, and
+// any Device construction) and do not keep a NetworkSpace obtained before the
+// call. The fromKey space object is closed and replaced by a new object for
+// toKey; listeners added before the call are told through
+// NetworkSpacesChanged and, when it was active, ActiveNetworkSpaceChanged with
+// the new object, and `GetNetworkSpace(toKey)` / `GetActiveNetworkSpace`
+// return it afterwards.
+func (self *NetworkSpaceManager) MigrateNetworkSpace(fromKey *NetworkSpaceKey, toKey *NetworkSpaceKey) bool {
+	if fromKey == nil || toKey == nil || *fromKey == *toKey {
+		return false
+	}
+
+	var fromNetworkSpace *NetworkSpace
+	var values NetworkSpaceValues
+	wasActive := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		if self.closed {
+			return
+		}
+		if _, ok := self.networkSpaces[*toKey]; ok {
+			return
+		}
+		networkSpace, ok := self.networkSpaces[*fromKey]
+		if !ok {
+			return
+		}
+		fromNetworkSpace = networkSpace
+		values = networkSpace.valuesCopy()
+		wasActive = self.activeNetworkSpace == networkSpace
+	}()
+	if fromNetworkSpace == nil {
+		return false
+	}
+
+	if values.MigrationHostName == toKey.HostName {
+		values.MigrationHostName = ""
+	}
+
+	if self.storagePath != "" {
+		fromStoragePath := self.envStoragePathFor(fromKey)
+		toStoragePath := self.envStoragePathFor(toKey)
+		// a destination directory with no space record is not overwritten.
+		// An empty one is just a leftover of path materialization and is
+		// replaced; anything else is state that is not ours to lose.
+		if entries, err := os.ReadDir(toStoragePath); err == nil {
+			if 0 < len(entries) {
+				glog.Infof("[nsm]migrate %s/%s -> %s/%s skipped: destination storage already exists", fromKey.HostName, fromKey.EnvName, toKey.HostName, toKey.EnvName)
+				return false
+			}
+			if err := os.Remove(toStoragePath); err != nil {
+				glog.Infof("[nsm]migrate %s/%s -> %s/%s skipped: %s", fromKey.HostName, fromKey.EnvName, toKey.HostName, toKey.EnvName, err)
+				return false
+			}
+		} else if !os.IsNotExist(err) {
+			glog.Infof("[nsm]migrate %s/%s -> %s/%s skipped: %s", fromKey.HostName, fromKey.EnvName, toKey.HostName, toKey.EnvName, err)
+			return false
+		}
+
+		// the source space is joined before its directory moves, so pending
+		// local state writes land in the directory that is renamed
+		fromNetworkSpace.close()
+
+		if _, err := os.Stat(fromStoragePath); err == nil {
+			if err := os.MkdirAll(filepath.Dir(toStoragePath), LocalStorageDirectoryPermissions); err != nil {
+				glog.Infof("[nsm]migrate %s/%s -> %s/%s failed: %s", fromKey.HostName, fromKey.EnvName, toKey.HostName, toKey.EnvName, err)
+				self.restoreNetworkSpace(fromKey, fromNetworkSpace, wasActive)
+				return false
+			}
+			if err := os.Rename(fromStoragePath, toStoragePath); err != nil {
+				glog.Infof("[nsm]migrate %s/%s -> %s/%s failed: %s", fromKey.HostName, fromKey.EnvName, toKey.HostName, toKey.EnvName, err)
+				self.restoreNetworkSpace(fromKey, fromNetworkSpace, wasActive)
+				return false
+			}
+		}
+	} else {
+		fromNetworkSpace.close()
+	}
+
+	toNetworkSpace := newNetworkSpace(self.ctx, *toKey, values, self.envStoragePath(toKey))
+	toNetworkSpace.setNetworkSpaceManager(self)
+	installed := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		if self.closed {
+			return
+		}
+		if self.networkSpaces[*fromKey] == fromNetworkSpace {
+			delete(self.networkSpaces, *fromKey)
+		}
+		self.networkSpaces[*toKey] = toNetworkSpace
+		if wasActive {
+			self.activeNetworkSpace = toNetworkSpace
+		}
+		installed = true
+	}()
+	if !installed {
+		toNetworkSpace.close()
+		return false
+	}
+	self.store()
+	self.networkSpacesChanged()
+	if wasActive {
+		self.activeNetworkSpaceChanged(self.GetActiveNetworkSpace())
+	}
+	return true
+}
+
+// restoreNetworkSpace puts a fresh space for key, carrying the values of the
+// closed space it replaces, back where a failed migration left a closed one.
+func (self *NetworkSpaceManager) restoreNetworkSpace(key *NetworkSpaceKey, closedNetworkSpace *NetworkSpace, active bool) {
+	replacement := newNetworkSpace(self.ctx, *key, closedNetworkSpace.valuesCopy(), self.envStoragePath(key))
+	replacement.setNetworkSpaceManager(self)
+	installed := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		if self.closed || self.networkSpaces[*key] != closedNetworkSpace {
+			return
+		}
+		self.networkSpaces[*key] = replacement
+		if active {
+			self.activeNetworkSpace = replacement
+		}
+		installed = true
+	}()
+	if !installed {
+		replacement.close()
+		return
+	}
+	if active {
+		self.activeNetworkSpaceChanged(self.GetActiveNetworkSpace())
+	}
 }
 
 func (self *NetworkSpaceManager) Close() {
