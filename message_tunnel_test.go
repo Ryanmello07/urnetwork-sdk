@@ -56,6 +56,30 @@ func TestMessageTunnelReachesAnExitThatNeverAnswersTheHandshake(t *testing.T) {
 			t.Errorf("window client %s reports a sealed session with an exit that runs none", window.client.ClientId())
 		}
 	}
+
+	// The establish hold (the owner's second ruling of 2026-10-04): a window waits up to its hold
+	// for the exit's session, then falls through. So nothing readable leaves a window before its
+	// hold has run from the window's first establishment attempt, which is after the window was
+	// made; and the echo above came back, so the fall-through happened.
+	hold := world.generator.NewClientSettings().EncryptionSettings.OpportunisticEstablishHold
+	if hold <= 0 {
+		t.Fatal("the tunnel's window clients have no establish hold, so the timing below would hold vacuously")
+	}
+	if elapsed < hold {
+		t.Errorf("the echo came back after %v, inside the %v establish hold", elapsed, hold)
+	}
+	readable := 0
+	for _, window := range world.generator.windowClients() {
+		wire := world.wire.window(window.client.ClientId())
+		readable += wire.application
+		if wire.application != 0 && wire.firstApplication.Before(window.made.Add(hold)) {
+			t.Errorf("window client %s wrote its first readable application frame %v after it was made, inside the %v hold",
+				window.client.ClientId(), wire.firstApplication.Sub(window.made).Round(time.Millisecond), hold)
+		}
+	}
+	if readable == 0 {
+		t.Error("no readable application frame crossed the wire to an exit that runs no session, so the tap read nothing")
+	}
 }
 
 func TestMessageTunnelSealsWithAnExitThatAnswers(t *testing.T) {
@@ -84,6 +108,30 @@ func TestMessageTunnelSealsWithAnExitThatAnswers(t *testing.T) {
 		t.Fatalf("the tunnel stopped reaching the exit once sealed: %v", echoErr)
 	}
 	t.Logf("echoed through the sealed tunnel in %v", elapsed.Round(time.Millisecond))
+
+	// The establish hold (the owner's second ruling of 2026-10-04): an exit that answers is sealed
+	// from the first byte. The first echo above was dialled before any session existed, and still
+	// not one application frame crossed the wire readable. The readable handshake frames are the
+	// tap's control: it reads plaintext when there is any.
+	sealedCount, application, handshake, notToExit := 0, 0, 0, 0
+	for _, window := range world.generator.windowClients() {
+		wire := world.wire.window(window.client.ClientId())
+		sealedCount += wire.sealed
+		application += wire.application
+		handshake += wire.handshake
+		notToExit += wire.notToExit
+	}
+	if application != 0 {
+		t.Errorf("%d application frame(s) crossed the wire readable to an exit that answers the handshake", application)
+	}
+	if handshake == 0 {
+		t.Error("the tap read no handshake frame in the clear, so it cannot tell a readable application frame either")
+	}
+	if sealedCount == 0 {
+		t.Error("no sealed message crossed the wire")
+	}
+	t.Logf("on the wire to the exit: %d sealed, %d readable handshake frame(s), %d readable application frame(s); %d message(s) to the platform",
+		sealedCount, handshake, application, notToExit)
 }
 
 // The other setting the tunnel names rather than inherits: no peer-to-peer link to the exit, so the
@@ -106,6 +154,77 @@ type tunnelWorld struct {
 	exit      *connect.Client
 	keyApi    *tunnelKeyApi
 	generator *tunnelGenerator
+	wire      *tunnelWire
+}
+
+// ── the wire: everything a window client writes toward the exit, as a relay would see it ────────
+//
+// The window client has one route here, so the tap also sees what it addresses to the platform
+// (its key publications, which no per-peer session covers on any route). Those are counted apart:
+// the property is about what is addressed to the exit.
+
+type tunnelWire struct {
+	exit    connect.Id
+	mutex   sync.Mutex
+	windows map[connect.Id]*tunnelWindowWire
+}
+
+type tunnelWindowWire struct {
+	sealed int
+	// frames to the exit readable on the wire: the per-peer handshake, and everything else
+	handshake        int
+	application      int
+	firstApplication time.Time
+	// messages addressed to anyone but the exit (the platform)
+	notToExit int
+}
+
+func (self *tunnelWire) record(clientId connect.Id, at time.Time, wireBytes []byte) {
+	var transferFrame protocol.TransferFrame
+	if err := connect.ProtoUnmarshal(wireBytes, &transferFrame); err != nil {
+		return
+	}
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	window := self.windows[clientId]
+	if window == nil {
+		window = &tunnelWindowWire{}
+		self.windows[clientId] = window
+	}
+	if !bytes.Equal(transferFrame.GetTransferPath().GetDestinationId(), self.exit.Bytes()) {
+		window.notToExit += 1
+		return
+	}
+	if 0 < len(transferFrame.GetEncryptedTransferFrame()) {
+		window.sealed += 1
+		return
+	}
+	pack := transferFrame.GetPack()
+	if pack == nil && transferFrame.GetFrame().GetMessageType() == protocol.MessageType_TransferPack {
+		var framePack protocol.Pack
+		if err := connect.ProtoUnmarshal(transferFrame.GetFrame().GetMessageBytes(), &framePack); err == nil {
+			pack = &framePack
+		}
+	}
+	for _, frame := range pack.GetFrames() {
+		if frame.GetMessageType() == protocol.MessageType_TransferEncryptedControl {
+			window.handshake += 1
+		} else {
+			window.application += 1
+			if window.firstApplication.IsZero() {
+				window.firstApplication = at
+			}
+		}
+	}
+}
+
+func (self *tunnelWire) window(clientId connect.Id) tunnelWindowWire {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if window := self.windows[clientId]; window != nil {
+		return *window
+	}
+	return tunnelWindowWire{}
 }
 
 func newTunnelWorld(t *testing.T, exitMode connect.EncryptionMode) *tunnelWorld {
@@ -115,11 +234,13 @@ func newTunnelWorld(t *testing.T, exitMode connect.EncryptionMode) *tunnelWorld 
 
 	keyApi := newTunnelKeyApi(t)
 	exit := startTunnelEchoExit(t, ctx, exitMode, keyApi)
+	wire := &tunnelWire{exit: exit.ClientId(), windows: map[connect.Id]*tunnelWindowWire{}}
 	generator := &tunnelGenerator{
 		exit:           exit,
 		keyApi:         keyApi,
 		clientStrategy: connect.NewClientStrategyWithDefaults(ctx),
 		unsubs:         map[*connect.Client]func(){},
+		wire:           wire,
 	}
 	tunnelCtx, tunnelCancel := context.WithCancel(ctx)
 	tunnel, err := startMessageTunnel(tunnelCtx, tunnelCancel, generator, connect.NewId())
@@ -127,7 +248,7 @@ func newTunnelWorld(t *testing.T, exitMode connect.EncryptionMode) *tunnelWorld 
 		t.Fatalf("startMessageTunnel: %v", err)
 	}
 	t.Cleanup(tunnel.Close)
-	return &tunnelWorld{ctx: ctx, tunnel: tunnel, exit: exit, keyApi: keyApi, generator: generator}
+	return &tunnelWorld{ctx: ctx, tunnel: tunnel, exit: exit, keyApi: keyApi, generator: generator, wire: wire}
 }
 
 // echo sends a datagram through the tunnel to an address the exit answers for, and waits for it to
@@ -331,6 +452,7 @@ type tunnelGenerator struct {
 	exit           *connect.Client
 	keyApi         *tunnelKeyApi
 	clientStrategy *connect.ClientStrategy
+	wire           *tunnelWire
 
 	mutex   sync.Mutex
 	windows []tunnelWindowClient
@@ -341,6 +463,8 @@ type tunnelWindowClient struct {
 	client *connect.Client
 	// the mode in the settings connect passed to NewClient, after the window's performance profile
 	mode connect.EncryptionMode
+	// when the window client was made, before any of its sessions could start
+	made time.Time
 }
 
 func (self *tunnelGenerator) windowClients() []tunnelWindowClient {
@@ -389,14 +513,32 @@ func (self *tunnelGenerator) NewClient(ctx context.Context, args *connect.MultiC
 	if clientSettings.EncryptionSettings != nil {
 		mode = clientSettings.EncryptionSettings.Mode
 	}
+	made := time.Now()
 	client := connect.NewClient(ctx, args.ClientId, connect.NewNoContractClientOob(), clientSettings)
 	self.keyApi.publish(client)
 
+	// everything the window client writes toward the exit passes the tap first
+	written := make(chan []byte)
 	toExit := make(chan []byte)
 	fromExit := make(chan []byte)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case wireBytes := <-written:
+				self.wire.record(args.ClientId, time.Now(), wireBytes)
+				select {
+				case toExit <- wireBytes:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
 	sendTransport := connect.NewSendGatewayTransport()
 	receiveTransport := connect.NewReceiveGatewayTransport()
-	client.RouteManager().UpdateTransport(sendTransport, []connect.Route{toExit})
+	client.RouteManager().UpdateTransport(sendTransport, []connect.Route{written})
 	client.RouteManager().UpdateTransport(receiveTransport, []connect.Route{fromExit})
 	client.ContractManager().AddNoContractPeer(self.exit.ClientId())
 
@@ -414,7 +556,7 @@ func (self *tunnelGenerator) NewClient(ctx context.Context, args *connect.MultiC
 		client.Cancel()
 	}
 	self.mutex.Lock()
-	self.windows = append(self.windows, tunnelWindowClient{client: client, mode: mode})
+	self.windows = append(self.windows, tunnelWindowClient{client: client, mode: mode, made: made})
 	self.unsubs[client] = unsub
 	self.mutex.Unlock()
 	return client, nil

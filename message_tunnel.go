@@ -7,6 +7,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -25,11 +26,12 @@ import (
 //
 // TWO SETTINGS ARE THE POINT, AND BOTH ARE NAMED HERE RATHER THAN INHERITED.
 //
-//   - Per-peer encryption OPPORTUNISTIC, not REQUIRED: the owner's ruling of 2026-10-04,
-//     "Opportunistic + provider fix" ([messageTunnelClientSettings]). Every window client asks its
-//     exit for a connect per-peer session (transfer_encrypt.go): TLS 1.3 preferring the
-//     X25519MLKEM768 hybrid, and the exit's identity proof checked against the identity key the
-//     operator names for it. What that hides, and when, is below.
+//   - Per-peer encryption OPPORTUNISTIC, not REQUIRED, with a 1 s establish hold: the owner's
+//     rulings of 2026-10-04, "Opportunistic + provider fix" and "Build the 1 s hold"
+//     ([messageTunnelClientSettings]). Every window client asks its exit for a connect per-peer
+//     session (transfer_encrypt.go): TLS 1.3 preferring the X25519MLKEM768 hybrid, and the exit's
+//     identity proof checked against the identity key the operator names for it. What that hides,
+//     and when, is below.
 //   - AllowDirect false: no peer-to-peer link from this device to the exit, so traffic goes via the
 //     operator's relay and the exit never learns this device's address (sdk.go: "setting this to
 //     true exposes the real source IP to the provider").
@@ -40,13 +42,18 @@ import (
 //
 //   - After the session completes: nothing. Not the destination address, the port, or the TCP and
 //     TLS headers inside.
-//   - Before it completes: every packet, because OPPORTUNISTIC does not hold them. On 2026-10-04
-//     every window to an exit that answered sent 3 to 6 writes this way, in the 0.55 to 0.62 s
-//     between its ClientHello and the session sealing. They opened the TCP connection to the
-//     server's endpoint, and in four windows of five carried its TLS ClientHello too, so the
-//     relay could read that destination and port.
-//   - With an exit that never answers: every packet, as the pre-merge alpha sent them to every
-//     exit. On 2026-10-04 that was nearly every exit on the beta (ledger 278).
+//   - Before it completes: nothing either, when it completes within the 1 s establish hold
+//     (connect's EncryptionSettings.OpportunisticEstablishHold). A window holds its application
+//     writes at SendSequence.Pack's entry until its exit's session seals, so an exit that answers
+//     in time is sealed from the first byte. Without the hold, on 2026-10-04, every window to an
+//     exit that answered sent 3 to 6 writes in plaintext, in the 0.55 to 0.62 s between its
+//     ClientHello and the session sealing. They opened the TCP connection to the server's
+//     endpoint, and in four windows of five carried its TLS ClientHello too, so the relay could
+//     read that destination and port.
+//   - With an exit that never answers, or does not answer within the hold: every packet once the
+//     hold ends, as the pre-merge alpha sent them to every exit. On 2026-10-04 that was nearly
+//     every exit on the beta (ledger 278), and the hold costs such an exit 1 s on the first Hello,
+//     once per window, not once per packet.
 //
 // THE TRADE. REQUIRED, which the profile's PostQuantumEncryption turns on, holds every packet until
 // its exit seals, so the relay never reads a destination. On 2026-10-04 it also made the first
@@ -55,8 +62,10 @@ import (
 // not one that interferes. A completed session is the same TLS and the same identity proof as under
 // REQUIRED. What REQUIRED adds, and this lacks:
 //
-//   - The hold before the session completes: the fail-closed entry gate in SendSequence.Pack
-//     (transfer.go).
+//   - The hold before the session completes, past the first second: REQUIRED's entry gate in
+//     SendSequence.Pack (transfer.go) refuses for as long as the session is not sealed, where the
+//     establish hold lets packets out unsealed after 1 s. So a relay that drops the handshake still
+//     gets plaintext, 1 s later.
 //   - The signed key-history hold: the cipher waits until the exit's identity key is corroborated
 //     against the operator's signed registration history (keyHistoryRequiredWithLock,
 //     transfer_key_history_session.go).
@@ -117,16 +126,19 @@ func newMessageTunnel(ctx context.Context, config *messageTunnelConfig) (*messag
 
 // messageTunnelClientSettings are the settings of every window client the tunnel mints: the
 // device's own window-client settings, which wire the operator's key api (/key/<id> and its signed
-// history), with the per-peer encryption mode OPPORTUNISTIC. Traffic to an exit that answers the
-// per-peer handshake is sealed from the moment its session completes; an exit that never answers
-// is reached unsealed at this layer instead of not at all. The owner's ruling of 2026-10-04
-// ("Opportunistic + provider fix"); the type comment above has the trade.
+// history), with the per-peer encryption mode OPPORTUNISTIC and a 1 s establish hold. A window
+// holds its application writes for up to 1 s while its exit's session first establishes, so an
+// exit that answers the per-peer handshake within that second is sealed from the first byte. An
+// exit that never answers is reached unsealed at this layer after the second, instead of not at
+// all. The owner's rulings of 2026-10-04, "Opportunistic + provider fix" and "Build the 1 s hold";
+// the type comment above has the trade.
 func messageTunnelClientSettings(apiUrl string, clientStrategy *connect.ClientStrategy) *connect.ClientSettings {
 	settings := connect.DefaultClientSettings()
 	if settings.EncryptionSettings == nil {
 		settings.EncryptionSettings = connect.DefaultEncryptionSettings()
 	}
 	settings.EncryptionSettings.Mode = connect.EncryptionModeOpportunistic
+	settings.EncryptionSettings.OpportunisticEstablishHold = 1 * time.Second
 	return newDeviceClientSettings(settings, apiUrl, clientStrategy)
 }
 
