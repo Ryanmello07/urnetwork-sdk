@@ -27,6 +27,14 @@ check_openapi:
 	export PATH="$$PATH:/usr/local/go/bin:$$HOME/go/bin"; \
 	go run gen_openapi.go -spec "$(OPENAPI_SPEC)" -check;
 
+# Tests consume the committed output; they must not repair source drift while
+# another source-pinned SDK/MAIN lane is validating the same checkout.
+check_types:
+	export PATH="$$PATH:/usr/local/go/bin:$$HOME/go/bin"; \
+	go run gen_types.go -check;
+
+check_generated: check_openapi check_types
+
 # Build the WASM binary and the Go JS runtime support file.
 #
 # wasm_exec.js is ABI-paired with the Go toolchain that compiled the wasm, so
@@ -34,10 +42,20 @@ check_openapi:
 # from `go env GOROOT` (which honors the toolchain directive in go.mod), not a
 # hardcoded path. Go >= 1.24 keeps it under lib/wasm; older toolchains under
 # misc/wasm. `check_wasm` then gates on the pairing.
+#
+# `$(MAKE) check_wasm` stays on its own recipe line: make executes any line that
+# names $(MAKE) even under `make -n`, so joined to the commands above it would
+# make a dry run compile the wasm and write wasm/.
+#
+# The recipe stops at the first failed step (set -e), and it removes the
+# previous pair before compiling, so a failed build leaves no stale sdk.wasm for
+# build_bundle or an npm publish to ship as this build's output.
 build_wasm:
+	set -e; \
 	export PATH="$$PATH:/usr/local/go/bin:$$HOME/go/bin"; \
 	export GOEXPERIMENT=greenteagc; \
 	mkdir -p wasm; \
+	rm -f wasm/sdk.wasm wasm/wasm_exec.js; \
 	GOOS=js GOARCH=wasm go build \
 		-ldflags "-X github.com/urnetwork/sdk.Version=$${WARP_VERSION}" \
 		-o wasm/sdk.wasm .; \
@@ -46,7 +64,7 @@ build_wasm:
 		cp "$$GOROOT/lib/wasm/wasm_exec.js" wasm/; \
 	else \
 		cp "$$GOROOT/misc/wasm/wasm_exec.js" wasm/; \
-	fi; \
+	fi
 	$(MAKE) check_wasm
 
 # Verify the packaged wasm_exec.js is byte-identical to the building toolchain's
@@ -67,8 +85,10 @@ check_wasm:
 	fi; \
 	echo "wasm_exec.js paired with $$toolchain_version"
 
-# Package the standalone browser bundle (wasm + sample loader) for release
+# Package the standalone browser bundle (wasm + sample loader) for release.
+# set -e stops at a failed copy, before the zip: a partial bundle is never zipped.
 build_bundle: build_wasm
+	set -e; \
 	rm -rf build; \
 	mkdir -p build/URnetworkSdkJs; \
 	cp wasm/sdk.wasm wasm/wasm_exec.js index.js index.html build/URnetworkSdkJs/; \
@@ -79,13 +99,20 @@ build: generate_types build_bundle
 	npm ci && \
 	npm run build;
 
-.PHONY: package check-package smoke publish generate_types generate_openapi check_openapi
+# Keep the developer build's explicit generation behavior. The smoke path
+# checks first, then builds only untracked artifacts from the committed inputs.
+build_checked: check_generated
+	$(MAKE) build_bundle
+	npm ci && \
+	npm run build;
+
+.PHONY: package check-package smoke publish generate_types generate_openapi check_openapi check_types check_generated build_checked
 package: build
 	go -C ../packaging run . npm package
 check-package:
 	npm test
 	go -C ../packaging run . npm check
-smoke: build
+smoke: build_checked
 	node --test test/smoke.test.ts
 publish:
 	go -C ../packaging run . publish npm

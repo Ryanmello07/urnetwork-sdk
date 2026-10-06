@@ -1074,8 +1074,10 @@ var streamAdapterPackageValueCensus = map[string]streamAdapterPackageVar{
 	"defaultAccountCheckTimeout":               streamAdapterPackageConstOf(defaultAccountCheckTimeout),
 	"defaultBlockActionWindowDuration":         streamAdapterPackageConstOf(defaultBlockActionWindowDuration),
 	"defaultNetworkCheckTimeout":               streamAdapterPackageConstOf(defaultNetworkCheckTimeout),
+	"defaultProviderStatusPollInterval":        streamAdapterPackageConstOf(defaultProviderStatusPollInterval),
 	"defaultThroughputSampleInterval":          streamAdapterPackageConstOf(defaultThroughputSampleInterval),
 	"defaultThroughputWindowDuration":          streamAdapterPackageConstOf(defaultThroughputWindowDuration),
+	"DefaultTunnelDnsAddressIpv6":              streamAdapterPackageConstOf(DefaultTunnelDnsAddressIpv6),
 	"dohServerScoresStaleAfter":                streamAdapterPackageConstOf(dohServerScoresStaleAfter),
 	"platformTransportMigrateConnectTimeout":   streamAdapterPackageConstOf(platformTransportMigrateConnectTimeout),
 	"platformTransportMigrateMaxScheduleDelay": streamAdapterPackageConstOf(platformTransportMigrateMaxScheduleDelay),
@@ -1088,6 +1090,7 @@ var streamAdapterPackageValueCensus = map[string]streamAdapterPackageVar{
 	"base58BigRadix":                           streamAdapterPackageVarOf(&base58BigRadix),
 	"base58BigZero":                            streamAdapterPackageVarOf(&base58BigZero),
 	"base58Table":                              streamAdapterPackageVarOf(&base58Table),
+	"controlDohSettingsConfigure":              streamAdapterPackageVarOf(&controlDohSettingsConfigure),
 	"countryCodeColorHexes":                    streamAdapterPackageVarOf(&countryCodeColorHexes),
 	"defaultTunnelDnsServersIpv4":              streamAdapterPackageVarOf(&defaultTunnelDnsServersIpv4),
 	"defaultTunnelDnsServersIpv6":              streamAdapterPackageVarOf(&defaultTunnelDnsServersIpv6),
@@ -1185,10 +1188,11 @@ var streamAdapterPackageValueCensus = map[string]streamAdapterPackageVar{
 	"errPeerPinStoreSuperseded":             streamAdapterPackageVarOf(&errPeerPinStoreSuperseded),
 	"errTransferDiagnosticSnapshotTooLarge": streamAdapterPackageVarOf(&errTransferDiagnosticSnapshotTooLarge),
 	"errTransferDiagnosticUnavailable":      streamAdapterPackageVarOf(&errTransferDiagnosticUnavailable),
+	"errUploadLogsRpcClosed":                streamAdapterPackageVarOf(&errUploadLogsRpcClosed),
+	"errUploadLogsUnreported":               streamAdapterPackageVarOf(&errUploadLogsUnreported),
 	"extenderNetworkClientConfigure":        streamAdapterPackageVarOf(&extenderNetworkClientConfigure),
 	"extenderNetworkClientEnabled":          streamAdapterPackageVarOf(&extenderNetworkClientEnabled),
 	"extenderNodeEnabled":                   streamAdapterPackageVarOf(&extenderNodeEnabled),
-	"extenderProvideListenTimeout":          streamAdapterPackageConstOf(extenderProvideListenTimeout),
 	"extenderProvideRoleEnabled":            streamAdapterPackageVarOf(&extenderProvideRoleEnabled),
 	"extenderProvideStatusEpoch":            streamAdapterPackageConstOf(extenderProvideStatusEpoch),
 	"extenderStatusEpoch":                   streamAdapterPackageConstOf(extenderStatusEpoch),
@@ -1267,7 +1271,8 @@ func streamAdapterPackageConstOf[T any](value T) streamAdapterPackageVar {
 	}
 }
 
-// streamAdapterCensus merges the portable census with this platform's fragment. The fragment
+// streamAdapterCensus merges the portable census with this platform's fragment and the native
+// extender's fragment (message_stream_adapter_census_extender_*_test.go). The fragment
 // exists because a package-level value declared in a build-constrained file can only be NAMED by
 // source this build compiles: streamAdapterPlatformValueCensus lives beside the production
 // exclusion files' own constraints, and the scope check below is go/build's answer rather than a
@@ -1276,6 +1281,7 @@ func streamAdapterCensus() map[string]streamAdapterPackageVar {
 	merged := map[string]streamAdapterPackageVar{}
 	maps.Copy(merged, streamAdapterPackageValueCensus)
 	maps.Copy(merged, streamAdapterPlatformValueCensus)
+	maps.Copy(merged, streamAdapterExtenderNativeValueCensus)
 	return merged
 }
 
@@ -1344,6 +1350,8 @@ var streamAdapterNonSentinelRulings = map[string]string{
 	"errPeerPinStoreSuperseded":             "the bounded peer key-pin store's refusal from a superseded owner",
 	"errTransferDiagnosticSnapshotTooLarge": "the transfer diagnostics' refusal of a snapshot over 64 KiB",
 	"errTransferDiagnosticUnavailable":      "the transfer diagnostics' refusal on a device that has not opted in",
+	"errUploadLogsRpcClosed":                "DeviceRemote's report to an UploadLogs callback that the device rpc closed before the upload reported its result",
+	"errUploadLogsUnreported":               "DeviceRemote's report to an UploadLogs callback that the device process does not report the upload's result",
 }
 
 // streamAdapterPredeclaredTypeNames is the set of type names a CONSTANT's declared type can be

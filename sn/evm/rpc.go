@@ -339,6 +339,33 @@ func (c *Client) LatestBaseFee(ctx context.Context) (*big.Int, error) {
 	return ParseUint256(block.BaseFeePerGas)
 }
 
+// The latest block's number and timestamp (unix seconds).
+func (self *Client) LatestHeader(ctx context.Context) (uint64, uint64, error) {
+	raw, err := self.Call(ctx, "eth_getBlockByNumber", "latest", false)
+	if err != nil {
+		return 0, 0, err
+	}
+	var block struct {
+		Number    string `json:"number"`
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(raw, &block); err != nil {
+		return 0, 0, err
+	}
+	number, err := ParseUint256(block.Number)
+	if err != nil {
+		return 0, 0, fmt.Errorf("block number: %w", err)
+	}
+	timestamp, err := ParseUint256(block.Timestamp)
+	if err != nil {
+		return 0, 0, fmt.Errorf("block timestamp: %w", err)
+	}
+	if !number.IsUint64() || !timestamp.IsUint64() {
+		return 0, 0, errors.New("block header overflows uint64")
+	}
+	return number.Uint64(), timestamp.Uint64(), nil
+}
+
 type callMsg struct {
 	From  string `json:"from,omitempty"`
 	To    string `json:"to"`

@@ -473,6 +473,81 @@ func TestStripePaymentSheetError(t *testing.T) {
 	}
 }
 
+// The server refuses a checkout or payment intent for a legacy guest network
+// with error.code guest_sign_in_required (controller.refuseGuestPurchase), and
+// the apps open their add-sign-in sheet on it. The error types carried only the
+// message before, so the json decode dropped the code and every app showed the
+// message as a generic error.
+func TestPurchaseRefusalKeepsGuestSignInRequiredCode(t *testing.T) {
+	// the server's exact payloads for the four refused entries
+	payloads := map[string]string{
+		"/stripe/create-checkout-session":    `{"error":{"code":"guest_sign_in_required","message":"Add a sign-in to your account before buying a plan."}}`,
+		"/stripe/payment-intent":             `{"error":{"code":"guest_sign_in_required","message":"Add a sign-in to your account before buying a plan."}}`,
+		"/subscription/stripe/payment-sheet": `{"amount_first_period_usd":0,"regular_period_usd":0,"trial_days":0,"offer_applied":false,"error":{"code":"guest_sign_in_required","message":"Add a sign-in to your account before buying a plan."}}`,
+		"/solana/payment-intent":             `{"error":{"code":"guest_sign_in_required","message":"Add a sign-in to your account before buying a plan."}}`,
+	}
+	api := newTestPaymentApi(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, payloads[r.URL.Path])
+	})
+
+	// the decoded error, re-encoded: the code must have survived the decode
+	encoded := func(t *testing.T, v any) string {
+		t.Helper()
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	want := `"code":"` + PurchaseErrorCodeGuestSignInRequired + `"`
+
+	checkoutCallback, checkoutC := connect.NewBlockingApiCallback[*StripeCreateCheckoutSessionResult](context.Background())
+	api.CreateStripeCheckoutSession(&StripeCreateCheckoutSessionArgs{ItemId: StripeItemProYearly}, checkoutCallback)
+	checkout := awaitApiResult(t, checkoutC, "CreateStripeCheckoutSession never returned")
+	if checkout.Error != nil || checkout.Result.Error == nil {
+		t.Fatalf("checkout session: %+v", checkout)
+	}
+	if got := encoded(t, checkout.Result.Error); !strings.Contains(got, want) {
+		t.Errorf("checkout session dropped the code: %s", got)
+	}
+
+	intentCallback, intentC := connect.NewBlockingApiCallback[*StripeCreatePaymentIntentResult](context.Background())
+	api.CreateStripePaymentIntent(&StripeCreatePaymentIntentArgs{}, intentCallback)
+	intent := awaitApiResult(t, intentC, "CreateStripePaymentIntent never returned")
+	if intent.Error != nil || intent.Result.Error == nil {
+		t.Fatalf("payment intent: %+v", intent)
+	}
+	if got := encoded(t, intent.Result.Error); !strings.Contains(got, want) {
+		t.Errorf("payment intent dropped the code: %s", got)
+	}
+
+	sheetCallback, sheetC := connect.NewBlockingApiCallback[*StripePaymentSheetResult](context.Background())
+	api.StripePaymentSheet(&StripePaymentSheetArgs{Plan: PlanYearly}, sheetCallback)
+	sheet := awaitApiResult(t, sheetC, "StripePaymentSheet never returned")
+	if sheet.Error != nil || sheet.Result.Error == nil {
+		t.Fatalf("payment sheet: %+v", sheet)
+	}
+	if got := encoded(t, sheet.Result.Error); !strings.Contains(got, want) {
+		t.Errorf("payment sheet dropped the code: %s", got)
+	}
+
+	solanaCallback, solanaC := connect.NewBlockingApiCallback[*SolanaPaymentIntentResult](context.Background())
+	api.CreateSolanaPaymentIntent(&SolanaPaymentIntentArgs{Reference: "ref", Plan: PlanYearly}, solanaCallback)
+	solana := awaitApiResult(t, solanaC, "CreateSolanaPaymentIntent never returned")
+	if solana.Error != nil || solana.Result.Error == nil {
+		t.Fatalf("solana intent: %+v", solana)
+	}
+	if got := encoded(t, solana.Result.Error); !strings.Contains(got, want) {
+		t.Errorf("solana intent dropped the code: %s", got)
+	}
+
+	// the message stays the fallback
+	if checkout.Result.Error.Message != "Add a sign-in to your account before buying a plan." {
+		t.Errorf("message = %q", checkout.Result.Error.Message)
+	}
+}
+
 // TestStripePrices pins the price lookup the Stripe-billed apps make before
 // showing the pay sheet: a GET with the storefront as a query parameter
 // (the server reads ?storefront_country), and every field of the server's

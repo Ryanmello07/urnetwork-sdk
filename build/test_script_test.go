@@ -56,7 +56,8 @@ if [ "$1" = --verify-held ]; then
 fi
 [ "$1" = run-all ] && [ "$2" = run-all-sdk ] && [ "$3" = -- ] || exit 70
 shift 3
-exec env URNETWORK_NETWORK_TEST_LOCK_HELD=1 "$@"
+export URNETWORK_NETWORK_TEST_LOCK_HELD=1
+exec "$@"
 `, 0o700)
 	fixture.write(t, "../bin/go", `#!/bin/sh
 if [ "$1" = test ]; then
@@ -64,6 +65,11 @@ if [ "$1" = test ]; then
   printf 'go-test:%s\n' "$module" >>"$SDK_TEST_FIXTURE_TRACE"
 fi
 exec "$SDK_TEST_FIXTURE_GO" "$@"
+`, 0o700)
+	fixture.write(t, "../bin/make", `#!/bin/sh
+[ "$1" = check_generated ] && [ "$PWD" = "$SDK_TEST_FIXTURE_ROOT/js" ] || exit 71
+printf 'make:js\n' >>"$SDK_TEST_FIXTURE_TRACE"
+[ "$SDK_TEST_FIXTURE_JS_GENERATED_STALE" != 1 ] || exit 2
 `, 0o700)
 	fixture.write(t, "../bin/npm", `#!/bin/sh
 [ "$1" = test ] && [ "$PWD" = "$SDK_TEST_FIXTURE_ROOT/js" ] || exit 71
@@ -156,7 +162,7 @@ func (self *sdkTestScriptFixture) run(t *testing.T, args ...string) (string, []s
 	output, err := command.CombinedOutput()
 	trace, readErr := os.ReadFile(self.tracePath)
 	if readErr != nil {
-		t.Fatalf("reading fixture trace: %v", readErr)
+		t.Fatalf("reading fixture trace: %v; command: %v\n%s", readErr, err, output)
 	}
 	return string(output), strings.Split(strings.TrimSpace(string(trace)), "\n"), err
 }
@@ -185,7 +191,7 @@ func TestSdkTestScriptHostModuleDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("host module discovery aborted: %v\n%s", err, output)
 	}
-	expected := []string{"go-test:.", "smoke:.", "go-test:.", "go-test:build", "go-test:cgo", "go-test:packaging", "go-test:raceonly", "go-test:testonly", "npm:js"}
+	expected := []string{"go-test:.", "smoke:.", "go-test:.", "go-test:build", "go-test:cgo", "go-test:packaging", "go-test:raceonly", "go-test:testonly", "make:js", "npm:js"}
 	if !slices.Equal(trace, expected) {
 		t.Fatalf("module commands = %q, want %q", trace, expected)
 	}
@@ -219,9 +225,9 @@ func TestSdkTestScriptBuildTags(t *testing.T) {
 		if err != nil {
 			t.Fatalf("tags args=%q flags=%q: %v\n%s", options.args, options.flags, err, output)
 		}
-		expected := []string{"go-test:.", "smoke:.", "go-test:.", "npm:js"}
+		expected := []string{"go-test:.", "smoke:.", "go-test:.", "make:js", "npm:js"}
 		if options.selected {
-			expected = []string{"go-test:.", "smoke:.", "go-test:.", "go-test:js", "go-test:space module", "npm:js"}
+			expected = []string{"go-test:.", "smoke:.", "go-test:.", "go-test:js", "go-test:space module", "make:js", "npm:js"}
 		}
 		if !slices.Equal(trace, expected) {
 			t.Fatalf("tags args=%q flags=%q: commands=%q, want %q", options.args, options.flags, trace, expected)
@@ -244,6 +250,21 @@ func TestSdkTestScriptDiscoveryErrorStopsSuite(t *testing.T) {
 	}
 	if !slices.Equal(trace, []string{"go-test:.", "smoke:.", "go-test:."}) {
 		t.Fatalf("discovery error continued the suite: %q", trace)
+	}
+}
+
+// A committed js client or type file that no longer matches its sources stops
+// the suite before the js package tests, with the check's own exit status.
+func TestSdkTestScriptStaleJsGeneratedStopsBeforeNpm(t *testing.T) {
+	fixture := newSdkTestScriptFixture(t)
+	fixture.env = append(fixture.env, "SDK_TEST_FIXTURE_JS_GENERATED_STALE=1")
+	output, trace, err := fixture.run(t, "-count=1", "-run", "^TestFixture$")
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 2 {
+		t.Fatalf("stale generated js result: %v\n%s", err, output)
+	}
+	if !slices.Equal(trace, []string{"go-test:.", "smoke:.", "go-test:.", "make:js"}) {
+		t.Fatalf("stale generated js continued the suite: %q", trace)
 	}
 }
 
@@ -293,5 +314,94 @@ func TestSdkTestScriptRootFailureStopsSuite(t *testing.T) {
 	}
 	if !slices.Equal(trace, []string{"go-test:.", "smoke:.", "go-test:."}) {
 		t.Fatalf("root failure retried or continued the suite: %q", trace)
+	}
+}
+
+// A directory without its own go.mod belongs to the root module. Its tests
+// must execute, and a failure there must stop the suite before nested modules.
+func TestSdkTestScriptRootSubpackages(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure=%t", fail), func(t *testing.T) {
+			fixture := newSdkTestScriptFixture(t)
+			fixture.write(t, "urmessage/fixture_test.go", fmt.Sprintf(`package urmessage
+
+import "testing"
+
+func TestFixture(t *testing.T) {
+	t.Log("subpackage fixture executed")
+	if %t {
+		t.Fatal("synthetic subpackage failure")
+	}
+}
+`, fail), 0o600)
+			fixture.module(t, "build")
+			fixture.write(t, "build/fixture_test.go", sdkTestScriptSource("fixture", ""), 0o600)
+			output, trace, err := fixture.run(t, "-count=1", "-run", "^TestFixture$")
+			if !strings.Contains(output, "subpackage fixture executed") {
+				t.Fatalf("root subpackage tests were omitted: %v\n%s", err, output)
+			}
+			expected := []string{"go-test:.", "smoke:.", "go-test:."}
+			if fail {
+				var exitError *exec.ExitError
+				if !errors.As(err, &exitError) || exitError.ExitCode() != 1 || !strings.Contains(output, "synthetic subpackage failure") {
+					t.Fatalf("subpackage failure result: %v\n%s", err, output)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("passing subpackage stopped the suite: %v\n%s", err, output)
+				}
+				expected = append(expected, "go-test:build", "make:js", "npm:js")
+			}
+			if !slices.Equal(trace, expected) {
+				t.Fatalf("subpackage commands = %q, want %q", trace, expected)
+			}
+		})
+	}
+}
+
+// cp3b's server is a real sibling dependency. A checkout without it must not
+// claim a passing SDK suite; an available checkout must actually be exercised.
+func TestSdkTestScriptMessageServerDependency(t *testing.T) {
+	for _, available := range []bool{false, true} {
+		t.Run(fmt.Sprintf("available=%t", available), func(t *testing.T) {
+			fixture := newSdkTestScriptFixture(t)
+			fixture.write(t, "cp3b/go.mod", `module sdk-fixture.example/cp3b
+
+go 1.26
+
+require github.com/urnetwork/message-server v0.0.0
+
+replace github.com/urnetwork/message-server => ../../message-server
+`, 0o600)
+			fixture.write(t, "cp3b/fixture_test.go", `package cp3b
+
+import (
+	"testing"
+	server "github.com/urnetwork/message-server"
+)
+
+func TestFixture(t *testing.T) { t.Log(server.Marker()) }
+`, 0o600)
+			if available {
+				fixture.write(t, "../message-server/go.mod", "module github.com/urnetwork/message-server\n\ngo 1.26\n", 0o600)
+				fixture.write(t, "../message-server/fixture.go", "package server\n\nfunc Marker() string { return \"server fixture executed\" }\n", 0o600)
+			}
+			output, trace, err := fixture.run(t, "-count=1", "-run", "^TestFixture$")
+			expected := []string{"go-test:.", "smoke:.", "go-test:.", "go-test:cp3b"}
+			if available {
+				if err != nil || !strings.Contains(output, "server fixture executed") {
+					t.Fatalf("available server dependency was not tested: %v\n%s", err, output)
+				}
+				expected = append(expected, "make:js", "npm:js")
+			} else {
+				var exitError *exec.ExitError
+				if !errors.As(err, &exitError) || exitError.ExitCode() != 1 || !strings.Contains(output, "replacement directory ../../message-server does not exist") {
+					t.Fatalf("missing server dependency did not fail closed: %v\n%s", err, output)
+				}
+			}
+			if !slices.Equal(trace, expected) {
+				t.Fatalf("server dependency commands = %q, want %q", trace, expected)
+			}
+		})
 	}
 }

@@ -70,3 +70,10 @@ func (self *viewControllerManager) ClosePointsLeaderboardViewController(vc *Poin
 		self.CloseViewController(vc)
 	}
 }
+
+// Closes a provider status controller this manager opened; nil is a no-op.
+func (self *viewControllerManager) CloseProviderStatusViewController(vc *ProviderStatusViewController) {
+	if vc != nil {
+		self.CloseViewController(vc)
+	}
+}

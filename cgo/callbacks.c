@@ -181,6 +181,10 @@ void urnet_invoke_delete_api_key(urnet_delete_api_key_cb cb, void* user_data, co
 	cb(user_data, result_json, err_param);
 }
 
+void urnet_invoke_device_configuration_changed(urnet_device_configuration_changed_cb cb, void* user_data) {
+	cb(user_data);
+}
+
 void urnet_invoke_device_recreated(urnet_device_recreated_cb cb, void* user_data) {
 	cb(user_data);
 }
@@ -298,6 +302,10 @@ void urnet_invoke_get_payout_wallet(urnet_get_payout_wallet_cb cb, void* user_da
 }
 
 void urnet_invoke_get_points_leaderboard(urnet_get_points_leaderboard_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
+}
+
+void urnet_invoke_get_provider_status(urnet_get_provider_status_cb cb, void* user_data, const char* result_json, const char* err_param) {
 	cb(user_data, result_json, err_param);
 }
 
@@ -478,6 +486,10 @@ void urnet_invoke_provide_secret_keys(urnet_provide_secret_keys_cb cb, void* use
 }
 
 void urnet_invoke_provider_identity_change(urnet_provider_identity_change_cb cb, void* user_data) {
+	cb(user_data);
+}
+
+void urnet_invoke_provider_status(urnet_provider_status_cb cb, void* user_data) {
 	cb(user_data);
 }
 
