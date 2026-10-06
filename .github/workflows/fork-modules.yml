@@ -17,8 +17,15 @@
 # If a module is added, add it here: this list is what the job claims, and a module missing from
 # it is the narrowing the job exists to prevent (items 269 and 277 recorded it twice).
 #
-# The siblings are the fork's connect and message-server: they carry the URmessage packages the
-# modules import, which upstream does not have until its pull requests land.
+# connect and message-server are PINNED BY SHA (the split plan's SX-0, red-team finding R2-F6).
+# URmessage is moving to urnetwork/message, and the changes that follow in message-server (MS-1)
+# and connect (CX-2) would turn this job red if it tracked their branches. Move a pin only by a
+# commit here, to a SHA this job has passed against; clone_at refuses anything but a full SHA.
+#   connect         urnetwork/connect, upstream's main at the sync: it carries the URmessage
+#                   packages (connect#216) and the establish hold (#217), and the synced sdk
+#                   needs upstream's newer connect API, which the fork's own connect main
+#                   (e449f7d8) does not have.
+#   message-server  the fork's main at the sync.
 name: Fork - every sdk module
 
 on:
@@ -42,11 +49,20 @@ jobs:
       - name: Check out the siblings the modules replace to
         run: |
           set -eu
-          git clone --depth 1 https://github.com/Ryanmello07/connect.git ../connect
+          # clone_at <url> <full sha> <dir>: fetch exactly that commit and check it out, then
+          # assert HEAD is it, so a branch name or a short SHA can never stand in for a pin.
+          clone_at() {
+            git init -q "$3"
+            git -C "$3" fetch -q --depth 1 "$1" "$2"
+            git -C "$3" checkout -q --detach FETCH_HEAD
+            test "$(git -C "$3" rev-parse HEAD)" = "$2"
+            echo "$3 pinned at $2"
+          }
+          clone_at https://github.com/urnetwork/connect.git 501c172d47bd63c05a833d401d37da990d37a06e ../connect
           git clone --depth 1 https://github.com/urnetwork/glog.git ../glog
           git clone --depth 1 https://github.com/urnetwork/goidenticons.git ../goidenticons
           git clone --depth 1 --branch go https://github.com/urnetwork/gvisor.git ../gvisor
-          git clone --depth 1 https://github.com/Ryanmello07/urnetwork-message-server.git ../message-server
+          clone_at https://github.com/Ryanmello07/urnetwork-message-server.git afc52ae64a3115a3bcc39ce5505f7d038f49c151 ../message-server
           git clone --depth 1 --filter=blob:none --sparse https://github.com/urnetwork/server.git ../server
           git -C ../server sparse-checkout set api
 
