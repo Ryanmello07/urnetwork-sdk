@@ -1,0 +1,393 @@
+# FORK-ONLY. Runs an sdk ref's own test.sh on a GitHub runner, the way it is run in the
+# maintainers' workspace, and checks that the committed generated code is current.
+#
+# WHY IT IS HERE. GitHub Actions is off for the urnetwork organization, and urnetwork/sdk carries
+# no workflow (7120b2cf removed it): the maintainers build and test on their own hardware, and
+# test.sh is the whole run. So a pull request's CI evidence comes from this fork. Dispatch this
+# workflow with the pull request's branch as `ref`. Dispatch it again with
+# repository=urnetwork/sdk and ref=main, and the same connect_ref: that run is the CONTROL, and a
+# failure both runs share is upstream's own.
+#
+# WHAT IT DOES TO THE REF: nothing. The ref is checked out as `sdk` in a workspace laid out like
+# the maintainers' (every repository a sibling directory), and its own test.sh is run unmodified.
+#
+# THE WORKSPACE, and where each part comes from:
+#   sdk/      the ref under test
+#   connect/, glog/, goidenticons/, gvisor/, message-server/
+#             read off the ref's own module files: every directory outside the checkout that a
+#             go.mod (or an alternate .go.mod) of the ref replaces to. A name this file has no
+#             address for is an error, never a skip. connect is taken at the connect_ref input,
+#             the others at their default branch; every commit is printed in the job summary.
+#   server/   api/ only. TestSdkApiUrlsMatchServerRoutes reads ../server/api/api.go and skips
+#             without it.
+#   tests/network-intensive-suite-lock.sh
+#             A STAND-IN. test.sh starts by taking the workspace's suite lock through this script,
+#             which lives in the maintainers' workspace and in no repository this fork can read.
+#             The lock serializes network-heavy suites that share one machine; a runner is
+#             nobody's but this job's. The stand-in keeps the interface test.sh uses and nothing
+#             else: `run-all run-all-sdk -- COMMAND` marks the lock held and runs the command, and
+#             `--verify-held run-all` answers for the mark. It is the same stand-in the sdk's own
+#             build/test_script_test.go gives test.sh.
+#
+# THE TOOLS: zsh (test.sh is a zsh script), Go 1.27.1 (the version the organization's release
+# script, urnetwork/build all/run.sh, requires; it must also satisfy the highest `go` line of the
+# ref's module files, which a step checks), Node 24 (the js tests run TypeScript sources
+# directly), and the runner image's gcc and make.
+#
+# THE LEGS, each on its own runner:
+#   test-sh      ./test.sh, as it is. Its exit code is the leg's. test.sh stops at its first
+#                failing phase, so a failure in the root module hides every module after it.
+#   every-phase  ./test.sh again, with one difference so that nothing is hidden: a `go` wrapper
+#                first on PATH lets test.sh carry on after a failing `go test`, and records each
+#                one's directory, arguments and exit code. Only the `go test` commands test.sh
+#                itself runs are wrapped; a `go test` a test starts keeps its exit code. The leg
+#                fails if any recorded command failed.
+#   generated    runs the generators (go -C cgo run ./gen; go -C packaging run . generate) and
+#                fails if the tree moved, then make -C js check_generated.
+# Every leg uploads its full log and a table of every test's result, so a branch's run and the
+# control's can be compared test by test.
+#
+# test_args is passed to test.sh, which hands it to every `go test` (test.sh's last line documents
+# `./test.sh -run 'pattern'`). It is for rerunning a few tests, for example
+#   -count=10 -run ^TestDeviceLocalLoadStability$
+# It is split on spaces, so a pattern cannot contain one.
+name: Fork CI - an sdk ref's own test.sh
+
+run-name: "fork-ci ${{ inputs.repository }}@${{ inputs.ref }} (connect ${{ inputs.connect_repository }}@${{ inputs.connect_ref }}) ${{ inputs.test_args }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "sdk repository to test (owner/name)"
+        required: true
+        default: Ryanmello07/urnetwork-sdk
+      ref:
+        description: "branch, tag or full commit of that repository"
+        required: true
+      connect_repository:
+        description: "connect repository to test against (owner/name)"
+        required: true
+        default: urnetwork/connect
+      connect_ref:
+        description: "branch, tag or full commit of connect; pin a commit to compare two runs"
+        required: true
+        default: main
+      test_args:
+        description: "arguments for test.sh, split on spaces (empty: the whole suite)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  SDK_REPOSITORY: ${{ inputs.repository }}
+  SDK_REF: ${{ inputs.ref }}
+  CONNECT_REPOSITORY: ${{ inputs.connect_repository }}
+  CONNECT_REF: ${{ inputs.connect_ref }}
+  TEST_ARGS: ${{ inputs.test_args }}
+  GO_VERSION: "1.27.1"
+
+jobs:
+  run:
+    name: ${{ matrix.leg }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [test-sh, every-phase, generated]
+    env:
+      LEG: ${{ matrix.leg }}
+    steps:
+      - name: Check out the ref as sdk
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          path: sdk
+          persist-credentials: false
+
+      # No module or build cache is restored: the branch's run and the control's start equal.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install zsh
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+
+      - name: Lay out the workspace the ref's module files ask for
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          python3 - > "$RUNNER_TEMP/wanted.txt" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          workspace = os.environ['GITHUB_WORKSPACE']
+          sdk = os.path.join(workspace, 'sdk')
+          listed = subprocess.run(['git', 'ls-files', '--', 'go.mod', '*/go.mod', '*.go.mod'],
+                                  cwd=sdk, check=True, capture_output=True, text=True).stdout.split('\n')
+          module_files = sorted(path for path in listed if path)
+          if 'go.mod' not in module_files:
+              sys.exit('the ref has no go.mod at its root: %s' % module_files)
+          wanted = {}
+          highest = (0, 0, 0)
+          for module_file in module_files:
+              parsed = json.loads(subprocess.run(['go', 'mod', 'edit', '-json', module_file],
+                                                 cwd=sdk, check=True, capture_output=True, text=True).stdout)
+              version = tuple(int(part) for part in (parsed.get('Go') or '0').split('.'))
+              version = version + (0,) * (3 - len(version))
+              highest = max(highest, version)
+              for replace in parsed.get('Replace') or []:
+                  new = replace['New']
+                  if new.get('Version'):
+                      continue
+                  target = os.path.normpath(os.path.join(sdk, os.path.dirname(module_file), new['Path']))
+                  relative = os.path.relpath(target, workspace)
+                  first = relative.split(os.sep)[0]
+                  if first == '..':
+                      sys.exit('%s replaces %s to %s, outside the workspace' % (module_file, replace['Old']['Path'], new['Path']))
+                  if first == 'sdk':
+                      continue
+                  wanted.setdefault(first, []).append('%s: %s => %s' % (module_file, replace['Old']['Path'], new['Path']))
+          sys.stderr.write('module files of the ref: %s\n' % ' '.join(module_files))
+          sys.stderr.write('highest go line: %d.%d.%d\n' % highest)
+          running = tuple(int(part) for part in os.environ['GO_VERSION'].split('.'))
+          if running < highest:
+              sys.exit('Go %s is older than the ref asks for (%d.%d.%d); raise GO_VERSION in this workflow' % ((os.environ['GO_VERSION'],) + highest))
+          for name in sorted(wanted):
+              sys.stderr.write('%s is replaced to by %d directive(s), for example %s\n' % (name, len(wanted[name]), wanted[name][0]))
+              print(name)
+          PY
+          echo "siblings the ref's module files replace to: $(tr '\n' ' ' < "$RUNNER_TEMP/wanted.txt")"
+
+          # at <dir> <url> <ref>: that ref, shallow, detached. A ref is a branch, a tag or a full commit.
+          at() {
+            git init -q "$1"
+            git -C "$1" remote add origin "$2"
+            git -C "$1" fetch -q --depth 1 origin "$3"
+            git -C "$1" checkout -q --detach FETCH_HEAD
+          }
+          : > "$RUNNER_TEMP/workspace.txt"
+          while IFS= read -r name; do
+            case "$name" in
+              connect) at connect "https://github.com/$CONNECT_REPOSITORY.git" "$CONNECT_REF"; from="$CONNECT_REPOSITORY@$CONNECT_REF" ;;
+              glog|goidenticons|gvisor|message-server)
+                git clone -q --depth 1 "https://github.com/urnetwork/$name.git" "$name"
+                from="urnetwork/$name@$(git -C "$name" rev-parse --abbrev-ref HEAD)" ;;
+              *) echo "the ref replaces a module to ../$name, and this workflow has no address for it" >&2; exit 1 ;;
+            esac
+            echo "$name $(git -C "$name" rev-parse HEAD) $from" >> "$RUNNER_TEMP/workspace.txt"
+          done < "$RUNNER_TEMP/wanted.txt"
+          git clone -q --depth 1 --filter=blob:none --sparse https://github.com/urnetwork/server.git server
+          git -C server sparse-checkout set api
+          echo "server $(git -C server rev-parse HEAD) urnetwork/server@$(git -C server rev-parse --abbrev-ref HEAD) (api/ only)" >> "$RUNNER_TEMP/workspace.txt"
+          echo "sdk $(git -C sdk rev-parse HEAD) $SDK_REPOSITORY@$SDK_REF" >> "$RUNNER_TEMP/workspace.txt"
+
+          mkdir -p tests
+          cat > tests/network-intensive-suite-lock.sh <<'GATE'
+          #!/bin/sh
+          # Stand-in for the workspace's suite lock; see .github/workflows/fork-ci.yml in the fork.
+          if [ "${1:-}" = --verify-held ]; then
+            [ "${2:-}" = run-all ] && [ "${URNETWORK_NETWORK_TEST_LOCK_HELD:-}" = 1 ]
+            exit $?
+          fi
+          if [ "${1:-}" != run-all ] || [ "${2:-}" != run-all-sdk ] || [ "${3:-}" != -- ]; then
+            echo "stand-in suite lock: unexpected arguments: $*" >&2
+            exit 64
+          fi
+          shift 3
+          export URNETWORK_NETWORK_TEST_LOCK_HELD=1
+          exec "$@"
+          GATE
+          chmod +x tests/network-intensive-suite-lock.sh
+
+          {
+            echo "### $LEG: $SDK_REPOSITORY@$SDK_REF"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/workspace.txt"
+            go version
+            echo "node $(node --version), $(zsh --version), $(gcc --version | head -1)"
+            echo "$(nproc) cpus, $(free -g | awk '/^Mem:/ {print $2}') GB memory, $(uname -sr)"
+            echo "test.sh arguments: [${TEST_ARGS}]"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          ls -la "$GITHUB_WORKSPACE"
+
+      # The gomobile module's tests run gobind with GOPROXY=off, so the module cache must hold
+      # x/mobile before they start, as it does on a machine that has built the sdk before.
+      - name: Fill the module cache for the gomobile module
+        if: matrix.leg != 'generated'
+        working-directory: sdk/build
+        run: |
+          go mod download
+          git -C .. status --porcelain
+
+      - name: test.sh
+        if: matrix.leg == 'test-sh'
+        working-directory: sdk
+        run: |
+          set -uo pipefail
+          read -r -a arguments <<< "${TEST_ARGS}"
+          ./test.sh "${arguments[@]}" 2>&1 | tee "$RUNNER_TEMP/test-sh.log"
+          status=${PIPESTATUS[0]}
+          echo "$status" > "$RUNNER_TEMP/test-sh.status"
+          echo "test.sh exited $status"
+          exit "$status"
+
+      - name: test.sh, carrying on after a failing go test
+        if: matrix.leg == 'every-phase'
+        working-directory: sdk
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/wrapper"
+          export FORK_CI_REAL_GO="$(command -v go)"
+          export FORK_CI_GO_TEST_RECORD="$RUNNER_TEMP/go-test-record.tsv"
+          : > "$FORK_CI_GO_TEST_RECORD"
+          cat > "$RUNNER_TEMP/wrapper/go" <<'WRAPPER'
+          #!/bin/sh
+          # Runs go. A `go test` that test.sh itself starts is run, its exit code recorded, and 0
+          # returned in its place so test.sh carries on. A `go test` started beneath one (by a
+          # test) is run untouched: the mark below is inherited by everything the first one starts.
+          if [ "${1:-}" = test ] && [ -z "${FORK_CI_INSIDE_GO_TEST:-}" ]; then
+            FORK_CI_INSIDE_GO_TEST=1 "$FORK_CI_REAL_GO" "$@"
+            status=$?
+            printf '%s\t%s\t%s\n' "$status" "$PWD" "$*" >> "$FORK_CI_GO_TEST_RECORD"
+            exit 0
+          fi
+          exec "$FORK_CI_REAL_GO" "$@"
+          WRAPPER
+          chmod +x "$RUNNER_TEMP/wrapper/go"
+          read -r -a arguments <<< "${TEST_ARGS}"
+          PATH="$RUNNER_TEMP/wrapper:$PATH" ./test.sh "${arguments[@]}" 2>&1 | tee "$RUNNER_TEMP/test-sh.log"
+          status=${PIPESTATUS[0]}
+          echo "$status" > "$RUNNER_TEMP/test-sh.status"
+          echo "test.sh exited $status; the go test commands it ran, as exit code, directory, arguments:"
+          cat "$FORK_CI_GO_TEST_RECORD"
+          failed=$(awk -F '\t' '$1 != 0' "$FORK_CI_GO_TEST_RECORD" | wc -l)
+          if [ "$status" != 0 ] || [ "$failed" != 0 ]; then
+            echo "test.sh exited $status, and $failed of its go test commands failed"
+            exit 1
+          fi
+
+      - name: Generated code is current
+        if: matrix.leg == 'generated'
+        working-directory: sdk
+        run: |
+          set -uo pipefail
+          result=0
+          go -C cgo run ./gen || result=1
+          go -C packaging run . generate || result=1
+          git status --porcelain | tee "$RUNNER_TEMP/generated-status.txt"
+          if [ -s "$RUNNER_TEMP/generated-status.txt" ]; then
+            echo "the generators changed the tree:"
+            git diff --stat
+            result=1
+          else
+            echo "the generators changed nothing"
+          fi
+          make -C js check_generated || result=1
+          {
+            echo "generators and check_generated: $([ "$result" = 0 ] && echo current || echo STALE OR FAILED)"
+            echo '```'
+            cat "$RUNNER_TEMP/generated-status.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$result"
+
+      - name: Table of every test's result
+        if: always() && matrix.leg != 'generated'
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP"
+          [ -f test-sh.log ] || { echo "no test.sh log: the run stopped before test.sh" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; }
+          python3 - <<'PY'
+          import os
+          import re
+
+          # go test -v prints each test's result line before its package's line, and prints a
+          # package's output whole, so a result belongs to the next package line.
+          result = re.compile(r'^\s*--- (PASS|FAIL|SKIP): (\S+)')
+          package = re.compile(r'^(ok|FAIL|\?)\s+(\S+)\s*(.*)$')
+          rows = {}
+          packages = []
+          pending = []
+          for raw in open('test-sh.log', encoding='utf-8', errors='replace'):
+              line = raw.rstrip('\r\n')
+              found = result.match(line)
+              if found:
+                  pending.append((found.group(2), found.group(1)))
+                  continue
+              found = package.match(line)
+              if found and found.group(2).count('/') >= 1:
+                  packages.append((found.group(1), found.group(2), found.group(3)))
+                  for name, status in pending:
+                      # a test run twice (the smoke, then the whole module) fails if either did
+                      if rows.get((found.group(2), name)) != 'FAIL':
+                          rows[(found.group(2), name)] = status
+                  pending = []
+          with open('results.tsv', 'w', encoding='utf-8') as out:
+              for (name_package, name), status in sorted(rows.items()):
+                  out.write('%s\t%s\t%s\n' % (name_package, name, status))
+          with open('packages.tsv', 'w', encoding='utf-8') as out:
+              for status, name_package, rest in packages:
+                  out.write('%s\t%s\t%s\n' % (status, name_package, rest))
+          counts = {}
+          for status in rows.values():
+              counts[status] = counts.get(status, 0) + 1
+          failing = sorted(key for key, status in rows.items() if status == 'FAIL')
+          failing_packages = sorted(set(name_package for status, name_package, rest in packages if status == 'FAIL'))
+          status_path = 'test-sh.status'
+          exit_status = open(status_path).read().strip() if os.path.exists(status_path) else 'unknown'
+          lines = ['test.sh exited **%s**. %d results: %s. %d result(s) belong to no package line: %s' % (
+              exit_status, len(rows), ', '.join('%d %s' % (counts[key], key) for key in sorted(counts)),
+              len(pending), ' '.join(name for name, status in pending[:10]))]
+          lines.append('')
+          lines.append('Package lines: %d ok, %d FAIL, %d without tests.' % (
+              sum(1 for row in packages if row[0] == 'ok'), sum(1 for row in packages if row[0] == 'FAIL'),
+              sum(1 for row in packages if row[0] == '?')))
+          lines.append('')
+          lines.append('Failing packages: %s' % (', '.join(failing_packages) or 'none'))
+          lines.append('')
+          lines.append('Failing tests (%d):' % len(failing))
+          lines.append('```')
+          lines.extend('%s %s' % key for key in failing)
+          lines.append('```')
+          if os.path.exists('go-test-record.tsv'):
+              lines.append('The `go test` commands test.sh ran, as exit code, directory, arguments:')
+              lines.append('```')
+              lines.extend(line.rstrip('\n') for line in open('go-test-record.tsv', encoding='utf-8', errors='replace'))
+              lines.append('```')
+          text = '\n'.join(lines) + '\n'
+          print(text)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write(text)
+          PY
+          gzip -k test-sh.log
+
+      - name: Keep the log and the table
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-ci-${{ matrix.leg }}
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/workspace.txt
+            ${{ runner.temp }}/test-sh.log.gz
+            ${{ runner.temp }}/test-sh.status
+            ${{ runner.temp }}/results.tsv
+            ${{ runner.temp }}/packages.tsv
+            ${{ runner.temp }}/go-test-record.tsv
+            ${{ runner.temp }}/generated-status.txt
