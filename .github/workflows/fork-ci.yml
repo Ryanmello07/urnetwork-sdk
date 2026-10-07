@@ -50,10 +50,11 @@
 # test_args is passed to test.sh, which hands it to every `go test` (test.sh's last line documents
 # `./test.sh -run 'pattern'`). It is for rerunning a few tests, for example
 #   -count=10 -run ^TestDeviceLocalLoadStability$
-# It is split on spaces, so a pattern cannot contain one.
+# It is split on spaces, so a pattern cannot contain one. legs chooses which legs run, so such a
+# rerun need not pay for all three.
 name: Fork CI - an sdk ref's own test.sh
 
-run-name: "fork-ci ${{ inputs.repository }}@${{ inputs.ref }} (connect ${{ inputs.connect_repository }}@${{ inputs.connect_ref }}) ${{ inputs.test_args }}"
+run-name: "fork-ci ${{ inputs.repository }}@${{ inputs.ref }} (connect ${{ inputs.connect_repository }}@${{ inputs.connect_ref }}) ${{ inputs.legs }} ${{ inputs.test_args }}"
 
 on:
   workflow_dispatch:
@@ -77,6 +78,10 @@ on:
         description: "arguments for test.sh, split on spaces (empty: the whole suite)"
         required: false
         default: ""
+      legs:
+        description: "the legs to run, as a JSON list"
+        required: true
+        default: '["test-sh", "every-phase", "generated"]'
 
 permissions:
   contents: read
@@ -97,7 +102,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        leg: [test-sh, every-phase, generated]
+        leg: ${{ fromJSON(inputs.legs) }}
     env:
       LEG: ${{ matrix.leg }}
     steps:
@@ -239,7 +244,8 @@ jobs:
         if: matrix.leg == 'test-sh'
         working-directory: sdk
         run: |
-          set -uo pipefail
+          # the runner starts this script with -e; a failing test.sh must reach the lines after it
+          set +e -uo pipefail
           read -r -a arguments <<< "${TEST_ARGS}"
           ./test.sh "${arguments[@]}" 2>&1 | tee "$RUNNER_TEMP/test-sh.log"
           status=${PIPESTATUS[0]}
@@ -251,7 +257,8 @@ jobs:
         if: matrix.leg == 'every-phase'
         working-directory: sdk
         run: |
-          set -uo pipefail
+          # the runner starts this script with -e; a failing test.sh must reach the lines after it
+          set +e -uo pipefail
           mkdir -p "$RUNNER_TEMP/wrapper"
           export FORK_CI_REAL_GO="$(command -v go)"
           export FORK_CI_GO_TEST_RECORD="$RUNNER_TEMP/go-test-record.tsv"
@@ -286,7 +293,7 @@ jobs:
         if: matrix.leg == 'generated'
         working-directory: sdk
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           result=0
           go -C cgo run ./gen || result=1
           go -C packaging run . generate || result=1
@@ -310,7 +317,7 @@ jobs:
       - name: Table of every test's result
         if: always() && matrix.leg != 'generated'
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           cd "$RUNNER_TEMP"
           [ -f test-sh.log ] || { echo "no test.sh log: the run stopped before test.sh" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; }
           python3 - <<'PY'
