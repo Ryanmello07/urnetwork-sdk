@@ -126,6 +126,7 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_BITTENSOR_WALLET_ERROR_UNSUPPORTED_WALLET "unsupported_wallet"
 #define URNET_BITTENSOR_WALLET_ERROR_WALLET "wallet_error"
 #define URNET_BITTENSOR_WALLET_ERROR_WRONG_TRANSPORT "wrong_transport"
+#define URNET_BITTENSOR_WALLET_NOVA "nova"
 #define URNET_BITTENSOR_WALLET_PLATFORM_ANDROID "android"
 #define URNET_BITTENSOR_WALLET_PLATFORM_IOS "ios"
 #define URNET_BITTENSOR_WALLET_PLATFORM_LINUX "linux"
@@ -142,11 +143,13 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_BITTENSOR_WALLET_STATE_FAILED "failed"
 #define URNET_BITTENSOR_WALLET_STATE_IDLE "idle"
 #define URNET_BITTENSOR_WALLET_STATE_SIGNED "signed"
+#define URNET_BITTENSOR_WALLET_SUB_WALLET "subwallet"
 #define URNET_BITTENSOR_WALLET_TALISMAN "talisman"
 #define URNET_BITTENSOR_WALLET_TAO_COM "taocom"
 #define URNET_BITTENSOR_WALLET_TRANSPORT_BROWSER_BRIDGE "browser_bridge"
 #define URNET_BITTENSOR_WALLET_TRANSPORT_EXTENSION "extension"
 #define URNET_BITTENSOR_WALLET_TRANSPORT_MANUAL "manual"
+#define URNET_BITTENSOR_WALLET_TRANSPORT_WALLET_APP "wallet_app"
 #define URNET_BITTENSOR_WALLET_TRANSPORT_WALLET_CONNECT "walletconnect"
 #define URNET_BITTENSOR_WALLET_WALLET_CONNECT "walletconnect"
 #define URNET_BLOCK_ACTION_REASON_BLOCKER "blocker"
@@ -1964,6 +1967,8 @@ bool urnet_websocket_device_rpc_listener_close(uint64_t self, char** out_error);
 
 double urnet_alpha_from_rao(int64_t rao);
 char* urnet_bittensor_sign_raw_data(const char* message);
+char* urnet_bittensor_wallet_choice_for(const char* wallet_id, const char* platform);
+char* urnet_bittensor_wallet_choice_id_list(const char* platform);
 char* urnet_bittensor_wallet_display_name(const char* wallet_id);
 char* urnet_bittensor_wallet_id_list(void);
 char* urnet_bittensor_wallet_injected_name(const char* wallet_id);
@@ -2456,6 +2461,16 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   Address: string
  *   Data: string
  *   Type: string
+ */
+
+/* BittensorWalletChoice (json):
+ *   WalletId: string
+ *   DisplayName: string
+ *   Transport: string
+ *   ProbeUrl: string
+ *   UniversalLinkOnly: boolean
+ *   Packages: StringList | null
+ *   PackageSigners: StringList | null
  */
 
 /* BittensorWalletProof (json):

@@ -1188,6 +1188,8 @@ public interface Raw extends Library {
   byte urnet_websocket_device_rpc_listener_close(long a0, PointerByReference a1);
   double urnet_alpha_from_rao(long a0);
   Pointer urnet_bittensor_sign_raw_data(String a0);
+  Pointer urnet_bittensor_wallet_choice_for(String a0, String a1);
+  Pointer urnet_bittensor_wallet_choice_id_list(String a0);
   Pointer urnet_bittensor_wallet_display_name(String a0);
   Pointer urnet_bittensor_wallet_id_list();
   Pointer urnet_bittensor_wallet_injected_name(String a0);

@@ -1159,6 +1159,7 @@ var streamAdapterPackageValueCensus = map[string]streamAdapterPackageVar{
 	"ExtenderGossipStateConnecting":         streamAdapterPackageConstOf(ExtenderGossipStateConnecting),
 	"ExtenderGossipStateDisconnected":       streamAdapterPackageConstOf(ExtenderGossipStateDisconnected),
 	"Version":                               streamAdapterPackageVarOf(&Version),
+	"bittensorWalletApps":                   streamAdapterPackageVarOf(&bittensorWalletApps),
 	"bundledExtenderRootPublicKeyHexes":     streamAdapterPackageVarOf(&bundledExtenderRootPublicKeyHexes),
 	"clientEventFlushInterval":              streamAdapterPackageConstOf(clientEventFlushInterval),
 	"clientEventPropKeys":                   streamAdapterPackageVarOf(&clientEventPropKeys),

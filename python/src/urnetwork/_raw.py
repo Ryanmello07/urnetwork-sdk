@@ -2176,6 +2176,10 @@ def bind(lib):
     lib.urnet_alpha_from_rao.restype = c_double
     lib.urnet_bittensor_sign_raw_data.argtypes = [c_char_p]
     lib.urnet_bittensor_sign_raw_data.restype = c_void_p
+    lib.urnet_bittensor_wallet_choice_for.argtypes = [c_char_p, c_char_p]
+    lib.urnet_bittensor_wallet_choice_for.restype = c_void_p
+    lib.urnet_bittensor_wallet_choice_id_list.argtypes = [c_char_p]
+    lib.urnet_bittensor_wallet_choice_id_list.restype = c_void_p
     lib.urnet_bittensor_wallet_display_name.argtypes = [c_char_p]
     lib.urnet_bittensor_wallet_display_name.restype = c_void_p
     lib.urnet_bittensor_wallet_id_list.argtypes = []

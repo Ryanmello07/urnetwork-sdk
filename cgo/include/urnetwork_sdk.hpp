@@ -185,6 +185,7 @@ inline constexpr const char* BittensorWalletErrorUnsupportedPlatform = "unsuppor
 inline constexpr const char* BittensorWalletErrorUnsupportedWallet = "unsupported_wallet";
 inline constexpr const char* BittensorWalletErrorWallet = "wallet_error";
 inline constexpr const char* BittensorWalletErrorWrongTransport = "wrong_transport";
+inline constexpr const char* BittensorWalletNova = "nova";
 inline constexpr const char* BittensorWalletPlatformAndroid = "android";
 inline constexpr const char* BittensorWalletPlatformIos = "ios";
 inline constexpr const char* BittensorWalletPlatformLinux = "linux";
@@ -201,11 +202,13 @@ inline constexpr const char* BittensorWalletStateChallenge = "challenge";
 inline constexpr const char* BittensorWalletStateFailed = "failed";
 inline constexpr const char* BittensorWalletStateIdle = "idle";
 inline constexpr const char* BittensorWalletStateSigned = "signed";
+inline constexpr const char* BittensorWalletSubWallet = "subwallet";
 inline constexpr const char* BittensorWalletTalisman = "talisman";
 inline constexpr const char* BittensorWalletTaoCom = "taocom";
 inline constexpr const char* BittensorWalletTransportBrowserBridge = "browser_bridge";
 inline constexpr const char* BittensorWalletTransportExtension = "extension";
 inline constexpr const char* BittensorWalletTransportManual = "manual";
+inline constexpr const char* BittensorWalletTransportWalletApp = "wallet_app";
 inline constexpr const char* BittensorWalletTransportWalletConnect = "walletconnect";
 inline constexpr const char* BittensorWalletWalletConnect = "walletconnect";
 inline constexpr const char* BlockActionReasonBlocker = "blocker";
@@ -634,6 +637,7 @@ struct AuthWalletChallengeArgs;
 struct AuthWalletChallengeResult;
 struct BittensorChallengeMessage;
 struct BittensorSignRequest;
+struct BittensorWalletChoice;
 struct BittensorWalletProof;
 struct BittensorWalletResult;
 struct BittensorWalletReturn;
@@ -1384,6 +1388,16 @@ struct BittensorSignRequest {
 	std::string Address{};
 	std::string Data{};
 	std::string Type{};
+};
+
+struct BittensorWalletChoice {
+	std::string WalletId{};
+	std::string DisplayName{};
+	std::string Transport{};
+	std::string ProbeUrl{};
+	bool UniversalLinkOnly{};
+	std::optional<StringList> Packages;
+	std::optional<StringList> PackageSigners;
 };
 
 struct BittensorWalletProof {
@@ -3852,6 +3866,8 @@ inline void to_json(nlohmann::json& j, const BittensorChallengeMessage& v);
 inline void from_json(const nlohmann::json& j, BittensorChallengeMessage& v);
 inline void to_json(nlohmann::json& j, const BittensorSignRequest& v);
 inline void from_json(const nlohmann::json& j, BittensorSignRequest& v);
+inline void to_json(nlohmann::json& j, const BittensorWalletChoice& v);
+inline void from_json(const nlohmann::json& j, BittensorWalletChoice& v);
 inline void to_json(nlohmann::json& j, const BittensorWalletProof& v);
 inline void from_json(const nlohmann::json& j, BittensorWalletProof& v);
 inline void to_json(nlohmann::json& j, const BittensorWalletResult& v);
@@ -6436,6 +6452,51 @@ inline void from_json(const nlohmann::json& j, BittensorSignRequest& v) {
 	}
 	if (auto it = j.find("Type"); it != j.end() && !it->is_null()) {
 		it->get_to(v.Type);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const BittensorWalletChoice& v) {
+	j = nlohmann::json::object();
+	j["WalletId"] = v.WalletId;
+	j["DisplayName"] = v.DisplayName;
+	j["Transport"] = v.Transport;
+	j["ProbeUrl"] = v.ProbeUrl;
+	j["UniversalLinkOnly"] = v.UniversalLinkOnly;
+	if (v.Packages) {
+		j["Packages"] = *v.Packages;
+	}
+	if (v.PackageSigners) {
+		j["PackageSigners"] = *v.PackageSigners;
+	}
+}
+inline void from_json(const nlohmann::json& j, BittensorWalletChoice& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("WalletId"); it != j.end() && !it->is_null()) {
+		it->get_to(v.WalletId);
+	}
+	if (auto it = j.find("DisplayName"); it != j.end() && !it->is_null()) {
+		it->get_to(v.DisplayName);
+	}
+	if (auto it = j.find("Transport"); it != j.end() && !it->is_null()) {
+		it->get_to(v.Transport);
+	}
+	if (auto it = j.find("ProbeUrl"); it != j.end() && !it->is_null()) {
+		it->get_to(v.ProbeUrl);
+	}
+	if (auto it = j.find("UniversalLinkOnly"); it != j.end() && !it->is_null()) {
+		it->get_to(v.UniversalLinkOnly);
+	}
+	if (auto it = j.find("Packages"); it != j.end() && !it->is_null()) {
+		StringList tmp{};
+		it->get_to(tmp);
+		v.Packages = std::move(tmp);
+	}
+	if (auto it = j.find("PackageSigners"); it != j.end() && !it->is_null()) {
+		StringList tmp{};
+		it->get_to(tmp);
+		v.PackageSigners = std::move(tmp);
 	}
 }
 
@@ -30476,6 +30537,22 @@ inline double alphaFromRao(int64_t rao) {
 inline std::string bittensorSignRawData(const std::string& message) {
 	char* r_c = urnet_bittensor_sign_raw_data(message.c_str());
 	return detail::takeString(r_c);
+}
+inline std::optional<BittensorWalletChoice> bittensorWalletChoiceFor(const std::string& wallet_id, const std::string& platform) {
+	char* r_c = urnet_bittensor_wallet_choice_for(wallet_id.c_str(), platform.c_str());
+	auto r_s = detail::takeStringOpt(r_c);
+	if (!r_s) {
+		return std::nullopt;
+	}
+	return detail::parseJson<BittensorWalletChoice>(r_s->c_str());
+}
+inline std::optional<StringList> bittensorWalletChoiceIdList(const std::string& platform) {
+	char* r_c = urnet_bittensor_wallet_choice_id_list(platform.c_str());
+	auto r_s = detail::takeStringOpt(r_c);
+	if (!r_s) {
+		return std::nullopt;
+	}
+	return detail::parseJson<StringList>(r_s->c_str());
 }
 inline std::string bittensorWalletDisplayName(const std::string& wallet_id) {
 	char* r_c = urnet_bittensor_wallet_display_name(wallet_id.c_str());

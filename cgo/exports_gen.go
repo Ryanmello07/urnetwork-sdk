@@ -5492,6 +5492,26 @@ func urnet_bittensor_sign_raw_data(message *C.char) *C.char {
 	return cString(string(r0))
 }
 
+//export urnet_bittensor_wallet_choice_for
+func urnet_bittensor_wallet_choice_for(walletId *C.char, platform *C.char) *C.char {
+	defer cgoGuard("urnet_bittensor_wallet_choice_for")
+	r0 := sdk.BittensorWalletChoiceFor(goString(walletId), goString(platform))
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_bittensor_wallet_choice_for")
+}
+
+//export urnet_bittensor_wallet_choice_id_list
+func urnet_bittensor_wallet_choice_id_list(platform *C.char) *C.char {
+	defer cgoGuard("urnet_bittensor_wallet_choice_id_list")
+	r0 := sdk.BittensorWalletChoiceIdList(goString(platform))
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_bittensor_wallet_choice_id_list")
+}
+
 //export urnet_bittensor_wallet_display_name
 func urnet_bittensor_wallet_display_name(walletId *C.char) *C.char {
 	defer cgoGuard("urnet_bittensor_wallet_display_name")

@@ -1187,6 +1187,8 @@ module URnetwork
       attach_function :urnet_websocket_device_rpc_listener_close, [:uint64, :pointer], :bool, blocking: true
       attach_function :urnet_alpha_from_rao, [:int64], :double, blocking: true
       attach_function :urnet_bittensor_sign_raw_data, [:string], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_choice_for, [:string, :string], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_choice_id_list, [:string], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_display_name, [:string], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_id_list, [], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_injected_name, [:string], :pointer, blocking: true

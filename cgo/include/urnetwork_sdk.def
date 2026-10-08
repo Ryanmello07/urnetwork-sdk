@@ -135,6 +135,8 @@ EXPORTS
 	urnet_async_local_state_set_by_client_jwt
 	urnet_async_local_state_set_by_jwt
 	urnet_bittensor_sign_raw_data
+	urnet_bittensor_wallet_choice_for
+	urnet_bittensor_wallet_choice_id_list
 	urnet_bittensor_wallet_display_name
 	urnet_bittensor_wallet_id_list
 	urnet_bittensor_wallet_injected_name
