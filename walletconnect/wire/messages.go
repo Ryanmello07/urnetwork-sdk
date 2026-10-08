@@ -249,7 +249,7 @@ func (s *SettleParams) ExpiryUnix() (int64, bool) {
 
 // isJsonNumber reports whether text is one JSON number and nothing else:
 //
-//	-? ( 0 | [1-9][0-9]* ) ( . [0-9]+ )? ( [eE] [+-]? [0-9]+ )?
+//	-? ( 0 | [1-9][0-9]* ) ( . [0-9]+ )? ( ( e | E ) [+-]? [0-9]+ )?
 //
 // Go's own number parsers take more than that ("+5", "0x10", "1_000", "Inf"),
 // and a quoted number is not a number.
