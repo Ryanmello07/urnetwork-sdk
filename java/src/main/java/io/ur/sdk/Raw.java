@@ -21,6 +21,7 @@ public interface Raw extends Library {
   interface urnet_auth_verify_cb extends Callback { void invoke(Pointer a0, String a1, String a2); }
   interface urnet_auth_verify_send_cb extends Callback { void invoke(Pointer a0, String a1, String a2); }
   interface urnet_auth_wallet_challenge_cb extends Callback { void invoke(Pointer a0, String a1, String a2); }
+  interface urnet_bittensor_wallet_connect_cb extends Callback { void invoke(Pointer a0, String a1); }
   interface urnet_block_action_overrides_change_cb extends Callback { void invoke(Pointer a0, String a1); }
   interface urnet_block_action_stats_cb extends Callback { void invoke(Pointer a0); }
   interface urnet_block_action_window_change_cb extends Callback { void invoke(Pointer a0, String a1); }
@@ -363,6 +364,20 @@ public interface Raw extends Library {
   void urnet_async_local_state_parse_by_jwt(long a0, urnet_parse_by_jwt_cb a1, Pointer a2);
   void urnet_async_local_state_set_by_client_jwt(long a0, String a1, urnet_commit_cb a2, Pointer a3);
   void urnet_async_local_state_set_by_jwt(long a0, String a1, urnet_commit_cb a2, Pointer a3);
+  long urnet_bittensor_wallet_connect_add_bittensor_wallet_connect_listener(long a0, urnet_bittensor_wallet_connect_cb a1, Pointer a2);
+  Pointer urnet_bittensor_wallet_connect_address(long a0);
+  void urnet_bittensor_wallet_connect_close(long a0);
+  byte urnet_bittensor_wallet_connect_connected(long a0);
+  Pointer urnet_bittensor_wallet_connect_pairing_uri(long a0);
+  Pointer urnet_bittensor_wallet_connect_purpose(long a0);
+  Pointer urnet_bittensor_wallet_connect_result(long a0);
+  void urnet_bittensor_wallet_connect_set_foreground(long a0, byte a1);
+  byte urnet_bittensor_wallet_connect_sign(long a0, String a1, String a2, PointerByReference a3);
+  Pointer urnet_bittensor_wallet_connect_state(long a0);
+  Pointer urnet_bittensor_wallet_connect_take_proof(long a0);
+  Pointer urnet_bittensor_wallet_connect_take_wallet_link(long a0);
+  Pointer urnet_bittensor_wallet_connect_wallet_id(long a0);
+  Pointer urnet_bittensor_wallet_connect_wallet_link(long a0);
   Pointer urnet_bittensor_wallet_session_bridge_url(long a0, PointerByReference a1);
   void urnet_bittensor_wallet_session_cancel(long a0);
   Pointer urnet_bittensor_wallet_session_challenge_args(long a0, String a1);
@@ -1270,6 +1285,7 @@ public interface Raw extends Library {
   double urnet_nano_cents_to_usd(long a0);
   double urnet_nano_points_to_points(long a0);
   long urnet_new_async_local_state(String a0);
+  long urnet_new_bittensor_wallet_connect(long a0, String a1, String a2, String a3, String a4, PointerByReference a5);
   long urnet_new_bittensor_wallet_session(String a0, String a1, String a2, String a3, PointerByReference a4);
   long urnet_new_client_event_queue(long a0, String a1, String a2, String a3);
   Pointer urnet_new_connect_first_event();

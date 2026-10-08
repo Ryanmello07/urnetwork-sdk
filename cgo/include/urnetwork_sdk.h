@@ -104,6 +104,7 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_EXTENSION_NOT_FOUND "extension_not_found"
 #define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_INVALID_REQUEST "invalid_request"
 #define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_NO_ACCOUNT "no_account"
+#define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_UNSUPPORTED_CHAIN "unsupported_chain"
 #define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_USER_REJECTED "user_rejected"
 #define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_WALLET "wallet_error"
 #define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_WALLET_CONNECT_EXPIRED "walletconnect_expired"
@@ -111,6 +112,13 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_BITTENSOR_WALLET_BRIDGE_URL "https://ur.io/bittensor-connect"
 #define URNET_BITTENSOR_WALLET_CONNECT_CHAIN "polkadot:2f0555cc76fc2840a25a6ea3b9637146"
 #define URNET_BITTENSOR_WALLET_CONNECT_METHOD "polkadot_signMessage"
+#define URNET_BITTENSOR_WALLET_CONNECT_STATE_AWAITING_APPROVAL "awaiting_approval"
+#define URNET_BITTENSOR_WALLET_CONNECT_STATE_AWAITING_SIGNATURE "awaiting_signature"
+#define URNET_BITTENSOR_WALLET_CONNECT_STATE_CLOSED "closed"
+#define URNET_BITTENSOR_WALLET_CONNECT_STATE_CONNECTING "connecting"
+#define URNET_BITTENSOR_WALLET_CONNECT_STATE_FAILED "failed"
+#define URNET_BITTENSOR_WALLET_CONNECT_STATE_IDLE "idle"
+#define URNET_BITTENSOR_WALLET_CONNECT_STATE_SIGNED "signed"
 #define URNET_BITTENSOR_WALLET_DAPP_NAME "URnetwork"
 #define URNET_BITTENSOR_WALLET_ERROR_ADDRESS_MISMATCH "address_mismatch"
 #define URNET_BITTENSOR_WALLET_ERROR_EXPIRED "challenge_expired"
@@ -506,6 +514,8 @@ typedef void (*urnet_auth_verify_cb)(void* user_data, const char* result_json, c
 typedef void (*urnet_auth_verify_send_cb)(void* user_data, const char* result_json, const char* err_param);
 /* AuthWalletChallengeCallback */
 typedef void (*urnet_auth_wallet_challenge_cb)(void* user_data, const char* result_json, const char* err_param);
+/* BittensorWalletConnectListener */
+typedef void (*urnet_bittensor_wallet_connect_cb)(void* user_data, const char* state);
 /* BlockActionOverridesChangeListener */
 typedef void (*urnet_block_action_overrides_change_cb)(void* user_data, const char* block_action_overrides_json);
 /* BlockActionStatsListener */
@@ -1002,6 +1012,23 @@ void urnet_async_local_state_logout(uint64_t self, urnet_commit_cb callback_comp
 void urnet_async_local_state_parse_by_jwt(uint64_t self, urnet_parse_by_jwt_cb callback_result, void* callback_user_data);
 void urnet_async_local_state_set_by_client_jwt(uint64_t self, const char* by_client_jwt, urnet_commit_cb callback_complete, void* callback_user_data);
 void urnet_async_local_state_set_by_jwt(uint64_t self, const char* by_jwt, urnet_commit_cb callback_complete, void* callback_user_data);
+
+/* ----- BittensorWalletConnect ----- */
+
+uint64_t urnet_bittensor_wallet_connect_add_bittensor_wallet_connect_listener(uint64_t self, urnet_bittensor_wallet_connect_cb listener_bittensor_wallet_connect_changed, void* listener_user_data);
+char* urnet_bittensor_wallet_connect_address(uint64_t self);
+void urnet_bittensor_wallet_connect_close(uint64_t self);
+bool urnet_bittensor_wallet_connect_connected(uint64_t self);
+char* urnet_bittensor_wallet_connect_pairing_uri(uint64_t self);
+char* urnet_bittensor_wallet_connect_purpose(uint64_t self);
+char* urnet_bittensor_wallet_connect_result(uint64_t self);
+void urnet_bittensor_wallet_connect_set_foreground(uint64_t self, bool foreground);
+bool urnet_bittensor_wallet_connect_sign(uint64_t self, const char* purpose, const char* expected_address, char** out_error);
+char* urnet_bittensor_wallet_connect_state(uint64_t self);
+char* urnet_bittensor_wallet_connect_take_proof(uint64_t self);
+char* urnet_bittensor_wallet_connect_take_wallet_link(uint64_t self);
+char* urnet_bittensor_wallet_connect_wallet_id(uint64_t self);
+char* urnet_bittensor_wallet_connect_wallet_link(uint64_t self);
 
 /* ----- BittensorWalletSession ----- */
 
@@ -2049,6 +2076,7 @@ double urnet_monthly_equivalent_amount(double yearly_amount, int64_t minor_unit_
 double urnet_nano_cents_to_usd(int64_t nano_cents);
 double urnet_nano_points_to_points(int64_t nano_points);
 uint64_t urnet_new_async_local_state(const char* local_storage_home);
+uint64_t urnet_new_bittensor_wallet_connect(uint64_t api, const char* wallet_id, const char* platform, const char* project_id, const char* app_id, char** out_error);
 uint64_t urnet_new_bittensor_wallet_session(const char* wallet_id, const char* platform, const char* purpose, const char* redirect_link, char** out_error);
 uint64_t urnet_new_client_event_queue(uint64_t network_space, const char* platform, const char* app_version, const char* locale);
 char* urnet_new_connect_first_event(void);

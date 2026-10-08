@@ -344,6 +344,18 @@ func (self *cAdapterAuthWalletChallengeCallback) Result(result *sdk.AuthWalletCh
 	}
 }
 
+type cAdapterBittensorWalletConnectListener struct {
+	cbBittensorWalletConnectChanged C.urnet_bittensor_wallet_connect_cb
+	userData                        unsafe.Pointer
+}
+
+func (self *cAdapterBittensorWalletConnectListener) BittensorWalletConnectChanged(state string) {
+	defer cgoGuard("urnet_bittensor_wallet_connect_cb")
+	state_ := cString(string(state))
+	C.urnet_invoke_bittensor_wallet_connect(self.cbBittensorWalletConnectChanged, self.userData, state_)
+	cStringFree(state_)
+}
+
 type cAdapterBlockActionOverridesChangeListener struct {
 	cbBlockActionOverridesChanged C.urnet_block_action_overrides_change_cb
 	userData                      unsafe.Pointer
@@ -5510,6 +5522,172 @@ func urnet_bittensor_wallet_choice_id_list(platform *C.char) *C.char {
 		return nil
 	}
 	return cJson(r0, "urnet_bittensor_wallet_choice_id_list")
+}
+
+//export urnet_bittensor_wallet_connect_add_bittensor_wallet_connect_listener
+func urnet_bittensor_wallet_connect_add_bittensor_wallet_connect_listener(self C.uint64_t, listener_bittensor_wallet_connect_changed C.urnet_bittensor_wallet_connect_cb, listener_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_bittensor_wallet_connect_add_bittensor_wallet_connect_listener")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_add_bittensor_wallet_connect_listener")
+	if !ok {
+		return 0
+	}
+	var listener_ sdk.BittensorWalletConnectListener
+	if listener_bittensor_wallet_connect_changed != nil {
+		listener_ = &cAdapterBittensorWalletConnectListener{cbBittensorWalletConnectChanged: listener_bittensor_wallet_connect_changed, userData: listener_user_data}
+	}
+	r0 := self_.AddBittensorWalletConnectListener(listener_)
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_bittensor_wallet_connect_address
+func urnet_bittensor_wallet_connect_address(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_bittensor_wallet_connect_address")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_address")
+	if !ok {
+		return nil
+	}
+	r0 := self_.Address()
+	return cString(string(r0))
+}
+
+//export urnet_bittensor_wallet_connect_close
+func urnet_bittensor_wallet_connect_close(self C.uint64_t) {
+	defer cgoGuard("urnet_bittensor_wallet_connect_close")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_close")
+	if !ok {
+		return
+	}
+	self_.Close()
+}
+
+//export urnet_bittensor_wallet_connect_connected
+func urnet_bittensor_wallet_connect_connected(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_bittensor_wallet_connect_connected")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_connected")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.Connected()
+	return C.bool(r0)
+}
+
+//export urnet_bittensor_wallet_connect_pairing_uri
+func urnet_bittensor_wallet_connect_pairing_uri(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_bittensor_wallet_connect_pairing_uri")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_pairing_uri")
+	if !ok {
+		return nil
+	}
+	r0 := self_.PairingUri()
+	return cString(string(r0))
+}
+
+//export urnet_bittensor_wallet_connect_purpose
+func urnet_bittensor_wallet_connect_purpose(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_bittensor_wallet_connect_purpose")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_purpose")
+	if !ok {
+		return nil
+	}
+	r0 := self_.Purpose()
+	return cString(string(r0))
+}
+
+//export urnet_bittensor_wallet_connect_result
+func urnet_bittensor_wallet_connect_result(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_bittensor_wallet_connect_result")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_result")
+	if !ok {
+		return nil
+	}
+	r0 := self_.Result()
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_bittensor_wallet_connect_result")
+}
+
+//export urnet_bittensor_wallet_connect_set_foreground
+func urnet_bittensor_wallet_connect_set_foreground(self C.uint64_t, foreground C.bool) {
+	defer cgoGuard("urnet_bittensor_wallet_connect_set_foreground")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_set_foreground")
+	if !ok {
+		return
+	}
+	self_.SetForeground(bool(foreground))
+}
+
+//export urnet_bittensor_wallet_connect_sign
+func urnet_bittensor_wallet_connect_sign(self C.uint64_t, purpose *C.char, expectedAddress *C.char, outError **C.char) C.bool {
+	defer cgoGuard("urnet_bittensor_wallet_connect_sign")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_sign")
+	if !ok {
+		return C.bool(false)
+	}
+	err := self_.Sign(goString(purpose), goString(expectedAddress))
+	if err != nil {
+		setErrorOut(outError, err)
+		return C.bool(false)
+	}
+	return C.bool(true)
+}
+
+//export urnet_bittensor_wallet_connect_state
+func urnet_bittensor_wallet_connect_state(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_bittensor_wallet_connect_state")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_state")
+	if !ok {
+		return nil
+	}
+	r0 := self_.State()
+	return cString(string(r0))
+}
+
+//export urnet_bittensor_wallet_connect_take_proof
+func urnet_bittensor_wallet_connect_take_proof(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_bittensor_wallet_connect_take_proof")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_take_proof")
+	if !ok {
+		return nil
+	}
+	r0 := self_.TakeProof()
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_bittensor_wallet_connect_take_proof")
+}
+
+//export urnet_bittensor_wallet_connect_take_wallet_link
+func urnet_bittensor_wallet_connect_take_wallet_link(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_bittensor_wallet_connect_take_wallet_link")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_take_wallet_link")
+	if !ok {
+		return nil
+	}
+	r0 := self_.TakeWalletLink()
+	return cString(string(r0))
+}
+
+//export urnet_bittensor_wallet_connect_wallet_id
+func urnet_bittensor_wallet_connect_wallet_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_bittensor_wallet_connect_wallet_id")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_wallet_id")
+	if !ok {
+		return nil
+	}
+	r0 := self_.WalletId()
+	return cString(string(r0))
+}
+
+//export urnet_bittensor_wallet_connect_wallet_link
+func urnet_bittensor_wallet_connect_wallet_link(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_bittensor_wallet_connect_wallet_link")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_wallet_link")
+	if !ok {
+		return nil
+	}
+	r0 := self_.WalletLink()
+	return cString(string(r0))
 }
 
 //export urnet_bittensor_wallet_display_name
@@ -15326,6 +15504,28 @@ func urnet_network_user_view_controller_update_network_user(self C.uint64_t, net
 func urnet_new_async_local_state(localStorageHome *C.char) C.uint64_t {
 	defer cgoGuard("urnet_new_async_local_state")
 	r0 := sdk.NewAsyncLocalState(goString(localStorageHome))
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_new_bittensor_wallet_connect
+func urnet_new_bittensor_wallet_connect(api C.uint64_t, walletId *C.char, platform *C.char, projectId *C.char, appId *C.char, outError **C.char) C.uint64_t {
+	defer cgoGuard("urnet_new_bittensor_wallet_connect")
+	var api_ *sdk.Api
+	if api != 0 {
+		var ok bool
+		api_, ok = resolveHandle[*sdk.Api](uint64(api), "urnet_new_bittensor_wallet_connect")
+		if !ok {
+			return 0
+		}
+	}
+	r0, err := sdk.NewBittensorWalletConnect(api_, goString(walletId), goString(platform), goString(projectId), goString(appId))
+	if err != nil {
+		setErrorOut(outError, err)
+		return 0
+	}
 	if r0 == nil {
 		return 0
 	}

@@ -73,6 +73,10 @@ void urnet_invoke_auth_wallet_challenge(urnet_auth_wallet_challenge_cb cb, void*
 	cb(user_data, result_json, err_param);
 }
 
+void urnet_invoke_bittensor_wallet_connect(urnet_bittensor_wallet_connect_cb cb, void* user_data, const char* state) {
+	cb(user_data, state);
+}
+
 void urnet_invoke_block_action_overrides_change(urnet_block_action_overrides_change_cb cb, void* user_data, const char* block_action_overrides_json) {
 	cb(user_data, block_action_overrides_json);
 }
