@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"strconv"
 )
 
@@ -56,9 +57,72 @@ func entropy(rand io.Reader, n uint64) int64 {
 }
 
 // RpcError is the error member of a response.
+//
+// It is written as it is declared and read whatever its shape, so that an
+// error a peer wrote badly is still an error: it ends the wait for the answer
+// at once, where a frame that cannot be read is passed over and the wait
+// runs to its deadline.
+//
+//   - Code may be a number whose value is an integer (5000, 5000.0, 5e3) or
+//     a string holding an integer ("5000"). One that is missing, is anything
+//     else or does not fit 32 bits is RpcCodeMalformed. The 32 bits are for
+//     every target, so that a frame reads the same on all of them.
+//   - Message may be any JSON value. One that is not a string is kept as its
+//     JSON text; null is no message, like a missing one.
+//   - An error that is no object, a bare string or a number, has no member
+//     to read: its code is RpcCodeMalformed and it has no message.
+//
+// An error member that is null is no error.
 type RpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+// RpcCodeMalformed is the Code of an error that was read with no code of its
+// own that can be used. No specification this client follows assigns it: the
+// codes of the Sign protocol are positive and JSON-RPC's own are -32768 to
+// -32000. It is not 0, which a caller may keep for no code at all. A peer
+// that sends -1 itself is not told apart.
+const RpcCodeMalformed = -1
+
+// UnmarshalJSON reads an error as the comment on RpcError says. It does not
+// fail.
+func (e *RpcError) UnmarshalJSON(text []byte) error {
+	if string(text) == "null" {
+		return nil
+	}
+	var members struct {
+		Code    json.RawMessage `json:"code"`
+		Message json.RawMessage `json:"message"`
+	}
+	// what is no object leaves both members empty
+	_ = json.Unmarshal(text, &members)
+	*e = RpcError{Code: rpcCode(members.Code)}
+	// a string decodes, and so does null; anything else is kept as written
+	if json.Unmarshal(members.Message, &e.Message) != nil {
+		e.Message = string(members.Message)
+	}
+	return nil
+}
+
+// rpcCode is the code that raw, the JSON of a code member (empty for a
+// missing one), stands for.
+func rpcCode(raw json.RawMessage) int {
+	if len(raw) > 0 && raw[0] == '"' {
+		var held string
+		_ = json.Unmarshal(raw, &held)
+		if code, err := strconv.ParseInt(held, 10, 32); err == nil {
+			return int(code)
+		}
+		return RpcCodeMalformed
+	}
+	// an integer of 32 bits is exact as a float64. What is no number fails
+	// here, and so does one too large to be finite.
+	number, err := strconv.ParseFloat(string(raw), 64)
+	if err != nil || number != math.Trunc(number) || number < math.MinInt32 || number > math.MaxInt32 {
+		return RpcCodeMalformed
+	}
+	return int(number)
 }
 
 // Frame is any JSON-RPC object as it is read: a call or a push of the relay,
@@ -80,8 +144,9 @@ type Frame struct {
 }
 
 // ParseFrame reads one JSON-RPC object. Text that is not one JSON object, or
-// whose members have other types than a Frame's, is an error; the error says
-// nothing of the text.
+// whose jsonrpc or method member is of another type than a Frame's, is an
+// error; the error says nothing of the text. The error member is read as
+// RpcError says, whatever it is.
 func ParseFrame(text []byte) (*Frame, error) {
 	// the decoder takes "null" for a struct without complaint, so the
 	// object is asked for here

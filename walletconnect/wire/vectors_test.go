@@ -33,8 +33,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -561,12 +563,22 @@ func TestTV3RelayAuth(t *testing.T) {
 			"not the base58 set":    "did:key:z0MkodHZwneVRShtaLf8JKYkxpDGp1vGZnpGmdBpX8M2exxH",
 			"upper case prefix":     "DID:KEY:z6MkodHZwneVRShtaLf8JKYkxpDGp1vGZnpGmdBpX8M2exxH",
 			"x25519 multicodec":     "did:key:z6LSkrCgsrCvBMwAZECC9Q6sSJskqbBXrWk4xazaBK2YT7wf",
+			"multicodec ed 02":      "did:key:z6Mm6rbwSaQ6DVSf9RSYXVj4A31o4WZbJztNFg99P3moAvCZ",
 			"33 bytes":              "did:key:z2DQX3nSbASG3pWey3BuQQgpa363gCY6nwnbqdHxAzrQ2of",
 			"the key with no codec": "did:key:z" + Base58Encode(mustHex(t, relayAuthPublic)),
+			"no did:key:z prefix":   strings.TrimPrefix(relayAuthDidKey, "did:key:z"),
 		} {
 			if got, err := PublicKeyFromDidKey(did); err == nil {
 				t.Errorf("PublicKeyFromDidKey %s: no error, got %x", name, got)
 			}
+		}
+
+		// A did:key that is too long to be one is refused before it is
+		// decoded, which would take time quadratic in its length (0.1 s for
+		// these 64 KiB) and a thousand allocations. The refusal makes one.
+		long := "did:key:z" + strings.Repeat("6", 64<<10)
+		if allocations := testing.AllocsPerRun(1, func() { PublicKeyFromDidKey(long) }); allocations > 2 {
+			t.Errorf("PublicKeyFromDidKey decodes a did:key of %d characters: %.0f allocations", len(long), allocations)
 		}
 	})
 
@@ -1002,6 +1014,41 @@ func TestNewKey(t *testing.T) {
 		}
 		if pair, err := NewKeyPair(reader); err == nil || pair != nil {
 			t.Errorf("NewKeyPair with a %s reader: got %v, %v", name, pair != nil, err)
+		}
+	}
+}
+
+// A formatting verb prints a fixed text for a key, by itself or as a field of
+// what is printed, and never its bytes.
+func TestKeyFormat(t *testing.T) {
+	var key Key
+	for i := range key {
+		// 161 to 192, a1 to c0: nothing else the values below print has the
+		// decimal or the hex form of one of these bytes in it
+		key[i] = 0xa1 + byte(i)
+	}
+	shows := func(text string) bool {
+		text = strings.ToLower(text)
+		for _, b := range key {
+			if strings.Contains(text, strconv.Itoa(int(b))) || strings.Contains(text, hex.EncodeToString([]byte{b})) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, v := range []struct {
+		value any
+		keys  int
+	}{
+		{key, 1},
+		{&KeyPair{Private: key, Public: key}, 2},
+		{&Pairing{SymKey: key, Topic: "t", ExpiryUnix: 5}, 1},
+	} {
+		for _, verb := range []string{"%v", "%+v", "%#v", "%d", "%x", "%s"} {
+			got := fmt.Sprintf(verb, v.value)
+			if strings.Count(got, "wire.Key(hidden)") != v.keys || shows(got) {
+				t.Errorf("%s of a %T: got %s", verb, v.value, got)
+			}
 		}
 	}
 }

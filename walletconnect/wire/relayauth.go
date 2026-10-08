@@ -18,6 +18,9 @@ import (
 const (
 	// did:key in multibase "z" (base58 in the bitcoin alphabet)
 	didKeyPrefix = "did:key:z"
+	// the did:key of an Ed25519 key is always this long: the two bytes of
+	// the multicodec and the 32 of the key make 47 base58 characters
+	didKeyLength = len(didKeyPrefix) + 47
 
 	// crypto-authentication: the header of the token, in this byte order
 	tokenHeader = `{"alg":"EdDSA","typ":"JWT"}`
@@ -48,7 +51,14 @@ func DidKey(public ed25519.PublicKey) string {
 
 // PublicKeyFromDidKey is the Ed25519 public key a did:key names. Any other
 // did, multibase or key type is an error.
+//
+// Text longer than such a did:key is refused before it is decoded: the
+// decoding takes time quadratic in the length, and the text is a claim of a
+// token nobody has verified yet.
 func PublicKeyFromDidKey(did string) (ed25519.PublicKey, error) {
+	if len(did) > didKeyLength {
+		return nil, errors.New("walletconnect: the did:key is not an ed25519 key")
+	}
 	encoded, found := strings.CutPrefix(did, didKeyPrefix)
 	if !found {
 		return nil, errors.New("walletconnect: not a base58 did:key")

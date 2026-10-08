@@ -49,6 +49,20 @@ func (k Key) Hex() string {
 	return hex.EncodeToString(k[:])
 }
 
+// Format makes fmt print a fixed text for a key in place of its bytes, which
+// %v would print in decimal and %x in hex, also where the Key is an exported
+// field of the value that is printed, a KeyPair or a Pairing.
+//
+// It is a second line of defence: a key is still never handed to a formatting
+// call. fmt asks no method where it reports a misused verb, and prints the
+// bytes there: for %w (which vet reports) and for %p of a value that is no
+// pointer (which vet does not report for a Key: to it a type with a Format
+// method takes any verb). fmt also prints the bytes of a Key in an unexported
+// field, and encoding/json writes a Key as its bytes.
+func (k Key) Format(state fmt.State, verb rune) {
+	io.WriteString(state, "wire.Key(hidden)")
+}
+
 // KeyPair is an X25519 key pair (crypto-keys: the keys of the key agreement
 // are Curve25519 keys). The dapp makes one per proposal and sends Public in
 // it.

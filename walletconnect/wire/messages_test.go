@@ -299,10 +299,8 @@ func TestTV7IdsAndFrames(t *testing.T) {
 			`{"id":1,"jsonrpc":"2.0","result":true} trailing`,
 			`{"id":1,"jsonrpc":"2.0","result":true}{"id":2}`,
 			"not json at all, with a secret in it",
-			// the members are typed: one of another type fails the frame
+			// the method is typed: one of another type fails the frame
 			`{"id":1,"jsonrpc":"2.0","method":5}`,
-			`{"id":1,"jsonrpc":"2.0","error":"a secret text"}`,
-			`{"id":1,"jsonrpc":"2.0","error":{"code":"5000","message":"a secret text"}}`,
 		} {
 			frame, err := ParseFrame([]byte(text))
 			if err == nil {
@@ -315,6 +313,65 @@ func TestTV7IdsAndFrames(t *testing.T) {
 			if strings.Contains(err.Error(), "secret") {
 				t.Errorf("ParseFrame %q: the error repeats the frame: %v", text, err)
 			}
+		}
+	})
+
+	t.Run("an error is read whatever its shape", func(t *testing.T) {
+		for _, v := range []struct {
+			member  string // the error member of a response
+			code    int
+			message string
+		}{
+			{`{"code":5000,"message":"User rejected."}`, 5000, "User rejected."},
+			// a number with a fraction or an exponent that is an integer
+			{`{"code":5000.0,"message":"m"}`, 5000, "m"},
+			{`{"code":5e3,"message":"m"}`, 5000, "m"},
+			// a string holding an integer
+			{`{"code":"5000","message":"m"}`, 5000, "m"},
+			{`{"code":"-32000","message":"m"}`, -32000, "m"},
+			// a message that is no string is kept as its json
+			{`{"code":5000,"message":7}`, 5000, "7"},
+			{`{"code":5000,"message":{"reason":["no"]}}`, 5000, `{"reason":["no"]}`},
+			// null is no message, like none
+			{`{"code":5000,"message":null}`, 5000, ""},
+			{`{"code":5000}`, 5000, ""},
+			// white space around a member is not part of it
+			{"{ \"code\" :\t\"5000\" ,\n\"message\" : 7 }", 5000, "7"},
+			// a code is 32 bits, on every target
+			{`{"code":2147483647,"message":"m"}`, math.MaxInt32, "m"},
+			{`{"code":-2147483648,"message":"m"}`, math.MinInt32, "m"},
+			{`{"code":2147483648,"message":"m"}`, RpcCodeMalformed, "m"},
+			{`{"code":-2147483649,"message":"m"}`, RpcCodeMalformed, "m"},
+			{`{"code":"2147483648","message":"m"}`, RpcCodeMalformed, "m"},
+			// no code that can be used
+			{`{"message":"m"}`, RpcCodeMalformed, "m"},
+			{`{"code":null,"message":"m"}`, RpcCodeMalformed, "m"},
+			{`{"code":true,"message":"m"}`, RpcCodeMalformed, "m"},
+			{`{"code":5000.5,"message":"m"}`, RpcCodeMalformed, "m"},
+			{`{"code":"5e3","message":"m"}`, RpcCodeMalformed, "m"},
+			{`{"code":"","message":"m"}`, RpcCodeMalformed, "m"},
+			{`{}`, RpcCodeMalformed, ""},
+			// an error that is no object has neither
+			{`"a secret text"`, RpcCodeMalformed, ""},
+			{`5000`, RpcCodeMalformed, ""},
+			{`false`, RpcCodeMalformed, ""},
+		} {
+			frame, err := ParseFrame([]byte(`{"id":1,"jsonrpc":"2.0","error":` + v.member + `}`))
+			if err != nil || frame.Error == nil {
+				t.Errorf("ParseFrame with the error %s: %v", v.member, err)
+				continue
+			}
+			if want := (RpcError{Code: v.code, Message: v.message}); *frame.Error != want {
+				t.Errorf("the error %s: got %+v, want %+v", v.member, *frame.Error, want)
+			}
+		}
+		if RpcCodeMalformed != -1 {
+			t.Errorf("RpcCodeMalformed: got %d, want -1", RpcCodeMalformed)
+		}
+		// null is no error, also for an RpcError that is decoded by itself
+		kept := RpcError{Code: 7, Message: "kept"}
+		if err := json.Unmarshal([]byte("null"), &kept); err != nil || kept != (RpcError{Code: 7, Message: "kept"}) {
+			t.Errorf("an RpcError decoded from null: got %+v, %v", kept, err)
 		}
 	})
 
