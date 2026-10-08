@@ -118,7 +118,7 @@ const (
 	// ahead of its clock.
 	tokenLeewaySeconds = 120
 	// A relay token is about 430 characters. One of thousands is not looked
-	// at: reading the did:key of a token takes time quadratic in its length.
+	// at.
 	maxTokenLength = 4096
 
 	// The hosted relay took a ttl of 30 seconds to 30 days.
@@ -143,8 +143,10 @@ var pingPayload = []byte("relaytest")
 
 var errRelayClosed = errors.New("relaytest: the relay is closed")
 
-// RelayOptions says whom the relay lets in. The zero value lets in a client
-// of the project "test-project" that presents nothing else.
+// RelayOptions says whom the relay lets in and how it numbers its pushes. The
+// zero value lets in a client of the project "test-project" that presents
+// nothing else, and numbers as the hosted relay did. FirstPushId is for a
+// test of ids that no float64 holds, such as one of 19 digits.
 type RelayOptions struct {
 	ProjectIds   []string         // accepted project ids; default {"test-project"}
 	Origins      []string         // allowed Origin header values; default none
@@ -152,6 +154,7 @@ type RelayOptions struct {
 	PackageNames []string         // allowed packageName query values; default none
 	Audiences    []string         // accepted aud; default the two urls of the hosted relay
 	Now          func() time.Time // default time.Now (bubble time inside synctest)
+	FirstPushId  int64            // id of the first push, each later one the next number; default 15 digits
 }
 
 // Relay is the relay. Every method is safe to call from any goroutine.
@@ -320,6 +323,9 @@ func NewRelay(options RelayOptions) *Relay {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
+	if options.FirstPushId == 0 {
+		options.FirstPushId = firstPushId
+	}
 	// the caller keeps its slices
 	options.ProjectIds = slices.Clone(options.ProjectIds)
 	options.Origins = slices.Clone(options.Origins)
@@ -335,7 +341,7 @@ func NewRelay(options RelayOptions) *Relay {
 		writing:     map[*socket]struct{}{},
 		topics:      map[string]*topic{},
 		pushes:      map[string]*push{},
-		nextPushId:  firstPushId,
+		nextPushId:  options.FirstPushId,
 		loseAck:     map[string]bool{},
 		ackHold:     defaultAckHold,
 		duplicate:   map[string]bool{},
@@ -572,7 +578,6 @@ func (r *Relay) upgrade(conn net.Conn) *socket {
 		r.forget(conn)
 		return nil
 	}
-	delete(r.pending, conn)
 	r.socketCount[v.clientId]++
 	s := &socket{
 		ordinal: r.socketCount[v.clientId],
@@ -598,6 +603,11 @@ func (r *Relay) upgrade(conn net.Conn) *socket {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// The connection stayed in pending while the answer was written, so that
+	// Close could end the wait for a client that does not read it. Nothing
+	// else would: a socket that was closed with a close frame meanwhile is
+	// no socket of its client any more, and has no writer yet.
+	delete(r.pending, conn)
 	if err != nil {
 		// an upgrade request that is no websocket handshake after all: the
 		// upgrader's refusal is the answer, and there was no socket
@@ -1561,6 +1571,12 @@ func (r *Relay) CloseSockets(clientId string, code int, reason string) {
 //
 // With false the connections work again. What was swallowed is lost, and a
 // connection the client had let go of is closed.
+//
+// The relay's pings go on counting. A zombie is sent none and its pongs are
+// not heard, so the relay itself drops it, with no close frame, at the second
+// ping tick after it was made one: 30 to 60 seconds later. And a socket that
+// works again after a tick passed while it was a zombie is closed with 4010
+// at its next tick: the ping it did not answer was never sent to it.
 //
 // The client id of a peer makes that peer silent: it is handed nothing, and
 // its calls fail. "" is every socket client and no peer.

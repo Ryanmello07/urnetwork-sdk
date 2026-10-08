@@ -546,6 +546,53 @@ func TestRelayPushFrame(t *testing.T) {
 	})
 }
 
+// FirstPushId: the pushes are numbered from there. With an id of 19 digits,
+// which no float64 holds, the acknowledgement is still matched digit for
+// digit.
+func TestRelayFirstPushId(t *testing.T) {
+	inBubble(t, RelayOptions{FirstPushId: 1791419882856123457}, func(t *testing.T, relay *Relay) {
+		sender := relay.Peer("sender")
+		must(t, sender.Publish(topicA, "one", wire.TagSessionRequestResponse, wire.TtlFiveMinutes))
+		must(t, sender.Publish(topicA, "two", wire.TagSessionRequestResponse, wire.TtlFiveMinutes))
+		client := connect(t, relay, testSeed(1))
+		_, frames := client.subscribed(topicA)
+		expect(t, "the client", told(frames),
+			pushed(topicA, "one", wire.TagSessionRequestResponse), pushed(topicA, "two", wire.TagSessionRequestResponse))
+		if one, two := string(frames[0].Id), string(frames[1].Id); one != "1791419882856123457" || two != "1791419882856123458" {
+			t.Fatalf("push ids %s and %s, want 1791419882856123457 and the next", one, two)
+		}
+		client.ack(frames[1])
+		_, frames = client.subscribed(topicA)
+		expect(t, "after the second was acknowledged", told(frames), pushed(topicA, "one", wire.TagSessionRequestResponse))
+		client.ack(frames[0])
+		_, frames = client.subscribed(topicA)
+		expect(t, "after both were", told(frames))
+	})
+}
+
+// A client id that unsubscribed stays known to the topic, and what is
+// published afterwards is kept for it: a fresh client id that subscribes
+// first gets nothing, and the client gets it when it subscribes again.
+func TestRelayKeepsAMessageForAClientThatUnsubscribed(t *testing.T) {
+	inBubble(t, RelayOptions{}, func(t *testing.T, relay *Relay) {
+		seed := testSeed(1)
+		sender := relay.Peer("sender")
+		first := connect(t, relay, seed)
+		first.subscribed(topicA)
+		first.call(wire.MethodUnsubscribe, wire.UnsubscribeParams{Topic: topicA, Id: "any"})
+		first.take()
+		first.close()
+		time.Sleep(3 * time.Second)
+		must(t, sender.Publish(topicA, "after the unsubscribe", wire.TagSessionRequest, wire.TtlFiveMinutes))
+		fresh := connect(t, relay, testSeed(2))
+		_, frames := fresh.subscribed(topicA)
+		expect(t, "a fresh client id that subscribes first", told(frames))
+		back := connect(t, relay, seed)
+		_, frames = back.subscribed(topicA)
+		expect(t, "the client that unsubscribed, back", told(frames), pushed(topicA, "after the unsubscribe", wire.TagSessionRequest))
+	})
+}
+
 // An acknowledged push is never delivered again. An unacknowledged one is
 // pushed again on the next irn_subscribe of the same client id, on the same
 // socket and on a new one, and never to another client id.
@@ -2579,6 +2626,41 @@ func TestRelayClose(t *testing.T) {
 		relay.SendOversized("", 10)
 		if len(relay.Handshakes()) != 2 || relay.Dials() != 4 {
 			t.Fatalf("%d handshakes and %d dials, want 2 and 4", len(relay.Handshakes()), relay.Dials())
+		}
+	})
+}
+
+// Close does not wait for a client that does not read: a socket that was
+// closed while its 101 was still being written to such a client ends with
+// the relay like any other.
+func TestRelayCloseWhileAnUpgradeIsAnswered(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		relay := NewRelay(RelayOptions{})
+		seed := testSeed(1)
+		conn, err := relay.DialTLS(t.Context(), "tcp", testRelayHost+":443")
+		must(t, err)
+		// lets the relay go, should Close wait for this end
+		defer conn.Close()
+		// a handshake by hand, whose answer is never read
+		_, err = io.WriteString(conn, "GET /?projectId="+testProjectId+" HTTP/1.1\r\nHost: "+testRelayHost+
+			"\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer "+
+			tokenOf(seed, claimsOf(seed, time.Now().Unix()))+"\r\n\r\n")
+		must(t, err)
+		synctest.Wait()
+		if open := relay.OpenSockets(clientIdOf(seed)); open != 1 {
+			t.Fatalf("%d open sockets while the answer is on its way, want 1", open)
+		}
+		relay.CloseSockets("", 1000, "")
+		closed := make(chan struct{})
+		go func() {
+			relay.Close()
+			close(closed)
+		}()
+		synctest.Wait()
+		select {
+		case <-closed:
+		default:
+			t.Fatal("Close waits for a client that does not read the answer to its upgrade")
 		}
 	})
 }
