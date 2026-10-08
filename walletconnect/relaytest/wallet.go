@@ -19,7 +19,7 @@ import (
 const (
 	// Bittensor, and the address of the development account //Alice
 	defaultChain   = "polkadot:2f0555cc76fc2840a25a6ea3b9637146"
-	defaultAccount = defaultChain + ":5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+	defaultAddress = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 	defaultMethod  = "polkadot_signMessage"
 	// how long a session lasts that the wallet settles
 	sessionSeconds = 7 * 24 * 60 * 60
@@ -116,7 +116,7 @@ func NewWallet(conn Conn, options WalletOptions) *Wallet {
 		options.Chain = defaultChain
 	}
 	if options.Accounts == nil {
-		options.Accounts = []string{defaultAccount}
+		options.Accounts = []string{options.Chain + ":" + defaultAddress}
 	}
 	if options.Methods == nil {
 		options.Methods = []string{defaultMethod}

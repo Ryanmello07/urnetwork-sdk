@@ -666,7 +666,8 @@ func TestClientApprovalAndSettleFailures(t *testing.T) {
 		code      int      // of the error the settle is answered with
 		publishes []string // of the client, after the proposal
 	}{
-		{"rejected", func(s *scene) { s.wallet.Reject(s.proposal, 5000, "User rejected.") }, "closed rejected 5000", 0, nil},
+		// the text has none of the reject words: the code alone gives the class
+		{"rejected", func(s *scene) { s.wallet.Reject(s.proposal, 5000, "no") }, "closed rejected 5000", 0, nil},
 		{"unsupported", func(s *scene) { s.wallet.Reject(s.proposal, 5100, "Unsupported chains.") }, "closed unsupported 5100", 0, nil},
 		{"the pairing deleted before the approval", func(s *scene) { s.wallet.DeletePairing() }, "closed rejected 0", 0, []string{pairingAnswer}},
 		{"the pairing deleted after the approval", func(s *scene) {
@@ -769,7 +770,7 @@ func TestClientRequestFailures(t *testing.T) {
 }
 
 // TE14 (B.4, R18): what a wallet asks of the dapp is answered, and changes
-// nothing. A second settle is not answered.
+// nothing. A request of the wallet and a second settle are not answered.
 func TestClientAnswersTheWallet(t *testing.T) {
 	play(t, nil, func(t *testing.T, s *scene) {
 		ask := func(send func(method string, params any) (*wire.Frame, error), method string, params any, want string, publishes ...string) {
@@ -799,6 +800,7 @@ func TestClientAnswersTheWallet(t *testing.T) {
 		ask(s.wallet.Send, "wc_sessionUpdate", map[string]any{"namespaces": other}, "result true", "> publish B 1105 86400")
 		ask(s.wallet.Send, "wc_sessionExtend", map[string]int64{"expiry": 4102444800}, "result true", "> publish B 1107 86400")
 		ask(s.wallet.Send, "wc_sessionAuthenticate", struct{}{}, "error 1001", "> publish B 0 86400")
+		ask(s.wallet.Send, "wc_sessionRequest", struct{}{}, "nothing")
 		ask(s.wallet.Send, "wc_sessionSettle", struct{}{}, "nothing")
 		s.expect("nothing changed")
 	})
