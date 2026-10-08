@@ -574,11 +574,14 @@ func TestTV3RelayAuth(t *testing.T) {
 		}
 
 		// A did:key that is too long to be one is refused before it is
-		// decoded, which would take time quadratic in its length (0.1 s for
-		// these 64 KiB) and a thousand allocations. The refusal makes one.
-		long := "did:key:z" + strings.Repeat("6", 64<<10)
-		if allocations := testing.AllocsPerRun(1, func() { PublicKeyFromDidKey(long) }); allocations > 2 {
-			t.Errorf("PublicKeyFromDidKey decodes a did:key of %d characters: %.0f allocations", len(long), allocations)
+		// decoded. Decoding takes time quadratic in the length (0.1 s for 64
+		// KiB) and allocates: five times for one character too many, a
+		// thousand times for 64 KiB. The refusal allocates its error.
+		for _, extra := range []int{1, 64 << 10} {
+			long := relayAuthDidKey + strings.Repeat("6", extra)
+			if allocations := testing.AllocsPerRun(1, func() { PublicKeyFromDidKey(long) }); allocations > 2 {
+				t.Errorf("PublicKeyFromDidKey decodes a did:key of %d characters: %.0f allocations", len(long), allocations)
+			}
 		}
 	})
 

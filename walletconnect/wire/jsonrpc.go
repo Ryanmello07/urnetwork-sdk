@@ -68,7 +68,7 @@ func entropy(rand io.Reader, n uint64) int64 {
 //     else or does not fit 32 bits is RpcCodeMalformed. The 32 bits are for
 //     every target, so that a frame reads the same on all of them.
 //   - Message may be any JSON value. One that is not a string is kept as its
-//     JSON text; null is no message, like a missing one.
+//     JSON text, null as "null"; a missing one is empty.
 //   - An error that is no object, a bare string or a number, has no member
 //     to read: its code is RpcCodeMalformed and it has no message.
 //
@@ -97,10 +97,9 @@ func (e *RpcError) UnmarshalJSON(text []byte) error {
 	}
 	// what is no object leaves both members empty
 	_ = json.Unmarshal(text, &members)
-	*e = RpcError{Code: rpcCode(members.Code)}
-	// a string decodes, and so does null; anything else is kept as written
-	if json.Unmarshal(members.Message, &e.Message) != nil {
-		e.Message = string(members.Message)
+	*e = RpcError{Code: rpcCode(members.Code), Message: string(members.Message)}
+	if len(members.Message) > 0 && members.Message[0] == '"' {
+		_ = json.Unmarshal(members.Message, &e.Message)
 	}
 	return nil
 }

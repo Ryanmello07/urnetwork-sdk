@@ -329,11 +329,10 @@ func TestTV7IdsAndFrames(t *testing.T) {
 			// a string holding an integer
 			{`{"code":"5000","message":"m"}`, 5000, "m"},
 			{`{"code":"-32000","message":"m"}`, -32000, "m"},
-			// a message that is no string is kept as its json
+			// a message that is no string is kept as its json, null too
 			{`{"code":5000,"message":7}`, 5000, "7"},
 			{`{"code":5000,"message":{"reason":["no"]}}`, 5000, `{"reason":["no"]}`},
-			// null is no message, like none
-			{`{"code":5000,"message":null}`, 5000, ""},
+			{`{"code":5000,"message":null}`, 5000, "null"},
 			{`{"code":5000}`, 5000, ""},
 			// white space around a member is not part of it
 			{"{ \"code\" :\t\"5000\" ,\n\"message\" : 7 }", 5000, "7"},
