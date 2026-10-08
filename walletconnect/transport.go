@@ -484,8 +484,11 @@ func (t *transport) pushed(s *socket, frame *wire.Frame) {
 	if s.settling && s.waiting == 0 {
 		t.quiet(s) // R6: a push starts the quiet window again
 	}
+	// what cannot be read of the params leaves its member empty: no push is
+	// lost to a member that nothing here needs
 	var params wire.SubscriptionParams
-	if json.Unmarshal(frame.Params, &params) != nil || !slices.Contains(t.topics, params.Data.Topic) {
+	json.Unmarshal(frame.Params, &params)
+	if !slices.Contains(t.topics, params.Data.Topic) {
 		return // R7: dropped only when the topic is not held
 	}
 	if id := wire.MessageId(params.Data.Message); !slices.Contains(t.seen, id) {

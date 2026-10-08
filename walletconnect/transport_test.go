@@ -11,6 +11,7 @@ package walletconnect
 // shows that the transport leaves none behind.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -649,6 +650,38 @@ func TestTransportPushBeforeResult(t *testing.T) {
 	})
 }
 
+// R7: a push for a held topic is handed on whatever its other members look
+// like. A tag that cannot be read is 0.
+func TestTransportPushWithOddMembers(t *testing.T) {
+	bubble(t, relaytest.RelayOptions{}, func(h *harness, config *Config) {
+		dial := config.DialTLS
+		config.DialTLS = func(ctx context.Context, network string, address string) (net.Conn, error) {
+			conn, err := dial(ctx, network, address)
+			return oddMembers{conn}, err
+		}
+	}, func(t *testing.T, h *harness) {
+		wallet := h.relay.Peer("wallet")
+		h.connect(topicA)
+		wallet.Publish(topicA, "the approval", 1101, 300)
+		h.expect("acknowledged", h.seen(), "1< push aaaa the approval", "1> ack")
+		h.expect("and handed on", h.told(), "message aaaa the approval 0")
+	})
+}
+
+// oddMembers is a connection on which a push with the tag 1101 has, in as
+// many characters, a publishedAt that is a fraction and a tag that is a
+// string.
+type oddMembers struct{ net.Conn }
+
+func (c oddMembers) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	// the two characters before the tag are the end of publishedAt
+	if i := bytes.Index(p[:n], []byte(`,"tag":1101`)); i >= 2 {
+		copy(p[i-2:], `.5,"tag":"11"`)
+	}
+	return n, err
+}
+
 // TT11 (R10): a push is acknowledged before it is handed on, with its id
 // digit for digit. One for a topic that is no longer held is acknowledged and
 // dropped, and so is a second delivery of a message.
@@ -823,6 +856,7 @@ func TestTransportBackground(t *testing.T) {
 	t.Run("after 45 ticks", func(t *testing.T) {
 		bubble(t, relaytest.RelayOptions{}, func(h *harness, config *Config) { config.BackgroundSocketSeconds = 45 }, func(t *testing.T, h *harness) {
 			h.connect(topicA)
+			h.wait(10 * time.Second) // 45 ticks from the call, not the tick number 45
 			h.do(func(tr *transport) { tr.setForeground(false) })
 			h.wait(45*time.Second - 2*latency)
 			if frames := h.seen(); slices.Contains(frames, "1> close 1000") {
@@ -955,11 +989,12 @@ func TestTransportShutdown(t *testing.T) {
 	queue := func(tr *transport) {
 		tr.addTopic(topicA) // not subscribed for a shutdown
 		tr.publish(topicA, "settle answer", 1103, 300, 0, "one")
-		tr.publish(topicA, "delete", 1112, 86400, 0, "two")
+		tr.publish(topicA, "delete", 1112, 86400, 3, "two") // its give-up is the flush time (B.4)
 		tr.shutdown(3)
 	}
 	t.Run("flushed", func(t *testing.T) {
 		bubble(t, relaytest.RelayOptions{}, nil, func(t *testing.T, h *harness) {
+			h.wait(5 * time.Second) // the flush time is counted from the call
 			h.do(queue)
 			if dials := h.dialed(); !h.stopped() || len(dials) != 1 {
 				t.Fatalf("stopped %t, dials at %v", h.stopped(), dials)
@@ -971,10 +1006,11 @@ func TestTransportShutdown(t *testing.T) {
 	t.Run("the relay cannot be reached", func(t *testing.T) {
 		bubble(t, relaytest.RelayOptions{}, nil, func(t *testing.T, h *harness) {
 			h.relay.SetOffline(true)
+			h.wait(5 * time.Second) // and so is the give-up of the delete
 			h.do(queue)
 			h.wait(2999 * time.Millisecond)
-			if h.stopped() {
-				t.Fatal("stopped before the flush time was over")
+			if told := h.told(); h.stopped() || len(told) != 0 {
+				t.Fatalf("before the flush time was over: stopped %t, told %q", h.stopped(), told)
 			}
 			h.wait(time.Millisecond)
 			if dials := h.dialed(); !h.stopped() || len(dials) != 1 {
