@@ -205,7 +205,7 @@ func (e *engine) onOpen() {
 	e.tr.addTopic(pairing.Topic)
 	e.tr.logf("walletconnect: pairing %s proposed", pairing.Topic[:8])
 	w.entry = e.publish(pairing.Topic, pairing.SymKey,
-		wire.ProposeRequest(w.id, e.keys.Public, e.config.Metadata, e.config.NamespaceKey, e.config.Chain, e.config.Method),
+		wire.ProposeRequest(w.id, e.keys.Public, e.config.Metadata, e.config.NamespaceKey, e.config.Chain, e.config.Method, wire.ProposeOptions{}),
 		wire.TagSessionPropose, wire.TtlFiveMinutes, 0)
 }
 

@@ -71,9 +71,9 @@ const (
 
 // Metadata is how a party describes itself to the other.
 //
-// It has no redirect member and there is no way to add one: this client
-// names no link for a wallet to open, and opens none a wallet names. A
-// redirect a wallet sends is not read.
+// It has no redirect member: a redirect a wallet sends is not read, and no
+// link a wallet names is opened. The redirect this client may name for
+// itself is ProposeOptions.Redirect.
 type Metadata struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
@@ -81,11 +81,36 @@ type Metadata struct {
 	Icons       []string `json:"icons"`
 }
 
+// Redirect is the link a dapp names for itself in its metadata, for a wallet
+// to bring the dapp to the front again (core/pairing/data-structures,
+// Metadata). Sent only, never read. An empty member is left out.
+type Redirect struct {
+	Native    string `json:"native,omitempty"`
+	Universal string `json:"universal,omitempty"`
+}
+
+// ProposeOptions are the members of a proposal that ur.io's client does not
+// send. The zero value sends none: the proposal is then byte for byte what
+// ur.io's client sends.
+type ProposeOptions struct {
+	// params.pairingTopic: in the Proposal structure of sign/data-structures,
+	// not in the params of wc_sessionPropose in sign/rpc-methods. "" = not sent.
+	PairingTopic string
+	// params.expiryTimestamp, unix seconds. NOT in the public specification
+	// for a proposal: the name and the place are those of the device test of
+	// 2026-10-09, by analogy with the pairing uri (delta 1.3). 0 = not sent.
+	ExpiryTimestamp int64
+	// params.proposer.metadata.redirect. nil, or both members empty = not sent.
+	Redirect *Redirect
+}
+
 type proposeParams struct {
 	Relays             []proposeRelay               `json:"relays"`
 	Proposer           proposer                     `json:"proposer"`
 	RequiredNamespaces map[string]requiredNamespace `json:"requiredNamespaces"`
 	OptionalNamespaces struct{}                     `json:"optionalNamespaces"`
+	PairingTopic       string                       `json:"pairingTopic,omitempty"`
+	ExpiryTimestamp    int64                        `json:"expiryTimestamp,omitempty"`
 }
 
 type proposeRelay struct {
@@ -93,8 +118,14 @@ type proposeRelay struct {
 }
 
 type proposer struct {
-	PublicKey string   `json:"publicKey"`
-	Metadata  Metadata `json:"metadata"`
+	PublicKey string           `json:"publicKey"`
+	Metadata  proposerMetadata `json:"metadata"`
+}
+
+// Metadata as this client sends its own: the redirect behind the four members.
+type proposerMetadata struct {
+	Metadata
+	Redirect *Redirect `json:"redirect,omitempty"`
 }
 
 // a required namespace has no accounts member, which is why it is not a
@@ -119,16 +150,22 @@ type requiredNamespace struct {
 // sends them, and not as the null a nil slice would give; metadata without
 // icons is sent with an empty list for the same reason.
 //
-// Not sent: an expiry, the pairing topic, session properties.
-func ProposeRequest(id int64, proposerPublicKey Key, metadata Metadata, namespaceKey string, chain string, method string) []byte {
+// Each member of options that is set is added: "redirect" behind the icons,
+// "pairingTopic" and "expiryTimestamp", in that order, behind
+// optionalNamespaces. Never sent: session properties.
+func ProposeRequest(id int64, proposerPublicKey Key, metadata Metadata, namespaceKey string, chain string, method string, options ProposeOptions) []byte {
 	if metadata.Icons == nil {
 		metadata.Icons = []string{}
+	}
+	redirect := options.Redirect
+	if redirect != nil && *redirect == (Redirect{}) {
+		redirect = nil
 	}
 	return RequestFrame(id, methodSessionPropose, proposeParams{
 		Relays: []proposeRelay{{Protocol: relayProtocol}},
 		Proposer: proposer{
 			PublicKey: proposerPublicKey.Hex(),
-			Metadata:  metadata,
+			Metadata:  proposerMetadata{Metadata: metadata, Redirect: redirect},
 		},
 		RequiredNamespaces: map[string]requiredNamespace{
 			namespaceKey: {
@@ -137,6 +174,8 @@ func ProposeRequest(id int64, proposerPublicKey Key, metadata Metadata, namespac
 				Events:  []string{},
 			},
 		},
+		PairingTopic:    options.PairingTopic,
+		ExpiryTimestamp: options.ExpiryTimestamp,
 	})
 }
 
