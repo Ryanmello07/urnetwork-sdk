@@ -51,7 +51,8 @@ func skipSettle(settle *relaytest.SettleEdit) { settle.SkipSettle = true }
 // Every line a client may trace (delta 5.3), as a whole: numbers, fixed words
 // and 8 hex characters of a topic. So no text that a wallet or the relay wrote
 // and no part of a key, a uri or a token fits one. play holds every line of
-// every test against it.
+// every test against it. bwcTraceLine of the root package's tests repeats the
+// forms, for the trace of a connection.
 var traceLine = func() *regexp.Regexp {
 	const topic, id = `topic=[0-9a-f]{8}`, `id=(?:\d{1,20}|\?)`
 	const label = `tag=\d+ ` + topic + ` ` + id

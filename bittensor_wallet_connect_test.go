@@ -442,21 +442,55 @@ func (l *bwcLog) Errorf(format string, args ...any)   { l.Infof(format, args...)
 func (l *bwcLog) V(int32) connect.Verbose             { return cmp.Or(l.verbose, l) }
 func (l *bwcLog) Enabled() bool                       { return true }
 
-// A trace line (delta 5.3): the clock of the connection, and then a line the
-// connection writes itself, as a whole, or one of its client, which package
-// walletconnect holds against the forms of its own.
-var bwcTraceLine = regexp.MustCompile(`^\d\d:\d\d:\d\d\.\d{3} (?:` + strings.Join([]string{
-	`proposal T=[01] E=[01] R=[01] link=(?:https|scheme|bare) bg=\d+ ttl=\d+`,
-	`sign (?:login|create|add|connect) first=[01]`,
-	`state (?:idle|connecting|awaiting_approval|awaiting_signature|signed|failed|closed) -> [a-z_]+(?: [a-z_]+(?:/[a-z_]+)?)?`,
-	`connected [01]`,
-	`link (?:pair|forward) taken`,
-	`challenge attempt \d+ (?:ok|failed)`,
-	`request id=\d+`,
-	`signature len=\d+ accepted=[01]`,
-	`proof taken`,
-	`(?:sock|fg|parked|resume|stopped|pairing|wait|OUT|write|rewrite|ack|give-up|push|IN|settle|deadline|read|expired|unreachable|end)(?: .*)?`,
-}, "|") + `)$`)
+// A trace line (delta 5.3), as a whole: the clock of the connection, and then
+// a line the connection writes itself or one of its client, whose forms are
+// those of traceLine in walletconnect/client_test.go. No line fits that holds
+// anything but numbers, fixed words and 8 hex characters of a topic; the words
+// of a state line are the seven states and, of a failure, the codes that the
+// result of a connection can have.
+var bwcTraceLine = func() *regexp.Regexp {
+	const state = `(?:idle|connecting|awaiting_approval|awaiting_signature|signed|failed|closed)`
+	const codes = `(?:no_challenge|invalid_challenge|challenge_expired|not_awaiting_wallet|invalid_ss58_address|address_mismatch|invalid_signature|` +
+		`wallet_error/(?:wallet_error|user_rejected|walletconnect_expired|walletconnect_unavailable|unsupported_chain|no_account|address_not_in_wallet))`
+	const topic, id = `topic=[0-9a-f]{8}`, `id=(?:\d{1,20}|\?)`
+	const label = `tag=\d+ ` + topic + ` ` + id
+	const said = `(?:request (?:wc_(?:pairingDelete|pairingPing|sessionSettle|sessionRequest|sessionDelete|sessionPing|sessionEvent|sessionUpdate|sessionExtend)|` +
+		`wc_sessionPropose T=[01] E=[01] R=[01]|other)|error -?\d+|result(?: responderPublicKey=1)?(?: signature=1)?)`
+	return regexp.MustCompile(`^\d\d:\d\d:\d\d\.\d{3} (?:` + strings.Join([]string{
+		`proposal T=[01] E=[01] R=[01] link=(?:https|scheme|bare) bg=\d+ ttl=\d+`,
+		`sign (?:login|create|add|connect) first=[01]`,
+		`state ` + state + ` -> ` + state + `(?: ` + codes + `)?`,
+		`connected [01]`,
+		`link (?:pair|forward) taken`,
+		`challenge attempt \d+ (?:ok|failed)`,
+		`request id=\d+`,
+		`signature len=\d+ accepted=[01]`,
+		`proof taken`,
+		// the client's
+		`sock dial \d+ relay\.walletconnect\.(?:com|org)`,
+		`sock (?:open|synced) \d+`,
+		`sock dial-failed \d+ status=\d+`,
+		`sock lost \d+ age=\d+s code=\d+`,
+		`sock close \d+ code=1000 (?:parked|shutdown)`,
+		`fg [01]`,
+		`parked after \d+s`,
+		`resume \d+`,
+		`stopped (?:unavailable|wallet) code=-?\d+`,
+		`pairing ` + topic + ` expires \+\d+s`,
+		`wait (?:proposal|settle|request)`,
+		`OUT ` + label + ` ` + said,
+		`(?:write|rewrite) ` + label + ` sock=\d+`,
+		`(?:ack|give-up) ` + label,
+		`push tag=\d+ (?:` + topic + `(?: dropped duplicate)?|dropped not-held)`,
+		`IN tag=\d+ ` + topic + ` (?:` + id + ` ` + said + `|dropped (?:cannot-open|not-jsonrpc|unexpected-id))`,
+		`settle (?:ok accounts=\d+|refused code=-?\d+)`,
+		`deadline passed: reading`,
+		`read [12]/2`,
+		`expired`,
+		`unreachable`,
+		`end(?: (?:unavailable|expired|rejected|unsupported|no_account|deleted|wallet) code=-?\d+)?`,
+	}, "|") + `)$`)
+}()
 
 // bwcHoldTrace holds the trace of a connection against its rule: every line is
 // one it may write, and none holds one of the texts.
