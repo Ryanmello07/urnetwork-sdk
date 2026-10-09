@@ -27,6 +27,12 @@ type Config struct {
 	NamespaceKey    string // "polkadot"
 	Chain           string // the one CAIP-2 chain proposed
 	Method          string // the one method proposed and requested
+	// Optional members of the proposal (wire.ProposeOptions; delta 2.2). The
+	// topic and the expiry are the pairing's own: only whether they are sent
+	// is chosen here. With none of the three the proposal is ur.io's.
+	ProposePairingTopic bool
+	ProposeExpiry       bool
+	Redirect            *wire.Redirect // nil = no redirect in the metadata
 	// seconds of running time the socket is kept after SetForeground(false); 0 closes it at once (B.3 R3)
 	BackgroundSocketSeconds int
 	Now                     func() int64                                                                // unix milliseconds; nil = time.Now().UnixMilli

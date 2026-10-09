@@ -385,6 +385,58 @@ func TestClientBaseline(t *testing.T) {
 	})
 }
 
+// The optional members of the proposal (delta 2.2). A config that asks for
+// none sends ur.io's proposal. One that asks sends the topic and the expiry of
+// the pairing it made, and its redirect as it is; the expiry is the one number
+// the uri and the event carry, and the flow goes on with the three.
+func TestClientProposalOptions(t *testing.T) {
+	const redirect = `{"native":"app.example.wallet://return","universal":"https://app.example/return"}`
+	for _, asked := range []bool{false, true} {
+		play(t, func(s *scene, config *Config, _ *relaytest.WalletOptions) {
+			// not the 300 s a pairing has until the engine gives it its own
+			config.Timing = DefaultTiming()
+			config.Timing.PairingTtl = 120 * time.Second
+			if asked {
+				config.ProposePairingTopic, config.ProposeExpiry = true, true
+				config.Redirect = &wire.Redirect{Native: "app.example.wallet://return", Universal: "https://app.example/return"}
+			}
+		}, func(t *testing.T, s *scene) {
+			s.client.Pair()
+			s.wait(latency)
+			ready, pairing := s.take(), s.pairing()
+			s.wallet.Pair(s.uri)
+			s.proposal = receive(s, s.wallet.Proposals())
+			var params struct {
+				PairingTopic    string
+				ExpiryTimestamp int64
+				Proposer        struct {
+					Metadata struct{ Redirect json.RawMessage }
+				}
+			}
+			err := json.Unmarshal(s.proposal.Params, &params)
+			switch got := string(s.proposal.Params); {
+			case err != nil || pairing.ExpiryUnix != time.Now().Unix()+120 || len(ready) != 2 || ready[1].PairingExpiryMillis != pairing.ExpiryUnix*1000:
+				t.Fatalf("the proposal %s (%v), the pairing until %d, told %q", got, err, pairing.ExpiryUnix, names(ready, true))
+			case !asked:
+				for _, member := range []string{"pairingTopic", "expiryTimestamp", "redirect"} {
+					if strings.Contains(got, member) {
+						t.Fatalf("the proposal has %s unasked: %s", member, got)
+					}
+				}
+			case params.PairingTopic != pairing.Topic || params.ExpiryTimestamp != pairing.ExpiryUnix || string(params.Proposer.Metadata.Redirect) != redirect:
+				t.Fatalf("the proposal %s for the pairing %s until %d", got, pairing.Topic, pairing.ExpiryUnix)
+			}
+			s.wallet.Approve(s.proposal)
+			s.wait(latency)
+			s.expect("settled", "settled")
+			_, request := s.sign()
+			s.wallet.Respond(request, testSignature)
+			s.wait(latency)
+			s.expect("signed", "result "+testSignature)
+		})
+	}
+}
+
 // TE2, TE3, TE9 (R2, R12): the process is away while the wallet
 // answers, in each of the three waits. What it finds in its mailbox when it
 // runs again is used, also when the deadline of the wait has passed.

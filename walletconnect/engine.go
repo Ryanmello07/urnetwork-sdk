@@ -204,8 +204,16 @@ func (e *engine) onOpen() {
 	e.setWait(w)
 	e.tr.addTopic(pairing.Topic)
 	e.tr.logf("walletconnect: pairing %s proposed", pairing.Topic[:8])
+	// the expiry is the number the uri, the wait and the event carry (delta 2.2)
+	options := wire.ProposeOptions{Redirect: e.config.Redirect}
+	if e.config.ProposePairingTopic {
+		options.PairingTopic = pairing.Topic
+	}
+	if e.config.ProposeExpiry {
+		options.ExpiryTimestamp = pairing.ExpiryUnix
+	}
 	w.entry = e.publish(pairing.Topic, pairing.SymKey,
-		wire.ProposeRequest(w.id, e.keys.Public, e.config.Metadata, e.config.NamespaceKey, e.config.Chain, e.config.Method, wire.ProposeOptions{}),
+		wire.ProposeRequest(w.id, e.keys.Public, e.config.Metadata, e.config.NamespaceKey, e.config.Chain, e.config.Method, options),
 		wire.TagSessionPropose, wire.TtlFiveMinutes, 0)
 }
 
