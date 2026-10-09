@@ -372,6 +372,7 @@ public interface Raw extends Library {
   Pointer urnet_bittensor_wallet_connect_purpose(long a0);
   Pointer urnet_bittensor_wallet_connect_result(long a0);
   void urnet_bittensor_wallet_connect_set_foreground(long a0, byte a1);
+  byte urnet_bittensor_wallet_connect_set_return_links(long a0, String a1, String a2, PointerByReference a3);
   byte urnet_bittensor_wallet_connect_sign(long a0, String a1, String a2, PointerByReference a3);
   Pointer urnet_bittensor_wallet_connect_state(long a0);
   Pointer urnet_bittensor_wallet_connect_take_proof(long a0);

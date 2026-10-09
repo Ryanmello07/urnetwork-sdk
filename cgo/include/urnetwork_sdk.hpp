@@ -193,6 +193,7 @@ inline constexpr const char* BittensorWalletErrorUnsupportedPlatform = "unsuppor
 inline constexpr const char* BittensorWalletErrorUnsupportedWallet = "unsupported_wallet";
 inline constexpr const char* BittensorWalletErrorWallet = "wallet_error";
 inline constexpr const char* BittensorWalletErrorWrongTransport = "wrong_transport";
+inline constexpr const char* BittensorWalletLinkLaunchPackage = "launch-package:";
 inline constexpr const char* BittensorWalletNova = "nova";
 inline constexpr const char* BittensorWalletPlatformAndroid = "android";
 inline constexpr const char* BittensorWalletPlatformIos = "ios";
@@ -17723,6 +17724,7 @@ public:
 	std::string purpose() const;
 	std::optional<BittensorWalletResult> result() const;
 	void setForeground(bool foreground) const;
+	void setReturnLinks(const std::string& native_link, const std::string& universal_link) const;
 	void sign(const std::string& purpose, const std::string& expected_address) const;
 	std::string state() const;
 	std::optional<BittensorWalletProof> takeProof() const;
@@ -26551,6 +26553,16 @@ inline std::optional<BittensorWalletResult> BittensorWalletConnect::result() con
 }
 inline void BittensorWalletConnect::setForeground(bool foreground) const {
 	urnet_bittensor_wallet_connect_set_foreground(handle(), foreground);
+}
+inline void BittensorWalletConnect::setReturnLinks(const std::string& native_link, const std::string& universal_link) const {
+	char* err_c = nullptr;
+	bool ok = urnet_bittensor_wallet_connect_set_return_links(handle(), native_link.c_str(), universal_link.c_str(), &err_c);
+	if (err_c) {
+		detail::throwError(err_c);
+	}
+	if (!ok) {
+		throw Error("urnet: urnet_bittensor_wallet_connect_set_return_links failed");
+	}
 }
 inline void BittensorWalletConnect::sign(const std::string& purpose, const std::string& expected_address) const {
 	char* err_c = nullptr;

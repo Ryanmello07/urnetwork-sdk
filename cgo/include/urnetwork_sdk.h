@@ -134,6 +134,7 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_BITTENSOR_WALLET_ERROR_UNSUPPORTED_WALLET "unsupported_wallet"
 #define URNET_BITTENSOR_WALLET_ERROR_WALLET "wallet_error"
 #define URNET_BITTENSOR_WALLET_ERROR_WRONG_TRANSPORT "wrong_transport"
+#define URNET_BITTENSOR_WALLET_LINK_LAUNCH_PACKAGE "launch-package:"
 #define URNET_BITTENSOR_WALLET_NOVA "nova"
 #define URNET_BITTENSOR_WALLET_PLATFORM_ANDROID "android"
 #define URNET_BITTENSOR_WALLET_PLATFORM_IOS "ios"
@@ -1023,6 +1024,7 @@ char* urnet_bittensor_wallet_connect_pairing_uri(uint64_t self);
 char* urnet_bittensor_wallet_connect_purpose(uint64_t self);
 char* urnet_bittensor_wallet_connect_result(uint64_t self);
 void urnet_bittensor_wallet_connect_set_foreground(uint64_t self, bool foreground);
+bool urnet_bittensor_wallet_connect_set_return_links(uint64_t self, const char* native_link, const char* universal_link, char** out_error);
 bool urnet_bittensor_wallet_connect_sign(uint64_t self, const char* purpose, const char* expected_address, char** out_error);
 char* urnet_bittensor_wallet_connect_state(uint64_t self);
 char* urnet_bittensor_wallet_connect_take_proof(uint64_t self);

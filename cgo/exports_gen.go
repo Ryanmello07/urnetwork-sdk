@@ -5617,6 +5617,21 @@ func urnet_bittensor_wallet_connect_set_foreground(self C.uint64_t, foreground C
 	self_.SetForeground(bool(foreground))
 }
 
+//export urnet_bittensor_wallet_connect_set_return_links
+func urnet_bittensor_wallet_connect_set_return_links(self C.uint64_t, nativeLink *C.char, universalLink *C.char, outError **C.char) C.bool {
+	defer cgoGuard("urnet_bittensor_wallet_connect_set_return_links")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_set_return_links")
+	if !ok {
+		return C.bool(false)
+	}
+	err := self_.SetReturnLinks(goString(nativeLink), goString(universalLink))
+	if err != nil {
+		setErrorOut(outError, err)
+		return C.bool(false)
+	}
+	return C.bool(true)
+}
+
 //export urnet_bittensor_wallet_connect_sign
 func urnet_bittensor_wallet_connect_sign(self C.uint64_t, purpose *C.char, expectedAddress *C.char, outError **C.char) C.bool {
 	defer cgoGuard("urnet_bittensor_wallet_connect_sign")

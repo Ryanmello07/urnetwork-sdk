@@ -145,6 +145,7 @@ EXPORTS
 	urnet_bittensor_wallet_connect_purpose
 	urnet_bittensor_wallet_connect_result
 	urnet_bittensor_wallet_connect_set_foreground
+	urnet_bittensor_wallet_connect_set_return_links
 	urnet_bittensor_wallet_connect_sign
 	urnet_bittensor_wallet_connect_state
 	urnet_bittensor_wallet_connect_take_proof
