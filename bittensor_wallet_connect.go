@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -94,6 +95,7 @@ type BittensorWalletConnect struct {
 	configureClient func(config *walletconnect.Config) // called once, before walletconnect.NewClient
 
 	stateLock sync.Mutex
+	redirect  wire.Redirect         // the links of SetReturnLinks; the zero value names none
 	client    *walletconnect.Client // from the first Sign on
 	over      bool                  // the client has ended, and the wallet session with it
 	state     string
@@ -180,6 +182,7 @@ func newBittensorWalletConnect(ctx context.Context, walletId string, platform st
 }
 
 // clientConfig is the client of this connection (design B.2; B.3 R3, R15).
+// The lock is held.
 func (self *BittensorWalletConnect) clientConfig() *walletconnect.Config {
 	log := connect.DefaultLogger()
 	config := &walletconnect.Config{
@@ -195,6 +198,11 @@ func (self *BittensorWalletConnect) clientConfig() *walletconnect.Config {
 		NamespaceKey: "polkadot",
 		Chain:        BittensorWalletConnectChain,
 		Method:       BittensorWalletConnectMethod,
+		// Talisman, opened by a link, held ur.io's proposal and showed no
+		// prompt; the one request that showed it named its pairing and the
+		// pairing's expiry (delta 1.2, 2.2)
+		ProposePairingTopic: true,
+		ProposeExpiry:       true,
 		// called on the loop of the client and, through SignMessage, on the
 		// goroutine of a challenge leg
 		Now: self.nowMillis,
@@ -211,6 +219,9 @@ func (self *BittensorWalletConnect) clientConfig() *walletconnect.Config {
 		// there the process goes on for about a minute behind the wallet
 		config.IdentifierName, config.BackgroundSocketSeconds = "packageName", 45
 	}
+	if redirect := self.redirect; redirect != (wire.Redirect{}) {
+		config.Redirect = &redirect
+	}
 	if self.configureClient != nil {
 		self.configureClient(config)
 	}
@@ -219,6 +230,70 @@ func (self *BittensorWalletConnect) clientConfig() *walletconnect.Config {
 
 func (self *BittensorWalletConnect) WalletId() string {
 	return self.walletId
+}
+
+// SetReturnLinks names the link a wallet may open to bring this app to the
+// front again; it is put into the connection request as the app's redirect.
+// The link must be inert: opening it does nothing but show the app. Nothing
+// arrives on it and the connection never reads it. nativeLink is a link on a
+// scheme of the app ("<scheme>://<host>"), universalLink an https link; either
+// may be "". A link with a query or a fragment is refused, and so is one the
+// apps act on today (the scheme ur or urnetwork, the host
+// bittensor-sign-message). Only before the first Sign.
+// Errors (nothing changes): invalid_return_link, busy (a Sign was accepted).
+func (self *BittensorWalletConnect) SetReturnLinks(nativeLink string, universalLink string) error {
+	if fault := bittensorWalletReturnLinkFault(nativeLink, false); fault != "" {
+		return fmt.Errorf("invalid_return_link: the native link %s", fault)
+	}
+	if fault := bittensorWalletReturnLinkFault(universalLink, true); fault != "" {
+		return fmt.Errorf("invalid_return_link: the universal link %s", fault)
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.signs > 0 {
+		// the proposal may be at the relay
+		return errors.New("busy: a Sign was accepted")
+	}
+	self.redirect = wire.Redirect{Native: nativeLink, Universal: universalLink}
+	return nil
+}
+
+// bittensorWalletReturnLinkFault says what is wrong with a return link, "" for
+// one that is taken (delta 2.3). A link carries no data, so that a handler
+// finds nothing to read; it is shown to a wallet; and it is no link the apps
+// act on today, which would put a screen over the one that waits or sign in
+// from what the link says.
+func bittensorWalletReturnLinkFault(link string, universal bool) string {
+	if link == "" {
+		return ""
+	}
+	if len(link) > 128 || strings.ContainsFunc(link, func(r rune) bool { return r <= ' ' || r > '~' }) {
+		return "has more than 128 bytes or is not printable ascii"
+	}
+	if strings.ContainsAny(link, "?#") {
+		return "has a query or a fragment"
+	}
+	u, err := url.Parse(link)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
+		return "is not <scheme>://<host>[/<path>]"
+	}
+	if universal {
+		if u.Scheme != "https" || strings.Contains(u.Host, ":") {
+			return "is not https://<host>[/<path>]"
+		}
+		return ""
+	}
+	switch u.Scheme {
+	case "http", "https", "wc", "file", "content", "intent", "javascript", "data":
+		return "is on a scheme that is not the app's"
+	case "ur", "urnetwork":
+		return "is on a scheme the apps act on"
+	}
+	// the return of the browser bridge, on whatever scheme
+	if strings.EqualFold(u.Hostname(), "bittensor-sign-message") {
+		return "is the return of the browser bridge"
+	}
+	return ""
 }
 
 // Sign asks the wallet for one proof. purpose is a BittensorWalletPurpose*.
@@ -694,7 +769,8 @@ func (self *BittensorWalletConnect) answered(signature string) {
 // newBittensorWalletConnectSession is the session of one Sign: one challenge,
 // on the walletconnect transport, which is the one that is asked to sign and
 // takes a signature, and with no redirect link, so that no url can be handed
-// to it as a return (design A.7 step 1, F.6).
+// to it as a return (design A.7 step 1, F.6). The links of SetReturnLinks are
+// the client's alone (delta 2.4).
 func newBittensorWalletConnectSession(walletId string, platform string, purpose string) *BittensorWalletSession {
 	return &BittensorWalletSession{
 		walletId:  walletId,

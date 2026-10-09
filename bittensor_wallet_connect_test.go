@@ -881,6 +881,112 @@ func TestBittensorWalletConnectSessionTakesNoReturn(t *testing.T) {
 	}
 }
 
+// The return links an app may name (delta 2.3, 2.4): what is refused, what a
+// wallet is shown of them in the proposal, beside the topic and the expiry of
+// the pairing, and TC14 again on a connection that named them: a link opened
+// with a proof in it is no return, whatever it is.
+func TestBittensorWalletConnectReturnLinks(t *testing.T) {
+	const native, universal = "com.bringyour.network.wallet://return", "https://ur.io/wallet/return"
+	login := BittensorWalletPurposeLogin
+	// the redirect of a proposal the wallet was handed ("" = it has none),
+	// which also carries the topic and the expiry of the pairing uri
+	redirect := func(s *bwcScene, proposal *relaytest.Proposal) string {
+		s.t.Helper()
+		var params struct {
+			PairingTopic    string
+			ExpiryTimestamp int64
+			Proposer        struct {
+				Metadata struct{ Redirect json.RawMessage }
+			}
+		}
+		pairing, err := wire.ParsePairingUri(s.c.PairingUri())
+		if err != nil || json.Unmarshal(proposal.Params, &params) != nil || params.PairingTopic != pairing.Topic || params.ExpiryTimestamp != pairing.ExpiryUnix {
+			s.t.Fatalf("the proposal %s (%v)", proposal.Params, err)
+		}
+		return string(params.Proposer.Metadata.Redirect)
+	}
+	for _, row := range []struct{ native, universal, redirect string }{
+		{"", "", ""},
+		{native, "", `{"native":"` + native + `"}`},
+		{"", universal, `{"universal":"` + universal + `"}`},
+	} {
+		bwcPlayNova(t, func(t *testing.T, s *bwcScene) {
+			// a link that was named is taken back by naming none
+			if err := errors.Join(s.c.SetReturnLinks(native, universal), s.c.SetReturnLinks(row.native, row.universal)); err != nil {
+				t.Fatal(err)
+			}
+			if got := redirect(s, s.pair(login, "")); got != row.redirect {
+				t.Fatalf("the redirect of (%q, %q) is %s", row.native, row.universal, got)
+			}
+		})
+	}
+
+	bwcPlay(t, BittensorWalletTalisman, BittensorWalletPlatformAndroid, relaytest.WalletOptions{}, func(t *testing.T, s *bwcScene) {
+		c := s.c
+		for _, taken := range [][2]string{
+			{"app://" + strings.Repeat("a", 122), "https://ur.io"}, // 128 bytes
+			{"app.example://back/path", "https://ur.io/back/"},
+			{native, universal},
+		} {
+			if err := c.SetReturnLinks(taken[0], taken[1]); err != nil {
+				t.Fatalf("%q: %v", taken, err)
+			}
+		}
+		// each of these is refused, by itself, and changes nothing
+		refused := func(nativeLink string, universalLink string) {
+			t.Helper()
+			if err := c.SetReturnLinks(nativeLink, universalLink); err == nil || !strings.HasPrefix(err.Error(), "invalid_return_link: ") ||
+				strings.Contains(err.Error(), nativeLink) || strings.Contains(err.Error(), universalLink) {
+				t.Fatalf("(%q, %q): %v", nativeLink, universalLink, err)
+			}
+		}
+		for _, link := range []string{
+			"app://back?x=1", "app://back?", "app://back#x", "app://back#", // a query, a fragment
+			"app://user@back", "app://ba ck", "app://back\n", "app://b\x00ack", "app://b\u00e4ck", // userinfo; a space, a control character, no ascii
+			"app://" + strings.Repeat("a", 123),                    // 129 bytes
+			"back", "//back", "app:back", "app:///back", "://back", // no scheme, or no host behind it
+			"http://back", "https://back", "wc://back", "file://back", "content://back", "intent://back", "javascript://back", "data://back",
+			"ur://back", "UR://back", "urnetwork://back", // the schemes the apps act on
+			"app://bittensor-sign-message", "app://Bittensor-Sign-Message:1/x", // the return of the browser bridge
+		} {
+			refused(link, "https://other.example/back")
+		}
+		for _, link := range []string{
+			"https://ur.io/back?x=1", "https://ur.io/back#x", "https://user@ur.io/back", "https://ur.io:8443/back", "https://ur.io:/back",
+			"https://ur.io/ba ck", "https://ur.io/" + strings.Repeat("a", 115),
+			"http://ur.io/back", "app://back", "ur.io/back", "https:///back", "https:ur.io",
+		} {
+			refused("other.example://back", link)
+		}
+		proposal := s.pair(login, "")
+		if got := redirect(s, proposal); got != `{"native":"`+native+`","universal":"`+universal+`"}` {
+			t.Fatalf("the redirect is %s", got)
+		}
+		// a Sign was accepted: the proposal may be at the relay
+		if err := c.SetReturnLinks("", ""); err == nil || !strings.HasPrefix(err.Error(), "busy: ") {
+			t.Fatalf("after a Sign: %v", err)
+		}
+		s.wallet.Approve(proposal)
+		s.wait(bwcStep)
+		s.expect("the request is with the wallet", bwcAwaitingSignature, bwcAwaitingApproval, bwcConnecting, bwcAwaitingSignature, bwcAwaitingSignature)
+		// the session of the Sign waits for the wallet now, and takes no link for its answer
+		c.stateLock.Lock()
+		session := c.session
+		c.stateLock.Unlock()
+		for _, link := range []string{native, universal} {
+			uri := link + "?address=" + bittensorTestAliceSs58 + "&signature=" + bittensorTestSignature + "&purpose=login"
+			if result := session.HandleBridgeReturn(uri, c.nowMillis()); session.IsReturn(link) || session.IsReturn(uri) || result.ErrorCode != BittensorWalletErrorNotReturn {
+				t.Fatalf("a return on %s was taken (%t), answered %s", link, session.IsReturn(uri), result.ErrorCode)
+			}
+		}
+		s.expect("nothing changed", bwcAwaitingSignature)
+		if c.Result() != nil {
+			t.Fatalf("a result: %+v", c.Result())
+		}
+		s.answer(bwcTake(s, s.wallet.Requests()), bwcSignature, bwcSigned)
+	})
+}
+
 // TC17: a listener may call every method of the connection from inside a
 // call, and one that panics stops neither the calls to the next listener nor
 // the process. That no call is made on the goroutine of the caller is held
