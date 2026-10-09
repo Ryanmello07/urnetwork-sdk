@@ -17723,12 +17723,15 @@ public:
 	std::string pairingUri() const;
 	std::string purpose() const;
 	std::optional<BittensorWalletResult> result() const;
+	void setDeviceTestOptions(const std::string& options) const;
 	void setForeground(bool foreground) const;
 	void setReturnLinks(const std::string& native_link, const std::string& universal_link) const;
+	void setTrace(bool enabled) const;
 	void sign(const std::string& purpose, const std::string& expected_address) const;
 	std::string state() const;
 	std::optional<BittensorWalletProof> takeProof() const;
 	std::string takeWalletLink() const;
+	std::optional<StringList> traceLines() const;
 	std::string walletId() const;
 	std::string walletLink() const;
 };
@@ -26551,6 +26554,16 @@ inline std::optional<BittensorWalletResult> BittensorWalletConnect::result() con
 	}
 	return detail::parseJson<BittensorWalletResult>(r_s->c_str());
 }
+inline void BittensorWalletConnect::setDeviceTestOptions(const std::string& options) const {
+	char* err_c = nullptr;
+	bool ok = urnet_bittensor_wallet_connect_set_device_test_options(handle(), options.c_str(), &err_c);
+	if (err_c) {
+		detail::throwError(err_c);
+	}
+	if (!ok) {
+		throw Error("urnet: urnet_bittensor_wallet_connect_set_device_test_options failed");
+	}
+}
 inline void BittensorWalletConnect::setForeground(bool foreground) const {
 	urnet_bittensor_wallet_connect_set_foreground(handle(), foreground);
 }
@@ -26563,6 +26576,9 @@ inline void BittensorWalletConnect::setReturnLinks(const std::string& native_lin
 	if (!ok) {
 		throw Error("urnet: urnet_bittensor_wallet_connect_set_return_links failed");
 	}
+}
+inline void BittensorWalletConnect::setTrace(bool enabled) const {
+	urnet_bittensor_wallet_connect_set_trace(handle(), enabled);
 }
 inline void BittensorWalletConnect::sign(const std::string& purpose, const std::string& expected_address) const {
 	char* err_c = nullptr;
@@ -26589,6 +26605,14 @@ inline std::optional<BittensorWalletProof> BittensorWalletConnect::takeProof() c
 inline std::string BittensorWalletConnect::takeWalletLink() const {
 	char* r_c = urnet_bittensor_wallet_connect_take_wallet_link(handle());
 	return detail::takeString(r_c);
+}
+inline std::optional<StringList> BittensorWalletConnect::traceLines() const {
+	char* r_c = urnet_bittensor_wallet_connect_trace_lines(handle());
+	auto r_s = detail::takeStringOpt(r_c);
+	if (!r_s) {
+		return std::nullopt;
+	}
+	return detail::parseJson<StringList>(r_s->c_str());
 }
 inline std::string BittensorWalletConnect::walletId() const {
 	char* r_c = urnet_bittensor_wallet_connect_wallet_id(handle());

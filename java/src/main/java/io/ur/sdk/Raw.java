@@ -371,12 +371,15 @@ public interface Raw extends Library {
   Pointer urnet_bittensor_wallet_connect_pairing_uri(long a0);
   Pointer urnet_bittensor_wallet_connect_purpose(long a0);
   Pointer urnet_bittensor_wallet_connect_result(long a0);
+  byte urnet_bittensor_wallet_connect_set_device_test_options(long a0, String a1, PointerByReference a2);
   void urnet_bittensor_wallet_connect_set_foreground(long a0, byte a1);
   byte urnet_bittensor_wallet_connect_set_return_links(long a0, String a1, String a2, PointerByReference a3);
+  void urnet_bittensor_wallet_connect_set_trace(long a0, byte a1);
   byte urnet_bittensor_wallet_connect_sign(long a0, String a1, String a2, PointerByReference a3);
   Pointer urnet_bittensor_wallet_connect_state(long a0);
   Pointer urnet_bittensor_wallet_connect_take_proof(long a0);
   Pointer urnet_bittensor_wallet_connect_take_wallet_link(long a0);
+  Pointer urnet_bittensor_wallet_connect_trace_lines(long a0);
   Pointer urnet_bittensor_wallet_connect_wallet_id(long a0);
   Pointer urnet_bittensor_wallet_connect_wallet_link(long a0);
   Pointer urnet_bittensor_wallet_session_bridge_url(long a0, PointerByReference a1);

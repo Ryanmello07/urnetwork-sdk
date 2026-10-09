@@ -1023,12 +1023,15 @@ bool urnet_bittensor_wallet_connect_connected(uint64_t self);
 char* urnet_bittensor_wallet_connect_pairing_uri(uint64_t self);
 char* urnet_bittensor_wallet_connect_purpose(uint64_t self);
 char* urnet_bittensor_wallet_connect_result(uint64_t self);
+bool urnet_bittensor_wallet_connect_set_device_test_options(uint64_t self, const char* options, char** out_error);
 void urnet_bittensor_wallet_connect_set_foreground(uint64_t self, bool foreground);
 bool urnet_bittensor_wallet_connect_set_return_links(uint64_t self, const char* native_link, const char* universal_link, char** out_error);
+void urnet_bittensor_wallet_connect_set_trace(uint64_t self, bool enabled);
 bool urnet_bittensor_wallet_connect_sign(uint64_t self, const char* purpose, const char* expected_address, char** out_error);
 char* urnet_bittensor_wallet_connect_state(uint64_t self);
 char* urnet_bittensor_wallet_connect_take_proof(uint64_t self);
 char* urnet_bittensor_wallet_connect_take_wallet_link(uint64_t self);
+char* urnet_bittensor_wallet_connect_trace_lines(uint64_t self);
 char* urnet_bittensor_wallet_connect_wallet_id(uint64_t self);
 char* urnet_bittensor_wallet_connect_wallet_link(uint64_t self);
 
