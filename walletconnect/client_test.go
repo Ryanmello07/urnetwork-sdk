@@ -1076,6 +1076,8 @@ func TestClientLogsNoSecret(t *testing.T) {
 		s.forge(topic, other, []byte(marker), wire.TagSessionRequestResponse)
 		s.forge(topic, session, []byte(marker), wire.TagSessionRequestResponse)
 		s.forge(topic, session, wire.ResultFrame(wire.IdToken(7), marker), wire.TagSessionRequestResponse)
+		// a number of 21 digits is not repeated as an id
+		s.forge(topic, session, wire.ResultFrame(json.RawMessage("123456789012345678901"), marker), wire.TagSessionRequestResponse)
 		s.expect("nothing of that is told")
 		_, request := s.sign()
 		s.wallet.RespondError(request, 4001, marker)
@@ -1130,7 +1132,7 @@ func TestClientLogsNoSecret(t *testing.T) {
 			"push tag=1101 topic=P", "IN tag=1101 topic=P id=N result responderPublicKey=1", "wait settle",
 			"push tag=1102 topic=B", "IN tag=1102 topic=B id=N request wc_sessionSettle", "settle ok accounts=2", "OUT tag=1103 topic=B id=N result",
 			"push tag=1234 dropped not-held", "IN tag=1109 topic=B dropped cannot-open", "IN tag=1109 topic=B dropped not-jsonrpc",
-			"IN tag=1109 topic=B id=7 result", "IN tag=1109 topic=B dropped unexpected-id",
+			"IN tag=1109 topic=B id=7 result", "IN tag=1109 topic=B dropped unexpected-id", "IN tag=1109 topic=B id=? result", "IN tag=1109 topic=B dropped unexpected-id",
 			"wait request", "OUT tag=1108 topic=B id=N request wc_sessionRequest", "IN tag=1109 topic=B id=N error 4001",
 			"sock lost 1 age=0s code=4010", "wait request", "OUT tag=1108 topic=B id=N request wc_sessionRequest",
 			"sock dial 3 relay.walletconnect.org", "sock open 3", "write tag=1108 topic=B id=N sock=3", "IN tag=1109 topic=B id=N result signature=1",

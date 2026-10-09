@@ -679,7 +679,8 @@ func TestBittensorWalletConnectFailures(t *testing.T) {
 		if strings.Contains(line, marker) || strings.Contains(line, "Unexpected error") {
 			t.Fatalf("logged: %s", line)
 		}
-		if strings.HasPrefix(line, "[bwc]") {
+		// a line of the client's own, at the verbosity above the default: a trace line has a blank behind the tag
+		if strings.HasPrefix(line, "[bwc]walletconnect:") {
 			tagged++
 		}
 	}
@@ -1287,7 +1288,8 @@ func TestBittensorWalletConnectTrace(t *testing.T) {
 			// of the two Signs; and the list is a copy
 			copied := c.TraceLines()
 			copied.Add(marker)
-			if !strings.Contains(trace, " IN tag=0 "+b) || strings.Count(trace, " request other\n") != 2 || strings.Count(trace, " request id=") != 2 || c.TraceLines().Len() != len(lines) {
+			copied.values[0] = marker
+			if !strings.Contains(trace, " IN tag=0 "+b) || strings.Count(trace, " request other\n") != 2 || strings.Count(trace, " request id=") != 2 || !slices.Equal(c.TraceLines().getAll(), lines) {
 				t.Fatalf("the trace:\n%s", trace)
 			}
 		})
