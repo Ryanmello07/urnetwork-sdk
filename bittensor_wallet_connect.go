@@ -311,6 +311,8 @@ func (self *BittensorWalletConnect) PairingUri() string {
 // awaiting_approval the link that hands the pairing over, while
 // awaiting_signature the link that brings the wallet forward. "" when there is
 // nothing to open. For an "Open wallet" button. As secret as PairingUri.
+// Where a wallet is brought forward by starting its app, the answer is
+// BittensorWalletLinkLaunchPackage, which is no link.
 func (self *BittensorWalletConnect) WalletLink() string {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()

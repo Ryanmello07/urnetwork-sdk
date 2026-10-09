@@ -782,7 +782,7 @@ func TestBittensorWalletConnectTakeWalletLink(t *testing.T) {
 			t.Fatalf("%d dials, or no link to open", dials)
 		}
 	})
-	// the entry of any wallet has no link, and Talisman's none that brings it forward
+	// the entry of any wallet has no link, and on ios Talisman's none that brings it forward
 	for walletId, pairing := range map[string]string{BittensorWalletWalletConnect: "", BittensorWalletTalisman: "https://talisman.xyz/wc?uri=wc:"} {
 		t.Run(walletId, func(t *testing.T) {
 			bwcPlay(t, walletId, BittensorWalletPlatformIos, relaytest.WalletOptions{}, func(t *testing.T, s *bwcScene) {
@@ -801,6 +801,15 @@ func TestBittensorWalletConnectTakeWalletLink(t *testing.T) {
 			})
 		})
 	}
+	// On android Talisman is brought forward by starting its app, for which
+	// there is no link (delta 3.3): what is taken once, and what the button
+	// gets, is the mark that says so.
+	bwcPlay(t, BittensorWalletTalisman, BittensorWalletPlatformAndroid, relaytest.WalletOptions{}, func(t *testing.T, s *bwcScene) {
+		s.signIn(login, "")
+		if c := s.c; c.TakeWalletLink() != BittensorWalletLinkLaunchPackage || c.TakeWalletLink() != "" || c.WalletLink() != BittensorWalletLinkLaunchPackage {
+			t.Fatal("the forward step is not taken once, or not the one for the button")
+		}
+	})
 }
 
 // TC10: a connection serves one purpose family (design A.3 rule 5).
