@@ -43,11 +43,16 @@ type Config struct {
 	Timing  *Timing                          // nil = DefaultTiming()
 	OnEvent func(event Event)                // called by the Client, one event at a time
 	Logf    func(format string, args ...any) // nil = silent; never given a secret
+	// One line per event, for a device test (delta 5.3); nil = none. Called on
+	// the loop. Never given a key, a uri, a token, a message text, a signature
+	// or any text that a wallet or the relay wrote: numbers, fixed words and 8
+	// hex characters of a topic the client holds, and nothing else.
+	Trace func(format string, args ...any)
 }
 
 // withDefaults is a copy of the config in which every nil that stands for a
-// default is that default. NetDial and Logf stay nil: they are asked where
-// they are used.
+// default is that default. NetDial, Logf and Trace stay nil: they are asked
+// where they are used.
 func (c *Config) withDefaults() *Config {
 	config := *c
 	if len(config.RelayUrls) == 0 {

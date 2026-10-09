@@ -13,13 +13,17 @@ package sdk
 // shows that a connection whose context ended leaves none behind.
 
 import (
+	"bytes"
+	"cmp"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -419,11 +423,12 @@ func TestBittensorWalletConnectLateReturn(t *testing.T) {
 	}
 }
 
-// bwcLog takes what is logged through connect's default logger, at every
-// verbosity.
+// bwcLog takes what is logged through connect's default logger: at every
+// verbosity, or with what is above the default one kept apart in verbose.
 type bwcLog struct {
-	mu    sync.Mutex
-	lines []string
+	mu      sync.Mutex
+	lines   []string
+	verbose *bwcLog
 }
 
 func (l *bwcLog) Infof(format string, args ...any) {
@@ -434,8 +439,36 @@ func (l *bwcLog) Infof(format string, args ...any) {
 func (l *bwcLog) Info(args ...any)                    { l.Infof("%s", fmt.Sprint(args...)) }
 func (l *bwcLog) Warningf(format string, args ...any) { l.Infof(format, args...) }
 func (l *bwcLog) Errorf(format string, args ...any)   { l.Infof(format, args...) }
-func (l *bwcLog) V(int32) connect.Verbose             { return l }
+func (l *bwcLog) V(int32) connect.Verbose             { return cmp.Or(l.verbose, l) }
 func (l *bwcLog) Enabled() bool                       { return true }
+
+// A trace line (delta 5.3): the clock of the connection, and then a line the
+// connection writes itself, as a whole, or one of its client, which package
+// walletconnect holds against the forms of its own.
+var bwcTraceLine = regexp.MustCompile(`^\d\d:\d\d:\d\d\.\d{3} (?:` + strings.Join([]string{
+	`sign (?:login|create|add|connect) first=[01]`,
+	`state (?:idle|connecting|awaiting_approval|awaiting_signature|signed|failed|closed) -> [a-z_]+(?: [a-z_]+(?:/[a-z_]+)?)?`,
+	`connected [01]`,
+	`link (?:pair|forward) taken`,
+	`challenge attempt \d+ (?:ok|failed)`,
+	`request id=\d+`,
+	`signature len=\d+ accepted=[01]`,
+	`proof taken`,
+	`(?:sock|fg|parked|resume|stopped|pairing|wait|OUT|write|rewrite|ack|give-up|push|IN|settle|deadline|read|expired|unreachable|end)(?: .*)?`,
+}, "|") + `)$`)
+
+// bwcHoldTrace holds the trace of a connection against its rule: every line is
+// one it may write, and none holds one of the texts.
+func bwcHoldTrace(t *testing.T, c *BittensorWalletConnect, texts ...string) []string {
+	t.Helper()
+	lines := c.TraceLines().getAll()
+	for _, line := range lines {
+		if !bwcTraceLine.MatchString(line) || slices.ContainsFunc(texts, func(text string) bool { return strings.Contains(line, text) }) {
+			t.Errorf("traced: %q", line)
+		}
+	}
+	return lines
+}
 
 // TC6, TC11, TC12 and sequence 6 of design A.8: every way a Sign ends without
 // a proof, as the app is told it (design A.5): the state, the two codes and
@@ -579,10 +612,22 @@ func TestBittensorWalletConnectFailures(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			bwcPlayNova(t, func(t *testing.T, s *bwcScene) {
+				s.c.SetTrace(true)
 				row.drive(s)
 				s.wait(2 * bwcStep)
 				calls := strings.Fields(row.calls)
 				s.expect("the end", calls[len(calls)-1], calls...)
+				// the trace has the codes of the end, and of a wallet's error its number alone (delta 5.4)
+				lines, ended := bwcHoldTrace(t, s.c, marker), ""
+				for _, line := range lines {
+					if strings.Contains(line, " state ") {
+						ended = line
+					}
+				}
+				if end := " -> " + calls[len(calls)-1] + " " + strings.TrimSuffix(row.code+"/"+row.bridge, "/"); !strings.HasSuffix(ended, end) ||
+					strings.Contains(row.message, "9999") != slices.ContainsFunc(lines, func(line string) bool { return strings.HasSuffix(line, " error 9999") }) {
+					t.Fatalf("the trace does not end in %q, or has no code of the wallet's error: %q", end, lines)
+				}
 				want := BittensorWalletResult{ErrorCode: row.code, BridgeErrorCode: row.bridge, ErrorMessage: row.message}
 				if result := s.c.Result(); result == nil || *result != want {
 					t.Fatalf("the result is %+v, want %+v", result, want)
@@ -1085,5 +1130,151 @@ func TestBittensorWalletConnectClose(t *testing.T) {
 				t.Fatalf("the result is %+v, want %s", result, bridge)
 			}
 		})
+	}
+}
+
+// The trace of a device test (delta 5): a login and a create on Talisman and
+// android, in which the wallet writes a marker wherever a wallet can write.
+// The trace says what happened, in order and with the clock of the connection
+// in front; neither it nor the log holds a secret or the marker; every line is
+// in the sdk log at the default verbosity; it is still there after Close. A
+// connection that was never told to trace keeps nothing and logs nothing at
+// that verbosity.
+func TestBittensorWalletConnectTrace(t *testing.T) {
+	const marker = "MARKER-7f3a"
+	seed := wire.Key{0: 9, 31: 9}
+	responder, _ := wire.NewKeyPair(bytes.NewReader(seed[:]))
+	defer connect.SetDefaultLogger(nil)
+	for _, traced := range []bool{false, true} {
+		verbose := &bwcLog{}
+		log := &bwcLog{verbose: verbose}
+		connect.SetDefaultLogger(log)
+		bwcPlay(t, BittensorWalletTalisman, BittensorWalletPlatformAndroid, relaytest.WalletOptions{Seed: seed}, func(t *testing.T, s *bwcScene) {
+			c := s.c
+			if traced {
+				c.SetTrace(true)
+			}
+			proposal := s.pair(BittensorWalletPurposeLogin, "")
+			uri, link := c.PairingUri(), c.TakeWalletLink()
+			pairing, _ := wire.ParsePairingUri(uri)
+			proposer, _ := wire.ParseKey(proposal.ProposerPublicKey)
+			session, _ := wire.DeriveSymKey(seed, proposer)
+			// a stranger who has the pairing, then the wallet with a settle and a request of its own making
+			stranger := s.relay.Peer("stranger")
+			defer stranger.Close()
+			forged, _ := wire.SealRandom(pairing.SymKey, rand.Reader, []byte(`{"id":"`+marker+`","jsonrpc":"2.0","method":"wc_`+marker+`","params":"`+marker+`"}`))
+			stranger.Publish(pairing.Topic, forged, 0, wire.TtlFiveMinutes)
+			s.wallet.ApproveWith(proposal, func(settle *relaytest.SettleEdit) { settle.SkipSettle = true })
+			_, err := s.wallet.Send("wc_sessionSettle", map[string]any{
+				"relay": map[string]string{"protocol": "irn"},
+				"controller": map[string]any{"publicKey": responder.Public.Hex(), "metadata": map[string]any{
+					"name": marker, "description": marker, "url": "https://" + marker, "icons": []string{marker}, "redirect": map[string]string{"native": marker + "://"},
+				}},
+				"namespaces": map[string]*wire.Namespace{"polkadot": {
+					Accounts: []string{BittensorWalletConnectChain + ":" + bittensorTestAliceSs58, BittensorWalletConnectChain + ":" + marker},
+					Methods:  []string{BittensorWalletConnectMethod}, Events: []string{marker},
+				}},
+				"expiry": time.Now().Unix() + 3600,
+			})
+			if _, unknown := s.wallet.Send("wc_"+marker, marker); err != nil || unknown != nil {
+				t.Fatalf("the settle (%v) or a request of the wallet (%v) was not answered", err, unknown)
+			}
+			s.wait(bwcStep)
+			request := bwcTake(s, s.wallet.Requests())
+			forward := c.TakeWalletLink()
+			s.wallet.Respond(request, map[string]string{"signature": bittensorTestSignature, "note": marker})
+			s.wait(bwcStep)
+			proof := c.TakeProof()
+			if proof == nil || forward != BittensorWalletLinkLaunchPackage || c.Sign(BittensorWalletPurposeCreate, proof.Address) != nil {
+				t.Fatalf("the proof %+v, the forward step %q, or no second Sign", proof, forward)
+			}
+			s.wait(bwcStep)
+			s.wallet.RespondError(bwcTake(s, s.wallet.Requests()), 4001, marker)
+			s.wait(bwcStep)
+			c.Close()
+			s.wait(bwcStep)
+
+			token := strings.TrimPrefix(s.relay.Handshakes()[0].Header.Get("Authorization"), "Bearer ")
+			secrets := []string{uri, link, url.QueryEscape(uri), token, "test-project", marker, proposal.ProposerPublicKey, responder.Public.Hex(),
+				bittensorTestAliceSs58, "q1w2e3r4t5y6u7i8o9p0a1s2d3f4g5h6j7k8l9z0x1c", "Sign in to URnetwork", strings.Repeat("ab", 64)}
+			for _, key := range []wire.Key{pairing.SymKey, session} {
+				secrets = append(secrets, wire.EncodeBase64(key[:]), fmt.Sprint(key[:]))
+				// and no 9 characters of the key or of its topic
+				for _, text := range []string{key.Hex(), wire.Topic(key)} {
+					for i := 0; i+9 <= len(text); i++ {
+						secrets = append(secrets, text[i:i+9])
+					}
+				}
+			}
+			lines := bwcHoldTrace(t, c, secrets...)
+			logged := []string{}
+			for _, line := range slices.Concat(log.lines, verbose.lines) {
+				if slices.ContainsFunc(secrets, func(secret string) bool { return strings.Contains(line, secret) }) {
+					t.Fatalf("logged: %s", line)
+				}
+			}
+			for _, line := range log.lines {
+				if text, tagged := strings.CutPrefix(line, "[bwc] "); tagged {
+					logged = append(logged, text)
+				}
+			}
+			if len(token) < 100 || !strings.HasPrefix(link, "https://talisman.xyz/wc?uri=wc:") || !slices.Equal(logged, lines) ||
+				!slices.ContainsFunc(verbose.lines, func(line string) bool { return strings.HasPrefix(line, "[bwc]") }) {
+				t.Fatalf("the token %q, the link %q, or the log at the default verbosity %q is not the trace %q", token, link, logged, lines)
+			}
+			if !traced {
+				if list := c.TraceLines(); list == nil || list.Len() != 0 {
+					t.Fatalf("a trace that was never on: %q", lines)
+				}
+				return
+			}
+			p, b, trace := "topic="+pairing.Topic[:8]+" ", "topic="+wire.Topic(session)[:8]+" ", strings.Join(lines, "\n")+"\n"
+			rest, first := strings.CutPrefix(trace, "00:00:00.000 sign login first=1\n")
+			for _, want := range []string{
+				" state idle -> connecting\n", " sock dial 1 relay.walletconnect.com\n", " OUT tag=1100 " + p,
+				" request wc_sessionPropose T=1 E=1 R=0\n", " state connecting -> awaiting_approval\n", " link pair taken\n",
+				" IN tag=0 " + p + "id=? request other\n", " IN tag=1101 " + p, " IN tag=1102 " + b, " settle ok accounts=2\n", " OUT tag=1103 " + b,
+				" challenge attempt 1 ok\n", " request id=", " OUT tag=1108 " + b, " state connecting -> awaiting_signature\n", " link forward taken\n",
+				" IN tag=1109 " + b, " result signature=1\n", " signature len=130 accepted=1\n", " state awaiting_signature -> signed\n", " proof taken\n",
+				" sign create first=0\n", " state signed -> connecting\n", " OUT tag=1108 " + b, " error 4001\n",
+				" state awaiting_signature -> failed wallet_error/user_rejected\n", " state failed -> closed\n", " OUT tag=1112 " + b,
+			} {
+				_, after, found := strings.Cut(rest, want)
+				if !found || !first {
+					t.Fatalf("the trace does not begin with the Sign, or has no %q after the lines before it:\n%s", want, trace)
+				}
+				rest = after
+			}
+			// a request of the wallet's own making, by its number and never by its name; and the list is a copy
+			copied := c.TraceLines()
+			copied.Add(marker)
+			if !strings.Contains(trace, " IN tag=0 "+b) || strings.Count(trace, " request other\n") != 2 || c.TraceLines().Len() != len(lines) {
+				t.Fatalf("the trace:\n%s", trace)
+			}
+		})
+	}
+}
+
+// The trace keeps the last 256 lines, each with the clock of the connection
+// in front, takes none while it is off, and keeps what it has when it is
+// turned off.
+func TestBittensorWalletConnectTraceKeepsTheLastLines(t *testing.T) {
+	connect.SetDefaultLogger(&bwcLog{})
+	defer connect.SetDefaultLogger(nil)
+	c, err := newBittensorWalletConnect(context.Background(), BittensorWalletTalisman, BittensorWalletPlatformAndroid, "test-project", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.nowMillis = func() int64 { return bittensorTestNowMillis + 123 }
+	c.tracef("before")
+	c.SetTrace(true)
+	for i := range 257 {
+		c.tracef("line %d", i+1)
+	}
+	c.SetTrace(false)
+	c.tracef("after")
+	if lines := c.TraceLines(); lines.Len() != 256 || lines.Get(0) != "14:00:00.123 line 2" || lines.Get(255) != "14:00:00.123 line 257" {
+		t.Fatalf("%d lines, from %q to %q", lines.Len(), lines.Get(0), lines.Get(lines.Len()-1))
 	}
 }

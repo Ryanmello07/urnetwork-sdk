@@ -4,7 +4,9 @@ package walletconnect
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/sdk/walletconnect/wire"
@@ -105,16 +107,70 @@ type engine struct {
 func (e *engine) setWait(w *wait) {
 	e.wait = w
 	e.tr.setWanted(w != nil)
+	if w != nil {
+		e.tr.trace("wait %s", [...]string{waitProposal: "proposal", waitSettle: "settle", waitRequest: "request"}[w.kind])
+	}
+}
+
+// said is what a frame says, as a trace line has it (delta 5.3): its id, and
+// "request <method>", "error <code>" or "result". Of what a wallet wrote only
+// numbers are repeated. An id is its own token when it is a number of at most
+// 20 digits, a method is named when it is one of this file's, and of a result
+// only the members that are read are named. Of a proposal, which of its
+// optional members the frame has.
+func said(frame *wire.Frame) string {
+	id := string(frame.Id)
+	if len(id) == 0 || len(id) > 20 || strings.Trim(id, "0123456789") != "" {
+		id = "?"
+	}
+	switch _, answered := sessionAnswers[frame.Method]; {
+	case frame.Method == methodSessionPropose:
+		var params struct {
+			PairingTopic, ExpiryTimestamp json.RawMessage
+			Proposer                      struct {
+				Metadata struct{ Redirect json.RawMessage }
+			}
+		}
+		json.Unmarshal(frame.Params, &params)
+		return fmt.Sprintf("id=%s request %s T=%d E=%d R=%d", id, methodSessionPropose,
+			bit(params.PairingTopic != nil), bit(params.ExpiryTimestamp != nil), bit(params.Proposer.Metadata.Redirect != nil))
+	case answered, frame.Method == methodPairingDelete, frame.Method == methodPairingPing, frame.Method == methodSessionSettle,
+		frame.Method == methodSessionRequest, frame.Method == methodSessionDelete:
+		return "id=" + id + " request " + frame.Method
+	case frame.IsRequest():
+		return "id=" + id + " request other"
+	case frame.Error != nil:
+		return fmt.Sprintf("id=%s error %d", id, frame.Error.Code)
+	}
+	var result struct{ ResponderPublicKey, Signature json.RawMessage }
+	json.Unmarshal(frame.Result, &result)
+	text := "id=" + id + " result"
+	if result.ResponderPublicKey != nil {
+		text += " responderPublicKey=1"
+	}
+	if result.Signature != nil {
+		text += " signature=1"
+	}
+	return text
 }
 
 // publish seals a frame under the key of its topic and queues it. giveUp is
-// running time, 0 for never.
+// running time, 0 for never. The entry is named, for the trace, by the tag,
+// the topic and the id of the frame.
 func (e *engine) publish(topic string, key wire.Key, frame []byte, tag int, ttl int, giveUp time.Duration) *publishEntry {
 	message, err := wire.SealRandom(key, e.config.Rand, frame)
 	if err != nil {
 		panic(noRandom)
 	}
-	return e.tr.publish(topic, message, tag, ttl, e.tr.ticks(giveUp), nil)
+	// what was made here can be read here
+	parsed, err := wire.ParseFrame(frame)
+	if err != nil {
+		parsed = &wire.Frame{}
+	}
+	what, kind, _ := strings.Cut(said(parsed), " ")
+	label := fmt.Sprintf("tag=%d topic=%s %s", tag, topic[:8], what)
+	e.tr.trace("OUT %s %s", label, kind)
+	return e.tr.publish(topic, message, tag, ttl, e.tr.ticks(giveUp), label)
 }
 
 // pair is Pair, on the loop.
@@ -151,6 +207,11 @@ func (e *engine) end(err *Error) {
 		return
 	}
 	e.closing, e.closeErr = true, err
+	if err != nil {
+		e.tr.trace("end %s code=%d", err.Kind, err.Code)
+	} else {
+		e.tr.trace("end")
+	}
 	if w := e.wait; w != nil {
 		e.tr.cancelPublish(w.entry) // what was not acknowledged is not written again
 	}
@@ -200,6 +261,7 @@ func (e *engine) onOpen() {
 	}
 	pairing.ExpiryUnix = now + int64(e.timing.PairingTtl/time.Second)
 	e.pairing = pairing
+	e.tr.trace("pairing topic=%s expires +%ds", pairing.Topic[:8], pairing.ExpiryUnix-now)
 	w := &wait{kind: waitProposal, topic: pairing.Topic, id: e.client.newId(), deadline: pairing.ExpiryUnix * 1000}
 	e.setWait(w)
 	e.tr.addTopic(pairing.Topic)
@@ -258,12 +320,14 @@ func (e *engine) onTick(_ int64, resumed bool) {
 		// R12: a deadline counts from the tick that sees it passed, and
 		// then the mailbox is read
 		if e.tr.nowMillis() >= w.deadline {
+			e.tr.trace("deadline passed: reading")
 			w.marked, w.grace, w.seq = true, e.tr.ticks(e.timing.DeadlineGrace), e.tr.startRead()
 		}
 	case w != nil && resumed:
 		w.grace = e.tr.ticks(e.timing.DeadlineGrace)
 	case w != nil:
 		if w.grace--; w.grace <= 0 {
+			e.tr.trace("unreachable")
 			e.fail(ErrUnavailable, "the relay could not be reached after the deadline")
 		}
 	case e.settled && e.foreground: // R21
@@ -282,17 +346,21 @@ func (e *engine) onRead(seq int64) {
 	if w == nil || !w.marked || seq < w.seq {
 		return
 	}
-	if w.reads++; w.reads < 2 {
+	w.reads++
+	e.tr.trace("read %d/2", w.reads)
+	if w.reads < 2 {
 		e.tr.startRead()
 		return
 	}
+	e.tr.trace("expired")
 	e.fail(ErrExpired, "the wallet did not answer in time")
 }
 
 // onMessage takes a message of the wallet. What cannot be opened with the
 // key of its topic, is no JSON-RPC object, or answers nothing that is pending
-// on that topic is passed over (R10). The relay's tag is not looked at.
-func (e *engine) onMessage(topic string, message string, _ int) {
+// on that topic is passed over (R10). The relay's tag is not looked at: it is
+// a number for the trace.
+func (e *engine) onMessage(topic string, message string, tag int) {
 	var key wire.Key
 	onPairing := e.pairing != nil && topic == e.pairing.Topic
 	switch {
@@ -303,20 +371,25 @@ func (e *engine) onMessage(topic string, message string, _ int) {
 	default:
 		return
 	}
+	in := fmt.Sprintf("IN tag=%d topic=%s", tag, topic[:8])
 	plaintext, err := wire.Open(key, message)
 	if err != nil {
+		e.tr.trace("%s dropped cannot-open", in)
 		return
 	}
 	frame, err := wire.ParseFrame(plaintext)
 	if err != nil {
+		e.tr.trace("%s dropped not-jsonrpc", in)
 		return
 	}
+	e.tr.trace("%s %s", in, said(frame))
 	switch w := e.wait; {
 	case frame.IsRequest() && onPairing:
 		e.pairingRequest(frame)
 	case frame.IsRequest():
 		e.sessionRequest(frame)
 	case w == nil || w.id == 0 || w.topic != topic || string(frame.Id) != string(wire.IdToken(w.id)):
+		e.tr.trace("%s dropped unexpected-id", in)
 	case w.kind == waitProposal:
 		e.approved(frame)
 	default:
@@ -442,11 +515,13 @@ func (e *engine) settle(frame *wire.Frame) {
 		if malformed {
 			code = wire.RpcCodeMalformed
 		}
+		e.tr.trace("settle refused code=%d", code)
 		e.end(&Error{Kind: kind, Code: code, Detail: "the session the wallet settled is not valid"})
 		return
 	}
 	accounts := wire.ChainAccounts(params.Namespaces, e.config.NamespaceKey, e.config.Chain)
 	e.tr.logf("walletconnect: session %s settled, %d accounts", s.topic[:8], len(accounts))
+	e.tr.trace("settle ok accounts=%d", len(accounts))
 	e.publish(s.topic, s.key, wire.ResultFrame(frame.Id, true), wire.TagSessionSettleResponse, wire.TtlFiveMinutes, 0)
 	// the pairing has done its work: nothing on its topic can be opened any more
 	e.tr.removeTopic(e.pairing.Topic)

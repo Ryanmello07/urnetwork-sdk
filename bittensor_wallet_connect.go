@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/connect"
@@ -55,6 +56,9 @@ const (
 // A BittensorWalletResult.BridgeErrorCode beside the BittensorWalletBridgeError*
 // codes: the wallet does not offer the Bittensor chain or the sign method.
 const BittensorWalletBridgeErrorUnsupportedChain = "unsupported_chain"
+
+// the lines a trace keeps (SetTrace)
+const bittensorWalletTraceLimit = 256
 
 // BittensorWalletConnectListener is called once for every state entered, and
 // once whenever Connected changes while the state is connecting,
@@ -124,6 +128,12 @@ type BittensorWalletConnect struct {
 	// whether the notifier runs
 	pending   []string
 	notifying bool
+
+	// The trace of a device test (delta 5), its last lines. Their lock is
+	// taken with stateLock held, never the other way round.
+	traceOn   atomic.Bool
+	traceLock sync.Mutex
+	trace     []string
 }
 
 // NewBittensorWalletConnect prepares a connection to a wallet app. walletId is
@@ -214,6 +224,7 @@ func (self *BittensorWalletConnect) clientConfig() *walletconnect.Config {
 				verbose.Infof("[bwc]"+format, args...)
 			}
 		},
+		Trace: self.tracef,
 	}
 	if self.platform == BittensorWalletPlatformAndroid {
 		// there the process goes on for about a minute behind the wallet
@@ -337,6 +348,7 @@ func (self *BittensorWalletConnect) Sign(purpose string, expectedAddress string)
 		}
 		self.client = client
 	}
+	self.tracef("sign %s first=%d", purpose, bittensorWalletTraceBit(first))
 	self.signs++
 	self.family, self.purpose, self.expected = family, purpose, expectedAddress
 	// a proof that was not taken is dropped (design A.3 rule 6)
@@ -419,7 +431,14 @@ func (self *BittensorWalletConnect) TakeWalletLink() string {
 		return ""
 	}
 	link := self.walletLink()
-	self.linkTaken = link != ""
+	if self.linkTaken = link != ""; self.linkTaken {
+		// which of the two it is, never the link
+		step := "pair"
+		if self.state == BittensorWalletConnectStateAwaitingSignature {
+			step = "forward"
+		}
+		self.tracef("link %s taken", step)
+	}
 	return link
 }
 
@@ -443,6 +462,9 @@ func (self *BittensorWalletConnect) TakeProof() *BittensorWalletProof {
 	if self.over {
 		// the wallet session ended while the proof waited (design A.3 rule 8)
 		self.enter(BittensorWalletConnectStateClosed)
+	}
+	if proof != nil {
+		self.tracef("proof taken")
 	}
 	return proof
 }
@@ -490,6 +512,51 @@ func (self *BittensorWalletConnect) SetForeground(foreground bool) {
 	}
 }
 
+// SetTrace turns the trace of this connection on or off. Off when never called.
+// While on, the connection keeps its last 256 trace lines and writes each to the
+// sdk log. A line holds times, states, relay tags, ids, error codes and the first
+// 8 hex characters of a topic: never a key, a pairing uri, a wallet link, a relay
+// token, a challenge text, a signature or a text a wallet wrote. For a test build.
+func (self *BittensorWalletConnect) SetTrace(enabled bool) {
+	self.traceOn.Store(enabled)
+}
+
+// TraceLines is the trace so far, oldest line first; empty when the trace was
+// never on. It stays readable after Close. A copy.
+func (self *BittensorWalletConnect) TraceLines() *StringList {
+	lines := NewStringList()
+	self.traceLock.Lock()
+	defer self.traceLock.Unlock()
+	lines.addAll(self.trace...)
+	return lines
+}
+
+// tracef adds a line to the trace when it is on (delta 5.3): the clock of the
+// connection in front, then what the client says on its loop or this file
+// says, with or without the state lock. What a line may hold is the rule of
+// walletconnect.Config.Trace. The line goes to the sdk log at the default
+// verbosity as well, in the order of the trace.
+func (self *BittensorWalletConnect) tracef(format string, args ...any) {
+	if !self.traceOn.Load() {
+		return
+	}
+	line := time.UnixMilli(self.nowMillis()).UTC().Format("15:04:05.000 ") + fmt.Sprintf(format, args...)
+	self.traceLock.Lock()
+	defer self.traceLock.Unlock()
+	if self.trace = append(self.trace, line); len(self.trace) > bittensorWalletTraceLimit {
+		self.trace = self.trace[1:]
+	}
+	connect.DefaultLogger().Infof("[bwc] %s", line)
+}
+
+// bittensorWalletTraceBit is a bool as a trace line has it.
+func bittensorWalletTraceBit(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func (self *BittensorWalletConnect) AddBittensorWalletConnectListener(listener BittensorWalletConnectListener) Sub {
 	callbackId := self.listeners.Add(listener)
 	return newSub(func() {
@@ -512,6 +579,12 @@ func (self *BittensorWalletConnect) Close() {
 // enter is the one place the state changes; the lock is held. The listeners
 // are told of it by the notifier.
 func (self *BittensorWalletConnect) enter(state string) {
+	// of a failure its two codes, which are words of the sdk
+	codes := ""
+	if result := self.result; result != nil {
+		codes = strings.TrimSuffix(" "+result.ErrorCode+"/"+result.BridgeErrorCode, "/")
+	}
+	self.tracef("state %s -> %s%s", self.state, state, codes)
 	self.state = state
 	self.linkTaken = false
 	if state != BittensorWalletConnectStateAwaitingApproval {
@@ -544,6 +617,7 @@ func (self *BittensorWalletConnect) setConnected(connected bool) {
 		return
 	}
 	self.connected = connected
+	self.tracef("connected %d", bittensorWalletTraceBit(connected))
 	switch self.state {
 	case BittensorWalletConnectStateConnecting, BittensorWalletConnectStateAwaitingApproval, BittensorWalletConnectStateAwaitingSignature:
 		self.tell(self.state)
@@ -707,9 +781,12 @@ func (self *BittensorWalletConnect) challenge() {
 			result, err := self.fetchChallenge(ctx, args)
 			cancel()
 			if err == nil {
+				self.tracef("challenge attempt %d ok", counted+repeated+1)
 				challenge = result
 				break
 			}
+			// never what the error says: it names the server
+			self.tracef("challenge attempt %d failed", counted+repeated+1)
 			if client.ResumeEpoch() != epoch && repeated < 3 {
 				// the process was suspended in it, which says nothing of
 				// the server: again at once, and not counted
@@ -741,12 +818,14 @@ func (self *BittensorWalletConnect) challenge() {
 		// wallet spells it.
 		session.SignRequest()
 		self.requestId = client.SignMessage(self.account, session.Message(), session.ExpiresAtMillis())
+		self.tracef("request id=%d", self.requestId)
 	})
 }
 
 // answered takes the wallet's answer to the request; the lock is held. The
 // session of the Sign decides whether it is a proof (design A.7 step 6).
 func (self *BittensorWalletConnect) answered(signature string) {
+	received := len(signature)
 	// 65 bytes of which the first names the kind of key (01: sr25519) are
 	// the signature behind that byte
 	if raw, err := hex.DecodeString(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(signature)), "0x")); err == nil && len(raw) == 65 && raw[0] == 1 {
@@ -757,6 +836,7 @@ func (self *BittensorWalletConnect) answered(signature string) {
 		address = self.address
 	}
 	result := self.session.HandleSignature(address, signature, self.nowMillis())
+	self.tracef("signature len=%d accepted=%d", received, bittensorWalletTraceBit(result.Proof != nil))
 	if result.Proof == nil {
 		self.result = result
 		self.enter(BittensorWalletConnectStateFailed)

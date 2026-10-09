@@ -220,6 +220,23 @@ func (t *transport) logf(format string, args ...any) {
 	}
 }
 
+// trace is one line of Config.Trace, which says what a line may hold. A topic
+// is named by 8 characters and only when it is held: the topic of a push that
+// is not held is a text the relay wrote.
+func (t *transport) trace(format string, args ...any) {
+	if t.config.Trace != nil {
+		t.config.Trace(format, args...)
+	}
+}
+
+// bit is a bool as a trace line has it.
+func bit(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // ticks is a running-time budget in ticks.
 func (t *transport) ticks(d time.Duration) int64 { return int64(d / t.timing.Tick) }
 
@@ -250,7 +267,7 @@ func (t *transport) handle(ev event) {
 	case ev.kind == evDialed:
 		t.dialed(ev)
 	case ev.kind == evLost:
-		t.lose(errors.Is(ev.err, websocket.ErrReadLimit))
+		t.lose(ev.err)
 	case ev.kind == evPing:
 		t.socket.idle = 0
 	case ev.kind == evFrame:
@@ -266,7 +283,7 @@ func (t *transport) advance() {
 	for !t.exit {
 		switch s := t.socket; {
 		case s != nil && s.failed:
-			t.lose(false)
+			t.lose(nil)
 		case t.connected() != t.reported:
 			t.reported = !t.reported
 			t.handler.onConnected(t.reported)
@@ -285,7 +302,7 @@ func (t *transport) advance() {
 // and dials when a socket is needed and none is there or on its way (R4).
 func (t *transport) connect() {
 	if t.closing && (len(t.queue) == 0 || t.running.Load() >= t.closeAt) {
-		t.hangUp()
+		t.hangUp("shutdown")
 		t.exit = true
 		return
 	}
@@ -333,12 +350,17 @@ func (t *transport) failedAttempt() {
 	t.urlIndex++
 }
 
-// lose lets go of a socket that ended or stopped answering (R4, R14).
-func (t *transport) lose(readLimit bool) {
+// lose lets go of a socket that ended or stopped answering (R4, R14). err is
+// what its reader ended with, nil when the loop gives the socket up itself.
+func (t *transport) lose(err error) {
 	s := t.socket
 	t.logf("walletconnect: socket %d lost after %d s", s.gen, s.age)
+	// of a close frame the code alone, 0 with none: its reason is a text of the relay
+	closed := &websocket.CloseError{}
+	errors.As(err, &closed)
+	t.trace("sock lost %d age=%ds code=%d", s.gen, s.age, closed.Code)
 	t.drop()
-	if t.readLimits++; !readLimit {
+	if t.readLimits++; !errors.Is(err, websocket.ErrReadLimit) {
 		t.readLimits = 0
 	}
 	switch {
@@ -360,7 +382,7 @@ func (t *transport) relayError(row *int, code int) {
 		t.fatal(ErrUnavailable, code, "the relay answered its calls with an error")
 		return
 	}
-	t.lose(false)
+	t.lose(nil)
 }
 
 // fatal stops the transport for good. A shutdown is not told: it is on its
@@ -372,6 +394,7 @@ func (t *transport) fatal(kind ErrorKind, code int, detail string) {
 	}
 	t.stopped = true
 	t.logf("walletconnect: stopped: %s, code %d", kind, code)
+	t.trace("stopped %s code=%d", kind, code)
 	t.tell = append(t.tell, func() { t.handler.onFatal(&Error{Kind: kind, Code: code, Detail: detail}) })
 }
 
@@ -379,6 +402,7 @@ func (t *transport) fatal(kind ErrorKind, code int, detail string) {
 func (t *transport) resume() {
 	t.logf("walletconnect: resumed")
 	t.epoch.Add(1)
+	t.trace("resume %d", t.epoch.Load())
 	t.resumed = true
 	t.drop()
 	t.attempts = 0
@@ -398,12 +422,12 @@ func (t *transport) tick() {
 	}
 	now := t.running.Add(1)
 	if !t.foreground && !t.parked && now >= t.backgroundAt {
-		t.parked = true
-		t.hangUp()
+		t.park()
 	}
 	t.queue = slices.DeleteFunc(t.queue, func(e *publishEntry) bool {
 		gone := e.giveUp > 0 && now >= e.giveUpAt
 		if gone {
+			t.trace("give-up %v", e.data)
 			t.tell = append(t.tell, func() { t.handler.onGiveUp(e) })
 		}
 		return gone
@@ -417,7 +441,7 @@ func (t *transport) tick() {
 		}
 		switch {
 		case silent:
-			t.lose(false)
+			t.lose(nil)
 		case t.wanted && s.synced && !s.settling:
 			if s.rest++; s.rest >= t.ticks(t.timing.ProbeInterval) {
 				t.startRound(s, t.timing.ProbeTimeout)
@@ -473,6 +497,7 @@ func (t *transport) published(s *socket, frame *wire.Frame) {
 		e := t.queue[i]
 		t.queue = slices.Delete(t.queue, i, i+1)
 		t.publishErrors = 0
+		t.trace("ack %v", e.data)
 		t.tell = append(t.tell, func() { t.handler.onAcked(e) })
 	}
 }
@@ -489,13 +514,18 @@ func (t *transport) pushed(s *socket, frame *wire.Frame) {
 	var params wire.SubscriptionParams
 	json.Unmarshal(frame.Params, &params)
 	if !slices.Contains(t.topics, params.Data.Topic) {
+		t.trace("push tag=%d dropped not-held", params.Data.Tag)
 		return // R7: dropped only when the topic is not held
 	}
+	topic := params.Data.Topic[:min(8, len(params.Data.Topic))]
 	if id := wire.MessageId(params.Data.Message); !slices.Contains(t.seen, id) {
 		if t.seen = append(t.seen, id); len(t.seen) > seenLimit {
 			t.seen = t.seen[1:]
 		}
+		t.trace("push tag=%d topic=%s", params.Data.Tag, topic)
 		t.tell = append(t.tell, func() { t.handler.onMessage(params.Data.Topic, params.Data.Message, params.Data.Tag) })
+	} else {
+		t.trace("push tag=%d topic=%s dropped duplicate", params.Data.Tag, topic)
 	}
 }
 
@@ -561,6 +591,7 @@ func (t *transport) settled(s *socket) {
 	}
 	if !s.wasSynced {
 		t.logf("walletconnect: socket %d synced", s.gen)
+		t.trace("sock synced %d", s.gen)
 	}
 	s.settling, s.round, s.rest = false, 0, 0
 	s.synced, s.wasSynced, t.everSynced = true, true, true
@@ -589,7 +620,10 @@ func (t *transport) flush() bool {
 		}
 		if e.gen = s.gen; !e.written {
 			e.written = true
+			t.trace("write %v sock=%d", e.data, s.gen)
 			t.tell = append(t.tell, func() { t.handler.onFirstWrite(e) })
+		} else {
+			t.trace("rewrite %v sock=%d", e.data, s.gen)
 		}
 	}
 	return wrote
@@ -671,17 +705,26 @@ func (t *transport) startRead() int64 {
 	return t.readSeq + 1
 }
 
+// park closes the socket on purpose, at the end of its time in the
+// background (R3).
+func (t *transport) park() {
+	t.trace("parked after %ds", t.config.BackgroundSocketSeconds)
+	t.parked = true
+	t.hangUp("parked")
+}
+
 // setForeground is R3.
 func (t *transport) setForeground(foreground bool) {
 	switch s := t.socket; {
 	case !foreground && t.foreground:
+		t.trace("fg 0")
 		t.foreground = false
 		t.backgroundAt = t.running.Load() + int64(t.config.BackgroundSocketSeconds)
 		if t.config.BackgroundSocketSeconds == 0 {
-			t.parked = true
-			t.hangUp()
+			t.park()
 		}
 	case foreground && !t.foreground:
+		t.trace("fg 1")
 		t.foreground = true
 		t.resume()
 	case foreground && s != nil && s.synced && !s.settling:

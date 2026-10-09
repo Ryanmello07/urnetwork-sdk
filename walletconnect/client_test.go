@@ -12,11 +12,13 @@ package walletconnect
 // shows that a client that ended leaves none behind.
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -46,6 +48,41 @@ var (
 
 func skipSettle(settle *relaytest.SettleEdit) { settle.SkipSettle = true }
 
+// Every line a client may trace (delta 5.3), as a whole: numbers, fixed words
+// and 8 hex characters of a topic. So no text that a wallet or the relay wrote
+// and no part of a key, a uri or a token fits one. play holds every line of
+// every test against it.
+var traceLine = func() *regexp.Regexp {
+	const topic, id = `topic=[0-9a-f]{8}`, `id=(?:\d{1,20}|\?)`
+	const label = `tag=\d+ ` + topic + ` ` + id
+	const said = `(?:request (?:wc_(?:pairingDelete|pairingPing|sessionSettle|sessionRequest|sessionDelete|sessionPing|sessionEvent|sessionUpdate|sessionExtend)|` +
+		`wc_sessionPropose T=[01] E=[01] R=[01]|other)|error -?\d+|result(?: responderPublicKey=1)?(?: signature=1)?)`
+	return regexp.MustCompile(`^(?:` + strings.Join([]string{
+		`sock dial \d+ relay\.walletconnect\.(?:com|org)`,
+		`sock (?:open|synced) \d+`,
+		`sock dial-failed \d+ status=\d+`,
+		`sock lost \d+ age=\d+s code=\d+`,
+		`sock close \d+ code=1000 (?:parked|shutdown)`,
+		`fg [01]`,
+		`parked after \d+s`,
+		`resume \d+`,
+		`stopped (?:unavailable|wallet) code=-?\d+`,
+		`pairing ` + topic + ` expires \+\d+s`,
+		`wait (?:proposal|settle|request)`,
+		`OUT ` + label + ` ` + said,
+		`(?:write|rewrite) ` + label + ` sock=\d+`,
+		`(?:ack|give-up) ` + label,
+		`push tag=\d+ (?:` + topic + `(?: dropped duplicate)?|dropped not-held)`,
+		`IN tag=\d+ ` + topic + ` (?:` + id + ` ` + said + `|dropped (?:cannot-open|not-jsonrpc|unexpected-id))`,
+		`settle (?:ok accounts=\d+|refused code=-?\d+)`,
+		`deadline passed: reading`,
+		`read [12]/2`,
+		`expired`,
+		`unreachable`,
+		`end(?: (?:unavailable|expired|rejected|unsupported|no_account|deleted|wallet) code=-?\d+)?`,
+	}, "|") + `)$`)
+}()
+
 // scene is a client on a relay, the wallet it talks to, and what the client
 // told.
 type scene struct {
@@ -62,6 +99,7 @@ type scene struct {
 	mu     sync.Mutex
 	events []Event
 	logs   []string
+	trace  []string // what Config.Trace was given
 	uri    string
 
 	told     int // events already looked at
@@ -94,6 +132,11 @@ func play(t *testing.T, edit func(s *scene, config *Config, wallet *relaytest.Wa
 					s.uri = ev.PairingUri
 				}
 			},
+			Trace: func(format string, args ...any) {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				s.trace = append(s.trace, fmt.Sprintf(format, args...))
+			},
 		}
 		options := relaytest.WalletOptions{Seed: walletSeed, Dedup: true}
 		if edit != nil {
@@ -108,10 +151,17 @@ func play(t *testing.T, edit func(s *scene, config *Config, wallet *relaytest.Wa
 			t.Fatal(err)
 		}
 		s.client, s.cancel = client, cancel
-		// the client ends with its context
+		// the client ends with its context, and what it traced is of the lines it may
 		defer func() {
 			cancel()
 			<-client.Done()
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			for _, line := range s.trace {
+				if !traceLine.MatchString(line) {
+					t.Errorf("traced: %q", line)
+				}
+			}
 		}()
 		f(t, s)
 	})
@@ -989,8 +1039,13 @@ func TestClientLinger(t *testing.T) {
 	}
 }
 
-// TE18 (F.1): nothing that is logged is a secret, and a topic is cut.
+// TE18 (F.1, delta 5.4): nothing that is logged or traced is a secret or a
+// text that the wallet or the relay wrote, and a topic is cut. The wallet
+// writes a marker wherever it can write: its metadata, an id, a method, params,
+// an error, a result, and what cannot be read at all. The relay writes it into
+// an error and into the reason of a close.
 func TestClientLogsNoSecret(t *testing.T) {
+	const marker = "MARKER-7f3a"
 	play(t, func(s *scene, config *Config, wallet *relaytest.WalletOptions) {
 		config.Logf = func(format string, args ...any) {
 			s.mu.Lock()
@@ -998,27 +1053,96 @@ func TestClientLogsNoSecret(t *testing.T) {
 			s.logs = append(s.logs, fmt.Sprintf(format, args...))
 		}
 	}, func(t *testing.T, s *scene) {
-		s.settle()
+		s.pair()
+		pairing, session := s.pairing(), s.sessionKey()
+		topic := wire.Topic(session)
+		responder, _ := wire.NewKeyPair(bytes.NewReader(walletSeed[:]))
+		s.forge(pairing.Topic, pairing.SymKey, []byte(`{"id":"`+marker+`","jsonrpc":"2.0","method":"wc_`+marker+`","params":"`+marker+`"}`), 0)
+		// the pairing topic stays subscribed at the relay when the client has let go of it
+		s.relay.FailCalls(wire.MethodUnsubscribe, 1, -32000, marker)
+		s.wallet.ApproveWith(s.proposal, skipSettle)
+		s.wallet.Send("wc_sessionSettle", map[string]any{
+			"relay": map[string]string{"protocol": "irn"},
+			"controller": map[string]any{"publicKey": responder.Public.Hex(), "metadata": map[string]any{
+				"name": marker, "description": marker, "url": "https://" + marker, "icons": []string{marker}, "redirect": map[string]string{"native": marker + "://"},
+			}},
+			"namespaces": map[string]*wire.Namespace{"polkadot": {Accounts: []string{testAccount, testChain + ":" + marker}, Methods: []string{testMethod}, Events: []string{marker}}},
+			"expiry":     time.Now().Unix() + 3600,
+		})
+		s.expect("settled", "settled")
+		other, _ := wire.NewKey(rand.Reader)
+		s.forge(pairing.Topic, pairing.SymKey, []byte(marker), 1234)
+		s.forge(topic, other, []byte(marker), wire.TagSessionRequestResponse)
+		s.forge(topic, session, []byte(marker), wire.TagSessionRequestResponse)
+		s.forge(topic, session, wire.ResultFrame(wire.IdToken(7), marker), wire.TagSessionRequestResponse)
+		s.expect("nothing of that is told")
 		_, request := s.sign()
-		s.wallet.Respond(request, map[string]string{"signature": testSignature})
+		s.wallet.RespondError(request, 4001, marker)
+		s.expect("refused", "failed rejected 4001")
+		s.relay.CloseSockets("", 4010, marker)
+		s.expect("the socket is lost, which is not told")
+		_, request = s.sign()
+		s.wallet.Respond(request, map[string]string{"signature": testSignature, "note": marker})
 		s.expect("the result", "result "+testSignature)
+		// an answer to the wallet that the relay does not acknowledge is given up after 30 s
+		s.relay.LoseNextPublishAck("")
+		s.wallet.Send("wc_sessionPing", marker)
+		s.wait(31 * time.Second)
+		// behind another app and back, where the socket is closed at once
+		s.client.SetForeground(false)
+		s.client.SetForeground(true)
 		s.client.Close()
 		receive(s, s.client.Done())
 
-		pairing, session := s.pairing(), s.sessionKey()
-		token := strings.TrimPrefix(s.relay.Handshakes()[0].Header.Get("Authorization"), "Bearer ")
-		secrets := []string{s.uri, token, "q1w2e3r4t5y6u7i8o9p0", testSignature, pairing.Topic, wire.Topic(session)}
-		for _, key := range []wire.Key{pairing.SymKey, session} {
-			secrets = append(secrets, key.Hex(), wire.EncodeBase64(key[:]), fmt.Sprint(key[:]))
+		secrets := []string{s.uri, "q1w2e3r4t5y6u7i8o9p0", testSignature, testAddress, "test-project", marker, s.proposal.ProposerPublicKey, responder.Public.Hex()}
+		// the relay token of each of the three sockets
+		handshakes := s.relay.Handshakes()
+		for _, handshake := range handshakes {
+			secrets = append(secrets, strings.TrimPrefix(handshake.Header.Get("Authorization"), "Bearer "))
 		}
-		logs := strings.Join(s.logs, "\n")
-		if len(token) < 100 || !strings.Contains(logs, pairing.Topic[:8]) || !strings.Contains(logs, wire.Topic(session)[:8]) {
-			t.Fatalf("the log of a whole flow:\n%s", logs)
+		for _, key := range []wire.Key{pairing.SymKey, session} {
+			secrets = append(secrets, wire.EncodeBase64(key[:]), fmt.Sprint(key[:]))
+			// and no 9 characters of the key or of its topic
+			for _, text := range []string{key.Hex(), wire.Topic(key)} {
+				for i := 0; i+9 <= len(text); i++ {
+					secrets = append(secrets, text[i:i+9])
+				}
+			}
+		}
+		s.mu.Lock()
+		logs, trace := strings.Join(s.logs, "\n"), strings.Join(s.trace, "\n")
+		s.mu.Unlock()
+		if len(handshakes) != 3 || len(secrets[8]) < 100 || !strings.Contains(logs, pairing.Topic[:8]) || !strings.Contains(logs, topic[:8]) {
+			t.Fatalf("%d sockets, or the log of a whole flow:\n%s", len(handshakes), logs)
 		}
 		for _, secret := range secrets {
-			if strings.Contains(logs, secret) {
-				t.Fatalf("%q is logged:\n%s", secret, logs)
+			if strings.Contains(logs+"\n"+trace, secret) {
+				t.Fatalf("%q is logged or traced:\n%s\n%s", secret, logs, trace)
 			}
+		}
+		// what the trace says of the same flow, in this order; P and B are the two topics, N an id the client or the wallet made
+		lines := strings.Split(regexp.MustCompile(`id=\d{15,}`).ReplaceAllString(strings.NewReplacer(pairing.Topic[:8], "P", topic[:8], "B").Replace(trace), "id=N"), "\n")
+		for _, want := range []string{
+			"sock dial 1 relay.walletconnect.com", "sock open 1", "pairing topic=P expires +300s", "wait proposal",
+			"OUT tag=1100 topic=P id=N request wc_sessionPropose T=0 E=0 R=0", "sock synced 1", "write tag=1100 topic=P id=N sock=1", "ack tag=1100 topic=P id=N",
+			"push tag=0 topic=P", "IN tag=0 topic=P id=? request other", "OUT tag=0 topic=P id=? result",
+			"push tag=1101 topic=P", "IN tag=1101 topic=P id=N result responderPublicKey=1", "wait settle",
+			"push tag=1102 topic=B", "IN tag=1102 topic=B id=N request wc_sessionSettle", "settle ok accounts=2", "OUT tag=1103 topic=B id=N result",
+			"push tag=1234 dropped not-held", "IN tag=1109 topic=B dropped cannot-open", "IN tag=1109 topic=B dropped not-jsonrpc",
+			"IN tag=1109 topic=B id=7 result", "IN tag=1109 topic=B dropped unexpected-id",
+			"wait request", "OUT tag=1108 topic=B id=N request wc_sessionRequest", "IN tag=1109 topic=B id=N error 4001",
+			"sock lost 1 age=0s code=4010", "wait request", "OUT tag=1108 topic=B id=N request wc_sessionRequest",
+			"sock dial 3 relay.walletconnect.org", "sock open 3", "write tag=1108 topic=B id=N sock=3", "IN tag=1109 topic=B id=N result signature=1",
+			"IN tag=1114 topic=B id=N request wc_sessionPing", "OUT tag=1115 topic=B id=N result", "write tag=1115 topic=B id=N sock=3", "give-up tag=1115 topic=B id=N",
+			"fg 0", "parked after 0s", "sock close 3 code=1000 parked", "fg 1", "resume 1",
+			"end", "OUT tag=1112 topic=B id=N request wc_sessionDelete", "sock dial 6 relay.walletconnect.org", "sock open 6",
+			"write tag=1112 topic=B id=N sock=6", "ack tag=1112 topic=B id=N", "sock close 6 code=1000 shutdown",
+		} {
+			at := slices.Index(lines, want)
+			if at < 0 {
+				t.Fatalf("the trace has no %q after the lines before it:\n%s", want, trace)
+			}
+			lines = lines[at+1:]
 		}
 	})
 }

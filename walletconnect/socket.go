@@ -103,6 +103,10 @@ func (t *transport) dial() {
 	ctx, cancel := context.WithTimeout(t.ctx, t.timing.DialTimeout)
 	t.cancelDial = cancel
 	t.logf("walletconnect: dial %d to %s", gen, relayUrl)
+	// the host alone: what is dialled has the project id and the app in it
+	if parsed, err := url.Parse(relayUrl); err == nil {
+		t.trace("sock dial %d %s", gen, parsed.Host)
+	}
 	go func() {
 		defer cancel()
 		defer t.contain()
@@ -123,6 +127,7 @@ func (t *transport) dialed(ev event) {
 	t.cancelDial = nil
 	if ev.ws == nil {
 		t.logf("walletconnect: dial %d failed, status %d", ev.gen, ev.status)
+		t.trace("sock dial-failed %d status=%d", ev.gen, ev.status)
 		origin := ev.status == http.StatusForbidden && strings.Contains(ev.body, refusedOrigin)
 		switch {
 		case origin && t.identifier:
@@ -137,6 +142,7 @@ func (t *transport) dialed(ev event) {
 		return
 	}
 	s := &socket{ws: ev.ws, gen: ev.gen, calls: map[string]*call{}, subscribed: map[string]string{}}
+	t.trace("sock open %d", s.gen)
 	defer func() {
 		if t.socket != s {
 			s.ws.Close()
@@ -209,9 +215,11 @@ func (t *transport) write(s *socket, text []byte) bool {
 	return !s.failed
 }
 
-// hangUp sends the close frame 1000 and lets go of the socket (R3, R19).
-func (t *transport) hangUp() {
+// hangUp sends the close frame 1000 and lets go of the socket (R3, R19). why
+// is a word for the trace.
+func (t *transport) hangUp(why string) {
 	if s := t.socket; s != nil && !s.failed {
+		t.trace("sock close %d code=1000 %s", s.gen, why)
 		s.ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 			time.Now().Add(t.timing.WriteTimeout))
 	}
