@@ -274,9 +274,11 @@ func (e *engine) onOpen() {
 	if e.config.ProposeExpiry {
 		options.ExpiryTimestamp = pairing.ExpiryUnix
 	}
+	// the relay keeps the proposal as long as the pairing lives (delta 6.1):
+	// the five minutes of wire.TtlFiveMinutes unless the timing says otherwise
 	w.entry = e.publish(pairing.Topic, pairing.SymKey,
 		wire.ProposeRequest(w.id, e.keys.Public, e.config.Metadata, e.config.NamespaceKey, e.config.Chain, e.config.Method, options),
-		wire.TagSessionPropose, wire.TtlFiveMinutes, 0)
+		wire.TagSessionPropose, int(pairing.ExpiryUnix-now), 0)
 }
 
 // onAcked hands the uri out when the proposal is at the relay (R20).

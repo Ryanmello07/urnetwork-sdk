@@ -64,6 +64,10 @@ type bittensorWalletAppLinks struct {
 	universalLinkOnly bool     // ios
 	packages          []string // android, in order
 	signers           []string // android: "<package> <64 lowercase hex>"
+
+	// two more forms of pair, which a device test may ask for
+	// (BittensorWalletConnect.SetDeviceTestOptions); "" = none
+	pairScheme, pairBare string
 }
 
 type bittensorWalletAppEntry struct {
@@ -137,6 +141,10 @@ var bittensorWalletApps = []bittensorWalletAppEntry{
 				"xyz.talisman.app 249542ce5087d97454c06910ab727e6d3430575920db0c8a32746a1f2812c86f",
 				"xyz.talisman.app 51392890773ad6d76ca52e073a9076c466b16cd0e8cdae03280a1cd89185af39",
 			},
+			// both opened the app on the phone of the first test as well; which
+			// form its one prompt came from was not recorded (delta 1.2, 3.2)
+			pairScheme: "talisman://wc?uri={uri_enc}",
+			pairBare:   "{uri}",
 		},
 	},
 	{

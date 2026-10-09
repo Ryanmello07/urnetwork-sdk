@@ -147,6 +147,14 @@ func TestBittensorWalletChoiceLinks(t *testing.T) {
 		if got := bittensorWalletAppLink(links.foreground, bittensorTestPairingUri, bittensorTestRequestId); got != c.foreground {
 			t.Errorf("%s on %s, foreground: %q, want %q", c.walletId, c.platform, got, c.foreground)
 		}
+		// the two other forms of the pairing link, which a device test may ask for (delta 3.2): Talisman's on android alone
+		scheme, bare := "", ""
+		if c.walletId == BittensorWalletTalisman && c.platform == BittensorWalletPlatformAndroid {
+			scheme, bare = "talisman://wc?uri="+bittensorTestPairingUriEnc, bittensorTestPairingUri
+		}
+		if got := bittensorWalletAppLink(links.pairScheme, bittensorTestPairingUri, 0) + " " + bittensorWalletAppLink(links.pairBare, bittensorTestPairingUri, 0); got != scheme+" "+bare {
+			t.Errorf("%s on %s, the other pairing links: %q, want %q", c.walletId, c.platform, got, scheme+" "+bare)
+		}
 	}
 }
 

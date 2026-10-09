@@ -16,12 +16,14 @@ package sdk
 // three runs under connect.HandleError.
 
 import (
+	"cmp"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,6 +70,56 @@ const bittensorWalletTraceLimit = 256
 // inside a call. Read the details from the connection and hop to the ui thread.
 type BittensorWalletConnectListener interface {
 	BittensorWalletConnectChanged(state string)
+}
+
+// bittensorWalletDeviceTest is what SetDeviceTestOptions chose (delta 6). The
+// zero value is a connection that was never told.
+type bittensorWalletDeviceTest struct {
+	noTopic, noExpiry bool   // -T, -E
+	link, pair        string // link=: its name and its template; "" = the entry's own, named https
+	background        *int   // bg=; nil = not given
+	ttl               int    // ttl=; 0 = not given
+}
+
+// bittensorWalletDeviceTestOptions reads the options of a device test for an
+// entry of the wallet-app table. What is refused is refused whole, with the
+// option at fault: one that is unknown, given twice or empty, a number out of
+// its range, or a form of the pairing link the entry does not have.
+func bittensorWalletDeviceTestOptions(options string, links *bittensorWalletAppLinks) (bittensorWalletDeviceTest, error) {
+	test, seen := bittensorWalletDeviceTest{}, map[string]bool{}
+	if strings.TrimSpace(options) == "" {
+		return test, nil
+	}
+	for _, option := range strings.Split(options, ",") {
+		option = strings.TrimSpace(option)
+		lower := strings.ToLower(option)
+		name, value, _ := strings.Cut(lower, "=")
+		number, err := strconv.Atoi(value)
+		ok := !seen[name]
+		seen[name] = true
+		switch {
+		case !ok:
+		case lower == "-t":
+			test.noTopic = true
+		case lower == "-e":
+			test.noExpiry = true
+		case lower == "link=https":
+		case lower == "link=scheme" && links.pairScheme != "":
+			test.link, test.pair = "scheme", links.pairScheme
+		case lower == "link=bare" && links.pairBare != "":
+			test.link, test.pair = "bare", links.pairBare
+		case name == "bg" && err == nil && number >= 0 && number <= 60:
+			test.background = &number
+		case name == "ttl" && err == nil && number >= 60 && number <= 3600:
+			test.ttl = number
+		default:
+			ok = false
+		}
+		if !ok {
+			return bittensorWalletDeviceTest{}, fmt.Errorf("invalid_options: %s", option)
+		}
+	}
+	return test, nil
 }
 
 // an account the wallet approved on the Bittensor chain
@@ -134,6 +186,9 @@ type BittensorWalletConnect struct {
 	traceOn   atomic.Bool
 	traceLock sync.Mutex
 	trace     []string
+
+	// the options of SetDeviceTestOptions (delta 6), under stateLock
+	deviceTest bittensorWalletDeviceTest
 }
 
 // NewBittensorWalletConnect prepares a connection to a wallet app. walletId is
@@ -191,10 +246,11 @@ func newBittensorWalletConnect(ctx context.Context, walletId string, platform st
 	}, nil
 }
 
-// clientConfig is the client of this connection (design B.2; B.3 R3, R15).
-// The lock is held.
+// clientConfig is the client of this connection (design B.2; B.3 R3, R15),
+// as SetDeviceTestOptions may have changed it; what it sends is the first line
+// of a trace. The lock is held.
 func (self *BittensorWalletConnect) clientConfig() *walletconnect.Config {
-	log := connect.DefaultLogger()
+	log, test := connect.DefaultLogger(), self.deviceTest
 	config := &walletconnect.Config{
 		ProjectId:       self.projectId,
 		IdentifierName:  "bundleId",
@@ -211,8 +267,8 @@ func (self *BittensorWalletConnect) clientConfig() *walletconnect.Config {
 		// Talisman, opened by a link, held ur.io's proposal and showed no
 		// prompt; the one request that showed it named its pairing and the
 		// pairing's expiry (delta 1.2, 2.2)
-		ProposePairingTopic: true,
-		ProposeExpiry:       true,
+		ProposePairingTopic: !test.noTopic,
+		ProposeExpiry:       !test.noExpiry,
 		// called on the loop of the client and, through SignMessage, on the
 		// goroutine of a challenge leg
 		Now: self.nowMillis,
@@ -233,9 +289,20 @@ func (self *BittensorWalletConnect) clientConfig() *walletconnect.Config {
 	if redirect := self.redirect; redirect != (wire.Redirect{}) {
 		config.Redirect = &redirect
 	}
+	if test.background != nil {
+		config.BackgroundSocketSeconds = *test.background
+	}
+	if test.ttl != 0 {
+		// with it the expiry in the uri and in the proposal, and the relay's ttl of the proposal (delta 6.1)
+		config.Timing = walletconnect.DefaultTiming()
+		config.Timing.PairingTtl = time.Duration(test.ttl) * time.Second
+	}
 	if self.configureClient != nil {
 		self.configureClient(config)
 	}
+	timing := cmp.Or(config.Timing, walletconnect.DefaultTiming())
+	self.tracef("proposal T=%d E=%d R=%d link=%s bg=%d ttl=%d", bittensorWalletTraceBit(config.ProposePairingTopic), bittensorWalletTraceBit(config.ProposeExpiry),
+		bittensorWalletTraceBit(config.Redirect != nil), cmp.Or(test.link, "https"), config.BackgroundSocketSeconds, int(timing.PairingTtl/time.Second))
 	return config
 }
 
@@ -409,7 +476,7 @@ func (self *BittensorWalletConnect) WalletLink() string {
 func (self *BittensorWalletConnect) walletLink() string {
 	switch self.state {
 	case BittensorWalletConnectStateAwaitingApproval:
-		return bittensorWalletAppLink(self.links.pair, self.pairingUri, 0)
+		return bittensorWalletAppLink(cmp.Or(self.deviceTest.pair, self.links.pair), self.pairingUri, 0)
 	case BittensorWalletConnectStateAwaitingSignature:
 		return bittensorWalletAppLink(self.links.foreground, "", self.requestId)
 	}
@@ -529,6 +596,38 @@ func (self *BittensorWalletConnect) TraceLines() *StringList {
 	defer self.traceLock.Unlock()
 	lines.addAll(self.trace...)
 	return lines
+}
+
+// SetDeviceTestOptions changes, for a device test, what this connection sends
+// and does: options separated by commas, in any case. Each call replaces the
+// options of the call before, and "" is what a connection does when this is
+// never called. Only before the first Sign.
+//
+//	-T              leave pairingTopic out of the connection request
+//	-E              leave expiryTimestamp out of it
+//	link=https      which form of the wallet's pairing link WalletLink answers:
+//	link=scheme     the entry's own, named https, or one of the two others
+//	link=bare       that Talisman's android entry has
+//	bg=<0..60>      the seconds the socket is kept in the background
+//	ttl=<60..3600>  the seconds the pairing lives and the relay keeps its request
+//
+// Errors (nothing changes): invalid_options with the option at fault, busy (a
+// Sign was accepted).
+// Temporary: it is removed, with the options that lose, when the device tests
+// have decided.
+func (self *BittensorWalletConnect) SetDeviceTestOptions(options string) error {
+	test, err := bittensorWalletDeviceTestOptions(options, self.links)
+	if err != nil {
+		return err
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.signs > 0 {
+		// the proposal may be at the relay
+		return errors.New("busy: a Sign was accepted")
+	}
+	self.deviceTest = test
+	return nil
 }
 
 // tracef adds a line to the trace when it is on (delta 5.3): the clock of the

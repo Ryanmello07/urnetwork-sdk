@@ -446,6 +446,7 @@ func (l *bwcLog) Enabled() bool                       { return true }
 // connection writes itself, as a whole, or one of its client, which package
 // walletconnect holds against the forms of its own.
 var bwcTraceLine = regexp.MustCompile(`^\d\d:\d\d:\d\d\.\d{3} (?:` + strings.Join([]string{
+	`proposal T=[01] E=[01] R=[01] link=(?:https|scheme|bare) bg=\d+ ttl=\d+`,
 	`sign (?:login|create|add|connect) first=[01]`,
 	`state (?:idle|connecting|awaiting_approval|awaiting_signature|signed|failed|closed) -> [a-z_]+(?: [a-z_]+(?:/[a-z_]+)?)?`,
 	`connected [01]`,
@@ -1229,7 +1230,7 @@ func TestBittensorWalletConnectTrace(t *testing.T) {
 				return
 			}
 			p, b, trace := "topic="+pairing.Topic[:8]+" ", "topic="+wire.Topic(session)[:8]+" ", strings.Join(lines, "\n")+"\n"
-			rest, first := strings.CutPrefix(trace, "00:00:00.000 sign login first=1\n")
+			rest, first := strings.CutPrefix(trace, "00:00:00.000 proposal T=1 E=1 R=0 link=https bg=45 ttl=300\n00:00:00.000 sign login first=1\n")
 			for _, want := range []string{
 				" state idle -> connecting\n", " sock dial 1 relay.walletconnect.com\n", " OUT tag=1100 " + p,
 				" request wc_sessionPropose T=1 E=1 R=0\n", " state connecting -> awaiting_approval\n", " link pair taken\n",
@@ -1241,7 +1242,7 @@ func TestBittensorWalletConnectTrace(t *testing.T) {
 			} {
 				_, after, found := strings.Cut(rest, want)
 				if !found || !first {
-					t.Fatalf("the trace does not begin with the Sign, or has no %q after the lines before it:\n%s", want, trace)
+					t.Fatalf("the trace does not begin with what is sent and the Sign, or has no %q after the lines before it:\n%s", want, trace)
 				}
 				rest = after
 			}
@@ -1277,4 +1278,129 @@ func TestBittensorWalletConnectTraceKeepsTheLastLines(t *testing.T) {
 	if lines := c.TraceLines(); lines.Len() != 256 || lines.Get(0) != "14:00:00.123 line 2" || lines.Get(255) != "14:00:00.123 line 257" {
 		t.Fatalf("%d lines, from %q to %q", lines.Len(), lines.Get(0), lines.Get(lines.Len()-1))
 	}
+}
+
+// The options of a device test (delta 6): what a connection that was never
+// told sends and does, and what each option changes of it. The members of the
+// proposal are held as the wallet was handed them, and the first line of the
+// trace and the line of the proposal itself say the same. A call that is
+// refused changes nothing, and none is taken once a Sign was accepted.
+func TestBittensorWalletConnectDeviceTestOptions(t *testing.T) {
+	connect.SetDefaultLogger(&bwcLog{})
+	defer connect.SetDefaultLogger(nil)
+	const native = "com.bringyour.network.wallet://return"
+	login, bit := BittensorWalletPurposeLogin, bittensorWalletTraceBit
+	for _, row := range []struct {
+		options       string // "none": SetDeviceTestOptions is not called
+		native        string
+		topic, expiry bool
+		link          string
+		background    int
+		ttl           int64
+		late          time.Duration // the wallet takes the pairing that long after it was made
+	}{
+		{"none", "", true, true, "https", 45, 300, 0},
+		{"", native, true, true, "https", 45, 300, 0},
+		{"-T", "", false, true, "https", 45, 300, 0},
+		{" -e ", "", true, false, "https", 45, 300, 0},
+		{"-E,-T,link=https", "", false, false, "https", 45, 300, 0},
+		{"link=scheme,bg=0", "", true, true, "scheme", 0, 300, 0},
+		{"LINK=Bare , BG=60 , TTL=60", "", true, true, "bare", 60, 60, 0},
+		// the pairing of an hour: 400 s on the proposal is still at the relay and the approval is taken
+		{"ttl=3600", "", true, true, "https", 45, 3600, 400 * time.Second},
+	} {
+		bwcPlay(t, BittensorWalletTalisman, BittensorWalletPlatformAndroid, relaytest.WalletOptions{}, func(t *testing.T, s *bwcScene) {
+			c, start := s.c, time.Now().Unix()
+			c.SetTrace(true)
+			err := c.SetReturnLinks(row.native, "")
+			if row.options != "none" {
+				err = errors.Join(err, c.SetDeviceTestOptions(row.options))
+			}
+			if err = errors.Join(err, c.Sign(login, "")); err != nil {
+				t.Fatalf("%q: %v", row.options, err)
+			}
+			s.wait(bwcStep)
+			uri := c.PairingUri()
+			pairing, err := wire.ParsePairingUri(uri)
+			link := map[string]string{"https": "https://talisman.xyz/wc?uri=wc:" + url.QueryEscape(strings.TrimPrefix(uri, "wc:")),
+				"scheme": "talisman://wc?uri=" + url.QueryEscape(uri), "bare": uri}[row.link]
+			if err != nil || pairing.ExpiryUnix != start+row.ttl || c.WalletLink() != link || c.TakeWalletLink() != link {
+				t.Fatalf("%q: the pairing %v (%v), made at %d, and the link %q, want %q", row.options, pairing, err, start, c.WalletLink(), link)
+			}
+			s.wait(row.late)
+			s.wallet.Pair(uri)
+			s.wait(bwcStep)
+			proposal := bwcTake(s, s.wallet.Proposals())
+			var params struct {
+				PairingTopic    *string
+				ExpiryTimestamp *int64
+				Proposer        struct {
+					Metadata struct{ Redirect json.RawMessage }
+				}
+			}
+			sent, bits := s.relay.Published()[0], fmt.Sprintf("T=%d E=%d R=%d", bit(row.topic), bit(row.expiry), bit(row.native != ""))
+			if err := json.Unmarshal(proposal.Params, &params); err != nil || (params.PairingTopic != nil) != row.topic || (params.ExpiryTimestamp != nil) != row.expiry ||
+				row.topic && *params.PairingTopic != pairing.Topic || row.expiry && *params.ExpiryTimestamp != pairing.ExpiryUnix ||
+				(params.Proposer.Metadata.Redirect != nil) != (row.native != "") || sent.Tag != wire.TagSessionPropose || int64(sent.Ttl) != row.ttl {
+				t.Fatalf("%q: the proposal %s (%v), kept by the relay for %d s, of the pairing %+v", row.options, proposal.Params, err, sent.Ttl, pairing)
+			}
+			lines := bwcHoldTrace(t, c, uri, url.QueryEscape(uri))
+			if lines[0] != fmt.Sprintf("00:00:00.000 proposal %s link=%s bg=%d ttl=%d", bits, row.link, row.background, row.ttl) ||
+				!slices.ContainsFunc(lines, func(line string) bool { return strings.HasSuffix(line, " request wc_sessionPropose "+bits) }) ||
+				!slices.ContainsFunc(lines, func(line string) bool { return strings.HasSuffix(line, fmt.Sprintf(" expires +%ds", row.ttl)) }) {
+				t.Fatalf("%q: the trace does not say %s for %d s: %q", row.options, bits, row.ttl, lines)
+			}
+			// behind the wallet the socket is kept for the seconds of bg, and the flow goes on
+			c.SetForeground(false)
+			s.wait(bwcStep)
+			sockets := s.relay.OpenSockets("")
+			c.SetForeground(true)
+			s.wallet.Approve(proposal)
+			s.wait(3 * bwcStep)
+			if (sockets == 0) != (row.background == 0) || c.State() != bwcAwaitingSignature {
+				t.Fatalf("%q: %d sockets a second behind the wallet, and %s after its approval", row.options, sockets, c.State())
+			}
+		})
+	}
+
+	bwcPlay(t, BittensorWalletTalisman, BittensorWalletPlatformAndroid, relaytest.WalletOptions{}, func(t *testing.T, s *bwcScene) {
+		c := s.c
+		// each call replaces the options of the one before, and with none a connection is as it was made
+		for _, options := range []string{"-T,-E,link=bare,bg=60,ttl=3600", " link=SCHEME , bg=0 , ttl=60 ", "", "-e", "  ", "-T"} {
+			if err := c.SetDeviceTestOptions(options); err != nil || (strings.TrimSpace(options) == "") != (c.deviceTest == bittensorWalletDeviceTest{}) {
+				t.Fatalf("%q: %v, and the options are %+v", options, err, c.deviceTest)
+			}
+		}
+		// each of these is refused, for the option that is named, and changes nothing
+		refused := func(c *BittensorWalletConnect, options string, option string) {
+			t.Helper()
+			if err := c.SetDeviceTestOptions(options); err == nil || err.Error() != "invalid_options: "+option {
+				t.Fatalf("%q: %v", options, err)
+			}
+		}
+		for options, option := range map[string]string{
+			"-X": "-X", "T": "T", "-T=1": "-T=1", "-R": "-R", "-E,-T,-e": "-e", "-T,": "", ",": "", // unknown, twice, empty
+			"link=web": "link=web", "link=": "link=", "link": "link", "link=scheme,link=bare": "link=bare",
+			"bg=61": "bg=61", "bg=-1": "bg=-1", "bg=": "bg=", "bg=x": "bg=x", "bg=1,bg=2": "bg=2",
+			"ttl=59": "ttl=59", "ttl=30": "ttl=30", "ttl=3601": "ttl=3601", "ttl=1e3": "ttl=1e3", "-E, ttl = 60": "ttl = 60",
+		} {
+			refused(c, options, option)
+		}
+		proposal := s.pair(login, "")
+		if text := string(proposal.Params); strings.Contains(text, "pairingTopic") || !strings.Contains(text, "expiryTimestamp") || c.WalletLink() == c.PairingUri() {
+			t.Fatalf("after the calls that were refused the proposal is %s and the link %q", text, c.WalletLink())
+		}
+		// a Sign was accepted: the proposal may be at the relay
+		if err := c.SetDeviceTestOptions(""); err == nil || !strings.HasPrefix(err.Error(), "busy: ") {
+			t.Fatalf("after a Sign: %v", err)
+		}
+		refused(c, "-X", "-X")
+		// an entry with one form of the pairing link has no other
+		nova, err := newBittensorWalletConnect(t.Context(), BittensorWalletNova, BittensorWalletPlatformIos, "test-project", "")
+		if err != nil || nova.SetDeviceTestOptions("link=https,-T,bg=10") != nil {
+			t.Fatalf("nova on ios: %v", err)
+		}
+		refused(nova, "link=scheme", "link=scheme")
+		refused(nova, "link=bare", "link=bare")
+	})
 }
