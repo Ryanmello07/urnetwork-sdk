@@ -20,6 +20,7 @@ module URnetwork
       callback :urnet_auth_verify_cb, [:pointer, :string, :string], :void
       callback :urnet_auth_verify_send_cb, [:pointer, :string, :string], :void
       callback :urnet_auth_wallet_challenge_cb, [:pointer, :string, :string], :void
+      callback :urnet_bittensor_wallet_connect_cb, [:pointer, :string], :void
       callback :urnet_block_action_overrides_change_cb, [:pointer, :string], :void
       callback :urnet_block_action_stats_cb, [:pointer], :void
       callback :urnet_block_action_window_change_cb, [:pointer, :string], :void
@@ -362,6 +363,20 @@ module URnetwork
       attach_function :urnet_async_local_state_parse_by_jwt, [:uint64, :urnet_parse_by_jwt_cb, :pointer], :void, blocking: true
       attach_function :urnet_async_local_state_set_by_client_jwt, [:uint64, :string, :urnet_commit_cb, :pointer], :void, blocking: true
       attach_function :urnet_async_local_state_set_by_jwt, [:uint64, :string, :urnet_commit_cb, :pointer], :void, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_add_bittensor_wallet_connect_listener, [:uint64, :urnet_bittensor_wallet_connect_cb, :pointer], :uint64, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_address, [:uint64], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_close, [:uint64], :void, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_connected, [:uint64], :bool, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_pairing_uri, [:uint64], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_purpose, [:uint64], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_result, [:uint64], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_set_foreground, [:uint64, :bool], :void, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_sign, [:uint64, :string, :string, :pointer], :bool, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_state, [:uint64], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_take_proof, [:uint64], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_take_wallet_link, [:uint64], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_wallet_id, [:uint64], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_wallet_link, [:uint64], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_session_bridge_url, [:uint64, :pointer], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_session_cancel, [:uint64], :void, blocking: true
       attach_function :urnet_bittensor_wallet_session_challenge_args, [:uint64, :string], :pointer, blocking: true
@@ -1187,6 +1202,8 @@ module URnetwork
       attach_function :urnet_websocket_device_rpc_listener_close, [:uint64, :pointer], :bool, blocking: true
       attach_function :urnet_alpha_from_rao, [:int64], :double, blocking: true
       attach_function :urnet_bittensor_sign_raw_data, [:string], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_choice_for, [:string, :string], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_choice_id_list, [:string], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_display_name, [:string], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_id_list, [], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_injected_name, [:string], :pointer, blocking: true
@@ -1267,6 +1284,7 @@ module URnetwork
       attach_function :urnet_nano_cents_to_usd, [:int64], :double, blocking: true
       attach_function :urnet_nano_points_to_points, [:int64], :double, blocking: true
       attach_function :urnet_new_async_local_state, [:string], :uint64, blocking: true
+      attach_function :urnet_new_bittensor_wallet_connect, [:uint64, :string, :string, :string, :string, :pointer], :uint64, blocking: true
       attach_function :urnet_new_bittensor_wallet_session, [:string, :string, :string, :string, :pointer], :uint64, blocking: true
       attach_function :urnet_new_client_event_queue, [:uint64, :string, :string, :string], :uint64, blocking: true
       attach_function :urnet_new_connect_first_event, [], :pointer, blocking: true

@@ -78,6 +78,8 @@ var behavioralTypes = map[string]bool{
 	"ClientEventQueue": true,
 	// one wallet-connect proof: lock-guarded session state and methods
 	"BittensorWalletSession": true,
+	// one app-held wallet connection: a relay socket, a loop and lock-guarded state
+	"BittensorWalletConnect": true,
 
 	"AccountPreferencesViewController":    true,
 	"AccountViewController":               true,
