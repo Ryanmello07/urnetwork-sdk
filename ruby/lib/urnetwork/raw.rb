@@ -370,11 +370,15 @@ module URnetwork
       attach_function :urnet_bittensor_wallet_connect_pairing_uri, [:uint64], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_connect_purpose, [:uint64], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_connect_result, [:uint64], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_set_device_test_options, [:uint64, :string, :pointer], :bool, blocking: true
       attach_function :urnet_bittensor_wallet_connect_set_foreground, [:uint64, :bool], :void, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_set_return_links, [:uint64, :string, :string, :pointer], :bool, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_set_trace, [:uint64, :bool], :void, blocking: true
       attach_function :urnet_bittensor_wallet_connect_sign, [:uint64, :string, :string, :pointer], :bool, blocking: true
       attach_function :urnet_bittensor_wallet_connect_state, [:uint64], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_connect_take_proof, [:uint64], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_connect_take_wallet_link, [:uint64], :pointer, blocking: true
+      attach_function :urnet_bittensor_wallet_connect_trace_lines, [:uint64], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_connect_wallet_id, [:uint64], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_connect_wallet_link, [:uint64], :pointer, blocking: true
       attach_function :urnet_bittensor_wallet_session_bridge_url, [:uint64, :pointer], :pointer, blocking: true

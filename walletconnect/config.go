@@ -27,6 +27,12 @@ type Config struct {
 	NamespaceKey    string // "polkadot"
 	Chain           string // the one CAIP-2 chain proposed
 	Method          string // the one method proposed and requested
+	// Optional members of the proposal (wire.ProposeOptions; delta 2.2). The
+	// topic and the expiry are the pairing's own: only whether they are sent
+	// is chosen here. With none of the three the proposal is ur.io's.
+	ProposePairingTopic bool
+	ProposeExpiry       bool
+	Redirect            *wire.Redirect // nil = no redirect in the metadata
 	// seconds of running time the socket is kept after SetForeground(false); 0 closes it at once (B.3 R3)
 	BackgroundSocketSeconds int
 	Now                     func() int64                                                                // unix milliseconds; nil = time.Now().UnixMilli
@@ -37,11 +43,16 @@ type Config struct {
 	Timing  *Timing                          // nil = DefaultTiming()
 	OnEvent func(event Event)                // called by the Client, one event at a time
 	Logf    func(format string, args ...any) // nil = silent; never given a secret
+	// One line per event, for a device test (delta 5.3); nil = none. Called on
+	// the loop. Never given a key, a uri, a token, a message text, a signature
+	// or any text that a wallet or the relay wrote: numbers, fixed words and 8
+	// hex characters of a topic the client holds, and nothing else.
+	Trace func(format string, args ...any)
 }
 
 // withDefaults is a copy of the config in which every nil that stands for a
-// default is that default. NetDial and Logf stay nil: they are asked where
-// they are used.
+// default is that default. NetDial, Logf and Trace stay nil: they are asked
+// where they are used.
 func (c *Config) withDefaults() *Config {
 	config := *c
 	if len(config.RelayUrls) == 0 {

@@ -16,13 +16,17 @@ package sdk
 // three runs under connect.HandleError.
 
 import (
+	"cmp"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/connect"
@@ -55,6 +59,9 @@ const (
 // codes: the wallet does not offer the Bittensor chain or the sign method.
 const BittensorWalletBridgeErrorUnsupportedChain = "unsupported_chain"
 
+// the lines a trace keeps (SetTrace)
+const bittensorWalletTraceLimit = 256
+
 // BittensorWalletConnectListener is called once for every state entered, and
 // once whenever Connected changes while the state is connecting,
 // awaiting_approval or awaiting_signature. Calls are made one at a time, in
@@ -63,6 +70,56 @@ const BittensorWalletBridgeErrorUnsupportedChain = "unsupported_chain"
 // inside a call. Read the details from the connection and hop to the ui thread.
 type BittensorWalletConnectListener interface {
 	BittensorWalletConnectChanged(state string)
+}
+
+// bittensorWalletDeviceTest is what SetDeviceTestOptions chose (delta 6). The
+// zero value is a connection that was never told.
+type bittensorWalletDeviceTest struct {
+	noTopic, noExpiry bool   // -T, -E
+	link, pair        string // link=: its name and its template; "" = the entry's own, named https
+	background        *int   // bg=; nil = not given
+	ttl               int    // ttl=; 0 = not given
+}
+
+// bittensorWalletDeviceTestOptions reads the options of a device test for an
+// entry of the wallet-app table. What is refused is refused whole, with the
+// option at fault: one that is unknown, given twice or empty, a number out of
+// its range, or a form of the pairing link the entry does not have.
+func bittensorWalletDeviceTestOptions(options string, links *bittensorWalletAppLinks) (bittensorWalletDeviceTest, error) {
+	test, seen := bittensorWalletDeviceTest{}, map[string]bool{}
+	if strings.TrimSpace(options) == "" {
+		return test, nil
+	}
+	for _, option := range strings.Split(options, ",") {
+		option = strings.TrimSpace(option)
+		lower := strings.ToLower(option)
+		name, value, _ := strings.Cut(lower, "=")
+		number, err := strconv.Atoi(value)
+		ok := !seen[name]
+		seen[name] = true
+		switch {
+		case !ok:
+		case lower == "-t":
+			test.noTopic = true
+		case lower == "-e":
+			test.noExpiry = true
+		case lower == "link=https":
+		case lower == "link=scheme" && links.pairScheme != "":
+			test.link, test.pair = "scheme", links.pairScheme
+		case lower == "link=bare" && links.pairBare != "":
+			test.link, test.pair = "bare", links.pairBare
+		case name == "bg" && err == nil && number >= 0 && number <= 60:
+			test.background = &number
+		case name == "ttl" && err == nil && number >= 60 && number <= 3600:
+			test.ttl = number
+		default:
+			ok = false
+		}
+		if !ok {
+			return bittensorWalletDeviceTest{}, fmt.Errorf("invalid_options: %s", option)
+		}
+	}
+	return test, nil
 }
 
 // an account the wallet approved on the Bittensor chain
@@ -94,6 +151,7 @@ type BittensorWalletConnect struct {
 	configureClient func(config *walletconnect.Config) // called once, before walletconnect.NewClient
 
 	stateLock sync.Mutex
+	redirect  wire.Redirect         // the links of SetReturnLinks; the zero value names none
 	client    *walletconnect.Client // from the first Sign on
 	over      bool                  // the client has ended, and the wallet session with it
 	state     string
@@ -122,6 +180,15 @@ type BittensorWalletConnect struct {
 	// whether the notifier runs
 	pending   []string
 	notifying bool
+
+	// The trace of a device test (delta 5), its last lines. Their lock is
+	// taken with stateLock held, never the other way round.
+	traceOn   atomic.Bool
+	traceLock sync.Mutex
+	trace     []string
+
+	// the options of SetDeviceTestOptions (delta 6), under stateLock
+	deviceTest bittensorWalletDeviceTest
 }
 
 // NewBittensorWalletConnect prepares a connection to a wallet app. walletId is
@@ -179,9 +246,11 @@ func newBittensorWalletConnect(ctx context.Context, walletId string, platform st
 	}, nil
 }
 
-// clientConfig is the client of this connection (design B.2; B.3 R3, R15).
+// clientConfig is the client of this connection (design B.2; B.3 R3, R15),
+// as SetDeviceTestOptions may have changed it; what it sends is the first line
+// of a trace. The lock is held.
 func (self *BittensorWalletConnect) clientConfig() *walletconnect.Config {
-	log := connect.DefaultLogger()
+	log, test := connect.DefaultLogger(), self.deviceTest
 	config := &walletconnect.Config{
 		ProjectId:       self.projectId,
 		IdentifierName:  "bundleId",
@@ -195,6 +264,11 @@ func (self *BittensorWalletConnect) clientConfig() *walletconnect.Config {
 		NamespaceKey: "polkadot",
 		Chain:        BittensorWalletConnectChain,
 		Method:       BittensorWalletConnectMethod,
+		// Talisman, opened by a link, held ur.io's proposal and showed no
+		// prompt; the one request that showed it named its pairing and the
+		// pairing's expiry (delta 1.2, 2.2)
+		ProposePairingTopic: !test.noTopic,
+		ProposeExpiry:       !test.noExpiry,
 		// called on the loop of the client and, through SignMessage, on the
 		// goroutine of a challenge leg
 		Now: self.nowMillis,
@@ -206,19 +280,98 @@ func (self *BittensorWalletConnect) clientConfig() *walletconnect.Config {
 				verbose.Infof("[bwc]"+format, args...)
 			}
 		},
+		Trace: self.tracef,
 	}
 	if self.platform == BittensorWalletPlatformAndroid {
 		// there the process goes on for about a minute behind the wallet
 		config.IdentifierName, config.BackgroundSocketSeconds = "packageName", 45
 	}
+	if redirect := self.redirect; redirect != (wire.Redirect{}) {
+		config.Redirect = &redirect
+	}
+	if test.background != nil {
+		config.BackgroundSocketSeconds = *test.background
+	}
+	if test.ttl != 0 {
+		// with it the expiry in the uri and in the proposal, and the relay's ttl of the proposal (delta 6.1)
+		config.Timing = walletconnect.DefaultTiming()
+		config.Timing.PairingTtl = time.Duration(test.ttl) * time.Second
+	}
 	if self.configureClient != nil {
 		self.configureClient(config)
 	}
+	timing := cmp.Or(config.Timing, walletconnect.DefaultTiming())
+	self.tracef("proposal T=%d E=%d R=%d link=%s bg=%d ttl=%d", bittensorWalletTraceBit(config.ProposePairingTopic), bittensorWalletTraceBit(config.ProposeExpiry),
+		bittensorWalletTraceBit(config.Redirect != nil), cmp.Or(test.link, "https"), config.BackgroundSocketSeconds, int(timing.PairingTtl/time.Second))
 	return config
 }
 
 func (self *BittensorWalletConnect) WalletId() string {
 	return self.walletId
+}
+
+// SetReturnLinks names the link a wallet may open to bring this app to the
+// front again; it is put into the connection request as the app's redirect.
+// The link must be inert: opening it does nothing but show the app. Nothing
+// arrives on it and the connection never reads it. nativeLink is a link on a
+// scheme of the app ("<scheme>://<host>"), universalLink an https link; either
+// may be "". A link with a query or a fragment is refused, and so is one the
+// apps act on today (the scheme ur or urnetwork, the host
+// bittensor-sign-message). Only before the first Sign.
+// Errors (nothing changes): invalid_return_link, busy (a Sign was accepted).
+func (self *BittensorWalletConnect) SetReturnLinks(nativeLink string, universalLink string) error {
+	if fault := bittensorWalletReturnLinkFault(nativeLink, false); fault != "" {
+		return fmt.Errorf("invalid_return_link: the native link %s", fault)
+	}
+	if fault := bittensorWalletReturnLinkFault(universalLink, true); fault != "" {
+		return fmt.Errorf("invalid_return_link: the universal link %s", fault)
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.signs > 0 {
+		// the proposal may be at the relay
+		return errors.New("busy: a Sign was accepted")
+	}
+	self.redirect = wire.Redirect{Native: nativeLink, Universal: universalLink}
+	return nil
+}
+
+// bittensorWalletReturnLinkFault says what is wrong with a return link, "" for
+// one that is taken (delta 2.3). A link carries no data, so that a handler
+// finds nothing to read; it is shown to a wallet; and it is no link the apps
+// act on today, which would put a screen over the one that waits or sign in
+// from what the link says.
+func bittensorWalletReturnLinkFault(link string, universal bool) string {
+	if link == "" {
+		return ""
+	}
+	if len(link) > 128 || strings.ContainsFunc(link, func(r rune) bool { return r <= ' ' || r > '~' }) {
+		return "has more than 128 bytes or is not printable ascii"
+	}
+	if strings.ContainsAny(link, "?#") {
+		return "has a query or a fragment"
+	}
+	u, err := url.Parse(link)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
+		return "is not <scheme>://<host>[/<path>]"
+	}
+	if universal {
+		if u.Scheme != "https" || strings.Contains(u.Host, ":") {
+			return "is not https://<host>[/<path>]"
+		}
+		return ""
+	}
+	switch u.Scheme {
+	case "http", "https", "wc", "file", "content", "intent", "javascript", "data":
+		return "is on a scheme that is not the app's"
+	case "ur", "urnetwork":
+		return "is on a scheme the apps act on"
+	}
+	// the return of the browser bridge, on whatever scheme
+	if strings.EqualFold(u.Hostname(), "bittensor-sign-message") {
+		return "is the return of the browser bridge"
+	}
+	return ""
 }
 
 // Sign asks the wallet for one proof. purpose is a BittensorWalletPurpose*.
@@ -262,6 +415,7 @@ func (self *BittensorWalletConnect) Sign(purpose string, expectedAddress string)
 		}
 		self.client = client
 	}
+	self.tracef("sign %s first=%d", purpose, bittensorWalletTraceBit(first))
 	self.signs++
 	self.family, self.purpose, self.expected = family, purpose, expectedAddress
 	// a proof that was not taken is dropped (design A.3 rule 6)
@@ -311,6 +465,8 @@ func (self *BittensorWalletConnect) PairingUri() string {
 // awaiting_approval the link that hands the pairing over, while
 // awaiting_signature the link that brings the wallet forward. "" when there is
 // nothing to open. For an "Open wallet" button. As secret as PairingUri.
+// Where a wallet is brought forward by starting its app, the answer is
+// BittensorWalletLinkLaunchPackage, which is no link.
 func (self *BittensorWalletConnect) WalletLink() string {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -320,7 +476,7 @@ func (self *BittensorWalletConnect) WalletLink() string {
 func (self *BittensorWalletConnect) walletLink() string {
 	switch self.state {
 	case BittensorWalletConnectStateAwaitingApproval:
-		return bittensorWalletAppLink(self.links.pair, self.pairingUri, 0)
+		return bittensorWalletAppLink(cmp.Or(self.deviceTest.pair, self.links.pair), self.pairingUri, 0)
 	case BittensorWalletConnectStateAwaitingSignature:
 		return bittensorWalletAppLink(self.links.foreground, "", self.requestId)
 	}
@@ -342,7 +498,14 @@ func (self *BittensorWalletConnect) TakeWalletLink() string {
 		return ""
 	}
 	link := self.walletLink()
-	self.linkTaken = link != ""
+	if self.linkTaken = link != ""; self.linkTaken {
+		// which of the two it is, never the link
+		step := "pair"
+		if self.state == BittensorWalletConnectStateAwaitingSignature {
+			step = "forward"
+		}
+		self.tracef("link %s taken", step)
+	}
 	return link
 }
 
@@ -366,6 +529,9 @@ func (self *BittensorWalletConnect) TakeProof() *BittensorWalletProof {
 	if self.over {
 		// the wallet session ended while the proof waited (design A.3 rule 8)
 		self.enter(BittensorWalletConnectStateClosed)
+	}
+	if proof != nil {
+		self.tracef("proof taken")
 	}
 	return proof
 }
@@ -413,6 +579,83 @@ func (self *BittensorWalletConnect) SetForeground(foreground bool) {
 	}
 }
 
+// SetTrace turns the trace of this connection on or off. Off when never called.
+// While on, the connection keeps its last 256 trace lines and writes each to the
+// sdk log. A line holds times, states, relay tags, ids, error codes and the first
+// 8 hex characters of a topic: never a key, a pairing uri, a wallet link, a relay
+// token, a challenge text, a signature or a text a wallet wrote. For a test build.
+func (self *BittensorWalletConnect) SetTrace(enabled bool) {
+	self.traceOn.Store(enabled)
+}
+
+// TraceLines is the trace so far, oldest line first; empty when the trace was
+// never on. It stays readable after Close. A copy.
+func (self *BittensorWalletConnect) TraceLines() *StringList {
+	lines := NewStringList()
+	self.traceLock.Lock()
+	defer self.traceLock.Unlock()
+	lines.addAll(self.trace...)
+	return lines
+}
+
+// SetDeviceTestOptions changes, for a device test, what this connection sends
+// and does: options separated by commas, in any case. Each call replaces the
+// options of the call before, and "" is what a connection does when this is
+// never called. Only before the first Sign.
+//
+//	-T              leave pairingTopic out of the connection request
+//	-E              leave expiryTimestamp out of it
+//	link=https      which form of the wallet's pairing link WalletLink answers:
+//	link=scheme     the entry's own, named https, or one of the two others
+//	link=bare       that Talisman's android entry has
+//	bg=<0..60>      the seconds the socket is kept in the background
+//	ttl=<60..3600>  the seconds the pairing lives and the relay keeps its request
+//
+// Errors (nothing changes): invalid_options with the option at fault, busy (a
+// Sign was accepted).
+// Temporary: it is removed, with the options that lose, when the device tests
+// have decided.
+func (self *BittensorWalletConnect) SetDeviceTestOptions(options string) error {
+	test, err := bittensorWalletDeviceTestOptions(options, self.links)
+	if err != nil {
+		return err
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.signs > 0 {
+		// the proposal may be at the relay
+		return errors.New("busy: a Sign was accepted")
+	}
+	self.deviceTest = test
+	return nil
+}
+
+// tracef adds a line to the trace when it is on (delta 5.3): the clock of the
+// connection in front, then what the client says on its loop or this file
+// says, with or without the state lock. What a line may hold is the rule of
+// walletconnect.Config.Trace. The line goes to the sdk log at the default
+// verbosity as well, in the order of the trace.
+func (self *BittensorWalletConnect) tracef(format string, args ...any) {
+	if !self.traceOn.Load() {
+		return
+	}
+	line := time.UnixMilli(self.nowMillis()).UTC().Format("15:04:05.000 ") + fmt.Sprintf(format, args...)
+	self.traceLock.Lock()
+	defer self.traceLock.Unlock()
+	if self.trace = append(self.trace, line); len(self.trace) > bittensorWalletTraceLimit {
+		self.trace = self.trace[1:]
+	}
+	connect.DefaultLogger().Infof("[bwc] %s", line)
+}
+
+// bittensorWalletTraceBit is a bool as a trace line has it.
+func bittensorWalletTraceBit(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func (self *BittensorWalletConnect) AddBittensorWalletConnectListener(listener BittensorWalletConnectListener) Sub {
 	callbackId := self.listeners.Add(listener)
 	return newSub(func() {
@@ -435,6 +678,12 @@ func (self *BittensorWalletConnect) Close() {
 // enter is the one place the state changes; the lock is held. The listeners
 // are told of it by the notifier.
 func (self *BittensorWalletConnect) enter(state string) {
+	// of a failure its two codes, which are words of the sdk
+	codes := ""
+	if result := self.result; result != nil {
+		codes = strings.TrimSuffix(" "+result.ErrorCode+"/"+result.BridgeErrorCode, "/")
+	}
+	self.tracef("state %s -> %s%s", self.state, state, codes)
 	self.state = state
 	self.linkTaken = false
 	if state != BittensorWalletConnectStateAwaitingApproval {
@@ -467,6 +716,7 @@ func (self *BittensorWalletConnect) setConnected(connected bool) {
 		return
 	}
 	self.connected = connected
+	self.tracef("connected %d", bittensorWalletTraceBit(connected))
 	switch self.state {
 	case BittensorWalletConnectStateConnecting, BittensorWalletConnectStateAwaitingApproval, BittensorWalletConnectStateAwaitingSignature:
 		self.tell(self.state)
@@ -630,9 +880,12 @@ func (self *BittensorWalletConnect) challenge() {
 			result, err := self.fetchChallenge(ctx, args)
 			cancel()
 			if err == nil {
+				self.tracef("challenge attempt %d ok", counted+repeated+1)
 				challenge = result
 				break
 			}
+			// never what the error says: it names the server
+			self.tracef("challenge attempt %d failed", counted+repeated+1)
 			if client.ResumeEpoch() != epoch && repeated < 3 {
 				// the process was suspended in it, which says nothing of
 				// the server: again at once, and not counted
@@ -664,12 +917,14 @@ func (self *BittensorWalletConnect) challenge() {
 		// wallet spells it.
 		session.SignRequest()
 		self.requestId = client.SignMessage(self.account, session.Message(), session.ExpiresAtMillis())
+		self.tracef("request id=%d", self.requestId)
 	})
 }
 
 // answered takes the wallet's answer to the request; the lock is held. The
 // session of the Sign decides whether it is a proof (design A.7 step 6).
 func (self *BittensorWalletConnect) answered(signature string) {
+	received := len(signature)
 	// 65 bytes of which the first names the kind of key (01: sr25519) are
 	// the signature behind that byte
 	if raw, err := hex.DecodeString(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(signature)), "0x")); err == nil && len(raw) == 65 && raw[0] == 1 {
@@ -680,6 +935,7 @@ func (self *BittensorWalletConnect) answered(signature string) {
 		address = self.address
 	}
 	result := self.session.HandleSignature(address, signature, self.nowMillis())
+	self.tracef("signature len=%d accepted=%d", received, bittensorWalletTraceBit(result.Proof != nil))
 	if result.Proof == nil {
 		self.result = result
 		self.enter(BittensorWalletConnectStateFailed)
@@ -692,7 +948,8 @@ func (self *BittensorWalletConnect) answered(signature string) {
 // newBittensorWalletConnectSession is the session of one Sign: one challenge,
 // on the walletconnect transport, which is the one that is asked to sign and
 // takes a signature, and with no redirect link, so that no url can be handed
-// to it as a return (design A.7 step 1, F.6).
+// to it as a return (design A.7 step 1, F.6). The links of SetReturnLinks are
+// the client's alone (delta 2.4).
 func newBittensorWalletConnectSession(walletId string, platform string, purpose string) *BittensorWalletSession {
 	return &BittensorWalletSession{
 		walletId:  walletId,

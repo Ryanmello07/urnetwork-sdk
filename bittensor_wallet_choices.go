@@ -23,6 +23,12 @@ const (
 // BittensorWalletConnect. BittensorWalletTransportFor never returns it.
 const BittensorWalletTransportWalletApp = "wallet_app"
 
+// What WalletLink and TakeWalletLink answer where a wallet is brought forward
+// by starting its app and no link exists for that (android): the app starts
+// the launch intent of the package it verified for the row. It is no link and
+// carries nothing, the package least of all (delta 3.3).
+const BittensorWalletLinkLaunchPackage = "launch-package:"
+
 // BittensorWalletChoice is one row of the wallet chooser on one platform.
 type BittensorWalletChoice struct {
 	WalletId string
@@ -51,31 +57,36 @@ type BittensorWalletChoice struct {
 // bittensorWalletAppLinks is what one platform needs to open a wallet app.
 // The templates are expanded by bittensorWalletAppLink.
 type bittensorWalletAppLinks struct {
+	listed            bool     // a row of the platform's chooser
 	pair              string   // template that hands the pairing over; "" = none
-	foreground        string   // template that brings the wallet forward; "" = none
+	foreground        string   // template that brings the wallet forward, or BittensorWalletLinkLaunchPackage; "" = none
 	probeUrl          string   // ios
 	universalLinkOnly bool     // ios
 	packages          []string // android, in order
 	signers           []string // android: "<package> <64 lowercase hex>"
+
+	// two more forms of pair, which a device test may ask for
+	// (BittensorWalletConnect.SetDeviceTestOptions); "" = none
+	pairScheme, pairBare string
 }
 
 type bittensorWalletAppEntry struct {
 	walletId    string
 	displayName string
-	listed      bool // a row of the phone chooser
 	ios         bittensorWalletAppLinks
 	android     bittensorWalletAppLinks
 }
 
 // bittensorWalletApps is the wallet-app table (design C.2 has the source of
-// every value). Read only: nothing writes it after package init. An entry
-// that is not listed can be connected to and is no chooser row; listing it is
-// that one field (design C.3 rule 7).
+// every value, delta 3 what changed after the first phone test). Read only:
+// nothing writes it after package init. An entry that is not listed on a
+// platform can be connected to there and is no chooser row; listing it is
+// that one field (design C.3 rule 7). Listed is what a phone has opened:
+// Talisman on android. Nova and SubWallet wait for a run of theirs.
 var bittensorWalletApps = []bittensorWalletAppEntry{
 	{
 		walletId:    BittensorWalletNova,
 		displayName: "Nova Wallet",
-		listed:      true,
 		ios: bittensorWalletAppLinks{
 			pair:       "novawallet://wc?uri={uri_enc}",
 			foreground: "novawallet://request",
@@ -96,7 +107,6 @@ var bittensorWalletApps = []bittensorWalletAppEntry{
 	{
 		walletId:    BittensorWalletSubWallet,
 		displayName: "SubWallet",
-		listed:      true,
 		ios: bittensorWalletAppLinks{
 			pair:       "subwallet://wc?uri={uri_enc}",
 			foreground: "subwallet://wc?requestId={request_id}",
@@ -114,20 +124,27 @@ var bittensorWalletApps = []bittensorWalletAppEntry{
 	{
 		walletId:    BittensorWalletTalisman,
 		displayName: "Talisman",
-		listed:      false, // until a session with the real app has met design C.4
 		ios: bittensorWalletAppLinks{
+			listed: false, // nothing was run on an iPhone
 			// the app's association file matches "wc:*" on the encoded
 			// value, so the first colon stays as it is
 			pair:              "https://talisman.xyz/wc?uri={uri_enc_keep_wc}",
 			universalLinkOnly: true,
 		},
 		android: bittensorWalletAppLinks{
-			pair:     "https://talisman.xyz/wc?uri={uri_enc_keep_wc}",
-			packages: []string{"xyz.talisman.app"},
+			listed: true,
+			pair:   "https://talisman.xyz/wc?uri={uri_enc_keep_wc}",
+			// it has no link that brings it forward: the app starts it
+			foreground: BittensorWalletLinkLaunchPackage,
+			packages:   []string{"xyz.talisman.app"},
 			signers: []string{
 				"xyz.talisman.app 249542ce5087d97454c06910ab727e6d3430575920db0c8a32746a1f2812c86f",
 				"xyz.talisman.app 51392890773ad6d76ca52e073a9076c466b16cd0e8cdae03280a1cd89185af39",
 			},
+			// both opened the app on the phone of the first test as well; which
+			// form its one prompt came from was not recorded (delta 1.2, 3.2)
+			pairScheme: "talisman://wc?uri={uri_enc}",
+			pairBare:   "{uri}",
 		},
 	},
 	{
@@ -135,7 +152,6 @@ var bittensorWalletApps = []bittensorWalletAppEntry{
 		// is no link (design C.3 rule 5)
 		walletId:    BittensorWalletWalletConnect,
 		displayName: "WalletConnect",
-		listed:      false,
 	},
 }
 
@@ -180,11 +196,12 @@ func BittensorWalletChoiceIdList(platform string) *StringList {
 	case BittensorWalletPlatformMacos, BittensorWalletPlatformWindows, BittensorWalletPlatformLinux, BittensorWalletPlatformWeb:
 		return BittensorWalletIdList()
 	case BittensorWalletPlatformIos, BittensorWalletPlatformAndroid:
-		// the listed wallet apps, then the wallets of bittensor_wallet.go
+		// the wallet apps listed there, then the wallets of bittensor_wallet.go
 		// that sign by copy and paste there (design C.3 rule 1)
 		for i := range bittensorWalletApps {
-			if bittensorWalletApps[i].listed {
-				walletIds.Add(bittensorWalletApps[i].walletId)
+			walletId := bittensorWalletApps[i].walletId
+			if _, links := bittensorWalletAppEntryFor(walletId, platform); links.listed {
+				walletIds.Add(walletId)
 			}
 		}
 		for _, walletId := range BittensorWalletIdList().values {
@@ -209,7 +226,7 @@ func BittensorWalletChoiceFor(walletId string, platform string) *BittensorWallet
 		Packages:       NewStringList(),
 		PackageSigners: NewStringList(),
 	}
-	if entry, links := bittensorWalletAppEntryFor(walletId, platform); entry != nil && entry.listed {
+	if entry, links := bittensorWalletAppEntryFor(walletId, platform); entry != nil && links.listed {
 		choice.DisplayName = entry.displayName
 		choice.Transport = BittensorWalletTransportWalletApp
 		choice.ProbeUrl = links.probeUrl

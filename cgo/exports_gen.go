@@ -5607,6 +5607,21 @@ func urnet_bittensor_wallet_connect_result(self C.uint64_t) *C.char {
 	return cJson(r0, "urnet_bittensor_wallet_connect_result")
 }
 
+//export urnet_bittensor_wallet_connect_set_device_test_options
+func urnet_bittensor_wallet_connect_set_device_test_options(self C.uint64_t, options *C.char, outError **C.char) C.bool {
+	defer cgoGuard("urnet_bittensor_wallet_connect_set_device_test_options")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_set_device_test_options")
+	if !ok {
+		return C.bool(false)
+	}
+	err := self_.SetDeviceTestOptions(goString(options))
+	if err != nil {
+		setErrorOut(outError, err)
+		return C.bool(false)
+	}
+	return C.bool(true)
+}
+
 //export urnet_bittensor_wallet_connect_set_foreground
 func urnet_bittensor_wallet_connect_set_foreground(self C.uint64_t, foreground C.bool) {
 	defer cgoGuard("urnet_bittensor_wallet_connect_set_foreground")
@@ -5615,6 +5630,31 @@ func urnet_bittensor_wallet_connect_set_foreground(self C.uint64_t, foreground C
 		return
 	}
 	self_.SetForeground(bool(foreground))
+}
+
+//export urnet_bittensor_wallet_connect_set_return_links
+func urnet_bittensor_wallet_connect_set_return_links(self C.uint64_t, nativeLink *C.char, universalLink *C.char, outError **C.char) C.bool {
+	defer cgoGuard("urnet_bittensor_wallet_connect_set_return_links")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_set_return_links")
+	if !ok {
+		return C.bool(false)
+	}
+	err := self_.SetReturnLinks(goString(nativeLink), goString(universalLink))
+	if err != nil {
+		setErrorOut(outError, err)
+		return C.bool(false)
+	}
+	return C.bool(true)
+}
+
+//export urnet_bittensor_wallet_connect_set_trace
+func urnet_bittensor_wallet_connect_set_trace(self C.uint64_t, enabled C.bool) {
+	defer cgoGuard("urnet_bittensor_wallet_connect_set_trace")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_set_trace")
+	if !ok {
+		return
+	}
+	self_.SetTrace(bool(enabled))
 }
 
 //export urnet_bittensor_wallet_connect_sign
@@ -5666,6 +5706,20 @@ func urnet_bittensor_wallet_connect_take_wallet_link(self C.uint64_t) *C.char {
 	}
 	r0 := self_.TakeWalletLink()
 	return cString(string(r0))
+}
+
+//export urnet_bittensor_wallet_connect_trace_lines
+func urnet_bittensor_wallet_connect_trace_lines(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_bittensor_wallet_connect_trace_lines")
+	self_, ok := resolveHandle[*sdk.BittensorWalletConnect](uint64(self), "urnet_bittensor_wallet_connect_trace_lines")
+	if !ok {
+		return nil
+	}
+	r0 := self_.TraceLines()
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_bittensor_wallet_connect_trace_lines")
 }
 
 //export urnet_bittensor_wallet_connect_wallet_id

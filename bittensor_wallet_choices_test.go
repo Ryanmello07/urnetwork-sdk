@@ -19,12 +19,14 @@ const (
 	bittensorTestRequestId           = int64(1759900000000456)
 )
 
-var bittensorTestPhoneChoiceIds = []string{BittensorWalletNova, BittensorWalletSubWallet, BittensorWalletTalisman, BittensorWalletTaoCom}
+// On android Talisman is the one wallet app, in front; on ios it is the first
+// of the wallets that sign by copy and paste (delta 3.1).
+var bittensorTestPhoneChoiceIds = []string{BittensorWalletTalisman, BittensorWalletTaoCom}
 
-// bittensorTestListWalletApp lists an entry of the wallet-app table until the
-// test ends: the table is swapped for a copy with the flag set and put back,
-// and is itself never written. Not for a parallel test.
-func bittensorTestListWalletApp(t *testing.T, walletId string) {
+// bittensorTestListWalletApp lists an entry of the wallet-app table on a phone
+// platform until the test ends: the table is swapped for a copy with the flag
+// set and put back, and is itself never written. Not for a parallel test.
+func bittensorTestListWalletApp(t *testing.T, walletId string, platform string) {
 	t.Helper()
 	tabled := bittensorWalletApps
 	apps := slices.Clone(tabled)
@@ -32,7 +34,11 @@ func bittensorTestListWalletApp(t *testing.T, walletId string) {
 	if i < 0 {
 		t.Fatalf("the table has no wallet app %q", walletId)
 	}
-	apps[i].listed = true
+	if platform == BittensorWalletPlatformIos {
+		apps[i].ios.listed = true
+	} else {
+		apps[i].android.listed = true
+	}
 	bittensorWalletApps = apps
 	t.Cleanup(func() { bittensorWalletApps = tabled })
 }
@@ -86,25 +92,24 @@ func TestBittensorWalletChoiceIdList(t *testing.T) {
 // TC15b: every row of every chooser, and no row for an id a chooser does
 // not offer.
 func TestBittensorWalletChoiceRows(t *testing.T) {
-	appNames := map[string]string{BittensorWalletNova: "Nova Wallet", BittensorWalletSubWallet: "SubWallet"}
 	rows := 0
 	for _, platform := range []string{
 		BittensorWalletPlatformIos, BittensorWalletPlatformAndroid, BittensorWalletPlatformMacos,
 		BittensorWalletPlatformWindows, BittensorWalletPlatformLinux, BittensorWalletPlatformWeb,
 	} {
-		phone := platform == BittensorWalletPlatformIos || platform == BittensorWalletPlatformAndroid
 		for _, walletId := range BittensorWalletChoiceIdList(platform).values {
+			// the one wallet app a chooser lists: Talisman, and on android only
 			appName := ""
-			if phone {
-				appName = appNames[walletId]
+			if walletId == BittensorWalletTalisman && platform == BittensorWalletPlatformAndroid {
+				appName = "Talisman"
 			}
 			bittensorTestCheckChoice(t, walletId, platform, appName)
 			rows += 1
 		}
 	}
-	// two phones with four rows, four other platforms with three
-	if rows != 20 {
-		t.Errorf("%d rows, want 20", rows)
+	// two phones with two rows, four other platforms with three
+	if rows != 16 {
+		t.Errorf("%d rows, want 16", rows)
 	}
 	if BittensorWalletChoiceFor(BittensorWalletWalletConnect, BittensorWalletPlatformIos) != nil ||
 		BittensorWalletChoiceFor(BittensorWalletNova, BittensorWalletPlatformMacos) != nil {
@@ -126,7 +131,8 @@ func TestBittensorWalletChoiceLinks(t *testing.T) {
 		{BittensorWalletSubWallet, BittensorWalletPlatformIos, "subwallet://wc?uri=" + bittensorTestPairingUriEnc, "subwallet://wc?requestId=1759900000000456"},
 		{BittensorWalletSubWallet, BittensorWalletPlatformAndroid, "subwallet://wc?uri=" + bittensorTestPairingUriEnc, "subwallet://wc?requestId=1759900000000456"},
 		{BittensorWalletTalisman, BittensorWalletPlatformIos, "https://talisman.xyz/wc?uri=" + bittensorTestPairingUriEncKeepWc, ""},
-		{BittensorWalletTalisman, BittensorWalletPlatformAndroid, "https://talisman.xyz/wc?uri=" + bittensorTestPairingUriEncKeepWc, ""},
+		// no link brings it forward there: the app starts the package (BittensorWalletLinkLaunchPackage)
+		{BittensorWalletTalisman, BittensorWalletPlatformAndroid, "https://talisman.xyz/wc?uri=" + bittensorTestPairingUriEncKeepWc, "launch-package:"},
 		{BittensorWalletWalletConnect, BittensorWalletPlatformIos, "", ""},
 		{BittensorWalletWalletConnect, BittensorWalletPlatformAndroid, "", ""},
 	} {
@@ -140,6 +146,14 @@ func TestBittensorWalletChoiceLinks(t *testing.T) {
 		}
 		if got := bittensorWalletAppLink(links.foreground, bittensorTestPairingUri, bittensorTestRequestId); got != c.foreground {
 			t.Errorf("%s on %s, foreground: %q, want %q", c.walletId, c.platform, got, c.foreground)
+		}
+		// the two other forms of the pairing link, which a device test may ask for (delta 3.2): Talisman's on android alone
+		scheme, bare := "", ""
+		if c.walletId == BittensorWalletTalisman && c.platform == BittensorWalletPlatformAndroid {
+			scheme, bare = "talisman://wc?uri="+bittensorTestPairingUriEnc, bittensorTestPairingUri
+		}
+		if got := bittensorWalletAppLink(links.pairScheme, bittensorTestPairingUri, 0) + " " + bittensorWalletAppLink(links.pairBare, bittensorTestPairingUri, 0); got != scheme+" "+bare {
+			t.Errorf("%s on %s, the other pairing links: %q, want %q", c.walletId, c.platform, got, scheme+" "+bare)
 		}
 	}
 }
@@ -173,32 +187,40 @@ func TestBittensorWalletChoiceSigners(t *testing.T) {
 	}
 }
 
-// TC15e: an entry that is not listed is in the table all the same, and
-// listing it is its flag and nothing else.
+// TC15e: an entry that is not listed on a platform is in the table all the
+// same, and listing it there is that flag and nothing else.
 func TestBittensorWalletChoiceUnlistedEntries(t *testing.T) {
 	for _, c := range []struct {
 		walletId string
 		platform string
 		tabled   bool
 	}{
+		{BittensorWalletNova, BittensorWalletPlatformIos, true},
+		{BittensorWalletSubWallet, BittensorWalletPlatformAndroid, true},
 		{BittensorWalletTalisman, BittensorWalletPlatformIos, true},
 		{BittensorWalletWalletConnect, BittensorWalletPlatformAndroid, true},
 		{BittensorWalletTalisman, BittensorWalletPlatformMacos, false},
 		{BittensorWalletTaoCom, BittensorWalletPlatformIos, false},
 	} {
 		entry, links := bittensorWalletAppEntryFor(c.walletId, c.platform)
-		if (entry != nil) != c.tabled || (links != nil) != c.tabled || entry != nil && entry.listed {
+		if (entry != nil) != c.tabled || (links != nil) != c.tabled || links != nil && links.listed {
 			t.Fatalf("%s on %s: %+v, %+v", c.walletId, c.platform, entry, links)
 		}
 	}
 
-	bittensorTestListWalletApp(t, BittensorWalletTalisman)
-	for _, platform := range []string{BittensorWalletPlatformIos, BittensorWalletPlatformAndroid} {
-		if got := BittensorWalletChoiceIdList(platform); !slices.Equal(got.values, bittensorTestPhoneChoiceIds) {
-			t.Errorf("%s with talisman listed: %v, want %v", platform, got.values, bittensorTestPhoneChoiceIds)
+	// Nova on android comes in front, in table order. Talisman on ios stays
+	// where it is and becomes a wallet app whose link is an https one: there
+	// it must never reach a browser.
+	bittensorTestListWalletApp(t, BittensorWalletNova, BittensorWalletPlatformAndroid)
+	bittensorTestListWalletApp(t, BittensorWalletTalisman, BittensorWalletPlatformIos)
+	for platform, want := range map[string][]string{
+		BittensorWalletPlatformAndroid: {BittensorWalletNova, BittensorWalletTalisman, BittensorWalletTaoCom},
+		BittensorWalletPlatformIos:     bittensorTestPhoneChoiceIds,
+	} {
+		if got := BittensorWalletChoiceIdList(platform); !slices.Equal(got.values, want) {
+			t.Errorf("%s with one more entry listed: %v, want %v", platform, got.values, want)
 		}
 		bittensorTestCheckChoice(t, BittensorWalletTalisman, platform, "Talisman")
-		// its link is an https one: on ios it must never reach a browser
 		if choice := BittensorWalletChoiceFor(BittensorWalletTalisman, platform); choice != nil && choice.UniversalLinkOnly != (platform == BittensorWalletPlatformIos) {
 			t.Errorf("talisman on %s: UniversalLinkOnly %t", platform, choice.UniversalLinkOnly)
 		}
@@ -206,4 +228,5 @@ func TestBittensorWalletChoiceUnlistedEntries(t *testing.T) {
 			t.Errorf("BittensorWalletTransportFor(talisman, %s) with talisman listed: %q", platform, got)
 		}
 	}
+	bittensorTestCheckChoice(t, BittensorWalletNova, BittensorWalletPlatformAndroid, "Nova Wallet")
 }

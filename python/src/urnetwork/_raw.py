@@ -541,8 +541,14 @@ def bind(lib):
     lib.urnet_bittensor_wallet_connect_purpose.restype = c_void_p
     lib.urnet_bittensor_wallet_connect_result.argtypes = [c_uint64]
     lib.urnet_bittensor_wallet_connect_result.restype = c_void_p
+    lib.urnet_bittensor_wallet_connect_set_device_test_options.argtypes = [c_uint64, c_char_p, POINTER(c_void_p)]
+    lib.urnet_bittensor_wallet_connect_set_device_test_options.restype = c_bool
     lib.urnet_bittensor_wallet_connect_set_foreground.argtypes = [c_uint64, c_bool]
     lib.urnet_bittensor_wallet_connect_set_foreground.restype = None
+    lib.urnet_bittensor_wallet_connect_set_return_links.argtypes = [c_uint64, c_char_p, c_char_p, POINTER(c_void_p)]
+    lib.urnet_bittensor_wallet_connect_set_return_links.restype = c_bool
+    lib.urnet_bittensor_wallet_connect_set_trace.argtypes = [c_uint64, c_bool]
+    lib.urnet_bittensor_wallet_connect_set_trace.restype = None
     lib.urnet_bittensor_wallet_connect_sign.argtypes = [c_uint64, c_char_p, c_char_p, POINTER(c_void_p)]
     lib.urnet_bittensor_wallet_connect_sign.restype = c_bool
     lib.urnet_bittensor_wallet_connect_state.argtypes = [c_uint64]
@@ -551,6 +557,8 @@ def bind(lib):
     lib.urnet_bittensor_wallet_connect_take_proof.restype = c_void_p
     lib.urnet_bittensor_wallet_connect_take_wallet_link.argtypes = [c_uint64]
     lib.urnet_bittensor_wallet_connect_take_wallet_link.restype = c_void_p
+    lib.urnet_bittensor_wallet_connect_trace_lines.argtypes = [c_uint64]
+    lib.urnet_bittensor_wallet_connect_trace_lines.restype = c_void_p
     lib.urnet_bittensor_wallet_connect_wallet_id.argtypes = [c_uint64]
     lib.urnet_bittensor_wallet_connect_wallet_id.restype = c_void_p
     lib.urnet_bittensor_wallet_connect_wallet_link.argtypes = [c_uint64]

@@ -28,6 +28,12 @@ const (
 	requestJson = `{"id":1759900000000456,"jsonrpc":"2.0","method":"wc_sessionRequest","params":{"request":{"method":"polkadot_signMessage","params":{"address":"5F3sa2TJAWMqDhXG6jhV4N8ko9SxwGy8TpaNS1repo5EYjQX","message":"Sign in to URnetwork\nChallenge: abc\nTimestamp: 1700000000"}},"chainId":"polkadot:2f0555cc76fc2840a25a6ea3b9637146"}}`
 	deleteJson  = `{"id":1759900000000789,"jsonrpc":"2.0","method":"wc_sessionDelete","params":{"code":6000,"message":"User disconnected."}}`
 
+	// The proposal with every optional member (ProposeOptions). No client of
+	// ur.io serialises it: the member order is the one the dapp of the device
+	// test of 2026-10-09 sent (delta 2.1), which is ur.io's proposal with the
+	// redirect behind the icons and the two others behind optionalNamespaces.
+	proposeFullJson = `{"id":1759900000000123,"jsonrpc":"2.0","method":"wc_sessionPropose","params":{"relays":[{"protocol":"irn"}],"proposer":{"publicKey":"8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a","metadata":{"name":"URnetwork","description":"URnetwork","url":"https://ur.io","icons":["https://ur.io/favicon.ico"],"redirect":{"native":"app.example.wallet://return"}}},"requiredNamespaces":{"polkadot":{"chains":["polkadot:2f0555cc76fc2840a25a6ea3b9637146"],"methods":["polkadot_signMessage"],"events":[]}},"optionalNamespaces":{},"pairingTopic":"59c972aedb6c86a0b0671be5ab622856e50ac00d51dc80c084e3b2a2f035d434","expiryTimestamp":1700000300}}`
+
 	// the same two messages in the layout of the porting notes
 	proposeLayout = `{"id":1759900000000123,"jsonrpc":"2.0","method":"wc_sessionPropose","params":{
   "relays":[{"protocol":"irn"}],
@@ -443,7 +449,8 @@ func TestTV8Messages(t *testing.T) {
 		if proposeJson != compactJson(t, proposeLayout) {
 			t.Fatalf("the two fixtures of the proposal differ")
 		}
-		got := string(ProposeRequest(proposalId, mustKey(t, rfc7748AlicePublic), urnetworkMetadata(), "polkadot", bittensorChain, bittensorMethod))
+		// with no option it is ur.io's proposal, byte for byte
+		got := string(ProposeRequest(proposalId, mustKey(t, rfc7748AlicePublic), urnetworkMetadata(), "polkadot", bittensorChain, bittensorMethod, ProposeOptions{}))
 		if got != proposeJson {
 			t.Fatalf("ProposeRequest:\n got %s\nwant %s", got, proposeJson)
 		}
@@ -463,13 +470,13 @@ func TestTV8Messages(t *testing.T) {
 		}
 
 		// metadata with no icon still sends an array
-		bare := string(ProposeRequest(proposalId, mustKey(t, rfc7748AlicePublic), Metadata{Name: "n"}, "polkadot", bittensorChain, bittensorMethod))
+		bare := string(ProposeRequest(proposalId, mustKey(t, rfc7748AlicePublic), Metadata{Name: "n"}, "polkadot", bittensorChain, bittensorMethod, ProposeOptions{}))
 		if !strings.Contains(bare, `"metadata":{"name":"n","description":"","url":"","icons":[]}`) {
 			t.Errorf("ProposeRequest without icons: got %s", bare)
 		}
 		// and the caller's value is not touched
 		metadata := Metadata{Name: "n"}
-		_ = ProposeRequest(proposalId, Key{}, metadata, "polkadot", bittensorChain, bittensorMethod)
+		_ = ProposeRequest(proposalId, Key{}, metadata, "polkadot", bittensorChain, bittensorMethod, ProposeOptions{})
 		if metadata.Icons != nil {
 			t.Errorf("ProposeRequest changed its argument")
 		}
@@ -481,6 +488,31 @@ func TestTV8Messages(t *testing.T) {
 		}
 		if !frame.IsRequest() || frame.Method != "wc_sessionPropose" || string(frame.Id) != "1759900000000123" {
 			t.Errorf("frame: %s %s", frame.Method, frame.Id)
+		}
+	})
+
+	t.Run("the optional members of wc_sessionPropose", func(t *testing.T) {
+		const icons, optional = `"icons":["https://ur.io/favicon.ico"]`, `"optionalNamespaces":{}`
+		for _, v := range []struct {
+			name    string
+			options ProposeOptions
+			want    string // the whole frame: a member that is not asked for is absent, never null and never ""
+		}{
+			{"all three", ProposeOptions{PairingTopic: pairingTopic, ExpiryTimestamp: 1700000300, Redirect: &Redirect{Native: "app.example.wallet://return"}}, proposeFullJson},
+			{"the pairing topic", ProposeOptions{PairingTopic: pairingTopic},
+				strings.Replace(proposeJson, optional, optional+`,"pairingTopic":"`+pairingTopic+`"`, 1)},
+			{"the expiry", ProposeOptions{ExpiryTimestamp: 1700000300},
+				strings.Replace(proposeJson, optional, optional+`,"expiryTimestamp":1700000300`, 1)},
+			{"a redirect with both links", ProposeOptions{Redirect: &Redirect{Native: "a://b", Universal: "https://c.example/d"}},
+				strings.Replace(proposeJson, icons, icons+`,"redirect":{"native":"a://b","universal":"https://c.example/d"}`, 1)},
+			{"a redirect with the universal link alone", ProposeOptions{Redirect: &Redirect{Universal: "https://c.example/d"}},
+				strings.Replace(proposeJson, icons, icons+`,"redirect":{"universal":"https://c.example/d"}`, 1)},
+			{"a redirect with no link is none", ProposeOptions{Redirect: &Redirect{}}, proposeJson},
+		} {
+			got := string(ProposeRequest(proposalId, mustKey(t, rfc7748AlicePublic), urnetworkMetadata(), "polkadot", bittensorChain, bittensorMethod, v.options))
+			if got != v.want {
+				t.Errorf("%s:\n got %s\nwant %s", v.name, got, v.want)
+			}
 		}
 	})
 
