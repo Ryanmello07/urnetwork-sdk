@@ -400,8 +400,13 @@ func DefaultDeviceLocalSettings() *DeviceLocalSettings {
 		UseExperimentalTunnelAddress: true,
 
 		AllowProvider: true,
-		// the provider extender role follows providing by default (G1)
+		// the provider extender role follows providing by default (G1), and
+		// the setting is on until the user turns it off (F3)
 		ProvideExtenderEnabled: true,
+		DefaultProvideExtender: true,
+		// every app binds the extender's dns carrier on 4053 alone; the sn
+		// miner opts in to 53 (L2)
+		ProvideExtenderDnsPrivilegedPort: false,
 		// Security-policy monitoring clones diagnostic maps and, for a
 		// DeviceRemote, performs synchronous RPC. Keep it opt-in so an app
 		// object never owns background polling.
@@ -491,17 +496,26 @@ func (self *DeviceLocalSettings) SetNetworkPeersEpochMillis(millis int64) {
 // tunables. Those carry their own field-level markers below. The durations
 // are reachable through the *Millis accessor pairs at the end of this file,
 // so an app can set them; the other three are Go-construction only.
+//
+// The c abi carries the settings as json (urnet_default_device_local_settings
+// and urnet_new_device_local). The json form is every field below but the ones
+// tagged `json:"-"`: the Go-only authorities and seams, which json cannot
+// encode, the key material, which crosses the c abi as a handle
+// (urnet_new_device_local_with_provide_extender), and the embedded client
+// settings. A duration is its integer count of nanoseconds. The c abi decodes
+// a settings json over DefaultDeviceLocalSettings, so a field the json omits
+// keeps its default and a NULL json is the defaults.
 type DeviceLocalSettings struct {
 	// Explicit platform-owned authorities. Nil retains the application HTTP
 	// path. These are captured per device and never installed on a shared API.
 	//gomobile:noexport Go-only local control authorities.
-	ClientCredentials connect.NetworkClientCredentials
+	ClientCredentials connect.NetworkClientCredentials `json:"-"`
 	//gomobile:noexport Go-only local control authority.
-	ClientControl connect.NetworkClientControl
+	ClientControl connect.NetworkClientControl `json:"-"`
 	//gomobile:noexport Go-only local discovery authority.
-	ProviderDiscovery connect.NetworkProviderDiscovery
+	ProviderDiscovery connect.NetworkProviderDiscovery `json:"-"`
 	//gomobile:noexport Go-only private API authority.
-	LocalApi localDeviceApi
+	LocalApi localDeviceApi `json:"-"`
 	// Diagnostic-only injection of the existing allocator-error return path.
 	testingTakeLocalAddress func() (netip.Addr, bool)
 	// Constructor seams observe admission ordering without creating a client.
@@ -573,10 +587,29 @@ type DeviceLocalSettings struct {
 	// role while it provides (EXTENDER.md G1, G2). Default on, which is what
 	// DefaultDeviceLocalSettings sets; an embedder that runs many providers in
 	// one process turns it off, since one host can hold only one extender
-	// identity and bind the carrier ports once. It is the embedder's switch,
-	// independent of the user's persisted `.provide_extender` setting of F3:
-	// the role runs only when both allow it.
+	// identity and bind the carrier ports once. It is the embedder's hard
+	// switch: off, the role never runs, whatever the user's provider extender
+	// setting of F3 says (DefaultProvideExtender has the whole order).
 	ProvideExtenderEnabled bool
+	// DefaultProvideExtender is the provider extender setting of F3 this
+	// device uses until the user sets one: while the space's local state
+	// stores no `.provide_extender`, and, on a space that keeps no local
+	// state, until SetProvideExtender sets a value the device then holds for
+	// its life. Default on, which is what DefaultDeviceLocalSettings sets; an
+	// embedder that wants the role only on the user's explicit opt-in turns
+	// it off. While the device provides, the role runs in this order of
+	// precedence: never with ProvideExtenderEnabled off; else as the user's
+	// setting says, when there is one; else as this default says.
+	DefaultProvideExtender bool
+	// ProvideExtenderDnsPrivilegedPort also binds the provider extender
+	// role's dns carrier on udp 53, beside the udp 4053 every extender binds
+	// (EXTENDER.md L2). Default off, which is what every app runs with on
+	// every platform; the sn miner, a service that can take 53, turns it on.
+	// The 53 bind is never required: a failure leaves the carrier serving on
+	// 4053, and the status's DnsPorts lists what bound. A client tries both
+	// ports on every extender whatever this is. A plain boolean, so gomobile
+	// binds it and the c abi settings json carries it.
+	ProvideExtenderDnsPrivilegedPort bool
 	// providerExtenderSettings, when set, adjusts the provider extender role's
 	// settings before it is built (EXTENDER.md G2). Tests bind ephemeral
 	// carrier ports and point the activation at an in-process operator through
@@ -592,6 +625,12 @@ type DeviceLocalSettings struct {
 	// test holds it to land a change before the watch runs; production never
 	// sets it.
 	testingBeforeExtenderProvideWatch func()
+	// testingBeforeExtenderProvideApply, when set, runs each time the
+	// provider extender role's wanted state is about to be handed to the
+	// provider, with that state, in the goroutine that hands it over. A test
+	// lands a newer change inside that window through it; production never
+	// sets it.
+	testingBeforeExtenderProvideApply func(enabled bool)
 	// Verbose opts into periodic, summarized security-policy diagnostics. It
 	// is disabled by default because a DeviceRemote poll performs RPC and app
 	// foreground/background polling belongs to view controllers.
@@ -601,7 +640,7 @@ type DeviceLocalSettings struct {
 	//
 	//gomobile:noexport func value — gomobile cannot bind funcs (only interfaces).
 	// Go/headless hosts only; apps get the default api generator.
-	GeneratorFunc func(specs []*connect.ProviderSpec) connect.MultiClientGenerator
+	GeneratorFunc func(specs []*connect.ProviderSpec) connect.MultiClientGenerator `json:"-"`
 	// MultiClientIdentityStore, when set, persists the api generator's
 	// window client identities so a process restart reuses them against the
 	// same destinations — keeping provider-side NAT flows resumable
@@ -609,7 +648,7 @@ type DeviceLocalSettings struct {
 	//
 	//gomobile:noexport connect.MultiClientIdentityStore is an interface from
 	// another package, which gomobile does not bind. Go/headless hosts only.
-	MultiClientIdentityStore connect.MultiClientIdentityStore
+	MultiClientIdentityStore connect.MultiClientIdentityStore `json:"-"`
 	// ProviderDialContextSettings, when set, is applied to the provider carrier
 	// and the exit NAT's TCP and UDP sockets. Headless integration harnesses use
 	// it to bind every path of each provider to one distinct loopback source
@@ -617,7 +656,7 @@ type DeviceLocalSettings struct {
 	// applications leave it nil.
 	//
 	//gomobile:noexport Go-only network dial seam.
-	ProviderDialContextSettings *connect.DialContextSettings
+	ProviderDialContextSettings *connect.DialContextSettings `json:"-"`
 	// DnsPumpHost overrides the public UDP/53 destination used by the DNS-pump
 	// carrier. Integration hosts with a private or loopback Connect endpoint
 	// must set this to their provisioned pump ingress; sending that endpoint's
@@ -627,7 +666,7 @@ type DeviceLocalSettings struct {
 	// FIXME remove EnableRpc. Turn on RPC when RPC connections are set (receive net.Conn, send net.Conn)
 	EnableRpc bool
 	// KeyMaterial, when set, is applied to `ClientSettings` at construction
-	KeyMaterial *DeviceLocalKeyMaterial
+	KeyMaterial *DeviceLocalKeyMaterial `json:"-"`
 	// DisableLogging silences the device and all nested components and
 	// clients, for hosts embedding many devices in one process.
 	// It overrides `ClientSettings.Log`.
@@ -642,6 +681,14 @@ type DeviceLocalSettings struct {
 	// `DeviceLocalRpc.DisableHostedIncompatible`, which stops the
 	// same operations at the rpc layer — either alone is sufficient, both
 	// together mean nothing reachable can flip these on a hosted device.
+	// A hosted device also refuses every endpoint a user names, since each is
+	// dialed from the host and a cloud host must never dial a server a user
+	// names: its private client strategy takes none of the space's VLESS
+	// server, custom extender, manual extender addresses or bootstrap DoH
+	// servers and refuses any added later (newHostedClientStrategy), no rpc
+	// carries them, and its dns resolver settings, whose servers the host would
+	// query, are guarded like the setters above. It keeps the built-in DoH
+	// servers and the extenders a signed record verifies.
 	HostedIncompatible bool
 
 	// UseExperimentalTunnelAddress, when set, assigns the TUN interface a random
@@ -655,7 +702,7 @@ type DeviceLocalSettings struct {
 	// which gomobile does not bind — the whole embedded block (and every
 	// field promoted from it) is absent on android/apple. Apps configure the
 	// client through the constructors and the setters on DeviceLocal instead.
-	connect.ClientSettings
+	connect.ClientSettings `json:"-"`
 }
 
 // compile check that DeviceLocal conforms to Device, device, and ViewControllerManager
@@ -683,7 +730,11 @@ type DeviceLocal struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	byJwt            string
+	byJwt string
+	// The network of the client this device was built for, empty when its
+	// credential names none. Fixed at construction: the identity the device
+	// makes belongs to this network (DeviceLocalKeyMaterial).
+	networkId        string
 	apiJwtRefreshSub Sub
 	apiAuthLogoutSub Sub
 	authPublication  *deviceAuthPublicationGate
@@ -923,6 +974,12 @@ type DeviceLocal struct {
 	offline                  bool
 	vpnInterfaceWhileOffline bool
 	tunnelStarted            bool
+	// The provider extender setting on a space that keeps no local state
+	// (F3): set by SetProvideExtender and held for the life of the device,
+	// with settings.DefaultProvideExtender in force until it is set. A space
+	// with local state stores the setting there instead.
+	provideExtenderSet bool
+	provideExtender    bool
 
 	orderedContractStatusUpdates []*contractStatusUpdate
 	netContractStatus            *ContractStatus
@@ -1029,6 +1086,10 @@ type DeviceLocal struct {
 	extenderProvideMonitor *connect.Monitor
 	jwtRefreshListeners    *connect.CallbackList[JwtRefreshListener]
 	authLogoutListeners    *connect.CallbackList[AuthLogoutListener]
+	// fed by watchClientLimitStatus from the provider's client limit hold
+	clientLimitStatusChangeListeners *connect.CallbackList[ClientLimitStatusChangeListener]
+	// fed by watchProviderConnected from the provider's transport generations
+	providerConnectedChangeCallbacks *connect.CallbackList[func(providerConnected bool)]
 
 	blockActionWindowChangeListeners         *connect.CallbackList[BlockActionWindowChangeListener]
 	blockStatsChangeListeners                *connect.CallbackList[BlockStatsChangeListener]
@@ -1138,10 +1199,52 @@ func NewDeviceLocalWithMemoryTarget(
 	)
 }
 
-// NewDeviceLocal creates a device with all options carried on `settings`
-// (see `DeviceLocalSettings`).
+// NewDeviceLocalWithProvideExtender creates a device with the two device
+// controls of the provider extender role (EXTENDER.md G1, F3):
+// provideExtenderEnabled is the embedder's hard switch
+// (DeviceLocalSettings.ProvideExtenderEnabled), and defaultProvideExtender the
+// setting the device uses until the user sets one
+// (DeviceLocalSettings.DefaultProvideExtender). NewDeviceLocalWithKeyMaterial
+// is this with both on. keyMaterial may be nil.
 //
-//gomobile:noexport
+// This is the host-facing constructor for the two controls where a host cannot
+// build a DeviceLocalSettings: the c abi and the language bindings over it,
+// whose settings json carries neither the key material nor the client
+// settings. Go and gomobile hosts may set the same fields on the settings of
+// NewDeviceLocal instead.
+func NewDeviceLocalWithProvideExtender(
+	networkSpace *NetworkSpace,
+	byJwt string,
+	deviceDescription string,
+	deviceSpec string,
+	appVersion string,
+	instanceId *Id,
+	enableRpc bool,
+	keyMaterial *DeviceLocalKeyMaterial,
+	provideExtenderEnabled bool,
+	defaultProvideExtender bool,
+) (*DeviceLocal, error) {
+	settings := DefaultDeviceLocalSettings()
+	settings.EnableRpc = enableRpc
+	settings.KeyMaterial = keyMaterial
+	settings.ProvideExtenderEnabled = provideExtenderEnabled
+	settings.DefaultProvideExtender = defaultProvideExtender
+	return NewDeviceLocal(
+		networkSpace,
+		byJwt,
+		deviceDescription,
+		deviceSpec,
+		appVersion,
+		instanceId,
+		settings,
+	)
+}
+
+// NewDeviceLocal creates a device with all options carried on `settings`
+// (see `DeviceLocalSettings`). Construct the settings with
+// DefaultDeviceLocalSettings and override fields. gomobile binds this
+// (Sdk.newDeviceLocal), so a mobile host reaches every bound settings field
+// through it.
 func NewDeviceLocal(
 	networkSpace *NetworkSpace,
 	byJwt string,
@@ -1295,6 +1398,16 @@ func newDeviceLocalWithOverridesForPlatform(
 	if settings.LocalApi != nil && settings.AllowProvider {
 		return nil, errors.New("local device API supports hosted source devices only")
 	}
+	// resolve the device logger. all nested components and clients follow it.
+	log := settings.logger()
+	settings.ClientSettings.Log = log
+
+	if settings.KeyMaterial != nil && !settings.KeyMaterial.belongsToNetworkOf(byJwt) {
+		// another network's identity, kept across a sign-out: this network
+		// starts on a new one (DeviceLocalKeyMaterial)
+		log.Infof("[device]the stored identity belongs to another network, so this device starts on a new identity\n")
+		settings.KeyMaterial = nil
+	}
 	if settings.KeyMaterial != nil {
 		applyDeviceLocalKeyMaterial(&settings.ClientSettings, settings.KeyMaterial)
 		// the extender identity belongs to the space, not to the client
@@ -1302,10 +1415,6 @@ func newDeviceLocalWithOverridesForPlatform(
 		// both present it (B1, G2)
 		networkSpace.setExtenderKeySeed(settings.KeyMaterial.GetExtenderKeySeed())
 	}
-
-	// resolve the device logger. all nested components and clients follow it.
-	log := settings.logger()
-	settings.ClientSettings.Log = log
 	dnsShareByteCount, _, _, providerShareByteCount := deviceMemoryShares(settings)
 	dnsMemoryTarget := connect.NewMemoryTarget(dnsShareByteCount)
 
@@ -1333,6 +1442,18 @@ func newDeviceLocalWithOverridesForPlatform(
 		// Proxy devices share immutable network metadata, not mutable API
 		// credentials or control-plane dial/DoH admission limits.
 		clientStrategy = networkSpace.newHostedClientStrategy(dnsMemoryTarget)
+		// the private strategy refuses the endpoints the space's user named
+		spaceValues := networkSpace.valuesCopy()
+		spaceControlDohUrlsIpv4, spaceControlDohUrlsIpv6 := spaceControlDohUrls(&spaceValues)
+		if 0 < len(networkSpace.clientStrategy.VlessConfigs()) {
+			log.Infof("[device]hosted incompatible: VLESS ignored\n")
+		}
+		if spaceValues.NetExtender != nil || 0 < len(ExtenderHosts(&spaceValues)) {
+			log.Infof("[device]hosted incompatible: manual extenders ignored\n")
+		}
+		if 0 < len(spaceControlDohUrlsIpv4)+len(spaceControlDohUrlsIpv6) {
+			log.Infof("[device]hosted incompatible: bootstrap DoH servers ignored\n")
+		}
 		api = api.newSessionWithStrategy(ctx, clientStrategy)
 		if settings.LocalApi != nil {
 			api.setHttpGetRaw(settings.LocalApi.Get)
@@ -1497,6 +1618,7 @@ func newDeviceLocalWithOverridesForPlatform(
 		ctx:                ctx,
 		cancel:             cancel,
 		byJwt:              byJwt,
+		networkId:          byJwtNetworkId(byJwt),
 		subprotocols:       newDeviceLocalSubprotocols(ctx, log),
 		// apiUrl:            apiUrl,
 		deviceDescription:      deviceDescription,
@@ -1583,6 +1705,8 @@ func newDeviceLocalWithOverridesForPlatform(
 		windowStatusChangeListeners:              connect.NewCallbackList[WindowStatusChangeListener](),
 		extenderProvideStatusChangeListeners:     connect.NewCallbackList[ExtenderProvideStatusChangeListener](),
 		extenderProvideMonitor:                   connect.NewMonitor(),
+		clientLimitStatusChangeListeners:         connect.NewCallbackList[ClientLimitStatusChangeListener](),
+		providerConnectedChangeCallbacks:         connect.NewCallbackList[func(providerConnected bool)](),
 		jwtRefreshListeners:                      connect.NewCallbackList[JwtRefreshListener](),
 		authLogoutListeners:                      connect.NewCallbackList[AuthLogoutListener](),
 		authPublication:                          authPublication,
@@ -1692,7 +1816,9 @@ func newDeviceLocalWithOverridesForPlatform(
 	// set up with nil destination
 	if provider != nil {
 		// the extender role is built on the first provide change, which is
-		// after this device exists, so the test seam is installed here (G2)
+		// after this device exists, so its device setting and the test seam
+		// are installed here (G2, L2)
+		provider.extenderDnsPrivilegedPort = settings.ProvideExtenderDnsPrivilegedPort
 		provider.extenderSettingsConfigure = settings.providerExtenderSettings
 		localUserNatSub := provider.LocalUserNat().AddReceivePacketCallback(deviceLocal.localFallbackReceive)
 		deviceLocal.localUserNatSub = localUserNatSub
@@ -1707,6 +1833,21 @@ func newDeviceLocalWithOverridesForPlatform(
 		go connect.HandleError(func() {
 			defer deviceLocal.lifecycleWorkers.Done()
 			deviceLocal.watchNetworkPeers(networkPeersNotify)
+		})
+		// the client limit hold of the provider's transports, armed here for
+		// the same reason
+		_, clientLimitUpdate := provider.clientLimitStatus()
+		deviceLocal.lifecycleWorkers.Add(1)
+		go connect.HandleError(func() {
+			defer deviceLocal.lifecycleWorkers.Done()
+			deviceLocal.watchClientLimitStatus(provider, clientLimitUpdate)
+		})
+		// the connected state of the provider's transports. The watch arms
+		// itself before its first read, so it needs nothing armed here
+		deviceLocal.lifecycleWorkers.Add(1)
+		go connect.HandleError(func() {
+			defer deviceLocal.lifecycleWorkers.Done()
+			deviceLocal.watchProviderConnected(provider)
 		})
 	}
 
@@ -3889,6 +4030,9 @@ func (self *DeviceLocal) GetExtenderKeySeed() []byte {
 // GetKeyMaterial returns the provider client's persisted identity
 // material. Persist it in caller-owned local storage and pass it back to
 // NewDeviceLocalWithKeyMaterial on the next process start.
+//
+// The material names this device's network, so a device for another network's
+// client never takes it.
 func (self *DeviceLocal) GetKeyMaterial() *DeviceLocalKeyMaterial {
 	keyMaterial := NewDeviceLocalKeyMaterial(
 		self.GetClientKeySeed(),
@@ -3896,6 +4040,7 @@ func (self *DeviceLocal) GetKeyMaterial() *DeviceLocalKeyMaterial {
 		self.GetProvideTlsPrivateKeyPem(),
 	)
 	keyMaterial.SetExtenderKeySeed(self.GetExtenderKeySeed())
+	keyMaterial.networkId = self.networkId
 	return keyMaterial
 }
 
@@ -3907,6 +4052,11 @@ func (self *DeviceLocal) SetKeyMaterial(keyMaterial *DeviceLocalKeyMaterial) {
 		return
 	}
 	if keyMaterial == nil || keyMaterial.IsEmpty() {
+		return
+	}
+	if keyMaterial.networkId != "" && self.networkId != "" && keyMaterial.networkId != self.networkId {
+		// another network's identity: this device keeps its own
+		self.log.Infof("[device]refused a stored identity that belongs to another network\n")
 		return
 	}
 
@@ -7441,8 +7591,13 @@ func (self *DeviceLocal) SetDnsResolverSettings(dnsResolverSettings *DnsResolver
 	_ = self.setLocalCatalogPreference("dns-resolver-settings", dnsResolverSettings)
 }
 
-// Applies without saving; its owning operation publishes notifications after unlock.
+// Applies without saving; its owning operation publishes notifications after
+// unlock. A hosted device takes no resolver settings: the servers they name
+// would be queried from its host.
 func (self *DeviceLocal) applyDnsResolverSettingsWithLock(dnsResolverSettings *DnsResolverSettings) (func(), error) {
+	if self.hostedIncompatibleGuarded("SetDnsResolverSettings") {
+		return nil, nil
+	}
 	if dnsResolverSettings == nil {
 		return nil, nil
 	}

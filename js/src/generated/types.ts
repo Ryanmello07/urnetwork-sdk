@@ -25,6 +25,7 @@ export interface NetworkSpaceValues {
   gossip_url?: string;
   extender_root_public_keys?: string[];
   extender_hosts?: string[];
+  extender_reset_id?: string;
   vless?: VlessSettings | null;
   control_doh_urls_ipv4?: string[];
   control_doh_urls_ipv6?: string[];
@@ -499,6 +500,7 @@ export interface AuthNetworkClientArgs {
   proxy_config?: ProxyConfig | null;
   time_zone?: string;
   locale?: string;
+  provide_intent?: boolean;
 }
 
 export interface ProxyConfig {
@@ -685,6 +687,13 @@ export interface SnWallet {
   client_id?: string;
   set_at_millis: number;
   from_epoch?: number;
+  consent_scope?: string;
+  through_epoch?: number;
+  hotkey_ss58?: string;
+  consent_head_hash?: string;
+  consent_generation?: number;
+  mapping_hash?: string;
+  mapping_generation?: number;
 }
 
 export interface SnSetWalletArgs {
@@ -799,6 +808,7 @@ export interface SnEpochResult {
   finalize_block: number;
   t_epoch_blocks: number;
   chain_id: number;
+  genesis_hash?: string;
   contract_address: string;
   settlement_vault_address?: string;
   no_id?: number;

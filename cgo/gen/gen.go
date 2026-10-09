@@ -127,6 +127,15 @@ var skipTypePatterns = []*regexp.Regexp{
 // explicitly not skipped even though they match skipTypePatterns
 var keepTypes = map[string]bool{}
 
+// json arguments decoded over their type's defaults rather than over a zero
+// value, by the type's defaults function: a field the json omits keeps its
+// default, and a NULL json is the defaults. A zero DeviceLocalSettings is no
+// device configuration at all (its client settings never cross as json), and
+// the type is built from DefaultDeviceLocalSettings everywhere else.
+var jsonParamDefaults = map[string]string{
+	"DeviceLocalSettings": "DefaultDeviceLocalSettings",
+}
+
 var skipFuncs = map[string]string{
 	"NewPlatformNetworkSpace": "platform constructor (macOS parity: ignored)",
 	"NewPlatformDeviceLocal":  "platform constructor (macOS parity: ignored)",
@@ -803,7 +812,18 @@ func (g *gen) emitCallable(cName string, symbol string, recv *typeInfo, recvName
 		case kindJson:
 			goParams = append(goParams, pName+" *C.char")
 			cParams = append(cParams, "const char* "+snake(pName)+"_json")
-			if info.pointer {
+			defaultsFunc := ""
+			if info.named != nil {
+				defaultsFunc = jsonParamDefaults[info.named.Obj().Name()]
+			}
+			if info.pointer && defaultsFunc != "" {
+				convert = append(convert,
+					fmt.Sprintf("\t%s_ := sdk.%s()", pName, defaultsFunc),
+					fmt.Sprintf("\tif !goJson(%s, %s_, %q) {", pName, pName, cName),
+					"\t\treturn"+zeroRet,
+					"\t}",
+				)
+			} else if info.pointer {
 				convert = append(convert,
 					fmt.Sprintf("\tvar %s_ %s", pName, g.goType(info.t)),
 					fmt.Sprintf("\tif %s != nil {", pName),
@@ -1401,6 +1421,11 @@ func (g *gen) dataDoc(name string, named *types.Named) string {
 		}
 		fmt.Fprintf(&b, " *   %s%s: %s\n", jsonName, optional, g.jsonTypeLabel(f.Type()))
 	}
+	if defaultsFunc, ok := jsonParamDefaults[name]; ok {
+		fmt.Fprintf(&b, " * A %s argument is decoded over\n", name)
+		fmt.Fprintf(&b, " * urnet_%s(): a field it omits keeps its default,\n", snake(defaultsFunc))
+		b.WriteString(" * and NULL is the defaults.\n")
+	}
 	b.WriteString(" */")
 	return b.String()
 }
@@ -1910,9 +1935,10 @@ func manualExports(sourceDirectory string) []string {
 // so before this an //export inside a build-tag-gated file reached include/urnetwork_sdk.def, and
 // an MSVC import library built from a .def naming a symbol the shipped dll does not contain is a
 // LINK ERROR at the consumer -- a break the generator would have caused and which nothing here
-// would have caught. loopback_test_world.go is the file that exists today: it is behind
-// `//go:build urnet_message_loopback`, its five exports are in no shipped library, and the
-// generator has not been run since it landed.
+// would have caught. It was written for the messaging ABI's loopback harness, behind
+// `//go:build urnet_message_loopback`, which moved to github.com/urnetwork/message with that
+// ABI. No file in this package is gated that way today; manual_exports_test.go holds the rule
+// against a fixture directory.
 //
 // THE QUESTION IT ASKS IS "IS THIS FILE IN ANY SHIPPED BUILD", not "is it in this one". A custom
 // tag -- one no Makefile target passes -- is always false. A platform tag is evaluated BOTH ways

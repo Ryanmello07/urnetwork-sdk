@@ -66,6 +66,7 @@ EXPORTS
 	urnet_api_get_provider_status
 	urnet_api_get_referral_network
 	urnet_api_get_transfer_stats
+	urnet_api_has_network_credential
 	urnet_api_list_api_keys
 	urnet_api_network_block_location
 	urnet_api_network_check
@@ -97,6 +98,7 @@ EXPORTS
 	urnet_api_sn_epoch_sync
 	urnet_api_sn_get_wallet
 	urnet_api_sn_head
+	urnet_api_sn_network_wallet_mapping_challenge_sync
 	urnet_api_sn_pool_claim_sync
 	urnet_api_sn_set_wallet
 	urnet_api_sn_set_wallet_sync
@@ -272,6 +274,7 @@ EXPORTS
 	urnet_device_add_can_prompt_intro_funnel_change_listener
 	urnet_device_add_can_refer_change_listener
 	urnet_device_add_can_show_rating_dialog_change_listener
+	urnet_device_add_client_limit_status_change_listener
 	urnet_device_add_connect_change_listener
 	urnet_device_add_connect_location_change_listener
 	urnet_device_add_connected_provider_location_change_listener
@@ -325,6 +328,7 @@ EXPORTS
 	urnet_device_get_can_refer
 	urnet_device_get_can_show_rating_dialog
 	urnet_device_get_client_id
+	urnet_device_get_client_limit_status
 	urnet_device_get_connect_enabled
 	urnet_device_get_connect_location
 	urnet_device_get_connected_provider_locations
@@ -382,6 +386,7 @@ EXPORTS
 	urnet_device_local_add_receive_packet_batch
 	urnet_device_local_add_receive_packets
 	urnet_device_local_add_sn_wallet_change_listener
+	urnet_device_local_begin_memory_teardown_observation
 	urnet_device_local_clear_sn_wallet_cache
 	urnet_device_local_close_block_action_view_controller
 	urnet_device_local_close_connect_view_controller
@@ -548,6 +553,7 @@ EXPORTS
 	urnet_device_remote_get_destination_exits
 	urnet_device_remote_get_exits
 	urnet_device_remote_get_probe_results
+	urnet_device_remote_get_provider_connected
 	urnet_device_remote_get_reliability_metrics
 	urnet_device_remote_get_reliability_settings
 	urnet_device_remote_get_remote_connected
@@ -603,6 +609,7 @@ EXPORTS
 	urnet_device_remove_block_action_override
 	urnet_device_remove_connected_provider
 	urnet_device_remove_destination
+	urnet_device_reset_extenders
 	urnet_device_rpc_key_material_get_client_cert_pem
 	urnet_device_rpc_key_material_get_client_pem
 	urnet_device_rpc_key_material_get_server_cert_pem
@@ -662,6 +669,7 @@ EXPORTS
 	urnet_extender_view_controller_get_settings
 	urnet_extender_view_controller_get_status
 	urnet_extender_view_controller_import_share
+	urnet_extender_view_controller_reset_extenders
 	urnet_extender_view_controller_set_settings
 	urnet_extender_view_controller_start
 	urnet_extender_view_controller_stop
@@ -815,65 +823,6 @@ EXPORTS
 	urnet_login_view_controller_start
 	urnet_login_view_controller_stop
 	urnet_memory_classes_json_for_diag
-	urnet_message_client_close
-	urnet_message_client_id
-	urnet_message_client_new
-	urnet_message_client_platform_url
-	urnet_message_context_cancel
-	urnet_message_context_new
-	urnet_message_device_close
-	urnet_message_device_connect
-	urnet_message_device_create_group
-	urnet_message_device_forget_group
-	urnet_message_device_groups
-	urnet_message_device_join
-	urnet_message_device_key_package
-	urnet_message_device_new
-	urnet_message_device_restore
-	urnet_message_device_wait_push
-	urnet_message_durable_state_store_close
-	urnet_message_durable_state_store_open
-	urnet_message_group_add_member
-	urnet_message_group_add_member_and_publish
-	urnet_message_group_close
-	urnet_message_group_delete
-	urnet_message_group_ensure_subscribed
-	urnet_message_group_epoch
-	urnet_message_group_id
-	urnet_message_group_is_open
-	urnet_message_group_list_at
-	urnet_message_group_list_count
-	urnet_message_group_members
-	urnet_message_group_messages
-	urnet_message_group_my_role
-	urnet_message_group_open
-	urnet_message_group_react
-	urnet_message_group_receive
-	urnet_message_group_removal
-	urnet_message_group_remove_member
-	urnet_message_group_send
-	urnet_message_group_send_reply
-	urnet_message_group_set_role
-	urnet_message_group_stats
-	urnet_message_group_transfer_ownership
-	urnet_message_group_unreact
-	urnet_message_invite_encode
-	urnet_message_list_body
-	urnet_message_list_count
-	urnet_message_list_info
-	urnet_message_list_reaction_count
-	urnet_message_list_reaction_info
-	urnet_message_member_list_count
-	urnet_message_member_list_info
-	urnet_message_parse_invite
-	urnet_message_route_client_close
-	urnet_message_route_client_new
-	urnet_message_route_client_status
-	urnet_message_stream_index_reserver_new
-	urnet_message_stream_store_close
-	urnet_message_stream_store_open
-	urnet_message_transport_close
-	urnet_message_transport_new
 	urnet_monthly_equivalent_amount
 	urnet_nano_cents_to_usd
 	urnet_nano_points_to_points
@@ -882,6 +831,7 @@ EXPORTS
 	urnet_network_name_validation_view_controller_start
 	urnet_network_name_validation_view_controller_stop
 	urnet_network_space_add_extender_status_change_listener
+	urnet_network_space_apply_extender_reset
 	urnet_network_space_close
 	urnet_network_space_connect_link_url
 	urnet_network_space_get_alt_url
@@ -904,6 +854,7 @@ EXPORTS
 	urnet_network_space_get_extender_dns_name
 	urnet_network_space_get_extender_gossip_mode
 	urnet_network_space_get_extender_hosts
+	urnet_network_space_get_extender_reset_id
 	urnet_network_space_get_extender_root_public_keys
 	urnet_network_space_get_extender_status
 	urnet_network_space_get_gossip_url
@@ -934,6 +885,7 @@ EXPORTS
 	urnet_network_space_manager_set_active_network_space
 	urnet_network_space_manager_update_network_space
 	urnet_network_space_manager_update_network_space_values
+	urnet_network_space_reset_extenders
 	urnet_network_space_reset_local_state_if_current
 	urnet_network_space_service_url
 	urnet_network_space_set_control_doh_urls
@@ -961,12 +913,12 @@ EXPORTS
 	urnet_new_device_local_with_defaults
 	urnet_new_device_local_with_key_material
 	urnet_new_device_local_with_memory_target
+	urnet_new_device_local_with_provide_extender
 	urnet_new_device_remote_with_defaults
 	urnet_new_export_options
 	urnet_new_feedback_submitted_event
 	urnet_new_id
 	urnet_new_login_view_controller
-	urnet_new_message_transport
 	urnet_new_network_name_validation_view_controller
 	urnet_new_network_space_key
 	urnet_new_network_space_manager
@@ -997,7 +949,6 @@ EXPORTS
 	urnet_normal_env_name
 	urnet_normal_extender_gossip_mode
 	urnet_normalize_bittensor_signature
-	urnet_open_stream_store
 	urnet_order_connected_provider_locations
 	urnet_packet_batch_get
 	urnet_packet_batch_ip_protocol
@@ -1008,7 +959,6 @@ EXPORTS
 	urnet_parse_checkout_redirect
 	urnet_parse_client_events_json
 	urnet_parse_id
-	urnet_parse_message_route_mode
 	urnet_parse_vless_link
 	urnet_peer_view_controller_add_peers_listener
 	urnet_peer_view_controller_close

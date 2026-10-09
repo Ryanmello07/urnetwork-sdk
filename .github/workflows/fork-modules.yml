@@ -1,31 +1,29 @@
-# THE FORK'S CHECK OVER EVERY sdk MODULE THAT test.yml DOES NOT REACH. FORK-ONLY: the
-# upstream branch drops this file (msgrepo ledger 277).
+# THE FORK'S CHECK OVER EVERY sdk MODULE THAT THE ROOT'S `go test ./...` DOES NOT REACH.
+# FORK-ONLY: the upstream branch drops this file (msgrepo ledger 277).
 #
-# test.yml runs `go test ./...` from the root, and a Go module boundary stops it. sdk has nine
-# go.mod files; the root is test.yml's, and this job covers the other eight:
+# `go test ./...` from the root stops at a Go module boundary. sdk has six go.mod files. The root
+# is test.sh's, which fork-ci.yml runs on dispatch (upstream removed test.yml, which ran it on
+# push, in 7120b2cf). This job covers the other five:
 #   cgo        `go test ./...`: the C ABI, gen's currentness test and upstream's build-contract
-#              tests. Plus a build of the loopback module file `make ctest` builds with, which the
-#              2026-10-03 merge broke. `make ctest` itself stays Windows-only: its C program
-#              includes windows.h for its threads, so no Linux host can run it.
-#   cp3b       URmessage's end-to-end suite, against the fork's message-server
+#              tests.
 #   packaging  the package-manager manifests and the generated language bindings
 #   build      the gomobile module: zsh for the three tests that drive test.sh, and a warm module
 #              cache for gobind, which its tests run with GOPROXY=off
 #   js         under GOOS=js GOARCH=wasm, run by node
-#   livepeer, liveprobe   vetted: each is one main.go with no tests
 #   cgo/build  no code at all: it is the module boundary that build output sits behind
 # If a module is added, add it here: this list is what the job claims, and a module missing from
 # it is the narrowing the job exists to prevent (items 269 and 277 recorded it twice).
+# URmessage's cp3b, livepeer and liveprobe modules and cgo's loopback harness (loopback.go.mod)
+# left the sdk for github.com/urnetwork/message with upstream's 13039432 and 7122eb81, so their
+# steps left this job with them.
 #
-# connect and message-server are PINNED BY SHA (the split plan's SX-0, red-team finding R2-F6).
-# URmessage is moving to urnetwork/message, and the changes that follow in message-server (MS-1)
-# and connect (CX-2) would turn this job red if it tracked their branches. Move a pin only by a
-# commit here, to a SHA this job has passed against; clone_at refuses anything but a full SHA.
-#   connect         urnetwork/connect, upstream's main at the sync: it carries the URmessage
-#                   packages (connect#216) and the establish hold (#217), and the synced sdk
-#                   needs upstream's newer connect API, which the fork's own connect main
-#                   (e449f7d8) does not have.
-#   message-server  the fork's main at the sync.
+# connect is PINNED BY SHA (the split plan's SX-0, red-team finding R2-F6), so a change on
+# connect's branch cannot turn this job red. Move a pin only by a commit here, to a SHA this job
+# has passed against; clone_at refuses anything but a full SHA.
+#   connect         urnetwork/connect, upstream's main at the sync (847460bb): it carries the
+#                   establish hold (#217), and the synced sdk needs its newer connect API
+#                   (ClientLimitStatus, ClientAuth.ProvideIntent), which the previous pin
+#                   (501c172d) does not have.
 name: Fork - every sdk module
 
 on:
@@ -39,7 +37,7 @@ permissions:
 
 jobs:
   modules:
-    name: cgo, cp3b, livepeer, liveprobe
+    name: cgo, packaging, build, js
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
@@ -58,11 +56,10 @@ jobs:
             test "$(git -C "$3" rev-parse HEAD)" = "$2"
             echo "$3 pinned at $2"
           }
-          clone_at https://github.com/urnetwork/connect.git 501c172d47bd63c05a833d401d37da990d37a06e ../connect
+          clone_at https://github.com/urnetwork/connect.git 847460bba8aa31fb2e86ce007e9d5443d884544b ../connect
           git clone --depth 1 https://github.com/urnetwork/glog.git ../glog
           git clone --depth 1 https://github.com/urnetwork/goidenticons.git ../goidenticons
           git clone --depth 1 --branch go https://github.com/urnetwork/gvisor.git ../gvisor
-          clone_at https://github.com/Ryanmello07/urnetwork-message-server.git afc52ae64a3115a3bcc39ce5505f7d038f49c151 ../message-server
           git clone --depth 1 --filter=blob:none --sparse https://github.com/urnetwork/server.git ../server
           git -C ../server sparse-checkout set api
 
@@ -76,26 +73,6 @@ jobs:
         if: always()
         working-directory: cgo
         run: go test ./... -count=1 -timeout 30m
-
-      - name: cp3b
-        if: always()
-        working-directory: cp3b
-        run: go test ./... -count=1 -timeout 30m
-
-      - name: livepeer and liveprobe vet
-        if: always()
-        run: |
-          set -eu
-          (cd livepeer && go vet ./...)
-          (cd liveprobe && go vet ./...)
-
-      - name: cgo loopback build (the module file make ctest builds with)
-        if: always()
-        working-directory: cgo
-        run: |
-          set -eu
-          CGO_ENABLED=1 go build -modfile=loopback.go.mod -tags urnet_message_loopback -buildmode=c-shared -o "$RUNNER_TEMP/loopback.so" .
-          CGO_ENABLED=1 go vet -modfile=loopback.go.mod -tags urnet_message_loopback .
 
       - name: packaging
         if: always()

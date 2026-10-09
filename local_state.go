@@ -68,10 +68,12 @@ type LocalState struct {
 	providerPriorsRetention time.Duration
 
 	// The provider extender setting, read from `.provide_extender` once and
-	// cached after (EXTENDER.md N4). Guarded by provideExtenderLock, which also
-	// serializes the file writes so the file and the cache end on one value.
+	// cached after (EXTENDER.md N4), and whether the space stores one at all.
+	// Guarded by provideExtenderLock, which also serializes the file writes so
+	// the file and the cache end on one value.
 	provideExtenderLock   sync.Mutex
 	provideExtenderLoaded bool
+	provideExtenderStored bool
 	provideExtender       bool
 }
 
@@ -241,6 +243,34 @@ func (self *LocalState) SetByJwt(byJwt string) error {
 		state.InstanceId = ""
 		return true, nil
 	}, func() { self.deviceAuthOwner = nil })
+}
+
+// Replaces the stored admin/login credential with its renewal, the
+// compare-and-swap of a network token renewal (api_network_credential_renewal.go).
+// A renewal continues the same sign-in, so unlike SetByJwt it keeps the paired
+// client credential, the instance and the device owner. It applies only while
+// the store still holds previousByJwt: a sign-out, a new sign-in, or another
+// API's renewal of the same token wins, and storedByJwt reports what the store
+// holds instead.
+func (self *LocalState) replaceNetworkByJwt(previousByJwt string, byJwt string) (storedByJwt string, accepted bool, returnErr error) {
+	if previousByJwt == "" || byJwt == "" {
+		return "", false, nil
+	}
+	returnErr = self.updateAuthState(func(state *persistedLocalAuthState) (bool, error) {
+		storedByJwt = state.ByJwt
+		if state.ByJwt == byJwt {
+			accepted = true
+			return false, nil
+		}
+		if state.ByJwt != previousByJwt {
+			return false, nil
+		}
+		state.ByJwt = byJwt
+		storedByJwt = byJwt
+		accepted = true
+		return true, nil
+	})
+	return
 }
 
 // Reads the derived provider client credential without falling back to admin.
@@ -825,6 +855,33 @@ type deviceLocalKeyMaterialStorage struct {
 	ClientKeySeed            []byte `json:"client_key_seed,omitempty"`
 	ProvideTlsCertificatePem []byte `json:"provide_tls_certificate_pem,omitempty"`
 	ProvideTlsPrivateKeyPem  []byte `json:"provide_tls_private_key_pem,omitempty"`
+	// The network the identity was made for. Absent in a record written
+	// before it was kept; an older sdk ignores it.
+	NetworkId string `json:"network_id,omitempty"`
+}
+
+// The identity a stored record describes. A record that names no network
+// belongs to the network whose credential this space holds when it is read:
+// the identity was saved under that sign-in, and every sign-out since removed
+// the record with the credential. `state` is that credential, nil when it
+// could not be read, in which case the network stays unknown.
+func storedDeviceLocalKeyMaterial(stored deviceLocalKeyMaterialStorage, state *persistedLocalAuthState) *DeviceLocalKeyMaterial {
+	material := NewDeviceLocalKeyMaterial(
+		stored.ClientKeySeed,
+		stored.ProvideTlsCertificatePem,
+		stored.ProvideTlsPrivateKeyPem,
+	)
+	if material.IsEmpty() {
+		return nil
+	}
+	material.networkId = stored.NetworkId
+	if material.networkId == "" && state != nil {
+		material.networkId = byJwtNetworkId(state.ByClientJwt)
+		if material.networkId == "" {
+			material.networkId = byJwtNetworkId(state.ByJwt)
+		}
+	}
+	return material
 }
 
 func (self *LocalState) SetDeviceLocalKeyMaterial(keyMaterial *DeviceLocalKeyMaterial) error {
@@ -846,6 +903,7 @@ func (self *LocalState) setDeviceLocalKeyMaterialWithLock(keyMaterial *DeviceLoc
 		ClientKeySeed:            keyMaterial.GetClientKeySeed(),
 		ProvideTlsCertificatePem: keyMaterial.GetProvideTlsCertificatePem(),
 		ProvideTlsPrivateKeyPem:  keyMaterial.GetProvideTlsPrivateKeyPem(),
+		NetworkId:                keyMaterial.networkId,
 	})
 	if err != nil {
 		return err
@@ -858,14 +916,11 @@ func (self *LocalState) GetDeviceLocalKeyMaterial() *DeviceLocalKeyMaterial {
 	if keyMaterialBytes, err := os.ReadFile(path); err == nil {
 		var keyMaterial deviceLocalKeyMaterialStorage
 		if err := json.Unmarshal(keyMaterialBytes, &keyMaterial); err == nil {
-			deviceLocalKeyMaterial := NewDeviceLocalKeyMaterial(
-				keyMaterial.ClientKeySeed,
-				keyMaterial.ProvideTlsCertificatePem,
-				keyMaterial.ProvideTlsPrivateKeyPem,
-			)
-			if !deviceLocalKeyMaterial.IsEmpty() {
-				return deviceLocalKeyMaterial
+			var state *persistedLocalAuthState
+			if loaded, err := self.loadAuthState(); err == nil {
+				state = &loaded
 			}
+			return storedDeviceLocalKeyMaterial(keyMaterial, state)
 		}
 	}
 	return nil
@@ -1083,23 +1138,64 @@ func (self *LocalState) GetAllowForeground() bool {
 
 // clears all auth tokens
 //
-// This also wipes .provider_priors (RemoveAll on the whole localStorageDir
-// below), so a logout drops the persisted routing memory along with
-// everything else per-space -- no separate deletion needed here.
+// This also wipes .provider_priors (the whole localStorageDir goes but the
+// device-level extender files, keptAcrossSignOut), so a logout drops the
+// persisted routing memory along with everything else per-space -- no
+// separate deletion needed here.
 func (self *LocalState) Logout() error {
 	self.authStateLock.Lock()
 	defer self.authStateLock.Unlock()
 	return self.logoutWithLock()
 }
 
-// Preserves explicit logout's deliberately destructive whole-store semantics.
+// Preserves explicit logout's deliberately destructive whole-store semantics,
+// but for the extender state (keptAcrossSignOut).
 func (self *LocalState) logoutWithLock() error {
 	self.deviceAuthOwner = nil
 	self.deviceAuthGeneration += 1
-	return errors.Join(
-		os.RemoveAll(self.localStorageDir),
-		os.MkdirAll(self.localStorageDir, LocalStorageDirectoryPermissions),
-	)
+	return self.removeAccountStateWithLock()
+}
+
+// What a sign-out keeps of a space's local state: all of the extender state
+// (owner, 2026-10-05: a sign-out leaves extender state alone, including what
+// was entered under the old account; local accounts on a device are trusted to
+// a degree, and Account > Extenders has its own reset). That is the extender
+// directory (.extenders: the operator's signed records and revocations, each
+// address's holds and failure history, imported share codes, the operator's
+// last country), the gossip role (.extender_gossip_mode), the extender
+// identity (.extender_key) and the provider extender setting
+// (.provide_extender), whose in-memory copy therefore stays true. Manual
+// extender hosts and the private extender live in the space's values, which a
+// sign-out never touches.
+func keptAcrossSignOut(name string) bool {
+	switch name {
+	case extenderStoreFileName, extenderGossipModeFileName, extenderKeyFileName, provideExtenderFileName:
+		return true
+	default:
+		return false
+	}
+}
+
+// Removes every entry of the storage directory but the ones a sign-out keeps,
+// and leaves the directory in place. A directory that cannot be listed is
+// removed whole, as before, kept files included: they are a cache. Called with
+// authStateLock held.
+func (self *LocalState) removeAccountStateWithLock() error {
+	entries, err := os.ReadDir(self.localStorageDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.Join(
+			os.RemoveAll(self.localStorageDir),
+			os.MkdirAll(self.localStorageDir, LocalStorageDirectoryPermissions),
+		)
+	}
+	var removeErr error
+	for _, entry := range entries {
+		if keptAcrossSignOut(entry.Name()) {
+			continue
+		}
+		removeErr = errors.Join(removeErr, os.RemoveAll(filepath.Join(self.localStorageDir, entry.Name())))
+	}
+	return errors.Join(removeErr, os.MkdirAll(self.localStorageDir, LocalStorageDirectoryPermissions))
 }
 
 func (self *LocalState) Close() {
