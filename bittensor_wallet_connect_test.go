@@ -1231,11 +1231,14 @@ func TestBittensorWalletConnectTrace(t *testing.T) {
 			}
 			p, b, trace := "topic="+pairing.Topic[:8]+" ", "topic="+wire.Topic(session)[:8]+" ", strings.Join(lines, "\n")+"\n"
 			rest, first := strings.CutPrefix(trace, "00:00:00.000 proposal T=1 E=1 R=0 link=https bg=45 ttl=300\n00:00:00.000 sign login first=1\n")
+			// Lines of which each follows the one before by cause. "request id=" is not among them: the challenge
+			// goroutine writes it when SignMessage has returned, and the loop that call woke writes its OUT line
+			// before it or behind it. It is counted below.
 			for _, want := range []string{
 				" state idle -> connecting\n", " sock dial 1 relay.walletconnect.com\n", " OUT tag=1100 " + p,
 				" request wc_sessionPropose T=1 E=1 R=0\n", " state connecting -> awaiting_approval\n", " link pair taken\n",
 				" IN tag=0 " + p + "id=? request other\n", " IN tag=1101 " + p, " IN tag=1102 " + b, " settle ok accounts=2\n", " OUT tag=1103 " + b,
-				" challenge attempt 1 ok\n", " request id=", " OUT tag=1108 " + b, " state connecting -> awaiting_signature\n", " link forward taken\n",
+				" challenge attempt 1 ok\n", " OUT tag=1108 " + b, " state connecting -> awaiting_signature\n", " link forward taken\n",
 				" IN tag=1109 " + b, " result signature=1\n", " signature len=130 accepted=1\n", " state awaiting_signature -> signed\n", " proof taken\n",
 				" sign create first=0\n", " state signed -> connecting\n", " OUT tag=1108 " + b, " error 4001\n",
 				" state awaiting_signature -> failed wallet_error/user_rejected\n", " state failed -> closed\n", " OUT tag=1112 " + b,
@@ -1246,10 +1249,11 @@ func TestBittensorWalletConnectTrace(t *testing.T) {
 				}
 				rest = after
 			}
-			// a request of the wallet's own making, by its number and never by its name; and the list is a copy
+			// a request of the wallet's own making, by its number and never by its name; the request line of each
+			// of the two Signs; and the list is a copy
 			copied := c.TraceLines()
 			copied.Add(marker)
-			if !strings.Contains(trace, " IN tag=0 "+b) || strings.Count(trace, " request other\n") != 2 || c.TraceLines().Len() != len(lines) {
+			if !strings.Contains(trace, " IN tag=0 "+b) || strings.Count(trace, " request other\n") != 2 || strings.Count(trace, " request id=") != 2 || c.TraceLines().Len() != len(lines) {
 				t.Fatalf("the trace:\n%s", trace)
 			}
 		})
