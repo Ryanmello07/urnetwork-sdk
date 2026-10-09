@@ -1300,6 +1300,7 @@ uint64_t urnet_device_local_add_receive_packet(uint64_t self, urnet_receive_pack
 uint64_t urnet_device_local_add_receive_packet_batch(uint64_t self, urnet_receive_packet_batch_cb receive_packet_batch_receive_packet_batch, void* receive_packet_batch_user_data);
 uint64_t urnet_device_local_add_receive_packets(uint64_t self, urnet_receive_packets_cb receive_packets_receive_packets, void* receive_packets_user_data);
 uint64_t urnet_device_local_add_sn_wallet_change_listener(uint64_t self, urnet_sn_wallet_change_cb listener_sn_wallet_changed, void* listener_user_data);
+char* urnet_device_local_begin_memory_teardown_observation(uint64_t self, char** out_error);
 void urnet_device_local_clear_sn_wallet_cache(uint64_t self);
 void urnet_device_local_close_block_action_view_controller(uint64_t self, uint64_t vc);
 void urnet_device_local_close_connect_view_controller(uint64_t self, uint64_t vc);
@@ -3551,6 +3552,9 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   GCCycleCount: number
  *   ForcedGCCycleCount: number
  *   GCPauseTotalNanoseconds: number
+ */
+
+/* MemoryTeardownObservation (json):
  */
 
 /* MessageTransport (json):

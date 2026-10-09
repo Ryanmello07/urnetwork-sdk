@@ -9187,6 +9187,24 @@ func urnet_device_local_add_sn_wallet_change_listener(self C.uint64_t, listener_
 	return C.uint64_t(newHandle(r0))
 }
 
+//export urnet_device_local_begin_memory_teardown_observation
+func urnet_device_local_begin_memory_teardown_observation(self C.uint64_t, outError **C.char) *C.char {
+	defer cgoGuard("urnet_device_local_begin_memory_teardown_observation")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_begin_memory_teardown_observation")
+	if !ok {
+		return nil
+	}
+	r0, err := self_.BeginMemoryTeardownObservation()
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_device_local_begin_memory_teardown_observation")
+}
+
 //export urnet_device_local_clear_sn_wallet_cache
 func urnet_device_local_clear_sn_wallet_cache(self C.uint64_t) {
 	defer cgoGuard("urnet_device_local_clear_sn_wallet_cache")
