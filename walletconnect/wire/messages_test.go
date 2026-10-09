@@ -573,6 +573,13 @@ func TestTV8Messages(t *testing.T) {
 		}
 	})
 
+	t.Run("wc_pairingDelete", func(t *testing.T) {
+		want := `{"id":1759900000000789,"jsonrpc":"2.0","method":"wc_pairingDelete","params":{"code":6000,"message":"User disconnected."}}`
+		if got := string(PairingDeleteRequest(deleteId)); got != want {
+			t.Errorf("PairingDeleteRequest:\n got %s\nwant %s", got, want)
+		}
+	})
+
 	t.Run("wc_sessionDelete", func(t *testing.T) {
 		if got := string(SessionDeleteRequest(deleteId)); got != deleteJson {
 			t.Errorf("SessionDeleteRequest:\n got %s\nwant %s", got, deleteJson)

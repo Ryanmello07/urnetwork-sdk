@@ -163,14 +163,17 @@ type BittensorWalletConnect struct {
 	expected  string // its expectedAddress
 	session   *BittensorWalletSession
 	requestId int64
+	resign    bool // its challenge ran out with the wallet session still there: it is signed again when next in the foreground
 
 	accounts   []bittensorWalletConnectAccount // those of the wallet that are addresses, in its order
 	account    string                          // the one in use, as the wallet spells it
 	address    string                          // the same under prefix 42
 	pairingUri string
-	connected  bool
-	foreground bool
-	linkTaken  bool // TakeWalletLink has given the link of this state
+	// the pairing of pairingUri lives until then; 0 before EventPairingReady
+	pairingExpiresAtMillis int64
+	connected              bool
+	foreground             bool
+	linkTaken              bool // TakeWalletLink has given the link of this state
 
 	proof                *BittensorWalletProof // waits to be taken
 	proofExpiresAtMillis int64
@@ -420,6 +423,7 @@ func (self *BittensorWalletConnect) Sign(purpose string, expectedAddress string)
 	self.family, self.purpose, self.expected = family, purpose, expectedAddress
 	// a proof that was not taken is dropped (design A.3 rule 6)
 	self.proof, self.result = nil, nil
+	self.resign = false
 	self.session = newBittensorWalletConnectSession(self.walletId, self.platform, purpose)
 	self.enter(BittensorWalletConnectStateConnecting)
 	if first {
@@ -462,9 +466,11 @@ func (self *BittensorWalletConnect) PairingUri() string {
 }
 
 // WalletLink is the link that opens the wallet app for what is pending: while
-// awaiting_approval the link that hands the pairing over, while
-// awaiting_signature the link that brings the wallet forward. "" when there is
-// nothing to open. For an "Open wallet" button. As secret as PairingUri.
+// awaiting_approval the link that hands the pairing over ("" once the pairing
+// has expired: it would open the wallet to a dead offer, ahead of the failure
+// the expiry is told as), while awaiting_signature the link that brings the
+// wallet forward. "" when there is nothing to open. For an "Open wallet"
+// button. As secret as PairingUri.
 // Where a wallet is brought forward by starting its app, the answer is
 // BittensorWalletLinkLaunchPackage, which is no link.
 func (self *BittensorWalletConnect) WalletLink() string {
@@ -476,6 +482,9 @@ func (self *BittensorWalletConnect) WalletLink() string {
 func (self *BittensorWalletConnect) walletLink() string {
 	switch self.state {
 	case BittensorWalletConnectStateAwaitingApproval:
+		if self.pairingExpiresAtMillis <= self.nowMillis() {
+			return ""
+		}
 		return bittensorWalletAppLink(cmp.Or(self.deviceTest.pair, self.links.pair), self.pairingUri, 0)
 	case BittensorWalletConnectStateAwaitingSignature:
 		return bittensorWalletAppLink(self.links.foreground, "", self.requestId)
@@ -511,8 +520,9 @@ func (self *BittensorWalletConnect) TakeWalletLink() string {
 
 // TakeProof hands the proof of the last Sign out exactly once: the first call
 // in state signed returns it, every other call returns nil. A proof whose
-// challenge expired while it waited is not handed out: the state becomes
-// failed with challenge_expired.
+// challenge expired while it waited is not handed out: with the wallet session
+// still there the Sign signs again on it (awaiting_signature follows);
+// otherwise the state becomes failed with challenge_expired.
 func (self *BittensorWalletConnect) TakeProof() *BittensorWalletProof {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -523,6 +533,10 @@ func (self *BittensorWalletConnect) TakeProof() *BittensorWalletProof {
 	}
 	self.proof = nil
 	if self.proofExpiresAtMillis <= self.nowMillis() {
+		if self.expired() {
+			// the Sign goes on: there is nothing to take
+			return nil
+		}
 		proof, self.result = nil, &BittensorWalletResult{ErrorCode: BittensorWalletErrorExpired}
 		self.enter(BittensorWalletConnectStateFailed)
 	}
@@ -562,8 +576,10 @@ func (self *BittensorWalletConnect) Connected() bool {
 // or is in front again (true). In the background the relay socket is closed on
 // purpose (ios at once, android after 45 s) so the wallet's messages are stored
 // instead of waiting on a silent peer; on the way back the socket is replaced
-// at once and what the wallet sent is collected. A connection starts in the
-// foreground. Correctness does not depend on these calls; they remove waits.
+// at once and what the wallet sent is collected, and a Sign whose challenge
+// ran out while the user was away is signed again when the wallet session is
+// still there. A connection starts in the foreground. Correctness does not
+// depend on these calls; they remove waits.
 func (self *BittensorWalletConnect) SetForeground(foreground bool) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -576,6 +592,9 @@ func (self *BittensorWalletConnect) SetForeground(foreground bool) {
 	self.foreground = foreground
 	if self.client != nil {
 		self.client.SetForeground(foreground)
+	}
+	if foreground && self.resign && !self.over {
+		self.resignNow()
 	}
 }
 
@@ -688,6 +707,7 @@ func (self *BittensorWalletConnect) enter(state string) {
 	self.linkTaken = false
 	if state != BittensorWalletConnectStateAwaitingApproval {
 		self.pairingUri = "" // design F.1
+		self.pairingExpiresAtMillis = 0
 	}
 	switch state {
 	case BittensorWalletConnectStateSigned, BittensorWalletConnectStateFailed, BittensorWalletConnectStateClosed:
@@ -701,6 +721,7 @@ func (self *BittensorWalletConnect) enter(state string) {
 		// Over for good: a challenge fetch is abandoned, and the client
 		// deletes the wallet session if there is one and it has not ended.
 		self.connected = false
+		self.resign = false
 		self.cancelFetch()
 		if self.client != nil {
 			self.client.Close()
@@ -792,6 +813,7 @@ func (self *BittensorWalletConnect) onEvent(ev walletconnect.Event) {
 		self.setConnected(ev.Connected)
 	case walletconnect.EventPairingReady:
 		self.pairingUri = ev.PairingUri
+		self.pairingExpiresAtMillis = ev.PairingExpiryMillis
 		self.enter(BittensorWalletConnectStateAwaitingApproval)
 	case walletconnect.EventSessionSettled:
 		// design A.7 step 2: what is no address, under any prefix, is passed over
@@ -921,6 +943,38 @@ func (self *BittensorWalletConnect) challenge() {
 	})
 }
 
+// expired takes the challenge_expired of the pending Sign. With the wallet
+// session still there the Sign is signed again on it — who signed a challenge
+// that had run out is still at the wallet or on the way back — at once in the
+// foreground, and on the next SetForeground(true) otherwise. Only a session
+// that is over fails the Sign, as before. The lock is held. Reports whether
+// the Sign goes on.
+func (self *BittensorWalletConnect) expired() bool {
+	if self.over {
+		return false
+	}
+	if self.resign = true; self.foreground {
+		self.resignNow()
+	}
+	return true
+}
+
+// resignNow signs the pending Sign again on the wallet session that is still
+// there: a session of its own, and the challenge leg again, as a Sign that
+// follows another does it (design A.7). The lock is held.
+func (self *BittensorWalletConnect) resignNow() {
+	self.resign = false
+	self.signs++
+	// a result of the expired attempt is dropped, as a dropped proof is
+	self.proof, self.result = nil, nil
+	self.session = newBittensorWalletConnectSession(self.walletId, self.platform, self.purpose)
+	self.tracef("resign")
+	self.enter(BittensorWalletConnectStateConnecting)
+	if self.choose() {
+		self.challenge()
+	}
+}
+
 // answered takes the wallet's answer to the request; the lock is held. The
 // session of the Sign decides whether it is a proof (design A.7 step 6).
 func (self *BittensorWalletConnect) answered(signature string) {
@@ -937,6 +991,9 @@ func (self *BittensorWalletConnect) answered(signature string) {
 	result := self.session.HandleSignature(address, signature, self.nowMillis())
 	self.tracef("signature len=%d accepted=%d", received, bittensorWalletTraceBit(result.Proof != nil))
 	if result.Proof == nil {
+		if result.ErrorCode == BittensorWalletErrorExpired && self.expired() {
+			return
+		}
 		self.result = result
 		self.enter(BittensorWalletConnectStateFailed)
 		return

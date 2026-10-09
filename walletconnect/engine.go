@@ -91,6 +91,7 @@ type engine struct {
 	closeErr   *Error // what EventClosed will say
 
 	pairing *wire.Pairing // from the first socket until a settle is taken
+	uriOut  bool          // the pairing uri was handed out (R20): a wallet may hold the pairing
 	session *session
 	settled bool
 	wait    *wait
@@ -200,8 +201,9 @@ func (e *engine) request(id int64, address string, message string, deadlineMilli
 }
 
 // end is the one way out (R19): the wait is over, the wallet is told when it
-// may list the session, no key is kept, and the transport writes what is
-// queued and stops. EventClosed follows when its loop has ended.
+// may list the session (or the pairing, when the proposal of it was handed
+// out but no session came of it), no key is kept, and the transport writes
+// what is queued and stops. EventClosed follows when its loop has ended.
 func (e *engine) end(err *Error) {
 	if e.closing {
 		return
@@ -217,6 +219,10 @@ func (e *engine) end(err *Error) {
 	}
 	if s := e.session; s != nil {
 		e.publish(s.topic, s.key, wire.SessionDeleteRequest(e.client.newId()), wire.TagSessionDelete, wire.TtlOneDay, e.timing.CloseFlush)
+	} else if p := e.pairing; p != nil && e.uriOut {
+		// the wallet may list the pairing without ever having answered the
+		// proposal: it is deleted the way a session is
+		e.publish(p.Topic, p.SymKey, wire.PairingDeleteRequest(e.client.newId()), wire.TagPairingDelete, wire.TtlOneDay, e.timing.CloseFlush)
 	}
 	e.wait, e.pairing, e.session, e.keys, e.settled = nil, nil, nil, nil, false
 	if err != nil {
@@ -285,6 +291,7 @@ func (e *engine) onOpen() {
 func (e *engine) onAcked(entry *publishEntry) {
 	if w := e.wait; w != nil && w.kind == waitProposal && w.entry == entry {
 		e.firstConnect = 0
+		e.uriOut = true
 		e.tr.logf("walletconnect: pairing %s ready", e.pairing.Topic[:8])
 		e.client.emit(Event{Kind: EventPairingReady, PairingUri: e.pairing.Uri(), PairingExpiryMillis: e.pairing.ExpiryUnix * 1000})
 	}
@@ -469,6 +476,7 @@ func (e *engine) pairingRequest(frame *wire.Frame) {
 	}
 	e.publish(e.pairing.Topic, e.pairing.SymKey, wire.ResultFrame(frame.Id, true), tag, ttl, e.timing.WalletAnswerTtl)
 	if frame.Method == methodPairingDelete && e.wait != nil && e.wait.kind == waitProposal {
+		e.pairing = nil // the wallet has ended it: there is nothing to delete
 		e.end(&Error{Kind: ErrRejected, Detail: "the wallet ended the pairing"})
 	}
 }

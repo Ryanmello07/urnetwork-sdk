@@ -453,6 +453,7 @@ var bwcTraceLine = regexp.MustCompile(`^\d\d:\d\d:\d\d\.\d{3} (?:` + strings.Joi
 	`link (?:pair|forward) taken`,
 	`challenge attempt \d+ (?:ok|failed)`,
 	`request id=\d+`,
+	`resign`,
 	`signature len=\d+ accepted=[01]`,
 	`proof taken`,
 	`(?:sock|fg|parked|resume|stopped|pairing|wait|OUT|write|rewrite|ack|give-up|push|IN|settle|deadline|read|expired|unreachable|end)(?: .*)?`,
@@ -473,9 +474,11 @@ func bwcHoldTrace(t *testing.T, c *BittensorWalletConnect, texts ...string) []st
 
 // TC6, TC11, TC12 and sequence 6 of design A.8: every way a Sign ends without
 // a proof, as the app is told it (design A.5): the state, the two codes and
-// the fixed sentence, whether the wallet session was deleted, and how often a
-// challenge was asked for. What the wallet wrote is in no result and in no
-// log line.
+// the fixed sentence, whether the wallet session was deleted, whether the
+// pairing was (one that was handed out and never became a session is), and
+// how often a challenge was asked for. What the wallet wrote is in no result
+// and in no log line. A challenge that ran out is not here: with the wallet
+// session still there the Sign is signed again instead (TC20).
 func TestBittensorWalletConnectFailures(t *testing.T) {
 	const (
 		marker      = "MARKER-7f3a"
@@ -537,29 +540,29 @@ func TestBittensorWalletConnectFailures(t *testing.T) {
 		drive func(s *bwcScene)
 		// what the listener is told from the helper's last look on, the last of
 		// it being the state the Sign ends in; and the result
-		calls, code, bridge, message string
-		deletes, fetches             int
+		calls, code, bridge, message     string
+		deletes, pairingDeletes, fetches int
 	}{
 		// the pairing
-		{"the connection declined", rejected(5000), "closed", "wallet_error", "user_rejected", declined, 0, 0},
-		{"the proposal not supported", rejected(5100), "closed", "wallet_error", "unsupported_chain", noChain, 0, 0},
-		{"another error to the proposal", rejected(9999), "closed", "wallet_error", "wallet_error", incomplete + " (code 9999)", 0, 0},
+		{"the connection declined", rejected(5000), "closed", "wallet_error", "user_rejected", declined, 0, 1, 0},
+		{"the proposal not supported", rejected(5100), "closed", "wallet_error", "unsupported_chain", noChain, 0, 1, 0},
+		{"another error to the proposal", rejected(9999), "closed", "wallet_error", "wallet_error", incomplete + " (code 9999)", 0, 1, 0},
 		{"no answer to the proposal", func(s *bwcScene) {
 			s.pair(login, "")
 			s.wait(300 * time.Second)
-		}, "closed", "wallet_error", "walletconnect_expired", expired, 0, 0},
+		}, "closed", "wallet_error", "walletconnect_expired", expired, 0, 1, 0},
 		{"the relay refuses the app", func(s *bwcScene) {
 			s.relay.RefuseHandshakes(1, 403, `{"error":"Project not found"}`)
 			s.c.Sign(login, "")
-		}, "connecting closed", "wallet_error", "walletconnect_unavailable", unreachable, 0, 0},
+		}, "connecting closed", "wallet_error", "walletconnect_unavailable", unreachable, 0, 0, 0},
 		{"a session on another chain", settled([]string{"polkadot:91b171bb158e2d3848fa23a9f1c25182:" + bittensorTestAliceSs58}),
-			"awaiting_approval closed", "wallet_error", "unsupported_chain", noChain, 1, 0},
-		{"a session with no account", settled([]string{}), "awaiting_approval closed", "wallet_error", "no_account", noAccount, 1, 0},
+			"awaiting_approval closed", "wallet_error", "unsupported_chain", noChain, 1, 0, 0},
+		{"a session with no account", settled([]string{}), "awaiting_approval closed", "wallet_error", "no_account", noAccount, 1, 0, 0},
 		{"a session whose account is no address", settled([]string{BittensorWalletConnectChain + ":nothing"}),
-			"awaiting_approval closed", "wallet_error", "no_account", noAccount, 1, 0},
+			"awaiting_approval closed", "wallet_error", "no_account", noAccount, 1, 0, 0},
 		{"the typed address is not the wallet's", func(s *bwcScene) {
 			s.wallet.Approve(s.pair(BittensorWalletPurposeConnect, bittensorTestBobSs58))
-		}, "awaiting_approval closed", "wallet_error", "address_not_in_wallet", notHeld, 1, 0},
+		}, "awaiting_approval closed", "wallet_error", "address_not_in_wallet", notHeld, 1, 0, 0},
 		// the challenge
 		{"no challenge", func(s *bwcScene) {
 			approved(func(*bwcScene, context.Context, int) (*AuthWalletChallengeResult, error) {
@@ -569,47 +572,42 @@ func TestBittensorWalletConnectFailures(t *testing.T) {
 			if asked := len(s.asked()); asked != 2 {
 				s.t.Fatalf("%d attempts in 3 s", asked)
 			}
-		}, "awaiting_approval connecting connecting failed", "no_challenge", "", "", 0, 3},
+		}, "awaiting_approval connecting connecting failed", "no_challenge", "", "", 0, 0, 3},
 		// an attempt the process was suspended in is not counted, three times at most
-		{"a suspension in the first fetch", suspended(1), "awaiting_approval connecting failed", "no_challenge", "", "", 0, 4},
-		{"a suspension in every fetch", suspended(9), "awaiting_approval connecting failed", "no_challenge", "", "", 0, 6},
+		{"a suspension in the first fetch", suspended(1), "awaiting_approval connecting failed", "no_challenge", "", "", 0, 0, 4},
+		{"a suspension in every fetch", suspended(9), "awaiting_approval connecting failed", "no_challenge", "", "", 0, 0, 6},
 		{"a challenge request that is never answered", approved(func(_ *bwcScene, ctx context.Context, _ int) (*AuthWalletChallengeResult, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
-		}, 59*time.Second), "awaiting_approval connecting connecting failed", "no_challenge", "", "", 0, 3},
+		}, 59*time.Second), "awaiting_approval connecting connecting failed", "no_challenge", "", "", 0, 0, 3},
 		// 60 s of running time end the leg: the fourth attempt is the first that counts, and the last
 		{"never answered, and a suspension in every fetch", approved(func(s *bwcScene, ctx context.Context, _ int) (*AuthWalletChallengeResult, error) {
 			jump(s)
 			<-ctx.Done()
 			return nil, ctx.Err()
-		}, 61*time.Second), "awaiting_approval connecting failed", "no_challenge", "", "", 0, 4},
+		}, 61*time.Second), "awaiting_approval connecting failed", "no_challenge", "", "", 0, 0, 4},
 		{"a challenge that is none", approved(func(*bwcScene, context.Context, int) (*AuthWalletChallengeResult, error) {
 			return &AuthWalletChallengeResult{MessageTemplate: "Sign in"}, nil
-		}, 0), "awaiting_approval connecting failed", "invalid_challenge", "", "", 0, 1},
+		}, 0), "awaiting_approval connecting failed", "invalid_challenge", "", "", 0, 0, 1},
 		// the signature
-		{"the signature declined", refused(4001), "failed", "wallet_error", "user_rejected", declined, 0, 1},
-		{"the request expired at the wallet", refused(8000), "failed", "wallet_error", "walletconnect_expired", expired, 0, 1},
-		{"the request not supported", refused(5101), "closed", "wallet_error", "unsupported_chain", noChain, 1, 1},
-		{"another error to the request", refused(9999), "failed", "wallet_error", "wallet_error", incomplete + " (code 9999)", 0, 1},
+		{"the signature declined", refused(4001), "failed", "wallet_error", "user_rejected", declined, 0, 0, 1},
+		{"the request expired at the wallet", refused(8000), "failed", "wallet_error", "walletconnect_expired", expired, 0, 0, 1},
+		{"the request not supported", refused(5101), "closed", "wallet_error", "unsupported_chain", noChain, 1, 0, 1},
+		{"another error to the request", refused(9999), "failed", "wallet_error", "wallet_error", incomplete + " (code 9999)", 0, 0, 1},
 		{"the wallet ended the session", func(s *bwcScene) {
 			s.signIn(login, "")
 			s.wallet.DeleteSession()
-		}, "closed", "wallet_error", "wallet_error", ended, 0, 1},
+		}, "closed", "wallet_error", "wallet_error", ended, 0, 0, 1},
 		{"the relay out of reach when the challenge expired", func(s *bwcScene) {
 			s.signIn(login, "")
 			s.relay.SetOffline(true)
 			s.relay.Drop("")
 			s.offset.Add(301_000)
 			s.wait(22 * time.Second)
-		}, "awaiting_signature failed", "wallet_error", "walletconnect_unavailable", unreachable, 0, 1},
+		}, "awaiting_signature failed", "wallet_error", "walletconnect_unavailable", unreachable, 0, 0, 1},
 		{"a signature that is none", func(s *bwcScene) {
 			s.wallet.Respond(s.signIn(login, ""), marker)
-		}, "failed", "invalid_signature", "", "", 0, 1},
-		{"a signature after the challenge expired", func(s *bwcScene) {
-			request := s.signIn(login, "")
-			s.offset.Add(301_000)
-			s.wallet.Respond(request, bwcSignature)
-		}, "awaiting_signature failed", "challenge_expired", "", "", 0, 1},
+		}, "failed", "invalid_signature", "", "", 0, 0, 1},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			bwcPlayNova(t, func(t *testing.T, s *bwcScene) {
@@ -633,8 +631,8 @@ func TestBittensorWalletConnectFailures(t *testing.T) {
 				if result := s.c.Result(); result == nil || *result != want {
 					t.Fatalf("the result is %+v, want %+v", result, want)
 				}
-				if deletes, fetches := s.wallet.Seen(wire.TagSessionDelete), len(s.asked()); deletes != row.deletes || fetches != row.fetches {
-					t.Fatalf("the wallet saw %d deletes and %d challenges were asked for; want %d and %d", deletes, fetches, row.deletes, row.fetches)
+				if deletes, pairingDeletes, fetches := s.wallet.Seen(wire.TagSessionDelete), s.wallet.Seen(wire.TagPairingDelete), len(s.asked()); deletes != row.deletes || pairingDeletes != row.pairingDeletes || fetches != row.fetches {
+					t.Fatalf("the wallet saw %d session deletes and %d pairing deletes, and %d challenges were asked for; want %d, %d and %d", deletes, pairingDeletes, fetches, row.deletes, row.pairingDeletes, row.fetches)
 				}
 			})
 		})
@@ -743,6 +741,8 @@ func TestBittensorWalletConnectSignsAgainAfterAFailure(t *testing.T) {
 
 // TC8: a proof is handed out once, and not after its challenge expired; one
 // that waits to be taken outlives the wallet session (design A.3 rules 2, 8).
+// With the session still there an expired proof is not a failure either: the
+// Sign is signed again on it (TC20).
 func TestBittensorWalletConnectTakeProof(t *testing.T) {
 	for name, after := range map[string]func(s *bwcScene){
 		"once": func(s *bwcScene) {
@@ -753,10 +753,17 @@ func TestBittensorWalletConnectTakeProof(t *testing.T) {
 		},
 		"expired": func(s *bwcScene) {
 			s.offset.Add(300_000)
-			if proof, result := s.c.TakeProof(), s.c.Result(); proof != nil || result == nil || *result != (BittensorWalletResult{ErrorCode: BittensorWalletErrorExpired}) {
+			// the wallet session is still there: nothing to take, no failure;
+			// the Sign is signed again on it
+			if proof, result := s.c.TakeProof(), s.c.Result(); proof != nil || result != nil {
 				s.t.Fatalf("the proof %+v, the result %+v", proof, result)
 			}
-			s.expect("the challenge expired while the proof waited", bwcFailed, bwcFailed)
+			s.wait(2 * bwcStep)
+			s.expect("signed again", bwcAwaitingSignature, bwcConnecting, bwcConnecting, bwcAwaitingSignature, bwcAwaitingSignature)
+			s.answer(bwcTake(s, s.wallet.Requests()), bwcSignature, bwcSigned)
+			if proof := s.c.TakeProof(); proof == nil || s.c.Result() != nil {
+				s.t.Fatalf("the proof of the second sign is %+v", proof)
+			}
 		},
 		"the session ended": func(s *bwcScene) {
 			s.wallet.DeleteSession()
@@ -855,6 +862,165 @@ func TestBittensorWalletConnectTakeWalletLink(t *testing.T) {
 		if c := s.c; c.TakeWalletLink() != BittensorWalletLinkLaunchPackage || c.TakeWalletLink() != "" || c.WalletLink() != BittensorWalletLinkLaunchPackage {
 			t.Fatal("the forward step is not taken once, or not the one for the button")
 		}
+	})
+}
+
+// TC19: the pairing link is handed out only while the pairing lives. In the
+// device test of 2026-10-09 the link went out 147 ms before the engine's own
+// expiry transition and opened the wallet to a dead offer; from the pairing's
+// expiry on, WalletLink and TakeWalletLink answer "" ahead of the failure the
+// expiry ends in.
+func TestBittensorWalletConnectPairingLinkExpiry(t *testing.T) {
+	bwcPlayNova(t, func(t *testing.T, s *bwcScene) {
+		c := s.c
+		s.pair(BittensorWalletPurposeLogin, "")
+		link := c.WalletLink()
+		if link == "" || !c.Connected() {
+			t.Fatalf("no link for a pairing that lives: %q", link)
+		}
+		s.offset.Add(250_000)
+		if c.WalletLink() != link {
+			t.Fatal("the link went early")
+		}
+		s.offset.Add(60_000)
+		// expired by the pairing's own clock, while the engine's expiry
+		// transition is still to come: nothing is handed out any more
+		if c.WalletLink() != "" || c.TakeWalletLink() != "" || c.State() != bwcAwaitingApproval {
+			t.Fatalf("an expired pairing handed out %q and %q in %s", c.WalletLink(), c.TakeWalletLink(), c.State())
+		}
+		s.wait(4 * bwcStep)
+		s.expect("the expiry is told", bwcClosed, bwcAwaitingApproval, bwcAwaitingApproval, bwcClosed)
+		if result := c.Result(); result == nil || result.BridgeErrorCode != BittensorWalletBridgeErrorWalletConnectExpired {
+			t.Fatalf("the result is %+v", result)
+		}
+		if deletes := s.wallet.Seen(wire.TagPairingDelete); deletes != 1 {
+			t.Fatalf("the wallet saw %d pairing deletes", deletes)
+		}
+	})
+}
+
+// TC20: a challenge that ran out while the user was away is not the end of
+// the Sign when the wallet session is still there: a fresh challenge is
+// fetched and asked for on the same session, at once in the foreground and on
+// the way back to it otherwise. Only a session that is over fails the Sign
+// with challenge_expired, as before. In the device test of 2026-10-09 a proof
+// that was taken 6 minutes after the signature died with challenge_expired.
+func TestBittensorWalletConnectChallengeExpiredRecovery(t *testing.T) {
+	login := BittensorWalletPurposeLogin
+	// the challenge of the first Sign lives a minute; a re-sign's is the fixture's
+	shortFirst := func(s *bwcScene) {
+		s.fetch = func(ctx context.Context, n int) (*AuthWalletChallengeResult, error) {
+			if n == 1 {
+				challenge := bittensorTestChallenge()
+				challenge.ExpiresIn = 60
+				return challenge, nil
+			}
+			return bittensorTestChallenge(), nil
+		}
+	}
+	// the publishes of a sign request, as the relay took them
+	signRequests := func(s *bwcScene) []relaytest.Published {
+		return slices.DeleteFunc(s.relay.Published(), func(p relaytest.Published) bool { return p.Tag != wire.TagSessionRequest })
+	}
+
+	// the proof waits while the app is in front
+	t.Run("the proof waited too long", func(t *testing.T) {
+		bwcPlayNova(t, func(t *testing.T, s *bwcScene) {
+			c := s.c
+			c.SetTrace(true)
+			shortFirst(s)
+			s.answer(s.signIn(login, ""), bwcSignature, bwcSigned)
+			s.wait(61 * time.Second) // the challenge ran out while the proof waited
+			if proof := c.TakeProof(); proof != nil {
+				t.Fatalf("the expired proof is %+v", proof)
+			}
+			s.wait(bwcStep)
+			s.expect("signed again", bwcAwaitingSignature, bwcConnecting, bwcAwaitingSignature)
+			s.answer(bwcTake(s, s.wallet.Requests()), bwcSignature, bwcSigned)
+			if proof := c.TakeProof(); proof == nil || proof.Purpose != login || c.Result() != nil {
+				t.Fatalf("the proof of the re-sign is %+v", proof)
+			}
+			// one pairing, one session: the re-sign asked on the topic of the first
+			requests, asked := signRequests(s), s.asked()
+			if len(asked) != 2 || len(requests) != 2 || requests[0].Topic != requests[1].Topic || s.wallet.Seen(wire.TagSessionPropose) != 1 {
+				t.Fatalf("the re-sign asked %q and published %+v", asked, requests)
+			}
+			// the trace tells the recovery, shape-only
+			if lines := bwcHoldTrace(t, c); !slices.ContainsFunc(lines, func(line string) bool { return strings.HasSuffix(line, " resign") }) {
+				t.Fatalf("the trace has no resign line: %q", lines)
+			}
+		})
+	})
+
+	// the wallet's answer is read when the process comes back, the challenge
+	// of it long run out
+	t.Run("the answer came after the challenge ran out", func(t *testing.T) {
+		bwcPlayNova(t, func(t *testing.T, s *bwcScene) {
+			c := s.c
+			request := s.signIn(login, "")
+			// the process is away while the wallet answers: the answer waits
+			// in the mailbox
+			s.relay.SetZombie("", true)
+			go s.wallet.Respond(request, bwcSignature)
+			synctest.Wait()
+			s.offset.Add(301_000)
+			s.wait(2 * bwcStep)
+			s.expect("signed again on the way back", bwcAwaitingSignature, bwcAwaitingSignature, bwcConnecting, bwcAwaitingSignature, bwcAwaitingSignature)
+			if c.Result() != nil {
+				t.Fatalf("a result: %+v", c.Result())
+			}
+			s.answer(bwcTake(s, s.wallet.Requests()), bwcSignature, bwcSigned)
+			if proof := c.TakeProof(); proof == nil {
+				t.Fatal("no proof of the re-sign")
+			}
+			if asked := s.asked(); len(asked) != 2 {
+				t.Fatalf("the challenges asked for: %q", asked)
+			}
+		})
+	})
+
+	// the expiry is found behind the wallet: the re-sign waits for the way back
+	t.Run("found behind the wallet", func(t *testing.T) {
+		bwcPlayNova(t, func(t *testing.T, s *bwcScene) {
+			c := s.c
+			shortFirst(s)
+			s.answer(s.signIn(login, ""), bwcSignature, bwcSigned)
+			c.SetForeground(false)
+			s.wait(62 * time.Second)
+			if proof := c.TakeProof(); proof != nil {
+				t.Fatalf("the expired proof is %+v", proof)
+			}
+			s.expect("nothing while away", bwcSigned)
+			if asked := len(s.asked()); asked != 1 {
+				t.Fatalf("%d challenges while away", asked)
+			}
+			c.SetForeground(true)
+			s.wait(2 * bwcStep)
+			s.expect("signed again", bwcAwaitingSignature, bwcConnecting, bwcAwaitingSignature, bwcAwaitingSignature)
+			s.answer(bwcTake(s, s.wallet.Requests()), bwcSignature, bwcSigned)
+		})
+	})
+
+	// the session is gone: the Sign fails as before
+	t.Run("the session is gone", func(t *testing.T) {
+		bwcPlayNova(t, func(t *testing.T, s *bwcScene) {
+			c := s.c
+			s.answer(s.signIn(login, ""), bwcSignature, bwcSigned)
+			s.wallet.DeleteSession()
+			s.wait(bwcStep)
+			s.expect("the proof waits", bwcSigned)
+			s.offset.Add(301_000)
+			if proof := c.TakeProof(); proof != nil {
+				t.Fatalf("the proof of a session that is gone is %+v", proof)
+			}
+			s.expect("failed, and over", bwcClosed, bwcFailed, bwcClosed)
+			if result := c.Result(); result == nil || result.ErrorCode != BittensorWalletErrorExpired {
+				t.Fatalf("the result is %+v", result)
+			}
+			if asked, requests := len(s.asked()), s.wallet.Seen(wire.TagSessionRequest); asked != 1 || requests != 1 {
+				t.Fatalf("a re-sign on a session that is gone: %d challenges, %d requests", asked, requests)
+			}
+		})
 	})
 }
 
@@ -1066,7 +1232,9 @@ func TestBittensorWalletConnectListeners(t *testing.T) {
 }
 
 // TC18: Close ends the connection at once and for good, and deletes the
-// wallet session if there is one. A connection also ends with the context it
+// wallet session if there is one. While the wallet was still being asked to
+// connect the pairing is deleted instead: its uri was handed out, and a
+// wallet may list it. A connection also ends with the context it
 // was made under.
 func TestBittensorWalletConnectClose(t *testing.T) {
 	// the challenge is asked for, each attempt failing after 2 s: they end 2 s, 5 s and 10 s after the approval
@@ -1082,21 +1250,22 @@ func TestBittensorWalletConnectClose(t *testing.T) {
 		}
 	}
 	for _, row := range []struct {
-		name    string
-		reach   func(s *bwcScene)
-		deletes int
+		name           string
+		reach          func(s *bwcScene)
+		deletes        int // wc_sessionDelete the wallet saw
+		pairingDeletes int // wc_pairingDelete
 	}{
-		{"while the wallet is asked to connect", func(s *bwcScene) { s.pair(BittensorWalletPurposeLogin, "") }, 0},
-		{"while the wallet is asked to sign", func(s *bwcScene) { s.signIn(BittensorWalletPurposeLogin, "") }, 1},
+		{"while the wallet is asked to connect", func(s *bwcScene) { s.pair(BittensorWalletPurposeLogin, "") }, 0, 1},
+		{"while the wallet is asked to sign", func(s *bwcScene) { s.signIn(BittensorWalletPurposeLogin, "") }, 1, 0},
 		{"after a Sign that failed", func(s *bwcScene) {
 			s.answer(s.signIn(BittensorWalletPurposeLogin, ""), "", bwcFailed)
-		}, 1},
+		}, 1, 0},
 		{"with a proof that was not taken", func(s *bwcScene) {
 			s.answer(s.signIn(BittensorWalletPurposeLogin, ""), bwcSignature, bwcSigned)
-		}, 1},
+		}, 1, 0},
 		// a fetch that returns after Close does nothing, and no other follows it
-		{"while the first attempt at the challenge is on its way", fetching(time.Second), 1},
-		{"while the last attempt at the challenge is on its way", fetching(9 * time.Second), 1},
+		{"while the first attempt at the challenge is on its way", fetching(time.Second), 1, 0},
+		{"while the last attempt at the challenge is on its way", fetching(9 * time.Second), 1, 0},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			bwcPlayNova(t, func(t *testing.T, s *bwcScene) {
@@ -1109,8 +1278,8 @@ func TestBittensorWalletConnectClose(t *testing.T) {
 				c.Close()
 				s.wait(3 * bwcStep)
 				s.expect("closed once", bwcClosed, bwcClosed)
-				if deletes := s.wallet.Seen(wire.TagSessionDelete); deletes != row.deletes || len(s.asked()) != asked {
-					t.Fatalf("the wallet saw %d deletes, and %d challenges were asked for after Close", deletes, len(s.asked())-asked)
+				if deletes, pairingDeletes := s.wallet.Seen(wire.TagSessionDelete), s.wallet.Seen(wire.TagPairingDelete); deletes != row.deletes || pairingDeletes != row.pairingDeletes || len(s.asked()) != asked {
+					t.Fatalf("the wallet saw %d session deletes and %d pairing deletes, and %d challenges were asked for after Close", deletes, pairingDeletes, len(s.asked())-asked)
 				}
 			})
 		})

@@ -535,15 +535,17 @@ func TestClientCollectsAfterASuspension(t *testing.T) {
 
 // TE4 (R12): with its deadline passed and nothing in the mailbox a wait
 // ends when two reads that began after the loop saw it are over, and not
-// with the first.
+// with the first. A pairing that was handed out and never became a session
+// is deleted at the wallet, the way a session is.
 func TestClientExpiresAfterTwoReads(t *testing.T) {
 	for _, row := range []struct {
-		wait, want string
-		deletes    int
+		wait, want     string
+		deletes        int // wc_sessionDelete the wallet saw
+		pairingDeletes int // wc_pairingDelete
 	}{
-		{"proposal", "closed expired 0", 0},
-		{"settle", "closed expired 0", 1},
-		{"request", "failed expired 0", 0},
+		{"proposal", "closed expired 0", 0, 1},
+		{"settle", "closed expired 0", 1, 0},
+		{"request", "failed expired 0", 0, 0},
 	} {
 		t.Run(row.wait, func(t *testing.T) {
 			play(t, nil, func(t *testing.T, s *scene) {
@@ -566,8 +568,8 @@ func TestClientExpiresAfterTwoReads(t *testing.T) {
 				s.expect("one read is not enough")
 				s.wait(time.Millisecond)
 				s.expect("the second read", row.want)
-				if deletes := s.wallet.Seen(wire.TagSessionDelete); deletes != row.deletes {
-					t.Fatalf("the wallet saw %d deletes", deletes)
+				if deletes, pairingDeletes := s.wallet.Seen(wire.TagSessionDelete), s.wallet.Seen(wire.TagPairingDelete); deletes != row.deletes || pairingDeletes != row.pairingDeletes {
+					t.Fatalf("the wallet saw %d session deletes and %d pairing deletes", deletes, pairingDeletes)
 				}
 			})
 		})
@@ -576,7 +578,8 @@ func TestClientExpiresAfterTwoReads(t *testing.T) {
 
 // TE5 (R12): with the relay out of reach a wait whose deadline passed ends
 // 20 ticks after the loop saw it, and what the relay kept is used when it is
-// back before that.
+// back before that. The end is told when the delete of the pairing, which the
+// relay cannot take, is written off.
 func TestClientDeadlineWithTheRelayOutOfReach(t *testing.T) {
 	for _, back := range []bool{false, true} {
 		t.Run(fmt.Sprintf("back %t", back), func(t *testing.T) {
@@ -597,6 +600,8 @@ func TestClientDeadlineWithTheRelayOutOfReach(t *testing.T) {
 				s.wait(21*time.Second - time.Millisecond)
 				s.expect("not before 20 ticks have passed")
 				s.wait(time.Millisecond)
+				s.expect("the wait is over; the delete is still to be written off")
+				s.wait(3 * time.Second)
 				s.expect("out of reach", "closed unavailable 0")
 			})
 		})
@@ -755,12 +760,14 @@ func TestClientSentWhenWritten(t *testing.T) {
 
 // TE12: what a wallet can answer a proposal with. An invalid settle is
 // answered with an error on tag 1103, and the session it would have made is
-// deleted.
+// deleted. A pairing that was handed out and never became a session is
+// deleted too — unless the wallet itself deleted it.
 func TestClientApprovalAndSettleFailures(t *testing.T) {
 	approve := func(edit func(settle *relaytest.SettleEdit)) func(s *scene) {
 		return func(s *scene) { s.wallet.ApproveWith(s.proposal, edit) }
 	}
 	const pairingAnswer, settleAnswer, deleted = "> publish P 1001 86400", "> publish B 1103 300", "> publish B 1112 86400"
+	const pairingDeleted = "> publish P 1000 86400"
 	for _, row := range []struct {
 		name      string
 		act       func(s *scene)
@@ -769,8 +776,8 @@ func TestClientApprovalAndSettleFailures(t *testing.T) {
 		publishes []string // of the client, after the proposal
 	}{
 		// the text has none of the reject words: the code alone gives the class
-		{"rejected", func(s *scene) { s.wallet.Reject(s.proposal, 5000, "no") }, "closed rejected 5000", 0, nil},
-		{"unsupported", func(s *scene) { s.wallet.Reject(s.proposal, 5100, "Unsupported chains.") }, "closed unsupported 5100", 0, nil},
+		{"rejected", func(s *scene) { s.wallet.Reject(s.proposal, 5000, "no") }, "closed rejected 5000", 0, []string{pairingDeleted}},
+		{"unsupported", func(s *scene) { s.wallet.Reject(s.proposal, 5100, "Unsupported chains.") }, "closed unsupported 5100", 0, []string{pairingDeleted}},
 		{"the pairing deleted before the approval", func(s *scene) { s.wallet.DeletePairing() }, "closed rejected 0", 0, []string{pairingAnswer}},
 		{"the pairing deleted after the approval", func(s *scene) {
 			s.wallet.ApproveWith(s.proposal, skipSettle)
@@ -780,7 +787,7 @@ func TestClientApprovalAndSettleFailures(t *testing.T) {
 		{"a responder key that is no key", func(s *scene) {
 			approval := wire.ResultFrame(s.proposal.Id, map[string]string{"responderPublicKey": "zz"})
 			s.forge(s.pairing().Topic, s.pairing().SymKey, approval, wire.TagSessionProposeApprove)
-		}, "closed wallet -1", 0, nil},
+		}, "closed wallet -1", 0, []string{pairingDeleted}},
 		{"another controller key", approve(func(settle *relaytest.SettleEdit) { settle.ControllerKey = strings.Repeat("ab", 32) }),
 			"closed wallet 7000", 7000, []string{settleAnswer, deleted}},
 		{"an account on another chain only", approve(func(settle *relaytest.SettleEdit) {
@@ -935,20 +942,23 @@ func TestClientIgnoresWhatIsNoAnswer(t *testing.T) {
 }
 
 // TE16 (R19): Close at every stage. The wallet is told that the session is
-// over whenever the approval had been read, and never twice. A context that
-// ends tells nobody.
+// over whenever the approval had been read, and never twice. A pairing whose
+// uri was handed out but never became a session is deleted the same way; one
+// that was never handed out leaves nothing to delete. A context that ends
+// tells nobody.
 func TestClientClose(t *testing.T) {
 	for _, row := range []struct {
-		stage   string
-		deletes int
+		stage          string
+		deletes        int // wc_sessionDelete the wallet saw
+		pairingDeletes int // wc_pairingDelete
 	}{
-		{"before Pair", 0},
-		{"proposing", 0},
-		{"awaiting the approval", 0},
-		{"approved", 1},
-		{"settled", 1},
-		{"requesting", 1},
-		{"the context ends", 0},
+		{"before Pair", 0, 0},
+		{"proposing", 0, 0},
+		{"awaiting the approval", 0, 1},
+		{"approved", 1, 0},
+		{"settled", 1, 0},
+		{"requesting", 1, 0},
+		{"the context ends", 0, 0},
 	} {
 		t.Run(row.stage, func(t *testing.T) {
 			play(t, nil, func(t *testing.T, s *scene) {
@@ -983,8 +993,9 @@ func TestClientClose(t *testing.T) {
 				s.wait(5 * time.Second)
 				s.same("nothing after the end", names(s.take(), true))
 				dials := s.relay.Dials()
-				if deletes := s.wallet.Seen(wire.TagSessionDelete); deletes != row.deletes || s.relay.OpenSockets("") != 0 || (dials == 0) != (row.stage == "before Pair") {
-					t.Fatalf("the wallet saw %d deletes; %d sockets, %d dials", deletes, s.relay.OpenSockets(""), dials)
+				if deletes, pairingDeletes := s.wallet.Seen(wire.TagSessionDelete), s.wallet.Seen(wire.TagPairingDelete); deletes != row.deletes || pairingDeletes != row.pairingDeletes ||
+					s.relay.OpenSockets("") != 0 || (dials == 0) != (row.stage == "before Pair") {
+					t.Fatalf("the wallet saw %d session deletes and %d pairing deletes; %d sockets, %d dials", deletes, pairingDeletes, s.relay.OpenSockets(""), dials)
 				}
 			})
 		})

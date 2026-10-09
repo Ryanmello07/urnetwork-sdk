@@ -59,6 +59,7 @@ const (
 )
 
 const (
+	methodPairingDelete  = "wc_pairingDelete"
 	methodSessionPropose = "wc_sessionPropose"
 	methodSessionRequest = "wc_sessionRequest"
 	methodSessionDelete  = "wc_sessionDelete"
@@ -218,9 +219,23 @@ func SessionRequest(id int64, chain string, method string, address string, messa
 	})
 }
 
-type sessionDeleteParams struct {
+// deleteParams are the reason a party gives for ending a pairing or a
+// session: wc_pairingDelete (core/pairing/rpc-methods) and wc_sessionDelete
+// (sign/rpc-methods) carry the same members.
+type deleteParams struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+// PairingDeleteRequest is wc_pairingDelete with the reason a dapp gives,
+// published on the pairing topic with TagPairingDelete and TtlOneDay:
+//
+//	{"id":..,"jsonrpc":"2.0","method":"wc_pairingDelete","params":{"code":6000,"message":"User disconnected."}}
+func PairingDeleteRequest(id int64) []byte {
+	return RequestFrame(id, methodPairingDelete, deleteParams{
+		Code:    userDisconnectedCode,
+		Message: userDisconnectedMessage,
+	})
 }
 
 // SessionDeleteRequest is wc_sessionDelete with the reason a dapp gives,
@@ -228,7 +243,7 @@ type sessionDeleteParams struct {
 //
 //	{"id":..,"jsonrpc":"2.0","method":"wc_sessionDelete","params":{"code":6000,"message":"User disconnected."}}
 func SessionDeleteRequest(id int64) []byte {
-	return RequestFrame(id, methodSessionDelete, sessionDeleteParams{
+	return RequestFrame(id, methodSessionDelete, deleteParams{
 		Code:    userDisconnectedCode,
 		Message: userDisconnectedMessage,
 	})
