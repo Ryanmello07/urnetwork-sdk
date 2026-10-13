@@ -165,6 +165,13 @@ pub type urnet_sn_epoch_cb = Option<unsafe extern "C" fn(*mut c_void, *const c_c
 pub type urnet_sn_gas_balance_cb = Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> ()>;
 pub type urnet_sn_get_wallet_cb = Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> ()>;
 pub type urnet_sn_head_cb = Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> ()>;
+pub type urnet_sn_ledger_accounts_cb = Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> ()>;
+pub type urnet_sn_ledger_claim_confirmed_cb = Option<unsafe extern "C" fn(*mut c_void, i64, i64, *const c_char, i64) -> ()>;
+pub type urnet_sn_ledger_claim_done_cb = Option<unsafe extern "C" fn(*mut c_void) -> ()>;
+pub type urnet_sn_ledger_claim_failed_cb = Option<unsafe extern "C" fn(*mut c_void, i64, i64, *const c_char) -> ()>;
+pub type urnet_sn_ledger_claim_sent_cb = Option<unsafe extern "C" fn(*mut c_void, i64, i64, *const c_char) -> ()>;
+pub type urnet_sn_network_consent_challenge_cb = Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> ()>;
+pub type urnet_sn_network_consent_status_cb = Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> ()>;
 pub type urnet_sn_set_wallet_cb = Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> ()>;
 pub type urnet_sn_validate_wallet_cb = Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> ()>;
 pub type urnet_sn_wallet_change_cb = Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> ()>;
@@ -346,6 +353,12 @@ pub struct Raw {
     pub urnet_api_sn_epoch_sync: unsafe extern "C" fn(u64, *mut *mut c_char) -> *mut c_char,
     pub urnet_api_sn_get_wallet: unsafe extern "C" fn(u64, urnet_sn_get_wallet_cb, *mut c_void) -> (),
     pub urnet_api_sn_head: unsafe extern "C" fn(u64, urnet_sn_head_cb, *mut c_void) -> (),
+    pub urnet_api_sn_network_consent_challenge: unsafe extern "C" fn(u64, *const c_char, urnet_sn_network_consent_challenge_cb, *mut c_void) -> (),
+    pub urnet_api_sn_network_consent_challenge_sync: unsafe extern "C" fn(u64, *const c_char, *mut *mut c_char) -> *mut c_char,
+    pub urnet_api_sn_network_consent_status: unsafe extern "C" fn(u64, urnet_sn_network_consent_status_cb, *mut c_void) -> (),
+    pub urnet_api_sn_network_consent_status_sync: unsafe extern "C" fn(u64, *mut *mut c_char) -> *mut c_char,
+    pub urnet_api_sn_network_consent_submit: unsafe extern "C" fn(u64, *const c_char, *const c_char, *const c_char, urnet_sn_set_wallet_cb, *mut c_void) -> (),
+    pub urnet_api_sn_network_consent_submit_sync: unsafe extern "C" fn(u64, *const c_char, *const c_char, *const c_char, *mut *mut c_char) -> *mut c_char,
     pub urnet_api_sn_network_wallet_mapping_challenge_sync: unsafe extern "C" fn(u64, *const c_char, *mut *mut c_char) -> *mut c_char,
     pub urnet_api_sn_pool_claim_sync: unsafe extern "C" fn(u64, *const c_char, *mut *mut c_char) -> *mut c_char,
     pub urnet_api_sn_set_wallet: unsafe extern "C" fn(u64, *const c_char, urnet_sn_set_wallet_cb, *mut c_void) -> (),
@@ -396,6 +409,7 @@ pub struct Raw {
     pub urnet_bittensor_wallet_session_proof: unsafe extern "C" fn(u64) -> *mut c_char,
     pub urnet_bittensor_wallet_session_purpose: unsafe extern "C" fn(u64) -> *mut c_char,
     pub urnet_bittensor_wallet_session_set_challenge: unsafe extern "C" fn(u64, *const c_char, i64, *mut *mut c_char) -> bool,
+    pub urnet_bittensor_wallet_session_set_network_consent_challenge: unsafe extern "C" fn(u64, *const c_char, i64, *mut *mut c_char) -> bool,
     pub urnet_bittensor_wallet_session_set_wallet_connect_project_id: unsafe extern "C" fn(u64, *const c_char) -> (),
     pub urnet_bittensor_wallet_session_sign_request: unsafe extern "C" fn(u64, *mut *mut c_char) -> *mut c_char,
     pub urnet_bittensor_wallet_session_state: unsafe extern "C" fn(u64) -> *mut c_char,
@@ -770,6 +784,9 @@ pub struct Raw {
     pub urnet_device_local_sn_claim_transactions: unsafe extern "C" fn(u64, *const c_char, *mut *mut c_char) -> *mut c_char,
     pub urnet_device_local_sn_claims: unsafe extern "C" fn(u64, urnet_sn_claims_cb, *mut c_void) -> (),
     pub urnet_device_local_sn_gas_balance: unsafe extern "C" fn(u64, urnet_sn_gas_balance_cb, *mut c_void) -> (),
+    pub urnet_device_local_sn_ledger_accounts: unsafe extern "C" fn(u64, urnet_sn_ledger_accounts_cb, *mut c_void) -> (),
+    pub urnet_device_local_sn_ledger_claim: unsafe extern "C" fn(u64, urnet_sn_ledger_claim_confirmed_cb, urnet_sn_ledger_claim_done_cb, urnet_sn_ledger_claim_failed_cb, urnet_sn_ledger_claim_sent_cb, *mut c_void) -> (),
+    pub urnet_device_local_sn_ledger_claim_transactions: unsafe extern "C" fn(u64, *mut *mut c_char) -> *mut c_char,
     pub urnet_device_local_stall_exit: unsafe extern "C" fn(u64, *const c_char, bool) -> bool,
     pub urnet_device_local_start_probe_suite: unsafe extern "C" fn(u64, *const c_char) -> bool,
     pub urnet_device_local_stop_probe_suite: unsafe extern "C" fn(u64) -> (),
@@ -874,6 +891,9 @@ pub struct Raw {
     pub urnet_device_remote_sn_claim_transactions: unsafe extern "C" fn(u64, *const c_char, *mut *mut c_char) -> *mut c_char,
     pub urnet_device_remote_sn_claims: unsafe extern "C" fn(u64, urnet_sn_claims_cb, *mut c_void) -> (),
     pub urnet_device_remote_sn_gas_balance: unsafe extern "C" fn(u64, urnet_sn_gas_balance_cb, *mut c_void) -> (),
+    pub urnet_device_remote_sn_ledger_accounts: unsafe extern "C" fn(u64, urnet_sn_ledger_accounts_cb, *mut c_void) -> (),
+    pub urnet_device_remote_sn_ledger_claim: unsafe extern "C" fn(u64, urnet_sn_ledger_claim_confirmed_cb, urnet_sn_ledger_claim_done_cb, urnet_sn_ledger_claim_failed_cb, urnet_sn_ledger_claim_sent_cb, *mut c_void) -> (),
+    pub urnet_device_remote_sn_ledger_claim_transactions: unsafe extern "C" fn(u64, *mut *mut c_char) -> *mut c_char,
     pub urnet_device_remote_stall_exit: unsafe extern "C" fn(u64, *const c_char, bool) -> bool,
     pub urnet_device_remote_start_probe_suite: unsafe extern "C" fn(u64, *const c_char) -> bool,
     pub urnet_device_remote_stop_probe_suite: unsafe extern "C" fn(u64) -> (),
@@ -1446,6 +1466,7 @@ pub struct Raw {
     pub urnet_set_control_ip_family_policy: unsafe extern "C" fn(i64) -> (),
     pub urnet_set_device_rpc_h1_plus_enabled: unsafe extern "C" fn(bool) -> (),
     pub urnet_set_egress_interface_index: unsafe extern "C" fn(i64, i64) -> (),
+    pub urnet_set_extender_network_client_enabled: unsafe extern "C" fn(bool) -> bool,
     pub urnet_set_extender_store_read_only: unsafe extern "C" fn(bool) -> (),
     pub urnet_set_log_dir: unsafe extern "C" fn(*const c_char, *mut *mut c_char) -> bool,
     pub urnet_set_log_dir_for_process: unsafe extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> bool,
@@ -1460,6 +1481,8 @@ pub struct Raw {
     pub urnet_sn_claims_for: unsafe extern "C" fn(*const c_char, *const c_char, i64, urnet_sn_claims_cb, *mut c_void) -> (),
     pub urnet_sn_fleet_binding_digest: unsafe extern "C" fn(*const c_char, *mut *mut c_char) -> *mut c_char,
     pub urnet_sn_gas_balance_for: unsafe extern "C" fn(*const c_char, *const c_char, urnet_sn_gas_balance_cb, *mut c_void) -> (),
+    pub urnet_sn_ledger_accounts_for: unsafe extern "C" fn(*const c_char, *const c_char, urnet_sn_ledger_accounts_cb, *mut c_void) -> (),
+    pub urnet_sn_ledger_claim_transactions_for: unsafe extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> *mut c_char,
     pub urnet_sn_payout_leaf_hex: unsafe extern "C" fn(*const c_char, i64) -> *mut c_char,
     pub urnet_sn_testnet_chain_settings: unsafe extern "C" fn() -> *mut c_char,
     pub urnet_suggest_emoji_tag: unsafe extern "C" fn(i64) -> *mut c_char,
@@ -1633,6 +1656,12 @@ impl Raw {
             urnet_api_sn_epoch_sync: unsafe { *library.get(b"urnet_api_sn_epoch_sync\0")? },
             urnet_api_sn_get_wallet: unsafe { *library.get(b"urnet_api_sn_get_wallet\0")? },
             urnet_api_sn_head: unsafe { *library.get(b"urnet_api_sn_head\0")? },
+            urnet_api_sn_network_consent_challenge: unsafe { *library.get(b"urnet_api_sn_network_consent_challenge\0")? },
+            urnet_api_sn_network_consent_challenge_sync: unsafe { *library.get(b"urnet_api_sn_network_consent_challenge_sync\0")? },
+            urnet_api_sn_network_consent_status: unsafe { *library.get(b"urnet_api_sn_network_consent_status\0")? },
+            urnet_api_sn_network_consent_status_sync: unsafe { *library.get(b"urnet_api_sn_network_consent_status_sync\0")? },
+            urnet_api_sn_network_consent_submit: unsafe { *library.get(b"urnet_api_sn_network_consent_submit\0")? },
+            urnet_api_sn_network_consent_submit_sync: unsafe { *library.get(b"urnet_api_sn_network_consent_submit_sync\0")? },
             urnet_api_sn_network_wallet_mapping_challenge_sync: unsafe { *library.get(b"urnet_api_sn_network_wallet_mapping_challenge_sync\0")? },
             urnet_api_sn_pool_claim_sync: unsafe { *library.get(b"urnet_api_sn_pool_claim_sync\0")? },
             urnet_api_sn_set_wallet: unsafe { *library.get(b"urnet_api_sn_set_wallet\0")? },
@@ -1683,6 +1712,7 @@ impl Raw {
             urnet_bittensor_wallet_session_proof: unsafe { *library.get(b"urnet_bittensor_wallet_session_proof\0")? },
             urnet_bittensor_wallet_session_purpose: unsafe { *library.get(b"urnet_bittensor_wallet_session_purpose\0")? },
             urnet_bittensor_wallet_session_set_challenge: unsafe { *library.get(b"urnet_bittensor_wallet_session_set_challenge\0")? },
+            urnet_bittensor_wallet_session_set_network_consent_challenge: unsafe { *library.get(b"urnet_bittensor_wallet_session_set_network_consent_challenge\0")? },
             urnet_bittensor_wallet_session_set_wallet_connect_project_id: unsafe { *library.get(b"urnet_bittensor_wallet_session_set_wallet_connect_project_id\0")? },
             urnet_bittensor_wallet_session_sign_request: unsafe { *library.get(b"urnet_bittensor_wallet_session_sign_request\0")? },
             urnet_bittensor_wallet_session_state: unsafe { *library.get(b"urnet_bittensor_wallet_session_state\0")? },
@@ -2057,6 +2087,9 @@ impl Raw {
             urnet_device_local_sn_claim_transactions: unsafe { *library.get(b"urnet_device_local_sn_claim_transactions\0")? },
             urnet_device_local_sn_claims: unsafe { *library.get(b"urnet_device_local_sn_claims\0")? },
             urnet_device_local_sn_gas_balance: unsafe { *library.get(b"urnet_device_local_sn_gas_balance\0")? },
+            urnet_device_local_sn_ledger_accounts: unsafe { *library.get(b"urnet_device_local_sn_ledger_accounts\0")? },
+            urnet_device_local_sn_ledger_claim: unsafe { *library.get(b"urnet_device_local_sn_ledger_claim\0")? },
+            urnet_device_local_sn_ledger_claim_transactions: unsafe { *library.get(b"urnet_device_local_sn_ledger_claim_transactions\0")? },
             urnet_device_local_stall_exit: unsafe { *library.get(b"urnet_device_local_stall_exit\0")? },
             urnet_device_local_start_probe_suite: unsafe { *library.get(b"urnet_device_local_start_probe_suite\0")? },
             urnet_device_local_stop_probe_suite: unsafe { *library.get(b"urnet_device_local_stop_probe_suite\0")? },
@@ -2161,6 +2194,9 @@ impl Raw {
             urnet_device_remote_sn_claim_transactions: unsafe { *library.get(b"urnet_device_remote_sn_claim_transactions\0")? },
             urnet_device_remote_sn_claims: unsafe { *library.get(b"urnet_device_remote_sn_claims\0")? },
             urnet_device_remote_sn_gas_balance: unsafe { *library.get(b"urnet_device_remote_sn_gas_balance\0")? },
+            urnet_device_remote_sn_ledger_accounts: unsafe { *library.get(b"urnet_device_remote_sn_ledger_accounts\0")? },
+            urnet_device_remote_sn_ledger_claim: unsafe { *library.get(b"urnet_device_remote_sn_ledger_claim\0")? },
+            urnet_device_remote_sn_ledger_claim_transactions: unsafe { *library.get(b"urnet_device_remote_sn_ledger_claim_transactions\0")? },
             urnet_device_remote_stall_exit: unsafe { *library.get(b"urnet_device_remote_stall_exit\0")? },
             urnet_device_remote_start_probe_suite: unsafe { *library.get(b"urnet_device_remote_start_probe_suite\0")? },
             urnet_device_remote_stop_probe_suite: unsafe { *library.get(b"urnet_device_remote_stop_probe_suite\0")? },
@@ -2733,6 +2769,7 @@ impl Raw {
             urnet_set_control_ip_family_policy: unsafe { *library.get(b"urnet_set_control_ip_family_policy\0")? },
             urnet_set_device_rpc_h1_plus_enabled: unsafe { *library.get(b"urnet_set_device_rpc_h1_plus_enabled\0")? },
             urnet_set_egress_interface_index: unsafe { *library.get(b"urnet_set_egress_interface_index\0")? },
+            urnet_set_extender_network_client_enabled: unsafe { *library.get(b"urnet_set_extender_network_client_enabled\0")? },
             urnet_set_extender_store_read_only: unsafe { *library.get(b"urnet_set_extender_store_read_only\0")? },
             urnet_set_log_dir: unsafe { *library.get(b"urnet_set_log_dir\0")? },
             urnet_set_log_dir_for_process: unsafe { *library.get(b"urnet_set_log_dir_for_process\0")? },
@@ -2747,6 +2784,8 @@ impl Raw {
             urnet_sn_claims_for: unsafe { *library.get(b"urnet_sn_claims_for\0")? },
             urnet_sn_fleet_binding_digest: unsafe { *library.get(b"urnet_sn_fleet_binding_digest\0")? },
             urnet_sn_gas_balance_for: unsafe { *library.get(b"urnet_sn_gas_balance_for\0")? },
+            urnet_sn_ledger_accounts_for: unsafe { *library.get(b"urnet_sn_ledger_accounts_for\0")? },
+            urnet_sn_ledger_claim_transactions_for: unsafe { *library.get(b"urnet_sn_ledger_claim_transactions_for\0")? },
             urnet_sn_payout_leaf_hex: unsafe { *library.get(b"urnet_sn_payout_leaf_hex\0")? },
             urnet_sn_testnet_chain_settings: unsafe { *library.get(b"urnet_sn_testnet_chain_settings\0")? },
             urnet_suggest_emoji_tag: unsafe { *library.get(b"urnet_suggest_emoji_tag\0")? },
