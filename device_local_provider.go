@@ -228,9 +228,10 @@ func newDeviceLocalProviderWithOverrides(
 	// traffic is isolated and every download still shares provider lane zero.
 	// Auto and H3 remain unchanged until the provider-side physical A/B proves a
 	// safe default across carrier fallback.
-	applyMobileH1PerformanceClientSettings(
+	applyMobileH1PerformanceClientSettingsForPlatform(
 		clientSettings,
 		deviceMemoryTargetByteCount,
+		mobileRuntime() || transferMemory != nil,
 		targetMode == connect.TransportModeH1,
 	)
 	// the provider always enables the e2e encryption sessions: the responder
@@ -291,12 +292,13 @@ func newDeviceLocalProviderWithOverrides(
 		AppVersion: appVersion,
 		ClientInfo: networkSpace.GetApi().connectClientInfo(), StreamLeaseVersion: 1,
 	}
-	platformTransportSettings := newDeviceLocalPlatformTransportSettings(
+	platformTransportSettings := newDeviceLocalPlatformTransportSettingsForProfile(
 		deviceMemoryTargetByteCount,
 		platformTransportBudget,
 		dialContextSettings,
 		networkSpace.GetAltUrl(),
 		dnsPumpHost,
+		mobileRuntime() || transferMemory != nil,
 	)
 	platformTransportSettings.AuthorizationClosed = func(cause connect.AuthorizationCloseCause) {
 		if cause != connect.AuthorizationCloseUnavailable {
@@ -989,19 +991,13 @@ func (self *deviceLocalProvider) CloseAndWait(ctx context.Context) error {
 	}
 }
 
-func newDeviceClientSettings(
-	settings *connect.ClientSettings,
-	apiUrl string,
-	clientStrategy *connect.ClientStrategy,
-) *connect.ClientSettings {
-	// Shallow-copy settings (and nested EncryptionSettings) so that
-	// filling in defaults never mutates the caller's struct.
-	var clientSettings connect.ClientSettings
-	if settings != nil {
-		clientSettings = *settings
-	} else {
-		clientSettings = *connect.DefaultClientSettings()
+// Clone mutable settings containers, retaining explicit shared-budget
+// pointers until the constructing owner replaces them with its own budgets.
+func cloneDeviceClientSettings(settings *connect.ClientSettings) *connect.ClientSettings {
+	if settings == nil {
+		return nil
 	}
+	clientSettings := *settings
 	if clientSettings.EncryptionSettings != nil {
 		encryptionSettings := *clientSettings.EncryptionSettings
 		clientSettings.EncryptionSettings = &encryptionSettings
@@ -1030,6 +1026,19 @@ func newDeviceClientSettings(
 		webRtcSettings := *clientSettings.WebRtcSettings
 		clientSettings.WebRtcSettings = &webRtcSettings
 	}
+	return &clientSettings
+}
+
+// Install owner-local defaults and API fetchers only at the client boundary.
+func newDeviceClientSettings(
+	settings *connect.ClientSettings,
+	apiUrl string,
+	clientStrategy *connect.ClientStrategy,
+) *connect.ClientSettings {
+	clientSettings := cloneDeviceClientSettings(settings)
+	if clientSettings == nil {
+		clientSettings = connect.DefaultClientSettings()
+	}
 	// A caller may intentionally provide a partial ClientSettings override.
 	// Provider memory sizing dereferences these nested settings before
 	// connect.NewClient fills defaults, so complete only the missing pieces
@@ -1047,7 +1056,6 @@ func newDeviceClientSettings(
 		webRtcSettings := *defaults.WebRtcSettings
 		clientSettings.WebRtcSettings = &webRtcSettings
 	}
-
 	// Install the default out-of-band peer-key cross-check when none
 	// is configured. Callers who want to disable the check can set a
 	// no-op NewPeerClientPublicKeyFetcher in their settings.
@@ -1099,7 +1107,7 @@ func newDeviceClientSettings(
 		}
 	}
 
-	return &clientSettings
+	return clientSettings
 }
 
 // All destination generations reuse the device's durable ratchet. Copy the
