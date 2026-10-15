@@ -11,6 +11,8 @@
 
 import { lagDownloadSources, type LagDownloadSource, type LagDownloadSourceFactory } from "./downloadSource";
 import { importLagUploadKey, LagKeystream, LAG_UPLOAD_MESSAGE_BYTES } from "./keystream";
+import { decodeLagTicket, decodeLagTicketBody } from "./protobuf";
+import { lagUploadShortMessage } from "./uploadEnd";
 import {
   bytesToMbps,
   LAG_SPREAD_MAX_MS,
@@ -47,6 +49,13 @@ export type LagSessionErrorCode =
   | "sessions"
   | "origin"
   | "internal"
+  /**
+   * The extender closed the session to admit another (close code 4410), as
+   * a full extender closes its oldest session whose load has ended and whose
+   * report has gone out. The session is done, not failed: its results are
+   * complete, no load was running, and nothing should reconnect it.
+   */
+  | "reclaimed"
   // from the extender, refusing a load; the session goes on pinging (M4)
   | "busy"
   | "budget"
@@ -57,7 +66,7 @@ export type LagSessionErrorCode =
   | "dropped"
   /** nothing came from the extender for `silenceMs`, so the session was closed */
   | "silent"
-  /** the extender sent what M4 does not allow */
+  /** the extender sent what M4 does not allow, or a hello beyond its ticket */
   | "protocol"
   /** the session closed, or was closed, while the load ran */
   | "closed"
@@ -226,7 +235,11 @@ export interface LagClosedEvent {
   reason: string;
   /** close() ended it */
   byClient: boolean;
-  /** why, when it was not close() */
+  /**
+   * Why, when it was not close(). Code `reclaimed` (closeCode 4410) is a
+   * session that finished rather than failed, and no error event comes
+   * before it.
+   */
   error?: LagSessionError;
   /** Date.now() */
   at: number;
@@ -249,7 +262,12 @@ export interface LagSessionOptions {
    * origin such as http://127.0.0.1:8443 is used as given (tests, dev).
    */
   host: string;
-  /** the ticket text (A6) */
+  /**
+   * The ticket text (A6). The extender's hello may ask for no longer a
+   * window each way, and no more streams, than the ticket allows; a hello
+   * that asks for more fails the session as `protocol`. A ticket that can't
+   * be read allows 8 s windows and 4 streams.
+   */
   ticket: string;
   onEvent?: (event: LagSessionEvent) => void;
   /** default globalThis.WebSocket */
@@ -312,14 +330,25 @@ const FIRST_BYTE_TIMEOUT_MS = 10_000;
 // how long the upload sockets get to open before the streams start without
 // the ones still connecting (the extender waits 10 s for them)
 const UPLOAD_OPEN_WAIT_MS = 3_000;
-// The upload's sockets start to open this long before the download's window
-// ends. The extender holds a stream that comes before its phase for up to
-// 2 s (M4), so the first socket's handshake is done when the phase opens.
-// The rest still connect after it: a browser has one WebSocket handshake to
-// a host in progress at a time (RFC 6455 4.1), and the extender holds the
-// first until the phase opens.
-const UPLOAD_EARLY_MS = 1_000;
-// how long the upload waits for the extender's report that closes its window
+// The upload's first socket reaches the extender about this long before
+// the download's window ends: the sockets start to open this long and two of
+// the session's lowest round trips before it, for a socket's TCP and TLS
+// handshakes before its request goes. The extender holds a stream that comes
+// before its phase for up to 2 s (M4), and the phase opens once the
+// download's window is final, at most LAG_SPREAD_MAX_MS after its end (M6,
+// amendment 15). So the first socket waits there at most this long and
+// LAG_SPREAD_MAX_MS, and a busy page's flush, well short of being refused;
+// and when the window is final sooner, it is already waiting. Before
+// amendment 15 the sockets opened 1 s before the end, which a window final
+// a second late would hold into a refusal. The rest still connect after the
+// first: a browser has one WebSocket handshake to a host in progress at a
+// time (RFC 6455 4.1), and the extender holds the first until the phase
+// opens. The keystreams start to generate then too.
+const UPLOAD_EARLY_MS = 250;
+// The upload's streams close when the extender's report says its window is
+// over, which comes once its window is final, at most LAG_SPREAD_MAX_MS after
+// its end (M4, M6, amendment 15). Without one they close this long after the
+// window's estimated end, and done goes out.
 const UPLOAD_SETTLE_MS = 2_000;
 // how long the load waits for the extender's loadResult after done
 const RESULT_TIMEOUT_MS = 5_000;
@@ -335,9 +364,10 @@ const OPEN_RETRIES = 3;
 // UPLOAD_BACKLOG_MS at that rate, within its floor and ceiling, which keeps
 // the bottleneck busy. That rate is the higher of the extender's last two
 // reports, so a short dip does not starve the streams. They may also hold no
-// more than the extender can still count by the window's end, at its rate
-// over the last UPLOAD_STEADY_MS, so they stop queueing in time to drain by
-// then. Until its first report, the streams may send UPLOAD_START_BYTES.
+// more than the extender can still count by its window's end, as its reports
+// place that on this page's clock (amendment 15), at its rate over the last
+// UPLOAD_STEADY_MS, so they stop queueing in time to drain by then. Until its
+// first report, the streams may send UPLOAD_START_BYTES.
 const UPLOAD_BACKLOG_MS = 250;
 const UPLOAD_BACKLOG_MIN_BYTES = 4 * LAG_UPLOAD_MESSAGE_BYTES;
 const UPLOAD_BACKLOG_MAX_BYTES = 16 << 20;
@@ -415,6 +445,8 @@ const closeCodeError = (code: number): LagSessionErrorCode | undefined => {
   switch (code) {
     case 4403:
       return "ticket";
+    case 4410:
+      return "reclaimed";
     case 4429:
       return "sessions";
     case 4500:
@@ -452,6 +484,56 @@ const parseHello = (message: Record<string, unknown>): LagHello | null => {
   return numbers.every((n) => !Number.isNaN(n)) ? hello : null;
 };
 
+// What a session's ticket lets its load take (A6): the hello may ask for no
+// longer a window each way, and no more streams, than these. Anyone can run
+// an extender, and the load's size comes from its hello, so an extender whose
+// hello asked for more would load every visitor for longer, and over more
+// streams, than the page says. An honest one never asks for more: it holds
+// the ticket to the same bounds (M3, M7).
+interface LagTicketLimits {
+  downloadMs: number;
+  uploadMs: number;
+  maxStreams: number;
+}
+
+// The extender's bounds on a ticket (connect extender_lag_api_session.go): a
+// phase of 250 ms to 8 s, 5 s when the ticket leaves it unset, and at most
+// 16 streams, 4 when unset. A ticket this can't read is held to 8 s, the
+// longest phase any extender runs (M7), and to the 4 streams A6 issues.
+const LAG_PHASE_MIN_MS = 250;
+const LAG_PHASE_MAX_MS = 8000;
+const LAG_PHASE_DEFAULT_MS = 5000;
+const LAG_STREAMS_MAX = 16;
+const LAG_STREAMS_DEFAULT = 4;
+
+const lagTicketLimits = (ticket: string): LagTicketLimits => {
+  try {
+    const body = decodeLagTicketBody(decodeLagTicket(ticket).body);
+    // M0: a ticket names itself with 16 bytes; text that happens to parse
+    // as protobuf without being a ticket names nothing
+    if (body.ticketId.length === 16) {
+      const phaseMs = (ms: number) =>
+        ms === 0 ? LAG_PHASE_DEFAULT_MS : Math.max(LAG_PHASE_MIN_MS, Math.min(LAG_PHASE_MAX_MS, ms));
+      return {
+        downloadMs: phaseMs(body.downloadMs),
+        uploadMs: phaseMs(body.uploadMs),
+        maxStreams: body.maxStreams === 0 ? LAG_STREAMS_DEFAULT : Math.min(LAG_STREAMS_MAX, body.maxStreams),
+      };
+    }
+  } catch {
+    // not a ticket this can read
+  }
+  return { downloadMs: LAG_PHASE_MAX_MS, uploadMs: LAG_PHASE_MAX_MS, maxStreams: LAG_STREAMS_DEFAULT };
+};
+
+// What a hello asks for beyond its ticket, or null when it asks for nothing more.
+const helloBeyondTicket = (hello: LagHello, limits: LagTicketLimits): string | null => {
+  const beyond = (["downloadMs", "uploadMs", "maxStreams"] as const)
+    .filter((name) => limits[name] < hello[name])
+    .map((name) => `${name} ${hello[name]}, the ticket allows ${limits[name]}`);
+  return beyond.length === 0 ? null : beyond.join("; ");
+};
+
 const finiteAtLeastZero = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) && 0 <= value ? value : undefined;
 
@@ -482,6 +564,8 @@ class LagSessionClient implements LagSession {
   private readonly onEvent?: (event: LagSessionEvent) => void;
   private readonly socket: WebSocket;
   private readonly silenceMs: number;
+  // what the ticket lets the hello ask for
+  private readonly ticketLimits: LagTicketLimits;
   private lastMessageAt = monotonicNow();
   private connectTimer?: ReturnType<typeof setTimeout>;
   private silenceTimer?: ReturnType<typeof setInterval>;
@@ -504,6 +588,7 @@ class LagSessionClient implements LagSession {
     this.downloadSources = lagDownloadSources({ fetch: options.fetch, worker: options.downloadWorker });
     this.onEvent = options.onEvent;
     this.silenceMs = options.silenceMs ?? 15_000;
+    this.ticketLimits = lagTicketLimits(options.ticket);
     this.ready = this.readyDeferred.promise;
     this.closed = this.closedDeferred.promise;
 
@@ -644,6 +729,11 @@ class LagSessionClient implements LagSession {
       this.fail(new LagSessionError("protocol", "the extender's hello is malformed"));
       return;
     }
+    const beyond = helloBeyondTicket(hello, this.ticketLimits);
+    if (beyond !== null) {
+      this.fail(new LagSessionError("protocol", `the extender's hello asks for more than its ticket allows: ${beyond}`));
+      return;
+    }
     clearTimeout(this.connectTimer);
     this.helloValue = hello;
     this.openedAtValue = epochNow();
@@ -742,7 +832,8 @@ class LagSessionClient implements LagSession {
     clearTimeout(this.connectTimer);
     clearInterval(this.silenceTimer);
     clearTimeout(this.fatalTimer);
-    if (error !== undefined && error !== this.fatal) {
+    // a reclaimed session finished: the closed event says why, and no error
+    if (error !== undefined && error !== this.fatal && error.code !== "reclaimed") {
       this.emit({ type: "error", error, fatal: true });
     }
     this.load?.onSessionClosed(error);
@@ -785,10 +876,15 @@ class LagLoadRun {
   private readonly downloadStreamsWithData = new Set<number>();
   // the streams that have ended
   private readonly downloadEnded = new Set<number>();
+  // the streams with a check of the window's finality due when they are done
+  private readonly downloadDoneChecks = new Set<number>();
   // resolves when every stream has ended, or the download is cut
   private readonly downloadStreamsEnded = deferred<void>();
-  // resolves downloadMs after the download's first byte, when its window ends
-  private readonly downloadWindow = deferred<void>();
+  // resolves when the download's window is final (M6, amendment 15): every
+  // stream still open is done, or LAG_SPREAD_MAX_MS has passed since the
+  // window's end
+  private readonly downloadFinal = deferred<void>();
+  // downloadMs has passed since the download's first byte
   private downloadWindowEnded = false;
   // no byte counts once the download is over
   private downloadClosed = false;
@@ -818,10 +914,19 @@ class LagLoadRun {
   // bytes counted), and when the last came (monotonic)
   private reports: Array<{ ms: number; bytes: number }> = [];
   private lastReportAt?: number;
+  // the earliest any report's ms could have been the extender's time as it
+  // arrived (monotonic): the least, over the reports, of when each arrived
+  // less its ms
+  private reportsOrigin = Number.POSITIVE_INFINITY;
   // the session's lowest round trip when the upload started
   private baseRttMs = UPLOAD_DEFAULT_RTT_MS;
   private lastUploaded = { bytes: 0, ms: 0 };
-  private readonly uploadWindowReported = deferred<void>();
+  // a report has said the extender's window is over
+  private uploadWindowOver = false;
+  // resolves when the upload's streams close: on that report, or
+  // UPLOAD_SETTLE_MS after the window's estimated end
+  private readonly uploadClosed = deferred<void>();
+  private uploadSettleTimer?: ReturnType<typeof setTimeout>;
   // the upload intervals that have had their progress event, and the whole
   // bytes through them
   private uploadReported = 0;
@@ -839,7 +944,11 @@ class LagLoadRun {
       }
       this.hello = hello;
       const intervals = (ms: number) => Math.max(1, Math.ceil(ms / hello.intervalMs));
-      this.download = new LagIntervalSeries({ intervalMs: hello.intervalMs, maxIntervals: intervals(hello.downloadMs) });
+      this.download = new LagIntervalSeries({
+        intervalMs: hello.intervalMs,
+        maxIntervals: intervals(hello.downloadMs),
+        windowMs: hello.downloadMs,
+      });
       this.upload = new LagIntervalSeries({ intervalMs: hello.intervalMs, maxIntervals: intervals(hello.uploadMs) });
       this.uploadKey = importLagUploadKey(hello.uploadKey);
       // a bad key fails the upload when it starts, not before
@@ -889,6 +998,7 @@ class LagLoadRun {
       return;
     }
     const { intervalMs, uploadMs } = this.hello;
+    const now = monotonicNow();
     // The live series (S5): the bytes a report adds arrived since the point
     // before, so they spread evenly back to it, from `at`; from `ms` where
     // an older extender sends no `at`, though the report's time can be well
@@ -900,7 +1010,13 @@ class LagLoadRun {
     this.lastUploaded = { bytes: Math.max(previous.bytes, bytes), ms: Math.max(previous.ms, ms) };
     if (0 < ms - previous.ms) {
       this.reports = [...this.reports.slice(-7), { ms, bytes: Math.max(previous.bytes, bytes) }];
-      this.lastReportAt = monotonicNow();
+      this.lastReportAt = now;
+    }
+    // the report that came soonest after its time places the extender's
+    // window on this page's clock (uploadWindowEnd)
+    if (now - ms < this.reportsOrigin) {
+      this.reportsOrigin = now - ms;
+      this.armUploadSettle();
     }
     const over = uploadMs - intervalMs / 2 <= ms;
     if (over) {
@@ -909,7 +1025,10 @@ class LagLoadRun {
     }
     this.reportUpload(over);
     if (over) {
-      this.uploadWindowReported.resolve();
+      this.uploadWindowOver = true;
+      if (this.uploadFirst !== undefined) {
+        this.closeUpload();
+      }
     }
   }
 
@@ -1002,15 +1121,18 @@ class LagLoadRun {
     }
   }
 
-  // M5: maxStreams fetches at once, chunks counted by rule S and dropped,
-  // `received` for each interval from the first byte once it has settled
-  // (M4). The download ends downloadMs after its first byte, or sooner when
-  // every stream has ended (a byte cap): the final `received` reports go
-  // out, streams still delivering are cut, and the upload starts at once.
-  // Waiting for trailing bytes would push every later load in the track
-  // back (S5). The streams are read in a Worker where one is available
-  // (downloadSource.ts), so a chunk's time is when it arrived, not when a
-  // busy page got to it.
+  // M5: maxStreams fetches at once, chunks counted by rule S as amendment 15
+  // extends it (M6) and dropped, `received` for each interval from the first
+  // byte once it has settled (M4). The window ends downloadMs after the
+  // first byte, but the streams are read on until it is final, since a chunk
+  // that arrives after the end still counts what it carried before it: until
+  // every stream still open is done, or LAG_SPREAD_MAX_MS after the end. The
+  // download ends then, or sooner when every stream has ended (a byte cap):
+  // the final `received` reports go out, streams still delivering are cut,
+  // and the upload starts at once. Waiting out trailing bytes beyond that
+  // would push every later load in the track back (S5). The streams are read
+  // in a Worker where one is available (downloadSource.ts), so a chunk's
+  // time is when it arrived, not when a busy page got to it.
   private async runDownload(): Promise<void> {
     this.session.send({ type: "load", phase: "download" });
     const firstByteGuard = this.timeout(FIRST_BYTE_TIMEOUT_MS, () => {
@@ -1031,14 +1153,18 @@ class LagLoadRun {
         chunk: (stream, at, bytes) => this.onDownloadChunk(stream, at, bytes),
         delivered: (through) => {
           this.downloadDelivered = Math.max(this.downloadDelivered, through);
+          this.checkDownloadFinal();
           this.catchUpDownload();
         },
         ended: (stream) => {
-          // an ended stream holds no interval back
+          // an ended stream holds no interval back, and a first group it
+          // still holds counts now (M6)
           this.downloadEnded.add(stream);
+          this.download.endStream(stream);
           if (this.hello.maxStreams <= this.downloadEnded.size) {
             this.downloadStreamsEnded.resolve();
           }
+          this.checkDownloadFinal();
           this.catchUpDownload();
         },
       },
@@ -1047,7 +1173,7 @@ class LagLoadRun {
       // the load stopped before the streams began
       source.close();
     }
-    const outcome = await this.until(Promise.race([this.downloadStreamsEnded.promise, this.downloadWindow.promise]));
+    const outcome = await this.until(Promise.race([this.downloadStreamsEnded.promise, this.downloadFinal.promise]));
     this.clearTimer(firstByteGuard);
     if (outcome !== EARLY) {
       // what arrived before now, still on its way from the Worker
@@ -1055,9 +1181,9 @@ class LagLoadRun {
     }
     this.closeDownload();
     if (this.downloadFirst !== undefined) {
-      // the final reports: once the download is closed, every interval has
-      // settled, through the window's last, or through the last that a
-      // download that ended early counts
+      // the final reports: once the download is closed, its window is final
+      // and every interval has settled, through the window's last, or
+      // through the last that a download that ended early counts
       this.reportDownload(this.download.count);
     }
     if (outcome === EARLY) {
@@ -1070,9 +1196,12 @@ class LagLoadRun {
   }
 
   // A chunk of stream `stream`, timed `at` on the monotonic clock where it
-  // arrived. It counts by rule S (M6): as having arrived evenly since the
-  // stream's previous chunk, from no more than LAG_SPREAD_MAX_MS before it
-  // and never before the window's first byte.
+  // arrived. It counts by rule S as amendment 15 extends it (M6,
+  // LagIntervalSeries.addRead): spread over the time since its stream's
+  // previous chunk, or over its group's span when it came back to back with
+  // the group's first; a stream's first group at the rate of its second, and
+  // only from the window's first byte on; and only the part before the
+  // window's end, though it arrives after it.
   private onDownloadChunk(stream: number, at: number, bytes: number): void {
     if (this.downloadClosed) {
       return;
@@ -1083,34 +1212,66 @@ class LagLoadRun {
       const sinceFirst = monotonicNow() - at;
       this.timeout(Math.max(0, this.hello.downloadMs - sinceFirst), () => {
         this.downloadWindowEnded = true;
-        this.downloadWindow.resolve();
       });
-      this.timeout(Math.max(0, this.hello.downloadMs - UPLOAD_EARLY_MS - sinceFirst), () => this.prepareUpload());
+      // no chunk that arrives later can reach back before the window's end,
+      // so its window is final; the chunks that arrived by then are flushed
+      // from the Worker before the download closes
+      this.timeout(Math.max(0, this.hello.downloadMs + LAG_SPREAD_MAX_MS - sinceFirst), () => this.downloadFinal.resolve());
+      const roundTrips = this.session.pings.roundTrips();
+      const rttMs = 0 < roundTrips.length ? Math.min(...roundTrips) : UPLOAD_DEFAULT_RTT_MS;
+      this.timeout(Math.max(0, this.hello.downloadMs - UPLOAD_EARLY_MS - 2 * rttMs - sinceFirst), () => this.prepareUpload());
       this.scheduleDownloadTick(1);
       this.emitPhase("download", this.downloadStartedAt);
     }
     const t = Math.max(0, at - this.downloadFirst);
-    if (this.hello.downloadMs <= t) {
-      // past the window, it counts nothing: on the page the window's timer
-      // cuts the streams before such a chunk is read, but the Worker can
-      // hand over one the page had not yet seen when the window closed
-      return;
-    }
     if (!this.downloadStreamsWithData.has(stream)) {
       this.downloadStreamsWithData.add(stream);
       this.downloadStreams += 1;
     }
     this.download.addRead(stream, t, bytes);
     this.downloadBytes += bytes;
+    // the stream is done LAG_SPREAD_JOIN_MS after the first chunk of its
+    // first group to begin at or after the window's end, chunk or no chunk
+    const doneAt = this.download.streamDoneAt(stream);
+    if (Number.isFinite(doneAt) && !this.downloadDoneChecks.has(stream)) {
+      this.downloadDoneChecks.add(stream);
+      this.timeout(Math.max(0, this.downloadFirst + doneAt - monotonicNow()) + 1, () => {
+        this.checkDownloadFinal();
+        this.catchUpDownload();
+      });
+    }
+    this.checkDownloadFinal();
     // a chunk past the next interval's end can settle it before the next tick
     if ((this.downloadReported + 1) * this.hello.intervalMs <= t) {
       this.catchUpDownload();
     }
   }
 
-  // End the download: nothing more counts, every stream still delivering is
-  // cut (its reader cancelled, its fetch aborted), and a window that ran to
-  // its end keeps its last intervals even if they stayed empty.
+  // The download's window is final (M6, amendment 15) once every stream that
+  // has not ended is done, so nothing it reads later can count: each is done
+  // LAG_SPREAD_JOIN_MS after the first chunk of its first group to begin at
+  // or after the window's end, judged by the chunks handed over by now. Or
+  // once a chunk came too late to count, more than LAG_SPREAD_MAX_MS after
+  // the end.
+  private checkDownloadFinal(): void {
+    if (this.downloadClosed || this.downloadFirst === undefined) {
+      return;
+    }
+    if (!this.download.finished) {
+      const seen = Math.min(monotonicNow(), this.downloadDelivered) - this.downloadFirst;
+      for (let k = 0; k < this.hello.maxStreams; k += 1) {
+        if (!this.downloadEnded.has(k) && !this.download.streamDone(k, seen)) {
+          return;
+        }
+      }
+    }
+    this.downloadFinal.resolve();
+  }
+
+  // End the download: its window is final, so nothing more counts and a
+  // first group still held counts now (M6); every stream still delivering
+  // is cut (its reader cancelled, its fetch aborted); and a window that ran
+  // to its end keeps its last intervals even if they stayed empty.
   private closeDownload(): void {
     if (this.downloadClosed) {
       return;
@@ -1120,8 +1281,15 @@ class LagLoadRun {
     this.downloadSource?.close();
     // a cut stream may never say it ended (the Worker drops a closed download)
     this.downloadStreamsEnded.resolve();
-    if (this.downloadWindowEnded && this.download !== undefined) {
-      this.download.extendTo(this.hello.downloadMs);
+    if (this.downloadFirst !== undefined && this.hello.downloadMs <= monotonicNow() - this.downloadFirst) {
+      // its timer may not have run yet, behind a batch of chunks from past it
+      this.downloadWindowEnded = true;
+    }
+    if (this.download !== undefined) {
+      this.download.finish();
+      if (this.downloadWindowEnded) {
+        this.download.extendTo(this.hello.downloadMs);
+      }
     }
   }
 
@@ -1155,19 +1323,22 @@ class LagLoadRun {
   // How many intervals have settled, so that no more bytes can reach them
   // (M4): each has ended by the clock, every chunk timed before now has
   // been handed over (the Worker hands them over a batch behind), and no
-  // stream can still spread into it by rule S (M6). A stream has stopped
-  // spreading into an interval once it has had a chunk at or after its end,
-  // or once LAG_SPREAD_MAX_MS has passed since that end. One that has not
-  // opened yet holds intervals back like any other, since its first chunk
-  // spreads back too; one that has ended holds nothing back.
+  // stream can still count bytes in it (M6, amendment 15). A stream's later
+  // chunks reach back to its previous chunk, or to its group's span while a
+  // chunk may still join the group, and never more than LAG_SPREAD_MAX_MS;
+  // a first group it holds reaches back LAG_SPREAD_MAX_MS from its last
+  // chunk; and a stream that is done, so that nothing it reads later counts,
+  // reaches nothing (LagIntervalSeries.reach). One that has not opened yet
+  // holds intervals back like any other, since its first group reaches back
+  // too; one that has ended holds nothing back. Until the window is final,
+  // chunks after its end can still count in its last intervals.
   private settledDownload(): number {
     const { intervalMs, maxStreams } = this.hello;
     const seen = Math.min(monotonicNow(), this.downloadDelivered) - this.downloadFirst!;
     let settled = Math.floor(seen / intervalMs);
     for (let k = 0; k < maxStreams; k += 1) {
       if (!this.downloadEnded.has(k)) {
-        const past = Math.max(this.download.lastRead(k) ?? Number.NEGATIVE_INFINITY, seen - LAG_SPREAD_MAX_MS);
-        settled = Math.min(settled, Math.floor(past / intervalMs));
+        settled = Math.min(settled, Math.floor(this.download.reach(k, seen) / intervalMs));
       }
     }
     if (maxStreams <= this.downloadEnded.size) {
@@ -1249,17 +1420,16 @@ class LagLoadRun {
     }
   }
 
-  // M6: maxStreams WebSockets of keystream for uploadMs, with backpressure
-  // by bufferedAmount. A browser opens WebSockets to one host one at a time,
-  // so streams started as their sockets opened would join the window late:
-  // every socket is opened first, from UPLOAD_EARLY_MS before the download's
-  // window ends, and the streams start together once each has opened or
-  // failed and has its first keystream, waiting at most UPLOAD_OPEN_WAIT_MS
-  // after the phase (S5). A stream that started before its keystream was
-  // generated would leave the extender's window, which opens at the first
-  // message, running past the browser's.
+  // M6: maxStreams WebSockets of keystream until the extender's report says
+  // its window is over, held back by what it has counted (S5). A browser
+  // opens WebSockets to one host one at a time, so streams started as their
+  // sockets opened would join the window late: every socket is opened first,
+  // from shortly before the download's window ends (UPLOAD_EARLY_MS), and the
+  // streams start together once each has opened or failed and has its first
+  // keystream, waiting at most UPLOAD_OPEN_WAIT_MS after the phase (S5). A
+  // stream that waited for its keystream would join the extender's window,
+  // which opens at the first message, late.
   private async runUpload(): Promise<void> {
-    const { uploadMs } = this.hello;
     let key: CryptoKey;
     try {
       key = await this.uploadKey!;
@@ -1305,47 +1475,107 @@ class LagLoadRun {
     }
     this.uploadFirst = monotonicNow();
     this.uploadStartedAt = epochNow();
-    // at the window's end the streams close at once: what is left in their
-    // backlog is not the extender's to count
-    this.timeout(uploadMs, () => {
-      this.uploadStopped = true;
-      this.closeSockets();
-    });
+    // The extender's window opens when the first message arrives, a little
+    // after it went, so the streams send until the extender's report says
+    // its window is over, rather than for uploadMs by this page's clock
+    // (M4, amendment 15); and failing that, until UPLOAD_SETTLE_MS after its
+    // estimated end
+    this.armUploadSettle();
+    if (this.uploadWindowOver) {
+      this.closeUpload();
+    }
     this.emitPhase("upload", this.uploadStartedAt);
     const pumped = await this.until(this.pumpUploads(ready));
     if (pumped === EARLY) {
       return;
     }
-    // the extender's window started when the first message arrived, a
-    // little after it was sent: give its last report a moment
-    await this.until(Promise.race([this.uploadWindowReported.promise, this.delay(UPLOAD_SETTLE_MS)]));
+    // streams the extender closed first leave that report still to wait for
+    await this.until(this.uploadClosed.promise);
   }
 
-  // The streams' messages, from the common start until uploadMs is over: a
+  // The extender's upload window's end on this page's monotonic clock (M4,
+  // amendment 15): uploadMs after its first byte, which a report's arrival
+  // less its ms places no earlier than half a round trip after it. The
+  // report that came soonest after its time places it best, and the
+  // session's lowest round trip stands in for the way here. Before the
+  // first report, uploadMs after the streams started.
+  private uploadWindowEnd(): number {
+    const { uploadMs } = this.hello;
+    return Number.isFinite(this.reportsOrigin)
+      ? this.reportsOrigin - this.baseRttMs / 2 + uploadMs
+      : this.uploadFirst! + uploadMs;
+  }
+
+  // The streams close UPLOAD_SETTLE_MS after the window's estimated end
+  // unless a report says it is over first; a report that places the end
+  // sooner moves the deadline.
+  private armUploadSettle(): void {
+    if (this.uploadFirst === undefined || this.uploadStopped) {
+      return;
+    }
+    this.clearTimer(this.uploadSettleTimer);
+    this.uploadSettleTimer = this.timeout(
+      Math.max(0, this.uploadWindowEnd() + UPLOAD_SETTLE_MS - monotonicNow()),
+      () => this.closeUpload(),
+    );
+  }
+
+  // The extender's window is over, or should long since have been: the
+  // streams close at once, and what is left in their backlog is not the
+  // extender's to count.
+  private closeUpload(): void {
+    this.clearTimer(this.uploadSettleTimer);
+    this.uploadStopped = true;
+    this.closeSockets();
+    this.uploadClosed.resolve();
+  }
+
+  // The streams' messages, from the common start until they close (on the
+  // extender's report that its window is over, closeUpload): a
   // message whenever the streams' unverified bytes leave room for it, dealt
   // to the streams in turn, so the backlog spreads across them rather than
   // filling one stream's buffers while the others idle. A stream whose
   // buffer in the page already holds its share of the room waits its next
-  // turn; one that closes or whose keystream fails drops out.
+  // turn; one that closes or whose keystream fails drops out. In the
+  // window's end phase, room that no longer fits a whole message goes as a
+  // stream's short, last message (lagUploadShortMessage, M6), and that stream
+  // sends nothing more.
   private async pumpUploads(streams: Array<{ socket: WebSocket; keystream: LagKeystream }>): Promise<void> {
     let live = streams.slice();
+    // the streams that have sent their last, short message
+    const finished = new Set<WebSocket>();
     let turn = 0;
     let sliceStart = monotonicNow();
     while (!this.uploadStopped) {
       live = live.filter(({ socket }) => socket.readyState === WEBSOCKET_OPEN);
-      if (live.length === 0) {
+      if (live.every(({ socket }) => finished.has(socket))) {
         return;
       }
-      const allowed = this.unverifiedAllowance(monotonicNow());
+      const now = monotonicNow();
+      const allowed = this.unverifiedAllowance(now);
+      const unverified = this.uploadSent - this.lastUploaded.bytes;
       const share = Math.max(LAG_UPLOAD_MESSAGE_BYTES, allowed / live.length);
       let next: { socket: WebSocket; keystream: LagKeystream } | undefined;
-      if (this.uploadSent - this.lastUploaded.bytes + LAG_UPLOAD_MESSAGE_BYTES <= allowed) {
+      let length = LAG_UPLOAD_MESSAGE_BYTES;
+      if (unverified + LAG_UPLOAD_MESSAGE_BYTES <= allowed) {
         for (let i = 0; i < live.length && next === undefined; i += 1) {
           const stream = live[(turn + i) % live.length];
-          if (stream.socket.bufferedAmount + LAG_UPLOAD_MESSAGE_BYTES <= share) {
+          if (!finished.has(stream.socket) && stream.socket.bufferedAmount + LAG_UPLOAD_MESSAGE_BYTES <= share) {
             next = stream;
             turn = (turn + i + 1) % live.length;
           }
+        }
+      } else if (this.lastReportAt !== undefined) {
+        const short = lagUploadShortMessage({
+          roomLeft: allowed - unverified,
+          timeLeftMs: Math.max(0, this.uploadWindowEnd() - now),
+          steadyBytesPerSecond: this.steadyRate(),
+          baseRttMs: this.baseRttMs,
+          streams: live.map(({ socket }) => ({ bufferedAmount: socket.bufferedAmount, finished: finished.has(socket) })),
+        });
+        if (short !== undefined) {
+          next = live[short.stream];
+          length = short.bytes;
         }
       }
       if (next === undefined) {
@@ -1360,13 +1590,17 @@ class LagLoadRun {
       }
       let message: Uint8Array;
       try {
-        message = await next.keystream.next(LAG_UPLOAD_MESSAGE_BYTES);
+        message = await next.keystream.next(length);
       } catch {
         live = live.filter((stream) => stream !== next);
         continue;
       }
       if (this.uploadStopped || next.socket.readyState !== WEBSOCKET_OPEN) {
         continue;
+      }
+      if (length < LAG_UPLOAD_MESSAGE_BYTES) {
+        // its last message: the extender takes none after a short one (M6)
+        finished.add(next.socket);
       }
       try {
         next.socket.send(message);
@@ -1381,13 +1615,14 @@ class LagLoadRun {
   // The bytes the streams may have sent that the extender has not verified
   // yet (UPLOAD_BACKLOG_MS): enough to keep the bottleneck busy at its recent
   // rate, and no more than it can still count by the window's end at its
-  // steady rate.
+  // steady rate. The end is the extender's, as this page's clock places it
+  // (uploadWindowEnd, amendment 15).
   private unverifiedAllowance(now: number): number {
     if (this.lastReportAt === undefined) {
       return UPLOAD_START_BYTES;
     }
     const sinceReportMs = now - this.lastReportAt;
-    const timeLeftMs = Math.max(0, this.uploadFirst! + this.hello.uploadMs - now);
+    const timeLeftMs = Math.max(0, this.uploadWindowEnd() - now);
     const recent = this.recentRate();
     const steady = this.steadyRate();
     const backlog = Math.min(UPLOAD_BACKLOG_MAX_BYTES, Math.max(UPLOAD_BACKLOG_MIN_BYTES, (recent * UPLOAD_BACKLOG_MS) / 1000));
@@ -1424,8 +1659,9 @@ class LagLoadRun {
     return ((last.bytes - since.bytes) * 1000) / (last.ms - since.ms);
   }
 
-  // UPLOAD_EARLY_MS before the download's window ends: the upload's sockets
-  // start to open, and its keystreams to generate once the key is in.
+  // UPLOAD_EARLY_MS and two round trips before the download's window ends:
+  // the upload's sockets start to open, and its keystreams to generate once
+  // the key is in.
   private prepareUpload(): void {
     if (this.uploadStopped || this.ended) {
       return;
@@ -1454,8 +1690,9 @@ class LagLoadRun {
   }
 
   // Starts opening the upload's sockets, once: before the download's window
-  // ends, or when the upload starts if that is sooner. A socket that arrives
-  // before the upload message waits for it at the extender (M4).
+  // ends (prepareUpload), or when the upload starts if that is sooner. A
+  // socket that arrives before the upload message waits for it at the
+  // extender (M4).
   private openUploadSockets(): { opened: Array<WebSocket | null>; opening: Promise<void>[] } {
     if (this.uploadSockets === null) {
       const opened: Array<WebSocket | null> = [];
