@@ -169,7 +169,8 @@ type AuthLogoutListener interface {
 	// fired when the stored auth is no longer valid on the server (for
 	// example the jwt's client was removed) and the local auth state has
 	// been cleared. The app must treat this as a logout: drop the device
-	// and return to the login flow.
+	// and return to the login flow. The device's GetAuthLogoutCause, read
+	// here, says why.
 	AuthLogout()
 }
 
@@ -795,6 +796,20 @@ type Device interface {
 	// as the provide mode is
 	SetProvideExtender(provideExtender bool)
 
+	// GetMeasurementsEnabled is the owner's lag.dev measurements setting
+	// (lag.dev/PLAN.md C4, decision 18): whether the provider extender role
+	// serves the measurement API, stored per network space, or held by the
+	// device for its life on a space that keeps no local state. On until the
+	// owner opts out; a device that cannot be reached reads the value queued
+	// for it, else the last value read, else on.
+	GetMeasurementsEnabled() bool
+
+	// applied at once, without a restart: off stops the measurement API and
+	// has the operator withdraw the extender's measurement name, on serves it
+	// again. Queued while the device cannot be reached and replayed at the
+	// next sync, as the provider extender setting is
+	SetMeasurementsEnabled(measurementsEnabled bool)
+
 	// ResetExtenders returns the extender state of the device's network space
 	// to a fresh install's (EXTENDER.md E7): everything learned about extenders
 	// is cleared and every extender a user added is removed, then the
@@ -879,6 +894,12 @@ type Device interface {
 	AddJwtRefreshListener(listener JwtRefreshListener) Sub
 
 	AddAuthLogoutListener(listener AuthLogoutListener) Sub
+
+	// Why the server ended this device's sign-in when its AuthLogout fired:
+	// AuthLogoutCauseSessionRevoked when the server confirmed the session was
+	// revoked (signed out from another device), else "". It is set before the
+	// listeners run.
+	GetAuthLogoutCause() string
 
 	GetWindowStatus() *WindowStatus
 

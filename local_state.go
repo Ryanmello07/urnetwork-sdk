@@ -75,6 +75,14 @@ type LocalState struct {
 	provideExtenderLoaded bool
 	provideExtenderStored bool
 	provideExtender       bool
+
+	// The lag.dev measurements setting, read from `.measurements_enabled` once
+	// and cached after (lag.dev/PLAN.md C4), and whether the space stores one
+	// at all. Guarded by measurementsEnabledLock as the setting above is.
+	measurementsEnabledLock   sync.Mutex
+	measurementsEnabledLoaded bool
+	measurementsEnabledStored bool
+	measurementsEnabled       bool
 }
 
 // One immutable read generation of the persisted
@@ -243,6 +251,34 @@ func (self *LocalState) SetByJwt(byJwt string) error {
 		state.InstanceId = ""
 		return true, nil
 	}, func() { self.deviceAuthOwner = nil })
+}
+
+// Replaces the stored admin/login credential with its renewal, the
+// compare-and-swap of a network token renewal (api_network_credential_renewal.go).
+// A renewal continues the same sign-in, so unlike SetByJwt it keeps the paired
+// client credential, the instance and the device owner. It applies only while
+// the store still holds previousByJwt: a sign-out, a new sign-in, or another
+// API's renewal of the same token wins, and storedByJwt reports what the store
+// holds instead.
+func (self *LocalState) replaceNetworkByJwt(previousByJwt string, byJwt string) (storedByJwt string, accepted bool, returnErr error) {
+	if previousByJwt == "" || byJwt == "" {
+		return "", false, nil
+	}
+	returnErr = self.updateAuthState(func(state *persistedLocalAuthState) (bool, error) {
+		storedByJwt = state.ByJwt
+		if state.ByJwt == byJwt {
+			accepted = true
+			return false, nil
+		}
+		if state.ByJwt != previousByJwt {
+			return false, nil
+		}
+		state.ByJwt = byJwt
+		storedByJwt = byJwt
+		accepted = true
+		return true, nil
+	})
+	return
 }
 
 // Reads the derived provider client credential without falling back to admin.
@@ -1128,6 +1164,12 @@ func (self *LocalState) logoutWithLock() error {
 	return self.removeAccountStateWithLock()
 }
 
+// The lag.dev measurement key the provider extender role keeps beside the
+// extender identity (lag.dev/PLAN.md C4). The name is connect/extender's
+// ExtenderMeasurementKeyFileName, spelled out here because this file is in
+// every build and the mobile builds carry no connect/extender.
+const extenderMeasurementKeyFileName = "extender-measurement-key.pem"
+
 // What a sign-out keeps of a space's local state: all of the extender state
 // (owner, 2026-10-05: a sign-out leaves extender state alone, including what
 // was entered under the old account; local accounts on a device are trusted to
@@ -1135,13 +1177,22 @@ func (self *LocalState) logoutWithLock() error {
 // directory (.extenders: the operator's signed records and revocations, each
 // address's holds and failure history, imported share codes, the operator's
 // last country), the gossip role (.extender_gossip_mode), the extender
-// identity (.extender_key) and the provider extender setting
-// (.provide_extender), whose in-memory copy therefore stays true. Manual
-// extender hosts and the private extender live in the space's values, which a
-// sign-out never touches.
+// identity (.extender_key), the provider extender setting (.provide_extender),
+// whose in-memory copy therefore stays true, the lag.dev measurements setting
+// (.measurements_enabled), likewise, and the lag.dev measurement key
+// (extender-measurement-key.pem). The measurement certificate is named by the
+// extender's id, which the kept identity keeps, so a new key after a sign-out
+// would only have the operator issue the same name again. Manual extender
+// hosts and the private extender live in the space's values, which a sign-out
+// never touches.
 func keptAcrossSignOut(name string) bool {
 	switch name {
-	case extenderStoreFileName, extenderGossipModeFileName, extenderKeyFileName, provideExtenderFileName:
+	case extenderStoreFileName,
+		extenderGossipModeFileName,
+		extenderKeyFileName,
+		provideExtenderFileName,
+		measurementsEnabledFileName,
+		extenderMeasurementKeyFileName:
 		return true
 	default:
 		return false

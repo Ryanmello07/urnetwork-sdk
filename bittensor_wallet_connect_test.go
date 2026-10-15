@@ -1086,8 +1086,10 @@ func TestBittensorWalletConnectRefusals(t *testing.T) {
 // handed to it (design F.6).
 func TestBittensorWalletConnectSessionTakesNoReturn(t *testing.T) {
 	session := newBittensorWalletConnectSession(BittensorWalletNova, BittensorWalletPlatformIos, BittensorWalletPurposeLogin)
+	// a walletconnect session answers wrong_transport: bridge returns go to
+	// bridge sessions (the transport guard on HandleBridgeReturn)
 	uri := bittensorTestRedirectLink + "?address=" + bittensorTestAliceSs58
-	if result := session.HandleBridgeReturn(uri, bittensorTestNowMillis); session.IsReturn(uri) || result.ErrorCode != BittensorWalletErrorNotReturn ||
+	if result := session.HandleBridgeReturn(uri, bittensorTestNowMillis); session.IsReturn(uri) || result.ErrorCode != BittensorWalletErrorWrongTransport ||
 		session.Transport() != BittensorWalletTransportWalletConnect {
 		t.Fatalf("a return was taken (%t), answered %s, on the transport %s", session.IsReturn(uri), result.ErrorCode, session.Transport())
 	}
@@ -1187,7 +1189,7 @@ func TestBittensorWalletConnectReturnLinks(t *testing.T) {
 		c.stateLock.Unlock()
 		for _, link := range []string{native, universal} {
 			uri := link + "?address=" + bittensorTestAliceSs58 + "&signature=" + bittensorTestSignature + "&purpose=login"
-			if result := session.HandleBridgeReturn(uri, c.nowMillis()); session.IsReturn(link) || session.IsReturn(uri) || result.ErrorCode != BittensorWalletErrorNotReturn {
+			if result := session.HandleBridgeReturn(uri, c.nowMillis()); session.IsReturn(link) || session.IsReturn(uri) || result.ErrorCode != BittensorWalletErrorWrongTransport {
 				t.Fatalf("a return on %s was taken (%t), answered %s", link, session.IsReturn(uri), result.ErrorCode)
 			}
 		}

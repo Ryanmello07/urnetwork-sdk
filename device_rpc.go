@@ -254,8 +254,12 @@ type DeviceRemote struct {
 	lifecycleDone         chan struct{}
 	securityPolicyMonitor *securityPolicyMonitor
 
-	networkSpace     *NetworkSpace
-	byJwt            string
+	networkSpace *NetworkSpace
+	byJwt        string
+	// why the server ended this remote's sign-in, set before its AuthLogout
+	// listeners run (GetAuthLogoutCause). A rejection the device process
+	// answered over rpc carries its typed status (DeviceRemoteHttpResponseError).
+	authLogoutCause  string
 	apiJwtRefreshSub Sub
 	apiAuthLogoutSub Sub
 	authPublication  *deviceAuthPublicationGate
@@ -681,7 +685,7 @@ func newDeviceRemoteWithOverrides(
 				return
 			}
 			defer release()
-			rejectedJwt, current := api.deviceRejectedJwt(authPublication)
+			rejectedJwt, cause, current := api.deviceRejectedJwt(authPublication)
 			if !current {
 				return
 			}
@@ -695,7 +699,7 @@ func newDeviceRemoteWithOverrides(
 			if !accepted {
 				return
 			}
-			deviceRemote.handleApiAuthLogout()
+			deviceRemote.handleApiAuthLogout(cause)
 		}),
 	)
 	// Publish the credential and transport owner together before enabling
@@ -1178,9 +1182,11 @@ func (self *DeviceRemote) setByJwt(byJwt string) {
 	self.log.Infof("DeviceRemote onTokenRefreshSuccess complete, should have fired listeners")
 }
 
-func (self *DeviceRemote) handleApiAuthLogout() {
+// The cause is the rejection's, read with the rejected credential.
+func (self *DeviceRemote) handleApiAuthLogout(cause string) {
 	self.stateLock.Lock()
 	self.byJwt = ""
+	self.authLogoutCause = cause
 	self.stateLock.Unlock()
 	self.authLogout()
 }
@@ -1499,6 +1505,65 @@ func (self *DeviceRemote) SetProvideExtender(provideExtender bool) {
 		self.log.Infof("[dr]provide extender dropped: the device process has no setter")
 	default:
 		self.state.ProvideExtender.Set(provideExtender)
+	}
+}
+
+// GetMeasurementsEnabled reads the setting through to the local device, which
+// owns the space it is stored in (lag.dev/PLAN.md C4). A device that cannot be
+// reached, or one too old to answer, reads the value queued for it, else the
+// last value read, else on -- exactly as the provider extender setting reads.
+func (self *DeviceRemote) GetMeasurementsEnabled() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	if self.service != nil {
+		measurementsEnabled, err := rpcCallNoArgAllowMissingMethod[bool](
+			self.service,
+			"DeviceLocalRpc.GetMeasurementsEnabled",
+			self.closeService,
+		)
+		if err == nil {
+			self.lastKnownState.MeasurementsEnabled.Set(measurementsEnabled)
+			return measurementsEnabled
+		}
+	}
+	return self.state.MeasurementsEnabled.Get(self.lastKnownState.MeasurementsEnabled.Get(true))
+}
+
+// SetMeasurementsEnabled writes the setting through to the local device, which
+// persists it and applies it at once (lag.dev/PLAN.md C4). While the device
+// process cannot be reached the value is queued and replayed at the next sync,
+// so the toggle does not snap back while a daemon restarts. A device process
+// too old to have the setter drops the write instead of queueing it: it has no
+// measurement API to turn off, and a queued value would replay on every
+// reconnect. A hosted device never runs the role (G1), so the setter is
+// guarded there as SetProvideExtender is.
+func (self *DeviceRemote) SetMeasurementsEnabled(measurementsEnabled bool) {
+	if self.hostedIncompatibleGuarded("SetMeasurementsEnabled") {
+		return
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	if self.service == nil {
+		self.state.MeasurementsEnabled.Set(measurementsEnabled)
+		return
+	}
+	err := rpcCallVoidAllowMissingMethod(
+		self.service,
+		"DeviceLocalRpc.SetMeasurementsEnabled",
+		measurementsEnabled,
+		self.closeService,
+	)
+	switch {
+	case err == nil:
+		self.state.MeasurementsEnabled.Unset()
+		self.lastKnownState.MeasurementsEnabled.Set(measurementsEnabled)
+	case rpcMissingMethodError(err):
+		self.state.MeasurementsEnabled.Unset()
+		self.log.Infof("[dr]measurements enabled dropped: the device process has no setter")
+	default:
+		self.state.MeasurementsEnabled.Set(measurementsEnabled)
 	}
 }
 
@@ -2676,6 +2741,14 @@ func (self *DeviceRemote) AddAuthLogoutListener(listener AuthLogoutListener) Sub
 	return newSub(func() {
 		self.authLogoutListeners.Remove(callbackId)
 	})
+}
+
+// Why the server ended this remote's sign-in when its AuthLogout fired:
+// AuthLogoutCauseSessionRevoked or "" (Device.GetAuthLogoutCause).
+func (self *DeviceRemote) GetAuthLogoutCause() string {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.authLogoutCause
 }
 
 func (self *DeviceRemote) LoadProvideSecretKeys(provideSecretKeyList *ProvideSecretKeyList) {
@@ -4836,6 +4909,7 @@ func (self *DeviceRemote) httpPostRaw(ctx context.Context, requestUrl string, re
 	if service != nil {
 		httpRequestId := connect.NewId()
 		httpRequest := &DeviceRemoteHttpRequest{
+			ClientInfo:       connect.ClientInfoFromContext(ctx),
 			RequestId:        httpRequestId,
 			RequestUrl:       requestUrl,
 			RequestBodyBytes: requestBodyBytes,
@@ -4940,6 +5014,7 @@ func (self *DeviceRemote) httpGetRaw(ctx context.Context, requestUrl string, byJ
 	if service != nil {
 		httpRequestId := connect.NewId()
 		httpRequest := &DeviceRemoteHttpRequest{
+			ClientInfo: connect.ClientInfoFromContext(ctx),
 			RequestId:  httpRequestId,
 			RequestUrl: requestUrl,
 			ByJwt:      byJwt,
@@ -5022,6 +5097,14 @@ func (self *DeviceRemote) removeHttpResponseChannel(
 }
 
 func (self *DeviceRemote) httpResponse(httpResponse *DeviceRemoteHttpResponse) {
+	if httpResponse.Error != nil && self.settings.httpMaxBodyBytes() < len(httpResponse.Error.Body) {
+		httpResponse = newDeviceRemoteHttpResponseWithLimit(
+			httpResponse.RequestId,
+			nil,
+			fmt.Errorf("device rpc http error response exceeds %d-byte limit", self.settings.httpMaxBodyBytes()),
+			self.settings.httpMaxBodyBytes(),
+		)
+	}
 	if self.settings.httpMaxBodyBytes() < len(httpResponse.BodyBytes) {
 		httpResponse = newDeviceRemoteHttpResponseWithLimit(
 			httpResponse.RequestId,
@@ -7165,6 +7248,9 @@ type DeviceRemoteState struct {
 	// the provider extender setting, stored independently of the provide mode
 	// (N4) and queued while the device process cannot be reached (N2)
 	ProvideExtender deviceRemoteValue[bool]
+	// the lag.dev measurements setting (lag.dev/PLAN.md C4), stored beside the
+	// provider extender setting and queued as it is
+	MeasurementsEnabled deviceRemoteValue[bool]
 	// the id of a reset of the extender state (EXTENDER.md E7) queued for the
 	// device process, a one-shot command applied during sync; a newer reset
 	// replaces an older one, which it covers
@@ -7246,6 +7332,7 @@ func (self *DeviceRemoteState) Merge(update *DeviceRemoteState) {
 	self.ProvideMode.Merge(update.ProvideMode)
 	self.ProvideNetworkMode.Merge(update.ProvideNetworkMode)
 	self.ProvideExtender.Merge(update.ProvideExtender)
+	self.MeasurementsEnabled.Merge(update.MeasurementsEnabled)
 	self.ExtenderReset.Merge(update.ExtenderReset)
 	self.ProvidePaused.Merge(update.ProvidePaused)
 	self.Offline.Merge(update.Offline)
@@ -7294,6 +7381,7 @@ func (self *DeviceRemoteState) hasPendingSyncState() bool {
 		self.ProvideMode.IsSet ||
 		self.ProvideNetworkMode.IsSet ||
 		self.ProvideExtender.IsSet ||
+		self.MeasurementsEnabled.IsSet ||
 		self.ExtenderReset.IsSet ||
 		self.ProvidePaused.IsSet ||
 		self.Offline.IsSet ||
@@ -9079,6 +9167,7 @@ func (self *DeviceRemoteUploadLogsResult) uploadLogsResult() (*UploadLogsResult,
 
 //gomobile:noexport
 type DeviceRemoteHttpRequest struct {
+	ClientInfo       connect.ClientInfo
 	RequestId        connect.Id
 	RequestUrl       string
 	RequestBodyBytes []byte
@@ -9119,12 +9208,30 @@ func newDeviceRemoteHttpResponseWithLimit(requestId connect.Id, bodyBytes []byte
 		httpResponse.Error = &DeviceRemoteHttpResponseError{
 			Error: fmt.Sprintf("%v", err),
 		}
+		// the server's answer itself, not a failure to get one
+		if status, ok := err.(*connect.HttpStatusError); ok && len(status.Body) <= maxBodyBytes {
+			httpResponse.Error.StatusCode = status.StatusCode
+			httpResponse.Error.Status = status.Status
+			httpResponse.Error.Body = status.Body
+		}
 	}
 	return httpResponse
 }
 
+// An answer the server gave is the same typed connect.HttpStatusError a direct
+// request returns, so the remote's API reads the same verdict: a 401 rejects
+// its credential with the structured code as the cause, a 202 carries its
+// body. Every other failure, and an answer from a device process that
+// predates the status fields, is the untyped message, as before.
 func (self *DeviceRemoteHttpResponse) toError() error {
 	if self.Error != nil {
+		if self.Error.StatusCode != 0 {
+			return &connect.HttpStatusError{
+				StatusCode: self.Error.StatusCode,
+				Status:     self.Error.Status,
+				Body:       self.Error.Body,
+			}
+		}
 		return fmt.Errorf("%s", self.Error.Error)
 	}
 	return nil
@@ -9133,6 +9240,12 @@ func (self *DeviceRemoteHttpResponse) toError() error {
 //gomobile:noexport
 type DeviceRemoteHttpResponseError struct {
 	Error string
+	// the status of the server's non-200 answer and its body, within the rpc
+	// body limit; 0 for a request that got no answer. Gob drops these fields
+	// for a peer that predates them.
+	StatusCode int
+	Status     string
+	Body       []byte
 }
 
 type deviceLocalRpcManager struct {
@@ -9273,8 +9386,9 @@ func (self *deviceLocalRpcManager) CloseAndWait(ctx context.Context) error {
 
 //gomobile:noexport
 type DeviceLocalRpc struct {
-	sockets      socketRpcRegistry
-	subprotocols subprotocolRpcRegistry
+	networkSessionsSub Sub
+	sockets            socketRpcRegistry
+	subprotocols       subprotocolRpcRegistry
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -9477,6 +9591,7 @@ func newDeviceLocalRpc(
 		providerIngressContractStatsChangeListenerIds:   map[connect.Id]bool{},
 		providerIngressContractDetailsChangeListenerIds: map[connect.Id]bool{},
 	}
+	deviceLocalRpc.networkSessionsSub = deviceLocal.GetApi().AddNetworkSessionsChangeListener(deviceLocalRpc)
 	deviceLocalRpc.httpSem = make(chan struct{}, settings.httpMaxConcurrent())
 	deviceLocalRpc.httpDeliverySem = make(chan struct{}, settings.httpMaxConcurrent())
 
@@ -9541,6 +9656,9 @@ func (self *gobServerCodec) Close() error {
 func (self *DeviceLocalRpc) run() {
 	defer func() {
 		self.cancel()
+		if self.networkSessionsSub != nil {
+			self.networkSessionsSub.Close()
+		}
 		self.sockets.close()
 		self.subprotocols.close()
 		self.conn.Close()
@@ -9932,6 +10050,7 @@ func (self *DeviceLocalRpc) state() DeviceRemoteState {
 	state.ProvideMode.Set(self.deviceLocal.GetProvideMode())
 	state.ProvideNetworkMode.Set(self.deviceLocal.GetProvideNetworkMode())
 	state.ProvideExtender.Set(self.deviceLocal.GetProvideExtender())
+	state.MeasurementsEnabled.Set(self.deviceLocal.GetMeasurementsEnabled())
 	state.ProvidePaused.Set(self.deviceLocal.GetProvidePaused())
 	state.Offline.Set(self.deviceLocal.GetOffline())
 	state.VpnInterfaceWhileOffline.Set(self.deviceLocal.GetVpnInterfaceWhileOffline())
@@ -10135,6 +10254,10 @@ func (self *DeviceLocalRpc) Sync(
 	// provide mode and of the control mode order above (N4)
 	if state.ProvideExtender.IsSet && !hostedIncompatible {
 		self.deviceLocal.SetProvideExtender(state.ProvideExtender.Value)
+	}
+	// the lag.dev measurements setting is its own file too (lag.dev/PLAN.md C4)
+	if state.MeasurementsEnabled.IsSet && !hostedIncompatible {
+		self.deviceLocal.SetMeasurementsEnabled(state.MeasurementsEnabled.Value)
 	}
 	// a reset the app made while this process could not be reached (E7)
 	if state.ExtenderReset.IsSet && !hostedIncompatible {
@@ -12406,6 +12529,19 @@ func (self *DeviceLocalRpc) SetProvideExtender(provideExtender bool, _ RpcVoid) 
 	return nil
 }
 
+func (self *DeviceLocalRpc) GetMeasurementsEnabled(_ RpcNoArg, measurementsEnabled *bool) error {
+	*measurementsEnabled = self.deviceLocal.GetMeasurementsEnabled()
+	return nil
+}
+
+func (self *DeviceLocalRpc) SetMeasurementsEnabled(measurementsEnabled bool, _ RpcVoid) error {
+	if self.hostedIncompatibleRpcGuarded("SetMeasurementsEnabled") {
+		return nil
+	}
+	self.deviceLocal.SetMeasurementsEnabled(measurementsEnabled)
+	return nil
+}
+
 // Applies a reset of the extender state the app minted (E7).
 func (self *DeviceLocalRpc) ApplyExtenderReset(resetId string, _ RpcVoid) error {
 	if self.hostedIncompatibleRpcGuarded("ApplyExtenderReset") {
@@ -13491,7 +13627,7 @@ func (self *DeviceLocalRpc) HttpPostRaw(httpRequest *DeviceRemoteHttpRequest, _ 
 		}()
 
 		bodyBytes, err := connect.HttpPostWithStrategyRaw(
-			self.ctx,
+			connect.WithClientInfo(self.ctx, httpRequest.ClientInfo),
 			self.deviceLocal.clientStrategy,
 			httpRequest.RequestUrl,
 			httpRequest.RequestBodyBytes,
@@ -13534,7 +13670,7 @@ func (self *DeviceLocalRpc) HttpGetRaw(httpRequest *DeviceRemoteHttpRequest, _ R
 		}()
 
 		bodyBytes, err := connect.HttpGetWithStrategyRaw(
-			self.ctx,
+			connect.WithClientInfo(self.ctx, httpRequest.ClientInfo),
 			self.deviceLocal.clientStrategy,
 			httpRequest.RequestUrl,
 			httpRequest.ByJwt,
@@ -13559,6 +13695,9 @@ func (self *DeviceLocalRpc) HttpGetRaw(httpRequest *DeviceRemoteHttpRequest, _ R
 }
 
 func (self *DeviceLocalRpc) Close() {
+	if self.networkSessionsSub != nil {
+		self.networkSessionsSub.Close()
+	}
 	// self.stateLock.Lock()
 	// defer self.stateLock.Unlock()
 
@@ -14025,4 +14164,16 @@ func (self *DeviceRemoteRpc) CloseAndWait(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+func (self *DeviceLocalRpc) NetworkSessionsChanged(revision *NetworkSessionsRevision) {
+	if revision == nil {
+		return
+	}
+	copy := *revision
+	self.reverseNotify("DeviceRemoteRpc.NetworkSessionsChanged", &copy)
+}
+func (self *DeviceRemoteRpc) NetworkSessionsChanged(revision *NetworkSessionsRevision, _ RpcVoid) error {
+	self.dispatch(func() { self.deviceRemote.GetApi().networkSessionsChanged(revision) })
+	return nil
 }

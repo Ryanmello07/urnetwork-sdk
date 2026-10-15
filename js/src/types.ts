@@ -1,3 +1,5 @@
+import type { ClientSessionSnapshot, SessionSignOutResult, SnNetworkConsentChallengeResult, SnNetworkConsentStatus, SnSetWalletResult } from "./generated/types";
+export type { ClientInfo, ClientSessionSnapshot, ClientSessionAction, ClientSessionError, SessionLastUsed, NetworkSessionInfo, NetworkSessionsResult, SessionOperationResult, SnNetworkConsentChallengeResult, SnNetworkConsentStatus, SnSetWalletResult } from "./generated/types";
 import type { SocketDevice } from "./socket";
 import type { SubprotocolDevice } from "./subprotocol";
 
@@ -267,6 +269,8 @@ export interface DeviceRemote extends SocketDevice, SubprotocolDevice {
   getLicenses(app: LicenseApp): LicenseInfo[];
   /** Last explicit RPC sync refusal; empty while pending or after success. */
   getSyncError(): string;
+  /** Why the server ended this device's sign-in once its logout fired: see AuthLogoutCause. */
+  getAuthLogoutCause(): AuthLogoutCause;
   /** A random tag of 1–3 distinct emoji to prefill the emoji-tag editor with; count 0 or omitted picks the length at random. */
   suggestEmojiTag(count?: number): string;
 
@@ -407,6 +411,9 @@ export interface DeviceRemote extends SocketDevice, SubprotocolDevice {
   openBlockActionViewController(): BlockActionViewController;
   openLocationsViewController(): LocationsViewController;
   openDevicesViewController(): DevicesViewController;
+  openClientSessionViewController(): ClientSessionViewController;
+  /** Supply display metadata before connecting or making account requests. */
+  setClientInfo(deviceType: string, appVersion: string): void;
   openPointsLeaderboardViewController(): PointsLeaderboardViewController;
   openPeerViewController(): PeerViewController;
   openProviderLocationsViewController(): ProviderLocationsViewController;
@@ -1230,11 +1237,18 @@ export interface AccountHostOptions {
 export interface AccountHost {
   setByJwt(byJwt: string): void;
   getByJwt(): string;
+  /** Why the server ended the sign-in once a confirmed 401 cleared it: see AuthLogoutCause. setByJwt of a new credential clears it. */
+  getAuthLogoutCause(): AuthLogoutCause;
+  /** Bounded server revoke attempt, followed by local sign-out; offline is explicitly unconfirmed. */
+  signOut(): Promise<SessionSignOutResult>;
   /** Releases ownership once; await to join teardown without blocking browser events. */
   close(): Promise<void>;
 
   openLocationsViewController(): LocationsViewController;
   openDevicesViewController(): DevicesViewController;
+  openClientSessionViewController(): ClientSessionViewController;
+  /** Supply display metadata before connecting or making account requests. */
+  setClientInfo(deviceType: string, appVersion: string): void;
   openAccountPreferencesViewController(): AccountPreferencesViewController;
   openNetworkUserViewController(): NetworkUserViewController;
   openFeedbackViewController(): FeedbackViewController;
@@ -1298,6 +1312,14 @@ export interface AccountHost {
   onboardingFeedbackToken(token: string, rating?: number, reason?: string): Promise<any>;
   /** The per-month sub-line math: yearly / 12 rounded up to the minor unit, saving rounded down, suppressed under one major unit. */
   computePriceEquivalent(yearly: number, monthly: number, minorUnitDigits: number): PriceEquivalent;
+
+  // ----- network payout consent (CONSENT.md) -----
+  /** The challenge whose exact `message` the wallet signs. Rejects with an Error whose message starts "network_owner_only: " when this credential is not the network owner's. */
+  snNetworkConsentChallenge(coldkeySs58: string): Promise<SnNetworkConsentChallengeResult>;
+  /** Submit the signed consent. Another account's signature resolves with error.code "signature_mismatch"; an expired message rejects "challenge_expired: …". */
+  snNetworkConsentSubmit(coldkeySs58: string, message: string, signatureHex: string): Promise<SnSetWalletResult>;
+  /** The network's newest consent; active is false when none is in force or starts next epoch. */
+  snNetworkConsentStatus(): Promise<SnNetworkConsentStatus>;
 }
 
 export interface PriceEquivalent {
@@ -1315,4 +1337,25 @@ export interface ExtensionDeviceRemoteOptions {
   byJwt: string;
   instanceId: string;
   transport: DeviceRpcTransport;
+}
+
+/**
+ * Why the server ended a sign-in: "session_revoked" only when it confirmed the
+ * session was revoked (show "This session was signed out from another
+ * device."), else "" (generic sign-in-required wording).
+ */
+export type AuthLogoutCause = "session_revoked" | "";
+
+/** Shared SDK session state; no app-owned revoke/retry or logout state machine. */
+export interface ClientSessionViewController {
+ close(): Promise<void>;
+ start(): void;
+ stop(): void;
+ refresh(): void;
+ setVisible(visible: boolean): void;
+ setForeground(foreground: boolean): void;
+ getSnapshot(): ClientSessionSnapshot;
+ revokeSession(sessionId: string): void;
+ revokeOtherSessions(): void;
+ addClientSessionListener(callback: (snapshot: ClientSessionSnapshot) => void): Unsubscribe;
 }

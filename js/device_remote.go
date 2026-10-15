@@ -161,6 +161,11 @@ func jsDeviceRemote(device *sdk.DeviceRemote) js.Value {
 	m["getSyncError"] = js.FuncOf(func(this js.Value, args []js.Value) any {
 		return js.ValueOf(device.GetSyncError())
 	})
+	// getAuthLogoutCause(): why the server ended the device's sign-in once its
+	// logout fired, "session_revoked" (signed out from another device) or ""
+	m["getAuthLogoutCause"] = js.FuncOf(func(js.Value, []js.Value) any {
+		return js.ValueOf(device.GetAuthLogoutCause())
+	})
 	m["getClientId"] = js.FuncOf(func(js.Value, []js.Value) any { return device.GetClientId().String() })
 	m["getLicenses"] = js.FuncOf(func(this js.Value, args []js.Value) any {
 		return jsLicenses(device.GetLicenses(stringArg(args, 0)))
@@ -561,6 +566,14 @@ func jsDeviceRemote(device *sdk.DeviceRemote) js.Value {
 		return jsLocationsViewController(vc, func() {
 			device.CloseLocationsViewController(vc)
 		})
+	})
+	m["setClientInfo"] = js.FuncOf(func(this js.Value, args []js.Value) any {
+		device.GetApi().SetClientInfo(sdk.NewClientInfo(stringArg(args, 0), stringArg(args, 1)))
+		return js.Null()
+	})
+	m["openClientSessionViewController"] = js.FuncOf(func(this js.Value, args []js.Value) any {
+		vc := device.OpenClientSessionViewController()
+		return jsClientSessionViewController(vc, func() { device.CloseClientSessionViewController(vc) })
 	})
 	m["openDevicesViewController"] = js.FuncOf(func(this js.Value, args []js.Value) any {
 		vc := device.OpenDevicesViewController()

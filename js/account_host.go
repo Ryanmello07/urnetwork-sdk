@@ -42,8 +42,17 @@ func NewAccountHost(this js.Value, args []js.Value) any {
 		api.SetByJwt(stringArg(args, 0))
 		return js.Null()
 	})
+	m["signOut"] = promiseMethod(func(args []js.Value) js.Value {
+		return apiPromise(func(cb connect.ApiCallback[*sdk.SessionSignOutResult]) { api.SignOut(sdk.SessionSignOutCallback(cb)) })
+	})
 	m["getByJwt"] = js.FuncOf(func(this js.Value, args []js.Value) any {
 		return js.ValueOf(api.GetByJwt())
+	})
+	// getAuthLogoutCause(): why the server ended the sign-in once a 401 clears
+	// it, "session_revoked" (signed out from another device) or ""; setByJwt
+	// of a new credential clears it
+	m["getAuthLogoutCause"] = js.FuncOf(func(this js.Value, args []js.Value) any {
+		return js.ValueOf(api.GetAuthLogoutCause())
 	})
 	m["close"] = jsViewControllerClose(func() {
 		cancel()
@@ -54,6 +63,14 @@ func NewAccountHost(this js.Value, args []js.Value) any {
 	m["openLocationsViewController"] = js.FuncOf(func(this js.Value, args []js.Value) any {
 		vc := sdk.NewLocationsViewControllerWithApi(ctx, api)
 		return jsLocationsViewController(vc, vc.Close)
+	})
+	m["setClientInfo"] = js.FuncOf(func(this js.Value, args []js.Value) any {
+		api.SetClientInfo(sdk.NewClientInfo(stringArg(args, 0), stringArg(args, 1)))
+		return js.Null()
+	})
+	m["openClientSessionViewController"] = js.FuncOf(func(this js.Value, args []js.Value) any {
+		vc := sdk.NewClientSessionViewControllerWithApi(ctx, api)
+		return jsClientSessionViewController(vc, vc.Close)
 	})
 	m["openDevicesViewController"] = js.FuncOf(func(this js.Value, args []js.Value) any {
 		vc := sdk.NewDevicesViewControllerWithApi(ctx, api)
@@ -344,6 +361,35 @@ func NewAccountHost(this js.Value, args []js.Value) any {
 	m["getNetworkUser"] = promiseMethod(func(args []js.Value) js.Value {
 		return apiPromise(func(cb connect.ApiCallback[*sdk.GetNetworkUserResult]) {
 			api.GetNetworkUser(sdk.GetNetworkUserCallback(cb))
+		})
+	})
+
+	// ----- network payout consent (CONSENT.md) -----
+
+	// snNetworkConsentChallenge(coldkeySs58): the challenge whose exact
+	// `message` the wallet signs. Rejects "network_owner_only: …" when the
+	// page's credential is not the network owner's.
+	m["snNetworkConsentChallenge"] = promiseMethod(func(args []js.Value) js.Value {
+		coldkeySs58 := stringArg(args, 0)
+		return apiPromise(func(cb connect.ApiCallback[*sdk.SnNetworkConsentChallengeResult]) {
+			api.SnNetworkConsentChallenge(coldkeySs58, sdk.SnNetworkConsentChallengeCallback(cb))
+		})
+	})
+	// snNetworkConsentSubmit(coldkeySs58, message, signatureHex): another
+	// account's signature resolves with error.code "signature_mismatch"; an
+	// expired message rejects "challenge_expired: …"
+	m["snNetworkConsentSubmit"] = promiseMethod(func(args []js.Value) js.Value {
+		coldkeySs58 := stringArg(args, 0)
+		message := stringArg(args, 1)
+		signatureHex := stringArg(args, 2)
+		return apiPromise(func(cb connect.ApiCallback[*sdk.SnSetWalletResult]) {
+			api.SnNetworkConsentSubmit(coldkeySs58, message, signatureHex, sdk.SnSetWalletCallback(cb))
+		})
+	})
+	// snNetworkConsentStatus(): the network's newest consent
+	m["snNetworkConsentStatus"] = promiseMethod(func(args []js.Value) js.Value {
+		return apiPromise(func(cb connect.ApiCallback[*sdk.SnNetworkConsentStatus]) {
+			api.SnNetworkConsentStatus(sdk.SnNetworkConsentStatusCallback(cb))
 		})
 	})
 

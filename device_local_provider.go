@@ -68,6 +68,7 @@ type deviceLocalProvider struct {
 	// the space this provider belongs to, which the extender role takes its
 	// identity, directory, node and operator urls from (G2)
 	networkSpace *NetworkSpace
+	api          *Api
 	// the device's egress-aware dial, which is also the extender relay's
 	// forward dial so the relay never enters the device's own tunnel (G2)
 	dialContextSettings *connect.DialContextSettings
@@ -78,6 +79,9 @@ type deviceLocalProvider struct {
 	// settings before it is built. Tests bind ephemeral carrier ports and
 	// point the activation at an in-process operator through it.
 	extenderSettingsConfigure func(settings *deviceLocalExtenderSettings)
+	// the device's lag.dev measurements setting, which the role reads as it
+	// starts (lag.dev/PLAN.md C4)
+	extenderMeasurementsEnabled func() bool
 
 	clientStrategy *connect.ClientStrategy
 	// clientStrategySettings seeds the direct-only strategies of the
@@ -202,9 +206,16 @@ func newDeviceLocalProviderWithOverrides(
 	targetMode connect.TransportMode,
 	modePreferences map[connect.TransportMode]int,
 	dialContextSettings *connect.DialContextSettings,
+	localDialContextSettings *connect.DialContextSettings,
 	dnsPumpHost string,
 	transferMemory *deviceLocalTransferMemory,
+	sessionApis ...*Api,
 ) (*deviceLocalProvider, error) {
+	providerApi := networkSpace.GetApi()
+	if len(sessionApis) > 0 && sessionApis[0] != nil {
+		providerApi = sessionApis[0]
+	}
+	ctx = providerApi.clientInfoContext(ctx)
 	providerCtx, providerCancel := context.WithCancel(ctx)
 	apiUrl := networkSpace.apiUrl
 	clientStrategy := networkSpace.clientStrategy
@@ -217,9 +228,10 @@ func newDeviceLocalProviderWithOverrides(
 	// traffic is isolated and every download still shares provider lane zero.
 	// Auto and H3 remain unchanged until the provider-side physical A/B proves a
 	// safe default across carrier fallback.
-	applyMobileH1PerformanceClientSettings(
+	applyMobileH1PerformanceClientSettingsForPlatform(
 		clientSettings,
 		deviceMemoryTargetByteCount,
+		mobileRuntime() || transferMemory != nil,
 		targetMode == connect.TransportModeH1,
 	)
 	// the provider always enables the e2e encryption sessions: the responder
@@ -248,9 +260,11 @@ func newDeviceLocalProviderWithOverrides(
 	// Admit the fallback NAT while the new device root is still empty, before
 	// starting the provider client. It is a lifetime owner even with providing
 	// disabled. Refusal is observable; never install a dead/nil NAT as a route.
+	// It carries the device's local route, so it dials through that seam.
 	localUserNatSettings := providerLocalUserNatSettings(
 		providerMemoryTargetByteCount,
 		clientSettings.Log,
+		localDialContextSettings,
 	)
 	if transferMemory != nil {
 		localUserNatSettings.MemoryBudget = transferMemory.nat
@@ -276,14 +290,21 @@ func newDeviceLocalProviderWithOverrides(
 		ByJwt:      byJwt,
 		InstanceId: instanceId,
 		AppVersion: appVersion,
+		ClientInfo: networkSpace.GetApi().connectClientInfo(), StreamLeaseVersion: 1,
 	}
-	platformTransportSettings := newDeviceLocalPlatformTransportSettings(
+	platformTransportSettings := newDeviceLocalPlatformTransportSettingsForProfile(
 		deviceMemoryTargetByteCount,
 		platformTransportBudget,
 		dialContextSettings,
 		networkSpace.GetAltUrl(),
 		dnsPumpHost,
+		mobileRuntime() || transferMemory != nil,
 	)
+	platformTransportSettings.AuthorizationClosed = func(cause connect.AuthorizationCloseCause) {
+		if cause != connect.AuthorizationCloseUnavailable {
+			providerApi.RequestJwtRefresh()
+		}
+	}
 	platformTransportSettings.Log = clientSettings.Log
 	platformTransportSettings.ModePreferences = maps.Clone(modePreferences)
 	// The provider exists before outbound client windows. Its optional Auto-H3
@@ -307,6 +328,7 @@ func newDeviceLocalProviderWithOverrides(
 		instanceId: instanceId,
 
 		networkSpace:              networkSpace,
+		api:                       providerApi,
 		dialContextSettings:       dialContextSettings,
 		clientStrategy:            clientStrategy,
 		clientStrategySettings:    networkSpace.derivedClientStrategySettings(),
@@ -575,6 +597,14 @@ func (self *deviceLocalProvider) handleControlFrames(source connect.TransferPath
 		return
 	}
 	for _, frame := range frames {
+		if frame.MessageType == protocol.MessageType_TransferNetworkSessionsChanged {
+			if message, err := connect.FromFrame(frame); err == nil {
+				if hint, ok := message.(*protocol.NetworkSessionsChanged); ok {
+					self.api.networkSessionsChanged(&NetworkSessionsRevision{Generation: hint.Generation, EventId: int64(hint.EventId)})
+				}
+			}
+			continue
+		}
 		if frame.MessageType != protocol.MessageType_TransferResidentMigrate {
 			continue
 		}
@@ -830,10 +860,18 @@ func (self *deviceLocalProvider) SetByJwt(byJwt string) {
 	if self.closed {
 		return
 	}
+	info := connect.ClientInfoFromContext(self.ctx)
+	if self.auth != nil {
+		info = self.auth.ClientInfo
+	}
+	if self.api != nil {
+		info = self.api.connectClientInfo()
+	}
 	auth := &connect.ClientAuth{
 		ByJwt:      byJwt,
 		InstanceId: self.instanceId,
 		AppVersion: self.appVersion,
+		ClientInfo: info, StreamLeaseVersion: 1,
 		// the declaration follows the provide mode, never the token
 		ProvideIntent: provideModeIncludesPublic(self.provideMode),
 	}
@@ -953,19 +991,13 @@ func (self *deviceLocalProvider) CloseAndWait(ctx context.Context) error {
 	}
 }
 
-func newDeviceClientSettings(
-	settings *connect.ClientSettings,
-	apiUrl string,
-	clientStrategy *connect.ClientStrategy,
-) *connect.ClientSettings {
-	// Shallow-copy settings (and nested EncryptionSettings) so that
-	// filling in defaults never mutates the caller's struct.
-	var clientSettings connect.ClientSettings
-	if settings != nil {
-		clientSettings = *settings
-	} else {
-		clientSettings = *connect.DefaultClientSettings()
+// Clone mutable settings containers, retaining explicit shared-budget
+// pointers until the constructing owner replaces them with its own budgets.
+func cloneDeviceClientSettings(settings *connect.ClientSettings) *connect.ClientSettings {
+	if settings == nil {
+		return nil
 	}
+	clientSettings := *settings
 	if clientSettings.EncryptionSettings != nil {
 		encryptionSettings := *clientSettings.EncryptionSettings
 		clientSettings.EncryptionSettings = &encryptionSettings
@@ -994,6 +1026,19 @@ func newDeviceClientSettings(
 		webRtcSettings := *clientSettings.WebRtcSettings
 		clientSettings.WebRtcSettings = &webRtcSettings
 	}
+	return &clientSettings
+}
+
+// Install owner-local defaults and API fetchers only at the client boundary.
+func newDeviceClientSettings(
+	settings *connect.ClientSettings,
+	apiUrl string,
+	clientStrategy *connect.ClientStrategy,
+) *connect.ClientSettings {
+	clientSettings := cloneDeviceClientSettings(settings)
+	if clientSettings == nil {
+		clientSettings = connect.DefaultClientSettings()
+	}
 	// A caller may intentionally provide a partial ClientSettings override.
 	// Provider memory sizing dereferences these nested settings before
 	// connect.NewClient fills defaults, so complete only the missing pieces
@@ -1011,7 +1056,6 @@ func newDeviceClientSettings(
 		webRtcSettings := *defaults.WebRtcSettings
 		clientSettings.WebRtcSettings = &webRtcSettings
 	}
-
 	// Install the default out-of-band peer-key cross-check when none
 	// is configured. Callers who want to disable the check can set a
 	// no-op NewPeerClientPublicKeyFetcher in their settings.
@@ -1063,7 +1107,7 @@ func newDeviceClientSettings(
 		}
 	}
 
-	return &clientSettings
+	return clientSettings
 }
 
 // All destination generations reuse the device's durable ratchet. Copy the
@@ -1197,10 +1241,28 @@ func (self *deviceLocalProvider) extenderSettings() (*deviceLocalExtenderSetting
 		ClientStrategySettings: self.clientStrategySettings,
 		DialContext:            connectSettings.DialContext,
 	}
+	settings.MeasurementsEnabled = self.extenderMeasurementsEnabled
 	if self.extenderSettingsConfigure != nil {
 		self.extenderSettingsConfigure(settings)
 	}
 	return settings, nil
+}
+
+// Applies the measurements setting to the running role at once
+// (lag.dev/PLAN.md C4). Taken with the role's start and stop, so a role being
+// built is given the change once it stands; a role built later reads the
+// setting as it starts.
+func (self *deviceLocalProvider) setExtenderMeasurementsEnabled(measurementsEnabled bool) {
+	self.extenderLock.Lock()
+	defer self.extenderLock.Unlock()
+	extender := func() *deviceLocalExtender {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.extender
+	}()
+	if extender != nil {
+		extender.setMeasurementsEnabled(measurementsEnabled)
+	}
 }
 
 // The client jwt of this provider, read at each activation and at each ping

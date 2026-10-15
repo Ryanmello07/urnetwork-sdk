@@ -103,6 +103,108 @@ export interface ApiError {
   message: string;
 }
 
+export interface SessionLastUsed {
+  unix_time: number;
+  city: string;
+  region: string;
+  country: string;
+  country_code: string;
+  device_type: string;
+  app_version: string;
+}
+
+export interface NetworkSessionInfo {
+  session_id: string | null;
+  current: boolean;
+  kind: string;
+  create_time: string | null;
+  last_mint_time: string | null;
+  token_expire_time: string | null;
+  accept_until: string | null;
+  origin_session_id: string | null;
+  last_used: SessionLastUsed | null;
+}
+
+export interface NetworkSessionsRevision {
+  generation: string;
+  event_id: number;
+}
+
+export interface NetworkSessionsResult {
+  sessions: NetworkSessionInfo[] | null;
+  generation: string;
+  event_id: number;
+  current_session_id: string | null;
+  legacy_coverage: string;
+}
+
+export interface SessionOperationResult {
+  operation_id: string | null;
+  status: string;
+  state: string;
+  session_id: string | null;
+  kept_session_id: string | null;
+  revoked_count: number;
+  cleanup_pending: boolean;
+  generation: string;
+  event_id: number;
+}
+
+export interface SessionSignOutResult {
+  operation_id: string | null;
+  revocation_confirmed: boolean;
+  credential_cleared: boolean;
+}
+
+export interface ClientSessionError {
+  message: string;
+  retryable: boolean;
+  sign_in_required: boolean;
+  session_revoked: boolean;
+  unsupported: boolean;
+}
+
+export interface ClientSessionAction {
+  status: string;
+  state: string;
+  session_id: string | null;
+  operation_id: string | null;
+  loading: boolean;
+  pending: boolean;
+  error: ClientSessionError | null;
+}
+
+export interface ClientSessionSnapshot {
+  sessions: NetworkSessionInfo[] | null;
+  current_session_id: string | null;
+  legacy_coverage: string;
+  generation: string;
+  event_id: number;
+  loaded: boolean;
+  loading: boolean;
+  refreshing: boolean;
+  supported: boolean;
+  bulk_action: ClientSessionAction | null;
+  actions: ClientSessionAction[] | null;
+  error: ClientSessionError | null;
+}
+
+export interface RevokeNetworkSessionArgs {
+  session_id: string | null;
+  operation_id: string | null;
+}
+
+export interface RevokeOtherNetworkSessionsArgs {
+  operation_id: string | null;
+}
+
+export interface ClientInfo {
+  v: number;
+  device_type: string;
+  app_version: string;
+  sdk_version?: string;
+}
+
 export interface GetPointsLeaderboardArgs {
   sort: string;
   cursor?: string;
@@ -462,6 +564,7 @@ export interface AuthVerifySendError {
 }
 
 export interface AuthCodeLoginArgs {
+  request_id?: string | null;
   auth_code: string;
 }
 
@@ -667,6 +770,7 @@ export interface DeleteApiKeyResult {
 export interface SnChainSettings {
   chain_id: number;
   vault_address: string;
+  vault2_address: string;
   coordinator_address: string;
   no_id: string;
   netuid: number;
@@ -719,6 +823,22 @@ export interface SnGetWalletResult {
   wallet?: SnWallet | null;
   wallets?: SnWallet[] | null;
   error?: SnError | null;
+}
+
+export interface SnNetworkConsentChallengeResult {
+  message: string;
+  coldkey_ss58: string;
+  from_epoch: number;
+  through_epoch: number;
+  expires_at: number;
+}
+
+export interface SnNetworkConsentStatus {
+  active: boolean;
+  coldkey_ss58: string;
+  from_epoch: number;
+  through_epoch: number;
+  generation: number;
 }
 
 export interface SnValidateWalletArgs {
@@ -791,6 +911,23 @@ export interface SnClaimsResult {
   error?: SnError | null;
 }
 
+export interface SnLedgerAccount {
+  vault: string;
+  no_id: number;
+  index: number;
+  finalized_rao: number;
+  claimable_rao: number;
+  paid_rao: number;
+  pending: boolean;
+  pending_rao: number;
+}
+
+export interface SnLedgerAccountsResult {
+  accounts: SnLedgerAccount[] | null;
+  coldkey_ss58?: string;
+  error?: SnError | null;
+}
+
 export interface SnUnsignedTx {
   epoch: number;
   chain_id: number;
@@ -798,6 +935,19 @@ export interface SnUnsignedTx {
   data: string;
   value: string;
   amount_rao: number;
+  gas: number;
+}
+
+export interface SnLedgerUnsignedTx {
+  no_id: number;
+  index: number;
+  root_index: number;
+  chain_id: number;
+  to: string;
+  data: string;
+  value: string;
+  amount_rao: number;
+  gas: number;
 }
 
 export interface SnEpochResult {

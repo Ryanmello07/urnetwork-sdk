@@ -64,6 +64,19 @@ func generateTypes() ([]byte, error) {
 		 * Api types
 		 */
 		sdk.ApiError{},
+		sdk.SessionLastUsed{},
+		sdk.NetworkSessionInfo{},
+		sdk.NetworkSessionsRevision{},
+		sdk.NetworkSessionsResult{},
+		sdk.SessionOperationResult{},
+		sdk.SessionSignOutResult{},
+		sdk.ClientSessionError{},
+		sdk.ClientSessionAction{},
+		sdk.ClientSessionSnapshot{},
+		sdk.RevokeNetworkSessionArgs{},
+		sdk.RevokeOtherNetworkSessionsArgs{},
+		sdk.ClientInfo{},
+
 		sdk.GetPointsLeaderboardArgs{},
 		sdk.PointsLeaderboardRow{},
 		sdk.PointsLeaderboardResult{},
@@ -151,6 +164,8 @@ func generateTypes() ([]byte, error) {
 		sdk.SnSetWalletResult{},
 		sdk.SnSetWalletError{},
 		sdk.SnGetWalletResult{},
+		sdk.SnNetworkConsentChallengeResult{},
+		sdk.SnNetworkConsentStatus{},
 		sdk.SnValidateWalletArgs{},
 		sdk.SnValidateWalletResult{},
 		sdk.SnConnectWalletResult{},
@@ -159,7 +174,10 @@ func generateTypes() ([]byte, error) {
 		sdk.SnEpochClaim{},
 		sdk.SnEpochSchedule{},
 		sdk.SnClaimsResult{},
+		sdk.SnLedgerAccount{},
+		sdk.SnLedgerAccountsResult{},
 		sdk.SnUnsignedTx{},
+		sdk.SnLedgerUnsignedTx{},
 		sdk.SnEpochResult{},
 		sdk.AccountEpoch{},
 		sdk.AccountEpochsResult{},
@@ -276,6 +294,10 @@ func goTypeToTypeScript(t reflect.Type) string {
 			return "string"
 		case "sdk.Id":
 			return "string" // UUID format
+		case "sdk.NetworkSessionInfoList":
+			return "NetworkSessionInfo[]"
+		case "sdk.ClientSessionActionList":
+			return "ClientSessionAction[]"
 		case "sdk.StringList":
 			return "string[]"
 		case "sdk.LocationResultList":
@@ -298,8 +320,12 @@ func goTypeToTypeScript(t reflect.Type) string {
 			return "SnWallet[]"
 		case "sdk.SnEpochClaimList":
 			return "SnEpochClaim[]"
+		case "sdk.SnLedgerAccountList":
+			return "SnLedgerAccount[]"
 		case "sdk.SnUnsignedTxList":
 			return "SnUnsignedTx[]"
+		case "sdk.SnLedgerUnsignedTxList":
+			return "SnLedgerUnsignedTx[]"
 		case "sdk.AccountEpochList":
 			return "AccountEpoch[]"
 		case "sdk.PointsLeaderboardRowList":

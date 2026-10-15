@@ -83,6 +83,16 @@ func (self *cAdapterAccountPreferencesSetCallback) Result(result *sdk.AccountPre
 	}
 }
 
+type cAdapterAccountSignInRequiredListener struct {
+	cbAccountSignInRequired C.urnet_account_sign_in_required_cb
+	userData                unsafe.Pointer
+}
+
+func (self *cAdapterAccountSignInRequiredListener) AccountSignInRequired() {
+	defer cgoGuard("urnet_account_sign_in_required_cb")
+	C.urnet_invoke_account_sign_in_required(self.cbAccountSignInRequired, self.userData)
+}
+
 type cAdapterAccountWalletsListener struct {
 	cbAccountWalletsChanged C.urnet_account_wallets_cb
 	userData                unsafe.Pointer
@@ -565,6 +575,17 @@ func (self *cAdapterClientRefreshIntegrityListener) ClientRefreshInvalid(notice 
 	defer cgoGuard("urnet_client_refresh_integrity_cb")
 	notice_ := C.uint64_t(newHandle(notice))
 	C.urnet_invoke_client_refresh_integrity(self.cbClientRefreshInvalid, self.userData, notice_)
+}
+
+type cAdapterClientSessionListener struct {
+	cbClientSessionsChanged C.urnet_client_session_cb
+	userData                unsafe.Pointer
+}
+
+func (self *cAdapterClientSessionListener) ClientSessionsChanged(snapshot *sdk.ClientSessionSnapshot) {
+	defer cgoGuard("urnet_client_session_cb")
+	snapshot_ := C.uint64_t(newHandle(snapshot))
+	C.urnet_invoke_client_session(self.cbClientSessionsChanged, self.userData, snapshot_)
 }
 
 type cAdapterCommitCallback struct {
@@ -1236,6 +1257,24 @@ func (self *cAdapterGetNetworkReliabilityCallback) Result(result *sdk.GetNetwork
 	}
 }
 
+type cAdapterGetNetworkSessionsCallback struct {
+	cbResult C.urnet_get_network_sessions_cb
+	userData unsafe.Pointer
+}
+
+func (self *cAdapterGetNetworkSessionsCallback) Result(result *sdk.NetworkSessionsResult, errParam error) {
+	defer cgoGuard("urnet_get_network_sessions_cb")
+	result_ := C.uint64_t(newHandle(result))
+	var errParam_ *C.char
+	if errParam != nil {
+		errParam_ = cString(errParam.Error())
+	}
+	C.urnet_invoke_get_network_sessions(self.cbResult, self.userData, result_, errParam_)
+	if errParam_ != nil {
+		cStringFree(errParam_)
+	}
+}
+
 type cAdapterGetNetworkUserCallback struct {
 	cbResult C.urnet_get_network_user_cb
 	userData unsafe.Pointer
@@ -1586,6 +1625,17 @@ func (self *cAdapterNetworkPeersChangeListener) NetworkPeersChanged(networkPeers
 	if networkPeers_ != nil {
 		cStringFree(networkPeers_)
 	}
+}
+
+type cAdapterNetworkSessionsChangeListener struct {
+	cbNetworkSessionsChanged C.urnet_network_sessions_change_cb
+	userData                 unsafe.Pointer
+}
+
+func (self *cAdapterNetworkSessionsChangeListener) NetworkSessionsChanged(revision *sdk.NetworkSessionsRevision) {
+	defer cgoGuard("urnet_network_sessions_change_cb")
+	revision_ := C.uint64_t(newHandle(revision))
+	C.urnet_invoke_network_sessions_change(self.cbNetworkSessionsChanged, self.userData, revision_)
 }
 
 type cAdapterNetworkSpaceUpdate struct {
@@ -2241,6 +2291,42 @@ func (self *cAdapterSendFeedbackCallback) Result(result *sdk.FeedbackSendResult,
 	}
 }
 
+type cAdapterSessionOperationCallback struct {
+	cbResult C.urnet_session_operation_cb
+	userData unsafe.Pointer
+}
+
+func (self *cAdapterSessionOperationCallback) Result(result *sdk.SessionOperationResult, errParam error) {
+	defer cgoGuard("urnet_session_operation_cb")
+	result_ := C.uint64_t(newHandle(result))
+	var errParam_ *C.char
+	if errParam != nil {
+		errParam_ = cString(errParam.Error())
+	}
+	C.urnet_invoke_session_operation(self.cbResult, self.userData, result_, errParam_)
+	if errParam_ != nil {
+		cStringFree(errParam_)
+	}
+}
+
+type cAdapterSessionSignOutCallback struct {
+	cbResult C.urnet_session_sign_out_cb
+	userData unsafe.Pointer
+}
+
+func (self *cAdapterSessionSignOutCallback) Result(p0 *sdk.SessionSignOutResult, p1 error) {
+	defer cgoGuard("urnet_session_sign_out_cb")
+	p0_ := C.uint64_t(newHandle(p0))
+	var p1_ *C.char
+	if p1 != nil {
+		p1_ = cString(p1.Error())
+	}
+	C.urnet_invoke_session_sign_out(self.cbResult, self.userData, p0_, p1_)
+	if p1_ != nil {
+		cStringFree(p1_)
+	}
+}
+
 type cAdapterSetEmojiTagCallback struct {
 	cbResult C.urnet_set_emoji_tag_cb
 	userData unsafe.Pointer
@@ -2514,6 +2600,103 @@ func (self *cAdapterSnHeadCallback) Result(result *sdk.SnHeadResult, errParam er
 		errParam_ = cString(errParam.Error())
 	}
 	C.urnet_invoke_sn_head(self.cbResult, self.userData, result_, errParam_)
+	if result_ != nil {
+		cStringFree(result_)
+	}
+	if errParam_ != nil {
+		cStringFree(errParam_)
+	}
+}
+
+type cAdapterSnLedgerAccountsCallback struct {
+	cbResult C.urnet_sn_ledger_accounts_cb
+	userData unsafe.Pointer
+}
+
+func (self *cAdapterSnLedgerAccountsCallback) Result(result *sdk.SnLedgerAccountsResult, errParam error) {
+	defer cgoGuard("urnet_sn_ledger_accounts_cb")
+	result_ := cJson(result, "urnet_sn_ledger_accounts_cb")
+	var errParam_ *C.char
+	if errParam != nil {
+		errParam_ = cString(errParam.Error())
+	}
+	C.urnet_invoke_sn_ledger_accounts(self.cbResult, self.userData, result_, errParam_)
+	if result_ != nil {
+		cStringFree(result_)
+	}
+	if errParam_ != nil {
+		cStringFree(errParam_)
+	}
+}
+
+type cAdapterSnLedgerClaimCallback struct {
+	cbConfirmed C.urnet_sn_ledger_claim_confirmed_cb
+	cbDone      C.urnet_sn_ledger_claim_done_cb
+	cbFailed    C.urnet_sn_ledger_claim_failed_cb
+	cbSent      C.urnet_sn_ledger_claim_sent_cb
+	userData    unsafe.Pointer
+}
+
+func (self *cAdapterSnLedgerClaimCallback) Confirmed(noId int64, index int64, txHash string, amountRao int64) {
+	defer cgoGuard("urnet_sn_ledger_claim_confirmed_cb")
+	txHash_ := cString(string(txHash))
+	C.urnet_invoke_sn_ledger_claim_confirmed(self.cbConfirmed, self.userData, C.int64_t(int64(noId)), C.int64_t(int64(index)), txHash_, C.int64_t(int64(amountRao)))
+	cStringFree(txHash_)
+}
+
+func (self *cAdapterSnLedgerClaimCallback) Done() {
+	defer cgoGuard("urnet_sn_ledger_claim_done_cb")
+	C.urnet_invoke_sn_ledger_claim_done(self.cbDone, self.userData)
+}
+
+func (self *cAdapterSnLedgerClaimCallback) Failed(noId int64, index int64, message string) {
+	defer cgoGuard("urnet_sn_ledger_claim_failed_cb")
+	message_ := cString(string(message))
+	C.urnet_invoke_sn_ledger_claim_failed(self.cbFailed, self.userData, C.int64_t(int64(noId)), C.int64_t(int64(index)), message_)
+	cStringFree(message_)
+}
+
+func (self *cAdapterSnLedgerClaimCallback) Sent(noId int64, index int64, txHash string) {
+	defer cgoGuard("urnet_sn_ledger_claim_sent_cb")
+	txHash_ := cString(string(txHash))
+	C.urnet_invoke_sn_ledger_claim_sent(self.cbSent, self.userData, C.int64_t(int64(noId)), C.int64_t(int64(index)), txHash_)
+	cStringFree(txHash_)
+}
+
+type cAdapterSnNetworkConsentChallengeCallback struct {
+	cbResult C.urnet_sn_network_consent_challenge_cb
+	userData unsafe.Pointer
+}
+
+func (self *cAdapterSnNetworkConsentChallengeCallback) Result(result *sdk.SnNetworkConsentChallengeResult, errParam error) {
+	defer cgoGuard("urnet_sn_network_consent_challenge_cb")
+	result_ := cJson(result, "urnet_sn_network_consent_challenge_cb")
+	var errParam_ *C.char
+	if errParam != nil {
+		errParam_ = cString(errParam.Error())
+	}
+	C.urnet_invoke_sn_network_consent_challenge(self.cbResult, self.userData, result_, errParam_)
+	if result_ != nil {
+		cStringFree(result_)
+	}
+	if errParam_ != nil {
+		cStringFree(errParam_)
+	}
+}
+
+type cAdapterSnNetworkConsentStatusCallback struct {
+	cbResult C.urnet_sn_network_consent_status_cb
+	userData unsafe.Pointer
+}
+
+func (self *cAdapterSnNetworkConsentStatusCallback) Result(result *sdk.SnNetworkConsentStatus, errParam error) {
+	defer cgoGuard("urnet_sn_network_consent_status_cb")
+	result_ := cJson(result, "urnet_sn_network_consent_status_cb")
+	var errParam_ *C.char
+	if errParam != nil {
+		errParam_ = cString(errParam.Error())
+	}
+	C.urnet_invoke_sn_network_consent_status(self.cbResult, self.userData, result_, errParam_)
 	if result_ != nil {
 		cStringFree(result_)
 	}
@@ -3342,6 +3525,21 @@ func urnet_api_account_preferences_update(self C.uint64_t, accountPreferences *C
 	self_.AccountPreferencesUpdate(accountPreferences_, callback_)
 }
 
+//export urnet_api_add_account_sign_in_required_listener
+func urnet_api_add_account_sign_in_required_listener(self C.uint64_t, listener_account_sign_in_required C.urnet_account_sign_in_required_cb, listener_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_api_add_account_sign_in_required_listener")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_add_account_sign_in_required_listener")
+	if !ok {
+		return 0
+	}
+	var listener_ sdk.AccountSignInRequiredListener
+	if listener_account_sign_in_required != nil {
+		listener_ = &cAdapterAccountSignInRequiredListener{cbAccountSignInRequired: listener_account_sign_in_required, userData: listener_user_data}
+	}
+	r0 := self_.AddAccountSignInRequiredListener(listener_)
+	return C.uint64_t(newHandle(r0))
+}
+
 //export urnet_api_add_auth
 func urnet_api_add_auth(self C.uint64_t, args *C.char, callback_result C.urnet_add_auth_cb, callback_user_data unsafe.Pointer) {
 	defer cgoGuard("urnet_api_add_auth")
@@ -3405,6 +3603,21 @@ func urnet_api_add_jwt_refresh_listener(self C.uint64_t, listener_jwt_refreshed 
 		listener_ = &cAdapterJwtRefreshListener{cbJwtRefreshed: listener_jwt_refreshed, userData: listener_user_data}
 	}
 	r0 := self_.AddJwtRefreshListener(listener_)
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_api_add_network_sessions_change_listener
+func urnet_api_add_network_sessions_change_listener(self C.uint64_t, listener_network_sessions_changed C.urnet_network_sessions_change_cb, listener_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_api_add_network_sessions_change_listener")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_add_network_sessions_change_listener")
+	if !ok {
+		return 0
+	}
+	var listener_ sdk.NetworkSessionsChangeListener
+	if listener_network_sessions_changed != nil {
+		listener_ = &cAdapterNetworkSessionsChangeListener{cbNetworkSessionsChanged: listener_network_sessions_changed, userData: listener_user_data}
+	}
+	r0 := self_.AddNetworkSessionsChangeListener(listener_)
 	return C.uint64_t(newHandle(r0))
 }
 
@@ -4035,6 +4248,17 @@ func urnet_api_get_account_wallets(self C.uint64_t, callback_result C.urnet_get_
 	self_.GetAccountWallets(callback_)
 }
 
+//export urnet_api_get_auth_logout_cause
+func urnet_api_get_auth_logout_cause(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_api_get_auth_logout_cause")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_get_auth_logout_cause")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetAuthLogoutCause()
+	return cString(string(r0))
+}
+
 //export urnet_api_get_by_jwt
 func urnet_api_get_by_jwt(self C.uint64_t) *C.char {
 	defer cgoGuard("urnet_api_get_by_jwt")
@@ -4044,6 +4268,35 @@ func urnet_api_get_by_jwt(self C.uint64_t) *C.char {
 	}
 	r0 := self_.GetByJwt()
 	return cString(string(r0))
+}
+
+//export urnet_api_get_client_info
+func urnet_api_get_client_info(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_api_get_client_info")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_get_client_info")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetClientInfo()
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_api_get_client_info")
+}
+
+//export urnet_api_get_credential_persistence_error
+func urnet_api_get_credential_persistence_error(self C.uint64_t, outError **C.char) C.bool {
+	defer cgoGuard("urnet_api_get_credential_persistence_error")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_get_credential_persistence_error")
+	if !ok {
+		return C.bool(false)
+	}
+	err := self_.GetCredentialPersistenceError()
+	if err != nil {
+		setErrorOut(outError, err)
+		return C.bool(false)
+	}
+	return C.bool(true)
 }
 
 //export urnet_api_get_leaderboard
@@ -4151,6 +4404,34 @@ func urnet_api_get_network_reliability(self C.uint64_t, callback_result C.urnet_
 	self_.GetNetworkReliability(callback_)
 }
 
+//export urnet_api_get_network_session_operation
+func urnet_api_get_network_session_operation(self C.uint64_t, operationId *C.char, callback_result C.urnet_session_operation_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_api_get_network_session_operation")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_get_network_session_operation")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SessionOperationCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSessionOperationCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.GetNetworkSessionOperation(goId(operationId, "urnet_api_get_network_session_operation"), callback_)
+}
+
+//export urnet_api_get_network_sessions
+func urnet_api_get_network_sessions(self C.uint64_t, callback_result C.urnet_get_network_sessions_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_api_get_network_sessions")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_get_network_sessions")
+	if !ok {
+		return
+	}
+	var callback_ sdk.GetNetworkSessionsCallback
+	if callback_result != nil {
+		callback_ = &cAdapterGetNetworkSessionsCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.GetNetworkSessions(callback_)
+}
+
 //export urnet_api_get_network_user
 func urnet_api_get_network_user(self C.uint64_t, callback_result C.urnet_get_network_user_cb, callback_user_data unsafe.Pointer) {
 	defer cgoGuard("urnet_api_get_network_user")
@@ -4254,6 +4535,17 @@ func urnet_api_get_transfer_stats(self C.uint64_t, callback_result C.urnet_get_t
 		callback_ = &cAdapterGetTransferStatsCallback{cbResult: callback_result, userData: callback_user_data}
 	}
 	self_.GetTransferStats(callback_)
+}
+
+//export urnet_api_has_network_credential
+func urnet_api_has_network_credential(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_api_has_network_credential")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_has_network_credential")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.HasNetworkCredential()
+	return C.bool(r0)
 }
 
 //export urnet_api_list_api_keys
@@ -4460,6 +4752,20 @@ func urnet_api_onboarding_offer_issue(self C.uint64_t, args *C.char, callback_re
 	self_.OnboardingOfferIssue(args_, callback_)
 }
 
+//export urnet_api_open_client_session_view_controller
+func urnet_api_open_client_session_view_controller(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_api_open_client_session_view_controller")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_open_client_session_view_controller")
+	if !ok {
+		return 0
+	}
+	r0 := self_.OpenClientSessionViewController()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
 //export urnet_api_redeem_balance_code
 func urnet_api_redeem_balance_code(self C.uint64_t, args *C.char, callback_result C.urnet_redeem_balance_code_cb, callback_user_data unsafe.Pointer) {
 	defer cgoGuard("urnet_api_redeem_balance_code")
@@ -4632,6 +4938,48 @@ func urnet_api_request_jwt_refresh(self C.uint64_t) {
 	self_.RequestJwtRefresh()
 }
 
+//export urnet_api_revoke_network_session
+func urnet_api_revoke_network_session(self C.uint64_t, args *C.char, callback_result C.urnet_session_operation_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_api_revoke_network_session")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_revoke_network_session")
+	if !ok {
+		return
+	}
+	var args_ *sdk.RevokeNetworkSessionArgs
+	if args != nil {
+		args_ = &sdk.RevokeNetworkSessionArgs{}
+		if !goJson(args, args_, "urnet_api_revoke_network_session") {
+			return
+		}
+	}
+	var callback_ sdk.SessionOperationCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSessionOperationCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.RevokeNetworkSession(args_, callback_)
+}
+
+//export urnet_api_revoke_other_network_sessions
+func urnet_api_revoke_other_network_sessions(self C.uint64_t, args *C.char, callback_result C.urnet_session_operation_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_api_revoke_other_network_sessions")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_revoke_other_network_sessions")
+	if !ok {
+		return
+	}
+	var args_ *sdk.RevokeOtherNetworkSessionsArgs
+	if args != nil {
+		args_ = &sdk.RevokeOtherNetworkSessionsArgs{}
+		if !goJson(args, args_, "urnet_api_revoke_other_network_sessions") {
+			return
+		}
+	}
+	var callback_ sdk.SessionOperationCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSessionOperationCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.RevokeOtherNetworkSessions(args_, callback_)
+}
+
 //export urnet_api_send_feedback
 func urnet_api_send_feedback(self C.uint64_t, sendFeedback *C.char, callback_result C.urnet_send_feedback_cb, callback_user_data unsafe.Pointer) {
 	defer cgoGuard("urnet_api_send_feedback")
@@ -4663,6 +5011,23 @@ func urnet_api_set_by_jwt(self C.uint64_t, byJwt *C.char) {
 	self_.SetByJwt(goString(byJwt))
 }
 
+//export urnet_api_set_client_info
+func urnet_api_set_client_info(self C.uint64_t, info *C.char) {
+	defer cgoGuard("urnet_api_set_client_info")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_set_client_info")
+	if !ok {
+		return
+	}
+	var info_ *sdk.ClientInfo
+	if info != nil {
+		info_ = &sdk.ClientInfo{}
+		if !goJson(info, info_, "urnet_api_set_client_info") {
+			return
+		}
+	}
+	self_.SetClientInfo(info_)
+}
+
 //export urnet_api_set_emoji_tag
 func urnet_api_set_emoji_tag(self C.uint64_t, args *C.char, callback_result C.urnet_set_emoji_tag_cb, callback_user_data unsafe.Pointer) {
 	defer cgoGuard("urnet_api_set_emoji_tag")
@@ -4682,6 +5047,24 @@ func urnet_api_set_emoji_tag(self C.uint64_t, args *C.char, callback_result C.ur
 		callback_ = &cAdapterSetEmojiTagCallback{cbResult: callback_result, userData: callback_user_data}
 	}
 	self_.SetEmojiTag(args_, callback_)
+}
+
+//export urnet_api_set_network_credential_store
+func urnet_api_set_network_credential_store(self C.uint64_t, store C.uint64_t) {
+	defer cgoGuard("urnet_api_set_network_credential_store")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_set_network_credential_store")
+	if !ok {
+		return
+	}
+	var store_ *sdk.LocalState
+	if store != 0 {
+		var ok bool
+		store_, ok = resolveHandle[*sdk.LocalState](uint64(store), "urnet_api_set_network_credential_store")
+		if !ok {
+			return
+		}
+	}
+	self_.SetNetworkCredentialStore(store_)
 }
 
 //export urnet_api_set_network_leaderboard_public
@@ -4768,6 +5151,20 @@ func urnet_api_set_points_leaderboard_public(self C.uint64_t, args *C.char, call
 	self_.SetPointsLeaderboardPublic(args_, callback_)
 }
 
+//export urnet_api_sign_out
+func urnet_api_sign_out(self C.uint64_t, callback_result C.urnet_session_sign_out_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_api_sign_out")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_sign_out")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SessionSignOutCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSessionSignOutCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.SignOut(callback_)
+}
+
 //export urnet_api_sn_epoch
 func urnet_api_sn_epoch(self C.uint64_t, callback_result C.urnet_sn_epoch_cb, callback_user_data unsafe.Pointer) {
 	defer cgoGuard("urnet_api_sn_epoch")
@@ -4826,6 +5223,102 @@ func urnet_api_sn_head(self C.uint64_t, callback_result C.urnet_sn_head_cb, call
 		callback_ = &cAdapterSnHeadCallback{cbResult: callback_result, userData: callback_user_data}
 	}
 	self_.SnHead(callback_)
+}
+
+//export urnet_api_sn_network_consent_challenge
+func urnet_api_sn_network_consent_challenge(self C.uint64_t, coldkeySs58 *C.char, callback_result C.urnet_sn_network_consent_challenge_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_api_sn_network_consent_challenge")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_sn_network_consent_challenge")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnNetworkConsentChallengeCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnNetworkConsentChallengeCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.SnNetworkConsentChallenge(goString(coldkeySs58), callback_)
+}
+
+//export urnet_api_sn_network_consent_challenge_sync
+func urnet_api_sn_network_consent_challenge_sync(self C.uint64_t, coldkeySs58 *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_api_sn_network_consent_challenge_sync")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_sn_network_consent_challenge_sync")
+	if !ok {
+		return nil
+	}
+	r0, err := self_.SnNetworkConsentChallengeSync(goString(coldkeySs58))
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_api_sn_network_consent_challenge_sync")
+}
+
+//export urnet_api_sn_network_consent_status
+func urnet_api_sn_network_consent_status(self C.uint64_t, callback_result C.urnet_sn_network_consent_status_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_api_sn_network_consent_status")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_sn_network_consent_status")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnNetworkConsentStatusCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnNetworkConsentStatusCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.SnNetworkConsentStatus(callback_)
+}
+
+//export urnet_api_sn_network_consent_status_sync
+func urnet_api_sn_network_consent_status_sync(self C.uint64_t, outError **C.char) *C.char {
+	defer cgoGuard("urnet_api_sn_network_consent_status_sync")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_sn_network_consent_status_sync")
+	if !ok {
+		return nil
+	}
+	r0, err := self_.SnNetworkConsentStatusSync()
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_api_sn_network_consent_status_sync")
+}
+
+//export urnet_api_sn_network_consent_submit
+func urnet_api_sn_network_consent_submit(self C.uint64_t, coldkeySs58 *C.char, message *C.char, signatureHex *C.char, callback_result C.urnet_sn_set_wallet_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_api_sn_network_consent_submit")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_sn_network_consent_submit")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnSetWalletCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnSetWalletCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.SnNetworkConsentSubmit(goString(coldkeySs58), goString(message), goString(signatureHex), callback_)
+}
+
+//export urnet_api_sn_network_consent_submit_sync
+func urnet_api_sn_network_consent_submit_sync(self C.uint64_t, coldkeySs58 *C.char, message *C.char, signatureHex *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_api_sn_network_consent_submit_sync")
+	self_, ok := resolveHandle[*sdk.Api](uint64(self), "urnet_api_sn_network_consent_submit_sync")
+	if !ok {
+		return nil
+	}
+	r0, err := self_.SnNetworkConsentSubmitSync(goString(coldkeySs58), goString(message), goString(signatureHex))
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_api_sn_network_consent_submit_sync")
 }
 
 //export urnet_api_sn_network_wallet_mapping_challenge_sync
@@ -5937,6 +6430,28 @@ func urnet_bittensor_wallet_session_set_challenge(self C.uint64_t, result *C.cha
 	return C.bool(true)
 }
 
+//export urnet_bittensor_wallet_session_set_network_consent_challenge
+func urnet_bittensor_wallet_session_set_network_consent_challenge(self C.uint64_t, result *C.char, nowMillis C.int64_t, outError **C.char) C.bool {
+	defer cgoGuard("urnet_bittensor_wallet_session_set_network_consent_challenge")
+	self_, ok := resolveHandle[*sdk.BittensorWalletSession](uint64(self), "urnet_bittensor_wallet_session_set_network_consent_challenge")
+	if !ok {
+		return C.bool(false)
+	}
+	var result_ *sdk.SnNetworkConsentChallengeResult
+	if result != nil {
+		result_ = &sdk.SnNetworkConsentChallengeResult{}
+		if !goJson(result, result_, "urnet_bittensor_wallet_session_set_network_consent_challenge") {
+			return C.bool(false)
+		}
+	}
+	err := self_.SetNetworkConsentChallenge(result_, int64(nowMillis))
+	if err != nil {
+		setErrorOut(outError, err)
+		return C.bool(false)
+	}
+	return C.bool(true)
+}
+
 //export urnet_bittensor_wallet_session_set_wallet_connect_project_id
 func urnet_bittensor_wallet_session_set_wallet_connect_project_id(self C.uint64_t, projectId *C.char) {
 	defer cgoGuard("urnet_bittensor_wallet_session_set_wallet_connect_project_id")
@@ -6417,6 +6932,489 @@ func urnet_client_refresh_integrity_notice_close_api_if_current(self C.uint64_t)
 	}
 	r0 := self_.CloseApiIfCurrent()
 	return C.bool(r0)
+}
+
+//export urnet_client_session_action_get_error
+func urnet_client_session_action_get_error(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_client_session_action_get_error")
+	self_, ok := resolveHandle[*sdk.ClientSessionAction](uint64(self), "urnet_client_session_action_get_error")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetError()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_client_session_action_get_loading
+func urnet_client_session_action_get_loading(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_client_session_action_get_loading")
+	self_, ok := resolveHandle[*sdk.ClientSessionAction](uint64(self), "urnet_client_session_action_get_loading")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetLoading()
+	return C.bool(r0)
+}
+
+//export urnet_client_session_action_get_operation_id
+func urnet_client_session_action_get_operation_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_client_session_action_get_operation_id")
+	self_, ok := resolveHandle[*sdk.ClientSessionAction](uint64(self), "urnet_client_session_action_get_operation_id")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetOperationId()
+	return cId(r0)
+}
+
+//export urnet_client_session_action_get_pending
+func urnet_client_session_action_get_pending(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_client_session_action_get_pending")
+	self_, ok := resolveHandle[*sdk.ClientSessionAction](uint64(self), "urnet_client_session_action_get_pending")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetPending()
+	return C.bool(r0)
+}
+
+//export urnet_client_session_action_get_session_id
+func urnet_client_session_action_get_session_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_client_session_action_get_session_id")
+	self_, ok := resolveHandle[*sdk.ClientSessionAction](uint64(self), "urnet_client_session_action_get_session_id")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetSessionId()
+	return cId(r0)
+}
+
+//export urnet_client_session_action_get_state
+func urnet_client_session_action_get_state(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_client_session_action_get_state")
+	self_, ok := resolveHandle[*sdk.ClientSessionAction](uint64(self), "urnet_client_session_action_get_state")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetState()
+	return cString(string(r0))
+}
+
+//export urnet_client_session_action_get_status
+func urnet_client_session_action_get_status(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_client_session_action_get_status")
+	self_, ok := resolveHandle[*sdk.ClientSessionAction](uint64(self), "urnet_client_session_action_get_status")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetStatus()
+	return cString(string(r0))
+}
+
+//export urnet_client_session_action_list_add
+func urnet_client_session_action_list_add(self C.uint64_t, value C.uint64_t) {
+	defer cgoGuard("urnet_client_session_action_list_add")
+	self_, ok := resolveHandle[*sdk.ClientSessionActionList](uint64(self), "urnet_client_session_action_list_add")
+	if !ok {
+		return
+	}
+	var value_ *sdk.ClientSessionAction
+	if value != 0 {
+		var ok bool
+		value_, ok = resolveHandle[*sdk.ClientSessionAction](uint64(value), "urnet_client_session_action_list_add")
+		if !ok {
+			return
+		}
+	}
+	self_.Add(value_)
+}
+
+//export urnet_client_session_action_list_contains
+func urnet_client_session_action_list_contains(self C.uint64_t, v C.uint64_t) C.bool {
+	defer cgoGuard("urnet_client_session_action_list_contains")
+	self_, ok := resolveHandle[*sdk.ClientSessionActionList](uint64(self), "urnet_client_session_action_list_contains")
+	if !ok {
+		return C.bool(false)
+	}
+	var v_ *sdk.ClientSessionAction
+	if v != 0 {
+		var ok bool
+		v_, ok = resolveHandle[*sdk.ClientSessionAction](uint64(v), "urnet_client_session_action_list_contains")
+		if !ok {
+			return C.bool(false)
+		}
+	}
+	r0 := self_.Contains(v_)
+	return C.bool(r0)
+}
+
+//export urnet_client_session_action_list_get
+func urnet_client_session_action_list_get(self C.uint64_t, i C.int64_t) C.uint64_t {
+	defer cgoGuard("urnet_client_session_action_list_get")
+	self_, ok := resolveHandle[*sdk.ClientSessionActionList](uint64(self), "urnet_client_session_action_list_get")
+	if !ok {
+		return 0
+	}
+	r0 := self_.Get(int(int64(i)))
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_client_session_action_list_len
+func urnet_client_session_action_list_len(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_client_session_action_list_len")
+	self_, ok := resolveHandle[*sdk.ClientSessionActionList](uint64(self), "urnet_client_session_action_list_len")
+	if !ok {
+		return 0
+	}
+	r0 := self_.Len()
+	return C.int64_t(r0)
+}
+
+//export urnet_client_session_action_list_unmarshal_json
+func urnet_client_session_action_list_unmarshal_json(self C.uint64_t, b *C.uint8_t, b_len C.int32_t, outError **C.char) C.bool {
+	defer cgoGuard("urnet_client_session_action_list_unmarshal_json")
+	self_, ok := resolveHandle[*sdk.ClientSessionActionList](uint64(self), "urnet_client_session_action_list_unmarshal_json")
+	if !ok {
+		return C.bool(false)
+	}
+	err := self_.UnmarshalJSON(goBytes(b, b_len))
+	if err != nil {
+		setErrorOut(outError, err)
+		return C.bool(false)
+	}
+	return C.bool(true)
+}
+
+//export urnet_client_session_error_get_message
+func urnet_client_session_error_get_message(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_client_session_error_get_message")
+	self_, ok := resolveHandle[*sdk.ClientSessionError](uint64(self), "urnet_client_session_error_get_message")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetMessage()
+	return cString(string(r0))
+}
+
+//export urnet_client_session_error_get_retryable
+func urnet_client_session_error_get_retryable(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_client_session_error_get_retryable")
+	self_, ok := resolveHandle[*sdk.ClientSessionError](uint64(self), "urnet_client_session_error_get_retryable")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetRetryable()
+	return C.bool(r0)
+}
+
+//export urnet_client_session_error_get_session_revoked
+func urnet_client_session_error_get_session_revoked(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_client_session_error_get_session_revoked")
+	self_, ok := resolveHandle[*sdk.ClientSessionError](uint64(self), "urnet_client_session_error_get_session_revoked")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetSessionRevoked()
+	return C.bool(r0)
+}
+
+//export urnet_client_session_error_get_sign_in_required
+func urnet_client_session_error_get_sign_in_required(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_client_session_error_get_sign_in_required")
+	self_, ok := resolveHandle[*sdk.ClientSessionError](uint64(self), "urnet_client_session_error_get_sign_in_required")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetSignInRequired()
+	return C.bool(r0)
+}
+
+//export urnet_client_session_error_get_unsupported
+func urnet_client_session_error_get_unsupported(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_client_session_error_get_unsupported")
+	self_, ok := resolveHandle[*sdk.ClientSessionError](uint64(self), "urnet_client_session_error_get_unsupported")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetUnsupported()
+	return C.bool(r0)
+}
+
+//export urnet_client_session_snapshot_get_actions
+func urnet_client_session_snapshot_get_actions(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_client_session_snapshot_get_actions")
+	self_, ok := resolveHandle[*sdk.ClientSessionSnapshot](uint64(self), "urnet_client_session_snapshot_get_actions")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetActions()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_client_session_snapshot_get_bulk_action
+func urnet_client_session_snapshot_get_bulk_action(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_client_session_snapshot_get_bulk_action")
+	self_, ok := resolveHandle[*sdk.ClientSessionSnapshot](uint64(self), "urnet_client_session_snapshot_get_bulk_action")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetBulkAction()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_client_session_snapshot_get_current_session_id
+func urnet_client_session_snapshot_get_current_session_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_client_session_snapshot_get_current_session_id")
+	self_, ok := resolveHandle[*sdk.ClientSessionSnapshot](uint64(self), "urnet_client_session_snapshot_get_current_session_id")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetCurrentSessionId()
+	return cId(r0)
+}
+
+//export urnet_client_session_snapshot_get_error
+func urnet_client_session_snapshot_get_error(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_client_session_snapshot_get_error")
+	self_, ok := resolveHandle[*sdk.ClientSessionSnapshot](uint64(self), "urnet_client_session_snapshot_get_error")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetError()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_client_session_snapshot_get_event_id
+func urnet_client_session_snapshot_get_event_id(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_client_session_snapshot_get_event_id")
+	self_, ok := resolveHandle[*sdk.ClientSessionSnapshot](uint64(self), "urnet_client_session_snapshot_get_event_id")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetEventId()
+	return C.int64_t(r0)
+}
+
+//export urnet_client_session_snapshot_get_generation
+func urnet_client_session_snapshot_get_generation(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_client_session_snapshot_get_generation")
+	self_, ok := resolveHandle[*sdk.ClientSessionSnapshot](uint64(self), "urnet_client_session_snapshot_get_generation")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetGeneration()
+	return cString(string(r0))
+}
+
+//export urnet_client_session_snapshot_get_legacy_coverage
+func urnet_client_session_snapshot_get_legacy_coverage(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_client_session_snapshot_get_legacy_coverage")
+	self_, ok := resolveHandle[*sdk.ClientSessionSnapshot](uint64(self), "urnet_client_session_snapshot_get_legacy_coverage")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetLegacyCoverage()
+	return cString(string(r0))
+}
+
+//export urnet_client_session_snapshot_get_loaded
+func urnet_client_session_snapshot_get_loaded(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_client_session_snapshot_get_loaded")
+	self_, ok := resolveHandle[*sdk.ClientSessionSnapshot](uint64(self), "urnet_client_session_snapshot_get_loaded")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetLoaded()
+	return C.bool(r0)
+}
+
+//export urnet_client_session_snapshot_get_loading
+func urnet_client_session_snapshot_get_loading(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_client_session_snapshot_get_loading")
+	self_, ok := resolveHandle[*sdk.ClientSessionSnapshot](uint64(self), "urnet_client_session_snapshot_get_loading")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetLoading()
+	return C.bool(r0)
+}
+
+//export urnet_client_session_snapshot_get_refreshing
+func urnet_client_session_snapshot_get_refreshing(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_client_session_snapshot_get_refreshing")
+	self_, ok := resolveHandle[*sdk.ClientSessionSnapshot](uint64(self), "urnet_client_session_snapshot_get_refreshing")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetRefreshing()
+	return C.bool(r0)
+}
+
+//export urnet_client_session_snapshot_get_sessions
+func urnet_client_session_snapshot_get_sessions(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_client_session_snapshot_get_sessions")
+	self_, ok := resolveHandle[*sdk.ClientSessionSnapshot](uint64(self), "urnet_client_session_snapshot_get_sessions")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetSessions()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_client_session_snapshot_get_supported
+func urnet_client_session_snapshot_get_supported(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_client_session_snapshot_get_supported")
+	self_, ok := resolveHandle[*sdk.ClientSessionSnapshot](uint64(self), "urnet_client_session_snapshot_get_supported")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetSupported()
+	return C.bool(r0)
+}
+
+//export urnet_client_session_view_controller_add_client_session_listener
+func urnet_client_session_view_controller_add_client_session_listener(self C.uint64_t, listener_client_sessions_changed C.urnet_client_session_cb, listener_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_client_session_view_controller_add_client_session_listener")
+	self_, ok := resolveHandle[*sdk.ClientSessionViewController](uint64(self), "urnet_client_session_view_controller_add_client_session_listener")
+	if !ok {
+		return 0
+	}
+	var listener_ sdk.ClientSessionListener
+	if listener_client_sessions_changed != nil {
+		listener_ = &cAdapterClientSessionListener{cbClientSessionsChanged: listener_client_sessions_changed, userData: listener_user_data}
+	}
+	r0 := self_.AddClientSessionListener(listener_)
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_client_session_view_controller_close
+func urnet_client_session_view_controller_close(self C.uint64_t) {
+	defer cgoGuard("urnet_client_session_view_controller_close")
+	self_, ok := resolveHandle[*sdk.ClientSessionViewController](uint64(self), "urnet_client_session_view_controller_close")
+	if !ok {
+		return
+	}
+	self_.Close()
+}
+
+//export urnet_client_session_view_controller_get_snapshot
+func urnet_client_session_view_controller_get_snapshot(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_client_session_view_controller_get_snapshot")
+	self_, ok := resolveHandle[*sdk.ClientSessionViewController](uint64(self), "urnet_client_session_view_controller_get_snapshot")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetSnapshot()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_client_session_view_controller_network_sessions_changed
+func urnet_client_session_view_controller_network_sessions_changed(self C.uint64_t, revision C.uint64_t) {
+	defer cgoGuard("urnet_client_session_view_controller_network_sessions_changed")
+	self_, ok := resolveHandle[*sdk.ClientSessionViewController](uint64(self), "urnet_client_session_view_controller_network_sessions_changed")
+	if !ok {
+		return
+	}
+	var revision_ *sdk.NetworkSessionsRevision
+	if revision != 0 {
+		var ok bool
+		revision_, ok = resolveHandle[*sdk.NetworkSessionsRevision](uint64(revision), "urnet_client_session_view_controller_network_sessions_changed")
+		if !ok {
+			return
+		}
+	}
+	self_.NetworkSessionsChanged(revision_)
+}
+
+//export urnet_client_session_view_controller_refresh
+func urnet_client_session_view_controller_refresh(self C.uint64_t) {
+	defer cgoGuard("urnet_client_session_view_controller_refresh")
+	self_, ok := resolveHandle[*sdk.ClientSessionViewController](uint64(self), "urnet_client_session_view_controller_refresh")
+	if !ok {
+		return
+	}
+	self_.Refresh()
+}
+
+//export urnet_client_session_view_controller_revoke_other_sessions
+func urnet_client_session_view_controller_revoke_other_sessions(self C.uint64_t) {
+	defer cgoGuard("urnet_client_session_view_controller_revoke_other_sessions")
+	self_, ok := resolveHandle[*sdk.ClientSessionViewController](uint64(self), "urnet_client_session_view_controller_revoke_other_sessions")
+	if !ok {
+		return
+	}
+	self_.RevokeOtherSessions()
+}
+
+//export urnet_client_session_view_controller_revoke_session
+func urnet_client_session_view_controller_revoke_session(self C.uint64_t, sessionId *C.char) {
+	defer cgoGuard("urnet_client_session_view_controller_revoke_session")
+	self_, ok := resolveHandle[*sdk.ClientSessionViewController](uint64(self), "urnet_client_session_view_controller_revoke_session")
+	if !ok {
+		return
+	}
+	self_.RevokeSession(goId(sessionId, "urnet_client_session_view_controller_revoke_session"))
+}
+
+//export urnet_client_session_view_controller_set_foreground
+func urnet_client_session_view_controller_set_foreground(self C.uint64_t, foreground C.bool) {
+	defer cgoGuard("urnet_client_session_view_controller_set_foreground")
+	self_, ok := resolveHandle[*sdk.ClientSessionViewController](uint64(self), "urnet_client_session_view_controller_set_foreground")
+	if !ok {
+		return
+	}
+	self_.SetForeground(bool(foreground))
+}
+
+//export urnet_client_session_view_controller_set_visible
+func urnet_client_session_view_controller_set_visible(self C.uint64_t, visible C.bool) {
+	defer cgoGuard("urnet_client_session_view_controller_set_visible")
+	self_, ok := resolveHandle[*sdk.ClientSessionViewController](uint64(self), "urnet_client_session_view_controller_set_visible")
+	if !ok {
+		return
+	}
+	self_.SetVisible(bool(visible))
+}
+
+//export urnet_client_session_view_controller_start
+func urnet_client_session_view_controller_start(self C.uint64_t) {
+	defer cgoGuard("urnet_client_session_view_controller_start")
+	self_, ok := resolveHandle[*sdk.ClientSessionViewController](uint64(self), "urnet_client_session_view_controller_start")
+	if !ok {
+		return
+	}
+	self_.Start()
+}
+
+//export urnet_client_session_view_controller_stop
+func urnet_client_session_view_controller_stop(self C.uint64_t) {
+	defer cgoGuard("urnet_client_session_view_controller_stop")
+	self_, ok := resolveHandle[*sdk.ClientSessionViewController](uint64(self), "urnet_client_session_view_controller_stop")
+	if !ok {
+		return
+	}
+	self_.Stop()
 }
 
 //export urnet_collapse_host_names
@@ -7110,6 +8108,16 @@ func urnet_default_device_local_settings() *C.char {
 		return nil
 	}
 	return cJson(r0, "urnet_default_device_local_settings")
+}
+
+//export urnet_default_low_memory_device_local_settings
+func urnet_default_low_memory_device_local_settings() *C.char {
+	defer cgoGuard("urnet_default_low_memory_device_local_settings")
+	r0 := sdk.DefaultLowMemoryDeviceLocalSettings()
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_default_low_memory_device_local_settings")
 }
 
 //export urnet_default_provider_transport_settings
@@ -7967,6 +8975,17 @@ func urnet_device_get_api(self C.uint64_t) C.uint64_t {
 	return C.uint64_t(newHandle(r0))
 }
 
+//export urnet_device_get_auth_logout_cause
+func urnet_device_get_auth_logout_cause(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_device_get_auth_logout_cause")
+	self_, ok := resolveHandle[sdk.Device](uint64(self), "urnet_device_get_auth_logout_cause")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetAuthLogoutCause()
+	return cString(string(r0))
+}
+
 //export urnet_device_get_block_action_overrides
 func urnet_device_get_block_action_overrides(self C.uint64_t) *C.char {
 	defer cgoGuard("urnet_device_get_block_action_overrides")
@@ -8338,6 +9357,17 @@ func urnet_device_get_log_verbosity(self C.uint64_t) C.int64_t {
 	}
 	r0 := self_.GetLogVerbosity()
 	return C.int64_t(r0)
+}
+
+//export urnet_device_get_measurements_enabled
+func urnet_device_get_measurements_enabled(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_device_get_measurements_enabled")
+	self_, ok := resolveHandle[sdk.Device](uint64(self), "urnet_device_get_measurements_enabled")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetMeasurementsEnabled()
+	return C.bool(r0)
 }
 
 //export urnet_device_get_network_peers
@@ -8996,6 +10026,16 @@ func urnet_device_set_log_verbosity(self C.uint64_t, level C.int64_t) {
 	self_.SetLogVerbosity(int(int64(level)))
 }
 
+//export urnet_device_set_measurements_enabled
+func urnet_device_set_measurements_enabled(self C.uint64_t, measurementsEnabled C.bool) {
+	defer cgoGuard("urnet_device_set_measurements_enabled")
+	self_, ok := resolveHandle[sdk.Device](uint64(self), "urnet_device_set_measurements_enabled")
+	if !ok {
+		return
+	}
+	self_.SetMeasurementsEnabled(bool(measurementsEnabled))
+}
+
 //export urnet_device_set_offline
 func urnet_device_set_offline(self C.uint64_t, offline C.bool) {
 	defer cgoGuard("urnet_device_set_offline")
@@ -9285,6 +10325,24 @@ func urnet_device_local_close_block_action_view_controller(self C.uint64_t, vc C
 		}
 	}
 	self_.CloseBlockActionViewController(vc_)
+}
+
+//export urnet_device_local_close_client_session_view_controller
+func urnet_device_local_close_client_session_view_controller(self C.uint64_t, vc C.uint64_t) {
+	defer cgoGuard("urnet_device_local_close_client_session_view_controller")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_close_client_session_view_controller")
+	if !ok {
+		return
+	}
+	var vc_ *sdk.ClientSessionViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.ClientSessionViewController](uint64(vc), "urnet_device_local_close_client_session_view_controller")
+		if !ok {
+			return
+		}
+	}
+	self_.CloseClientSessionViewController(vc_)
 }
 
 //export urnet_device_local_close_connect_view_controller
@@ -9942,6 +11000,20 @@ func urnet_device_local_open_client_contract_details_view_controller(self C.uint
 		return 0
 	}
 	r0 := self_.OpenClientContractDetailsViewController()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_device_local_open_client_session_view_controller
+func urnet_device_local_open_client_session_view_controller(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_device_local_open_client_session_view_controller")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_open_client_session_view_controller")
+	if !ok {
+		return 0
+	}
+	r0 := self_.OpenClientSessionViewController()
 	if r0 == nil {
 		return 0
 	}
@@ -10672,6 +11744,52 @@ func urnet_device_local_sn_gas_balance(self C.uint64_t, callback_result C.urnet_
 	self_.SnGasBalance(callback_)
 }
 
+//export urnet_device_local_sn_ledger_accounts
+func urnet_device_local_sn_ledger_accounts(self C.uint64_t, callback_result C.urnet_sn_ledger_accounts_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_device_local_sn_ledger_accounts")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_sn_ledger_accounts")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnLedgerAccountsCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnLedgerAccountsCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.SnLedgerAccounts(callback_)
+}
+
+//export urnet_device_local_sn_ledger_claim
+func urnet_device_local_sn_ledger_claim(self C.uint64_t, callback_confirmed C.urnet_sn_ledger_claim_confirmed_cb, callback_done C.urnet_sn_ledger_claim_done_cb, callback_failed C.urnet_sn_ledger_claim_failed_cb, callback_sent C.urnet_sn_ledger_claim_sent_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_device_local_sn_ledger_claim")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_sn_ledger_claim")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnLedgerClaimCallback
+	if callback_confirmed != nil {
+		callback_ = &cAdapterSnLedgerClaimCallback{cbConfirmed: callback_confirmed, cbDone: callback_done, cbFailed: callback_failed, cbSent: callback_sent, userData: callback_user_data}
+	}
+	self_.SnLedgerClaim(callback_)
+}
+
+//export urnet_device_local_sn_ledger_claim_transactions
+func urnet_device_local_sn_ledger_claim_transactions(self C.uint64_t, outError **C.char) *C.char {
+	defer cgoGuard("urnet_device_local_sn_ledger_claim_transactions")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_sn_ledger_claim_transactions")
+	if !ok {
+		return nil
+	}
+	r0, err := self_.SnLedgerClaimTransactions()
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_device_local_sn_ledger_claim_transactions")
+}
+
 //export urnet_device_local_stall_exit
 func urnet_device_local_stall_exit(self C.uint64_t, clientId *C.char, stalled C.bool) C.bool {
 	defer cgoGuard("urnet_device_local_stall_exit")
@@ -10874,6 +11992,32 @@ func urnet_device_local_tunnel_local_address_ipv6(self C.uint64_t) *C.char {
 	}
 	r0 := self_.TunnelLocalAddressIpv6()
 	return cString(string(r0))
+}
+
+//export urnet_device_local_upload_logs_with_files
+func urnet_device_local_upload_logs_with_files(self C.uint64_t, feedbackId *C.char, uploadLogsFiles *C.char, callback_result C.urnet_upload_logs_cb, callback_user_data unsafe.Pointer, outError **C.char) C.bool {
+	defer cgoGuard("urnet_device_local_upload_logs_with_files")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_upload_logs_with_files")
+	if !ok {
+		return C.bool(false)
+	}
+	var uploadLogsFiles_ *sdk.UploadLogsFileList
+	if uploadLogsFiles != nil {
+		uploadLogsFiles_ = &sdk.UploadLogsFileList{}
+		if !goJson(uploadLogsFiles, uploadLogsFiles_, "urnet_device_local_upload_logs_with_files") {
+			return C.bool(false)
+		}
+	}
+	var callback_ sdk.UploadLogsCallback
+	if callback_result != nil {
+		callback_ = &cAdapterUploadLogsCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	err := self_.UploadLogsWithFiles(goString(feedbackId), uploadLogsFiles_, callback_)
+	if err != nil {
+		setErrorOut(outError, err)
+		return C.bool(false)
+	}
+	return C.bool(true)
 }
 
 //export urnet_device_local_wait_for_close
@@ -11130,6 +12274,24 @@ func urnet_device_remote_close_block_action_view_controller(self C.uint64_t, vc 
 		}
 	}
 	self_.CloseBlockActionViewController(vc_)
+}
+
+//export urnet_device_remote_close_client_session_view_controller
+func urnet_device_remote_close_client_session_view_controller(self C.uint64_t, vc C.uint64_t) {
+	defer cgoGuard("urnet_device_remote_close_client_session_view_controller")
+	self_, ok := resolveHandle[*sdk.DeviceRemote](uint64(self), "urnet_device_remote_close_client_session_view_controller")
+	if !ok {
+		return
+	}
+	var vc_ *sdk.ClientSessionViewController
+	if vc != 0 {
+		var ok bool
+		vc_, ok = resolveHandle[*sdk.ClientSessionViewController](uint64(vc), "urnet_device_remote_close_client_session_view_controller")
+		if !ok {
+			return
+		}
+	}
+	self_.CloseClientSessionViewController(vc_)
 }
 
 //export urnet_device_remote_close_connect_view_controller
@@ -11603,6 +12765,20 @@ func urnet_device_remote_open_client_contract_details_view_controller(self C.uin
 	return C.uint64_t(newHandle(r0))
 }
 
+//export urnet_device_remote_open_client_session_view_controller
+func urnet_device_remote_open_client_session_view_controller(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_device_remote_open_client_session_view_controller")
+	self_, ok := resolveHandle[*sdk.DeviceRemote](uint64(self), "urnet_device_remote_open_client_session_view_controller")
+	if !ok {
+		return 0
+	}
+	r0 := self_.OpenClientSessionViewController()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
 //export urnet_device_remote_open_connect_view_controller
 func urnet_device_remote_open_connect_view_controller(self C.uint64_t) C.uint64_t {
 	defer cgoGuard("urnet_device_remote_open_connect_view_controller")
@@ -12058,6 +13234,52 @@ func urnet_device_remote_sn_gas_balance(self C.uint64_t, callback_result C.urnet
 		callback_ = &cAdapterSnGasBalanceCallback{cbResult: callback_result, userData: callback_user_data}
 	}
 	self_.SnGasBalance(callback_)
+}
+
+//export urnet_device_remote_sn_ledger_accounts
+func urnet_device_remote_sn_ledger_accounts(self C.uint64_t, callback_result C.urnet_sn_ledger_accounts_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_device_remote_sn_ledger_accounts")
+	self_, ok := resolveHandle[*sdk.DeviceRemote](uint64(self), "urnet_device_remote_sn_ledger_accounts")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnLedgerAccountsCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnLedgerAccountsCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.SnLedgerAccounts(callback_)
+}
+
+//export urnet_device_remote_sn_ledger_claim
+func urnet_device_remote_sn_ledger_claim(self C.uint64_t, callback_confirmed C.urnet_sn_ledger_claim_confirmed_cb, callback_done C.urnet_sn_ledger_claim_done_cb, callback_failed C.urnet_sn_ledger_claim_failed_cb, callback_sent C.urnet_sn_ledger_claim_sent_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_device_remote_sn_ledger_claim")
+	self_, ok := resolveHandle[*sdk.DeviceRemote](uint64(self), "urnet_device_remote_sn_ledger_claim")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnLedgerClaimCallback
+	if callback_confirmed != nil {
+		callback_ = &cAdapterSnLedgerClaimCallback{cbConfirmed: callback_confirmed, cbDone: callback_done, cbFailed: callback_failed, cbSent: callback_sent, userData: callback_user_data}
+	}
+	self_.SnLedgerClaim(callback_)
+}
+
+//export urnet_device_remote_sn_ledger_claim_transactions
+func urnet_device_remote_sn_ledger_claim_transactions(self C.uint64_t, outError **C.char) *C.char {
+	defer cgoGuard("urnet_device_remote_sn_ledger_claim_transactions")
+	self_, ok := resolveHandle[*sdk.DeviceRemote](uint64(self), "urnet_device_remote_sn_ledger_claim_transactions")
+	if !ok {
+		return nil
+	}
+	r0, err := self_.SnLedgerClaimTransactions()
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_device_remote_sn_ledger_claim_transactions")
 }
 
 //export urnet_device_remote_stall_exit
@@ -13426,6 +14648,17 @@ func urnet_local_state_get_log_verbosity(self C.uint64_t) C.int64_t {
 	return C.int64_t(r0)
 }
 
+//export urnet_local_state_get_measurements_enabled
+func urnet_local_state_get_measurements_enabled(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_local_state_get_measurements_enabled")
+	self_, ok := resolveHandle[*sdk.LocalState](uint64(self), "urnet_local_state_get_measurements_enabled")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetMeasurementsEnabled()
+	return C.bool(r0)
+}
+
 //export urnet_local_state_get_performance_profile
 func urnet_local_state_get_performance_profile(self C.uint64_t) *C.char {
 	defer cgoGuard("urnet_local_state_get_performance_profile")
@@ -14067,6 +15300,21 @@ func urnet_local_state_set_log_verbosity(self C.uint64_t, level C.int64_t, outEr
 	return C.bool(true)
 }
 
+//export urnet_local_state_set_measurements_enabled
+func urnet_local_state_set_measurements_enabled(self C.uint64_t, measurementsEnabled C.bool, outError **C.char) C.bool {
+	defer cgoGuard("urnet_local_state_set_measurements_enabled")
+	self_, ok := resolveHandle[*sdk.LocalState](uint64(self), "urnet_local_state_set_measurements_enabled")
+	if !ok {
+		return C.bool(false)
+	}
+	err := self_.SetMeasurementsEnabled(bool(measurementsEnabled))
+	if err != nil {
+		setErrorOut(outError, err)
+		return C.bool(false)
+	}
+	return C.bool(true)
+}
+
 //export urnet_local_state_set_performance_profile
 func urnet_local_state_set_performance_profile(self C.uint64_t, profile *C.char, outError **C.char) C.bool {
 	defer cgoGuard("urnet_local_state_set_performance_profile")
@@ -14564,6 +15812,265 @@ func urnet_network_name_validation_view_controller_stop(self C.uint64_t) {
 		return
 	}
 	self_.Stop()
+}
+
+//export urnet_network_session_info_get_accept_until
+func urnet_network_session_info_get_accept_until(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_network_session_info_get_accept_until")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfo](uint64(self), "urnet_network_session_info_get_accept_until")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetAcceptUntil()
+	return cTime(r0)
+}
+
+//export urnet_network_session_info_get_create_time
+func urnet_network_session_info_get_create_time(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_network_session_info_get_create_time")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfo](uint64(self), "urnet_network_session_info_get_create_time")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetCreateTime()
+	return cTime(r0)
+}
+
+//export urnet_network_session_info_get_current
+func urnet_network_session_info_get_current(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_network_session_info_get_current")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfo](uint64(self), "urnet_network_session_info_get_current")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetCurrent()
+	return C.bool(r0)
+}
+
+//export urnet_network_session_info_get_kind
+func urnet_network_session_info_get_kind(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_network_session_info_get_kind")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfo](uint64(self), "urnet_network_session_info_get_kind")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetKind()
+	return cString(string(r0))
+}
+
+//export urnet_network_session_info_get_last_mint_time
+func urnet_network_session_info_get_last_mint_time(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_network_session_info_get_last_mint_time")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfo](uint64(self), "urnet_network_session_info_get_last_mint_time")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetLastMintTime()
+	return cTime(r0)
+}
+
+//export urnet_network_session_info_get_last_used
+func urnet_network_session_info_get_last_used(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_network_session_info_get_last_used")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfo](uint64(self), "urnet_network_session_info_get_last_used")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetLastUsed()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_network_session_info_get_origin_session_id
+func urnet_network_session_info_get_origin_session_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_network_session_info_get_origin_session_id")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfo](uint64(self), "urnet_network_session_info_get_origin_session_id")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetOriginSessionId()
+	return cId(r0)
+}
+
+//export urnet_network_session_info_get_session_id
+func urnet_network_session_info_get_session_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_network_session_info_get_session_id")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfo](uint64(self), "urnet_network_session_info_get_session_id")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetSessionId()
+	return cId(r0)
+}
+
+//export urnet_network_session_info_get_token_expire_time
+func urnet_network_session_info_get_token_expire_time(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_network_session_info_get_token_expire_time")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfo](uint64(self), "urnet_network_session_info_get_token_expire_time")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetTokenExpireTime()
+	return cTime(r0)
+}
+
+//export urnet_network_session_info_list_add
+func urnet_network_session_info_list_add(self C.uint64_t, value C.uint64_t) {
+	defer cgoGuard("urnet_network_session_info_list_add")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfoList](uint64(self), "urnet_network_session_info_list_add")
+	if !ok {
+		return
+	}
+	var value_ *sdk.NetworkSessionInfo
+	if value != 0 {
+		var ok bool
+		value_, ok = resolveHandle[*sdk.NetworkSessionInfo](uint64(value), "urnet_network_session_info_list_add")
+		if !ok {
+			return
+		}
+	}
+	self_.Add(value_)
+}
+
+//export urnet_network_session_info_list_contains
+func urnet_network_session_info_list_contains(self C.uint64_t, v C.uint64_t) C.bool {
+	defer cgoGuard("urnet_network_session_info_list_contains")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfoList](uint64(self), "urnet_network_session_info_list_contains")
+	if !ok {
+		return C.bool(false)
+	}
+	var v_ *sdk.NetworkSessionInfo
+	if v != 0 {
+		var ok bool
+		v_, ok = resolveHandle[*sdk.NetworkSessionInfo](uint64(v), "urnet_network_session_info_list_contains")
+		if !ok {
+			return C.bool(false)
+		}
+	}
+	r0 := self_.Contains(v_)
+	return C.bool(r0)
+}
+
+//export urnet_network_session_info_list_get
+func urnet_network_session_info_list_get(self C.uint64_t, i C.int64_t) C.uint64_t {
+	defer cgoGuard("urnet_network_session_info_list_get")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfoList](uint64(self), "urnet_network_session_info_list_get")
+	if !ok {
+		return 0
+	}
+	r0 := self_.Get(int(int64(i)))
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_network_session_info_list_len
+func urnet_network_session_info_list_len(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_network_session_info_list_len")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfoList](uint64(self), "urnet_network_session_info_list_len")
+	if !ok {
+		return 0
+	}
+	r0 := self_.Len()
+	return C.int64_t(r0)
+}
+
+//export urnet_network_session_info_list_unmarshal_json
+func urnet_network_session_info_list_unmarshal_json(self C.uint64_t, b *C.uint8_t, b_len C.int32_t, outError **C.char) C.bool {
+	defer cgoGuard("urnet_network_session_info_list_unmarshal_json")
+	self_, ok := resolveHandle[*sdk.NetworkSessionInfoList](uint64(self), "urnet_network_session_info_list_unmarshal_json")
+	if !ok {
+		return C.bool(false)
+	}
+	err := self_.UnmarshalJSON(goBytes(b, b_len))
+	if err != nil {
+		setErrorOut(outError, err)
+		return C.bool(false)
+	}
+	return C.bool(true)
+}
+
+//export urnet_network_sessions_result_get_current_session_id
+func urnet_network_sessions_result_get_current_session_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_network_sessions_result_get_current_session_id")
+	self_, ok := resolveHandle[*sdk.NetworkSessionsResult](uint64(self), "urnet_network_sessions_result_get_current_session_id")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetCurrentSessionId()
+	return cId(r0)
+}
+
+//export urnet_network_sessions_result_get_event_id
+func urnet_network_sessions_result_get_event_id(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_network_sessions_result_get_event_id")
+	self_, ok := resolveHandle[*sdk.NetworkSessionsResult](uint64(self), "urnet_network_sessions_result_get_event_id")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetEventId()
+	return C.int64_t(r0)
+}
+
+//export urnet_network_sessions_result_get_generation
+func urnet_network_sessions_result_get_generation(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_network_sessions_result_get_generation")
+	self_, ok := resolveHandle[*sdk.NetworkSessionsResult](uint64(self), "urnet_network_sessions_result_get_generation")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetGeneration()
+	return cString(string(r0))
+}
+
+//export urnet_network_sessions_result_get_legacy_coverage
+func urnet_network_sessions_result_get_legacy_coverage(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_network_sessions_result_get_legacy_coverage")
+	self_, ok := resolveHandle[*sdk.NetworkSessionsResult](uint64(self), "urnet_network_sessions_result_get_legacy_coverage")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetLegacyCoverage()
+	return cString(string(r0))
+}
+
+//export urnet_network_sessions_result_get_sessions
+func urnet_network_sessions_result_get_sessions(self C.uint64_t) C.uint64_t {
+	defer cgoGuard("urnet_network_sessions_result_get_sessions")
+	self_, ok := resolveHandle[*sdk.NetworkSessionsResult](uint64(self), "urnet_network_sessions_result_get_sessions")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetSessions()
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_network_sessions_revision_get_event_id
+func urnet_network_sessions_revision_get_event_id(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_network_sessions_revision_get_event_id")
+	self_, ok := resolveHandle[*sdk.NetworkSessionsRevision](uint64(self), "urnet_network_sessions_revision_get_event_id")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetEventId()
+	return C.int64_t(r0)
+}
+
+//export urnet_network_sessions_revision_get_generation
+func urnet_network_sessions_revision_get_generation(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_network_sessions_revision_get_generation")
+	self_, ok := resolveHandle[*sdk.NetworkSessionsRevision](uint64(self), "urnet_network_sessions_revision_get_generation")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetGeneration()
+	return cString(string(r0))
 }
 
 //export urnet_network_space_add_extender_status_change_listener
@@ -15636,6 +17143,16 @@ func urnet_new_client_event_queue(networkSpace C.uint64_t, platform *C.char, app
 	return C.uint64_t(newHandle(r0))
 }
 
+//export urnet_new_client_info
+func urnet_new_client_info(deviceType *C.char, appVersion *C.char) *C.char {
+	defer cgoGuard("urnet_new_client_info")
+	r0 := sdk.NewClientInfo(goString(deviceType), goString(appVersion))
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_new_client_info")
+}
+
 //export urnet_new_connect_first_event
 func urnet_new_connect_first_event() *C.char {
 	defer cgoGuard("urnet_new_connect_first_event")
@@ -15859,27 +17376,6 @@ func urnet_new_login_view_controller(api C.uint64_t) C.uint64_t {
 		return 0
 	}
 	return C.uint64_t(newHandle(r0))
-}
-
-//export urnet_new_message_transport
-func urnet_new_message_transport(config *C.char, outError **C.char) *C.char {
-	defer cgoGuard("urnet_new_message_transport")
-	var config_ *sdk.MessageTransportConfig
-	if config != nil {
-		config_ = &sdk.MessageTransportConfig{}
-		if !goJson(config, config_, "urnet_new_message_transport") {
-			return nil
-		}
-	}
-	r0, err := sdk.NewMessageTransport(config_)
-	if err != nil {
-		setErrorOut(outError, err)
-		return nil
-	}
-	if r0 == nil {
-		return nil
-	}
-	return cJson(r0, "urnet_new_message_transport")
 }
 
 //export urnet_new_network_name_validation_view_controller
@@ -16209,20 +17705,6 @@ func urnet_normalize_bittensor_signature(signature *C.char) *C.char {
 	return cString(string(r0))
 }
 
-//export urnet_open_stream_store
-func urnet_open_stream_store(dir *C.char, outError **C.char) *C.char {
-	defer cgoGuard("urnet_open_stream_store")
-	r0, err := sdk.OpenStreamStore(goString(dir))
-	if err != nil {
-		setErrorOut(outError, err)
-		return nil
-	}
-	if r0 == nil {
-		return nil
-	}
-	return cJson(r0, "urnet_open_stream_store")
-}
-
 //export urnet_order_connected_provider_locations
 func urnet_order_connected_provider_locations(locations *C.char) *C.char {
 	defer cgoGuard("urnet_order_connected_provider_locations")
@@ -16338,17 +17820,6 @@ func urnet_parse_id(src *C.char, outError **C.char) *C.char {
 		return nil
 	}
 	return cId(r0)
-}
-
-//export urnet_parse_message_route_mode
-func urnet_parse_message_route_mode(value *C.char, outError **C.char) C.int64_t {
-	defer cgoGuard("urnet_parse_message_route_mode")
-	r0, err := sdk.ParseMessageRouteMode(goString(value))
-	if err != nil {
-		setErrorOut(outError, err)
-		return 0
-	}
-	return C.int64_t(r0)
 }
 
 //export urnet_parse_vless_link
@@ -17450,6 +18921,215 @@ func urnet_service_url(key *C.char, values *C.char, scheme *C.char, service *C.c
 	return cString(string(r0))
 }
 
+//export urnet_session_last_used_get_app_version
+func urnet_session_last_used_get_app_version(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_last_used_get_app_version")
+	self_, ok := resolveHandle[*sdk.SessionLastUsed](uint64(self), "urnet_session_last_used_get_app_version")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetAppVersion()
+	return cString(string(r0))
+}
+
+//export urnet_session_last_used_get_city
+func urnet_session_last_used_get_city(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_last_used_get_city")
+	self_, ok := resolveHandle[*sdk.SessionLastUsed](uint64(self), "urnet_session_last_used_get_city")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetCity()
+	return cString(string(r0))
+}
+
+//export urnet_session_last_used_get_country
+func urnet_session_last_used_get_country(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_last_used_get_country")
+	self_, ok := resolveHandle[*sdk.SessionLastUsed](uint64(self), "urnet_session_last_used_get_country")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetCountry()
+	return cString(string(r0))
+}
+
+//export urnet_session_last_used_get_country_code
+func urnet_session_last_used_get_country_code(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_last_used_get_country_code")
+	self_, ok := resolveHandle[*sdk.SessionLastUsed](uint64(self), "urnet_session_last_used_get_country_code")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetCountryCode()
+	return cString(string(r0))
+}
+
+//export urnet_session_last_used_get_device_type
+func urnet_session_last_used_get_device_type(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_last_used_get_device_type")
+	self_, ok := resolveHandle[*sdk.SessionLastUsed](uint64(self), "urnet_session_last_used_get_device_type")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetDeviceType()
+	return cString(string(r0))
+}
+
+//export urnet_session_last_used_get_region
+func urnet_session_last_used_get_region(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_last_used_get_region")
+	self_, ok := resolveHandle[*sdk.SessionLastUsed](uint64(self), "urnet_session_last_used_get_region")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetRegion()
+	return cString(string(r0))
+}
+
+//export urnet_session_last_used_get_unix_time
+func urnet_session_last_used_get_unix_time(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_session_last_used_get_unix_time")
+	self_, ok := resolveHandle[*sdk.SessionLastUsed](uint64(self), "urnet_session_last_used_get_unix_time")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetUnixTime()
+	return C.int64_t(r0)
+}
+
+//export urnet_session_operation_result_get_cleanup_pending
+func urnet_session_operation_result_get_cleanup_pending(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_session_operation_result_get_cleanup_pending")
+	self_, ok := resolveHandle[*sdk.SessionOperationResult](uint64(self), "urnet_session_operation_result_get_cleanup_pending")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetCleanupPending()
+	return C.bool(r0)
+}
+
+//export urnet_session_operation_result_get_event_id
+func urnet_session_operation_result_get_event_id(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_session_operation_result_get_event_id")
+	self_, ok := resolveHandle[*sdk.SessionOperationResult](uint64(self), "urnet_session_operation_result_get_event_id")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetEventId()
+	return C.int64_t(r0)
+}
+
+//export urnet_session_operation_result_get_generation
+func urnet_session_operation_result_get_generation(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_operation_result_get_generation")
+	self_, ok := resolveHandle[*sdk.SessionOperationResult](uint64(self), "urnet_session_operation_result_get_generation")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetGeneration()
+	return cString(string(r0))
+}
+
+//export urnet_session_operation_result_get_kept_session_id
+func urnet_session_operation_result_get_kept_session_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_operation_result_get_kept_session_id")
+	self_, ok := resolveHandle[*sdk.SessionOperationResult](uint64(self), "urnet_session_operation_result_get_kept_session_id")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetKeptSessionId()
+	return cId(r0)
+}
+
+//export urnet_session_operation_result_get_operation_id
+func urnet_session_operation_result_get_operation_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_operation_result_get_operation_id")
+	self_, ok := resolveHandle[*sdk.SessionOperationResult](uint64(self), "urnet_session_operation_result_get_operation_id")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetOperationId()
+	return cId(r0)
+}
+
+//export urnet_session_operation_result_get_revoked_count
+func urnet_session_operation_result_get_revoked_count(self C.uint64_t) C.int64_t {
+	defer cgoGuard("urnet_session_operation_result_get_revoked_count")
+	self_, ok := resolveHandle[*sdk.SessionOperationResult](uint64(self), "urnet_session_operation_result_get_revoked_count")
+	if !ok {
+		return 0
+	}
+	r0 := self_.GetRevokedCount()
+	return C.int64_t(r0)
+}
+
+//export urnet_session_operation_result_get_session_id
+func urnet_session_operation_result_get_session_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_operation_result_get_session_id")
+	self_, ok := resolveHandle[*sdk.SessionOperationResult](uint64(self), "urnet_session_operation_result_get_session_id")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetSessionId()
+	return cId(r0)
+}
+
+//export urnet_session_operation_result_get_state
+func urnet_session_operation_result_get_state(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_operation_result_get_state")
+	self_, ok := resolveHandle[*sdk.SessionOperationResult](uint64(self), "urnet_session_operation_result_get_state")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetState()
+	return cString(string(r0))
+}
+
+//export urnet_session_operation_result_get_status
+func urnet_session_operation_result_get_status(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_operation_result_get_status")
+	self_, ok := resolveHandle[*sdk.SessionOperationResult](uint64(self), "urnet_session_operation_result_get_status")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetStatus()
+	return cString(string(r0))
+}
+
+//export urnet_session_sign_out_result_get_credential_cleared
+func urnet_session_sign_out_result_get_credential_cleared(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_session_sign_out_result_get_credential_cleared")
+	self_, ok := resolveHandle[*sdk.SessionSignOutResult](uint64(self), "urnet_session_sign_out_result_get_credential_cleared")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetCredentialCleared()
+	return C.bool(r0)
+}
+
+//export urnet_session_sign_out_result_get_operation_id
+func urnet_session_sign_out_result_get_operation_id(self C.uint64_t) *C.char {
+	defer cgoGuard("urnet_session_sign_out_result_get_operation_id")
+	self_, ok := resolveHandle[*sdk.SessionSignOutResult](uint64(self), "urnet_session_sign_out_result_get_operation_id")
+	if !ok {
+		return nil
+	}
+	r0 := self_.GetOperationId()
+	return cId(r0)
+}
+
+//export urnet_session_sign_out_result_get_revocation_confirmed
+func urnet_session_sign_out_result_get_revocation_confirmed(self C.uint64_t) C.bool {
+	defer cgoGuard("urnet_session_sign_out_result_get_revocation_confirmed")
+	self_, ok := resolveHandle[*sdk.SessionSignOutResult](uint64(self), "urnet_session_sign_out_result_get_revocation_confirmed")
+	if !ok {
+		return C.bool(false)
+	}
+	r0 := self_.GetRevocationConfirmed()
+	return C.bool(r0)
+}
+
 //export urnet_set_control_ip_family_policy
 func urnet_set_control_ip_family_policy(policy C.int64_t) {
 	defer cgoGuard("urnet_set_control_ip_family_policy")
@@ -17466,6 +19146,13 @@ func urnet_set_device_rpc_h1_plus_enabled(enabled C.bool) {
 func urnet_set_egress_interface_index(index4 C.int64_t, index6 C.int64_t) {
 	defer cgoGuard("urnet_set_egress_interface_index")
 	sdk.SetEgressInterfaceIndex(int(int64(index4)), int(int64(index6)))
+}
+
+//export urnet_set_extender_network_client_enabled
+func urnet_set_extender_network_client_enabled(enabled C.bool) C.bool {
+	defer cgoGuard("urnet_set_extender_network_client_enabled")
+	r0 := sdk.SetExtenderNetworkClientEnabled(bool(enabled))
+	return C.bool(r0)
 }
 
 //export urnet_set_extender_store_read_only
@@ -17616,6 +19303,44 @@ func urnet_sn_gas_balance_for(settings *C.char, address *C.char, callback_result
 		callback_ = &cAdapterSnGasBalanceCallback{cbResult: callback_result, userData: callback_user_data}
 	}
 	sdk.SnGasBalanceFor(settings_, goString(address), callback_)
+}
+
+//export urnet_sn_ledger_accounts_for
+func urnet_sn_ledger_accounts_for(settings *C.char, coldkeySs58 *C.char, callback_result C.urnet_sn_ledger_accounts_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_sn_ledger_accounts_for")
+	var settings_ *sdk.SnChainSettings
+	if settings != nil {
+		settings_ = &sdk.SnChainSettings{}
+		if !goJson(settings, settings_, "urnet_sn_ledger_accounts_for") {
+			return
+		}
+	}
+	var callback_ sdk.SnLedgerAccountsCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnLedgerAccountsCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	sdk.SnLedgerAccountsFor(settings_, goString(coldkeySs58), callback_)
+}
+
+//export urnet_sn_ledger_claim_transactions_for
+func urnet_sn_ledger_claim_transactions_for(settings *C.char, coldkeySs58 *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_sn_ledger_claim_transactions_for")
+	var settings_ *sdk.SnChainSettings
+	if settings != nil {
+		settings_ = &sdk.SnChainSettings{}
+		if !goJson(settings, settings_, "urnet_sn_ledger_claim_transactions_for") {
+			return nil
+		}
+	}
+	r0, err := sdk.SnLedgerClaimTransactionsFor(settings_, goString(coldkeySs58))
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_sn_ledger_claim_transactions_for")
 }
 
 //export urnet_sn_payout_leaf_hex

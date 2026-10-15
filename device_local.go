@@ -81,14 +81,14 @@ func (self *fixedWindowMonitor) Events() (*connect.WindowExpandEvent, map[connec
 }
 
 // defaultDeviceLocalMemoryTargetByteCount preserves the established
-// desktop/server default. Mobile defaults are selected separately so the
-// 24-MiB app profile does not silently enlarge server queue budgets. Hosts
+// desktop/server default. iOS and explicitly selected low-profile hosts use
+// the shared 32-MiB target; Android defaults are selected separately. Hosts
 // which know their process/container budget should still pass an explicit
 // value where the device is created (NewDeviceLocalWithMemoryTarget).
 const defaultDeviceLocalMemoryTargetByteCount = 20 * 1024 * 1024
 
 // Base device shares, in parts of `deviceMemoryRatioParts`, are DNS 2, client
-// 9, platform carriers 5, and provider 4. A memory-targeted mobile device puts
+// 9, platform carriers 5, and provider 4. A mobile or explicit low-profile device puts
 // the client and provider shares behind one stable 13-part transfer/topology
 // root; its client, provider, and NAT children are overlapping admission
 // ceilings rather than additive pools. The platform share is the same
@@ -173,13 +173,26 @@ func newDeviceLocalPlatformTransportSettings(
 	altUrl string,
 	dnsPumpHost string,
 ) *connect.PlatformTransportSettings {
+	return newDeviceLocalPlatformTransportSettingsForProfile(memoryTargetByteCount,
+		platformTransportBudget, dialContextSettings, altUrl, dnsPumpHost, mobileRuntime())
+}
+
+// Every provider and destination carrier uses its owner's explicit policy;
+// the actual host still controls runtime sampling and process-wide resources.
+func newDeviceLocalPlatformTransportSettingsForProfile(
+	memoryTargetByteCount ByteCount,
+	platformTransportBudget *connect.PlatformTransportBudget,
+	dialContextSettings *connect.DialContextSettings,
+	altUrl string,
+	dnsPumpHost string,
+	lowMemoryProfile bool,
+) *connect.PlatformTransportSettings {
 	settings := connect.DefaultPlatformTransportSettingsWithMemoryTarget(
 		memoryTargetByteCount,
 	)
-	// Both provider and destination carriers need the mobile ownership policy;
-	// applying it only in the destination generator leaves a larger provider
-	// target on the desktop carrier path.
-	applyMobileLowMemoryPlatformTransportSettings(settings, memoryTargetByteCount)
+	applyMobileLowMemoryPlatformTransportSettingsForPlatform(
+		settings, memoryTargetByteCount, lowMemoryProfile,
+	)
 	settings.PlatformTransportBudget = platformTransportBudget
 	if altUrl = strings.TrimSpace(altUrl); altUrl != "" {
 		settings.AltUrl = altUrl
@@ -326,8 +339,9 @@ func deviceLocalWebRtcBudget(shareByteCount ByteCount, parents ...*connect.Trans
 	), parents...)
 }
 
-func DefaultDeviceLocalSettings() *DeviceLocalSettings {
-	memoryTargetByteCount := defaultDeviceLocalMemoryTargetByteCountForPlatform(mobileRuntime())
+// Construct fresh provisional budgets; device construction rederives them
+// after target/provider overrides and never mutates a reusable caller value.
+func defaultDeviceLocalSettingsWithProfile(memoryTargetByteCount ByteCount, lowMemoryProfile bool) *DeviceLocalSettings {
 	// provisional sizing from the unfolded client share; device construction
 	// re-derives from the final settings (target overrides, provider fold)
 	clientShareByteCount := memoryTargetByteCount * deviceMemoryRatioClient / deviceMemoryRatioParts
@@ -352,7 +366,7 @@ func DefaultDeviceLocalSettings() *DeviceLocalSettings {
 		mobilePackQueueBudgetForPlatform(
 			memoryTargetByteCount,
 			clientShareByteCount,
-			mobileRuntime(),
+			lowMemoryProfile,
 		)
 	// p2p peer connections admit against a DEDICATED budget (see
 	// deviceLocalWebRtcBudget) with a phone-sized SCTP buffer, not the shared
@@ -365,6 +379,7 @@ func DefaultDeviceLocalSettings() *DeviceLocalSettings {
 	}
 	return &DeviceLocalSettings{
 		MemoryTargetByteCount: memoryTargetByteCount,
+		LowMemoryProfile:      lowMemoryProfile,
 		// this works with the `SequenceBufferSize` to control packet loss during back pressure
 		SendTimeout:        5 * time.Second,
 		SequenceBufferSize: bufferSize,
@@ -522,7 +537,8 @@ type DeviceLocalSettings struct {
 	testingBeforePeerPinStoreAdmission func(*deviceLocalTransferMemory)
 	testingBeforeProviderConstruction  func()
 	// MemoryTargetByteCount is this device's memory target. A targeted mobile
-	// device uses DNS 2 parts, one shared 13-part transfer/topology root with
+	// or explicitly low-profile device uses DNS 2 parts, one shared 13-part
+	// transfer/topology root with
 	// overlapping client/provider/NAT children, and 5 parts for every H1/H3
 	// platform carrier. The 13-part root is seeded from the 9-part client and
 	// 4-part provider base shares returned by deviceMemoryShares; when the
@@ -535,6 +551,12 @@ type DeviceLocalSettings struct {
 	// explicitly where the device is created; the default keeps a plain
 	// construction bounded.
 	MemoryTargetByteCount int64
+
+	// Per-device retained accounting, queue caps, and window topology shared
+	// by iOS and hosted proxies. This never selects mobile runtime sampling
+	// or changes the process Go limit/message pools. Zero target still opts
+	// out of per-device sizing; actual mobile hosts retain their policy.
+	LowMemoryProfile bool
 
 	// time to give up (drop) sending a packet to a destination
 	//
@@ -657,6 +679,13 @@ type DeviceLocalSettings struct {
 	//
 	//gomobile:noexport Go-only network dial seam.
 	ProviderDialContextSettings *connect.DialContextSettings `json:"-"`
+	// LocalDialContextSettings, when set, is applied to the TCP and UDP sockets
+	// of the local route: what the device sends outside the tunnel, with route
+	// local on, to an un-blocked destination, or over SMTP. Tests keep that
+	// traffic in the process with it. Ordinary applications leave it nil.
+	//
+	//gomobile:noexport Go-only network dial seam.
+	LocalDialContextSettings *connect.DialContextSettings `json:"-"`
 	// DnsPumpHost overrides the public UDP/53 destination used by the DNS-pump
 	// carrier. Integration hosts with a private or loopback Connect endpoint
 	// must set this to their provisioned pump ingress; sending that endpoint's
@@ -731,6 +760,9 @@ type DeviceLocal struct {
 	cancel context.CancelFunc
 
 	byJwt string
+	// why the server ended this device's sign-in, set before its AuthLogout
+	// listeners run (GetAuthLogoutCause)
+	authLogoutCause string
 	// The network of the client this device was built for, empty when its
 	// credential names none. Fixed at construction: the identity the device
 	// makes belongs to this network (DeviceLocalKeyMaterial).
@@ -980,6 +1012,12 @@ type DeviceLocal struct {
 	// with local state stores the setting there instead.
 	provideExtenderSet bool
 	provideExtender    bool
+	// The lag.dev measurements setting on a space that keeps no local state
+	// (lag.dev/PLAN.md C4): set by SetMeasurementsEnabled and held for the
+	// life of the device, on until it is set. A space with local state stores
+	// the setting there instead.
+	measurementsEnabledSet bool
+	measurementsEnabled    bool
 
 	orderedContractStatusUpdates []*contractStatusUpdate
 	netContractStatus            *ContractStatus
@@ -1392,6 +1430,8 @@ func newDeviceLocalWithOverridesForPlatform(
 	// Runtime-owned stores must not leak into a reusable caller settings value.
 	settingsCopy := *settings
 	settings = &settingsCopy
+	settings.ClientSettings = *cloneDeviceClientSettings(&settings.ClientSettings)
+	settings.LowMemoryProfile = settings.LowMemoryProfile || mobile
 	if settings.LocalApi != nil && !settings.HostedIncompatible {
 		return nil, errors.New("local device API requires an isolated hosted session")
 	}
@@ -1467,6 +1507,7 @@ func newDeviceLocalWithOverridesForPlatform(
 		}()
 	}
 
+	ctx = api.clientInfoContext(ctx)
 	preparedAuth, err := api.prepareDeviceAuth(authLocalState, byJwt, instanceId, time.Now(), authPublication)
 	if err != nil {
 		cancel()
@@ -1498,8 +1539,8 @@ func newDeviceLocalWithOverridesForPlatform(
 	platformTransportBudget := connect.NewPlatformTransportBudgetForMemoryTarget(
 		settings.MemoryTargetByteCount,
 	)
-	transferMemory := newDeviceLocalTransferMemoryForPlatform(settings, mobile)
-	configureDeviceLocalClientMemoryForPlatform(settings, transferMemory, mobile)
+	transferMemory := newDeviceLocalTransferMemoryForPlatform(settings, settings.LowMemoryProfile)
+	configureDeviceLocalClientMemoryForPlatform(settings, transferMemory, settings.LowMemoryProfile)
 	if settings.testingBeforePeerPinStoreAdmission != nil {
 		settings.testingBeforePeerPinStoreAdmission(transferMemory)
 	}
@@ -1559,8 +1600,10 @@ func newDeviceLocalWithOverridesForPlatform(
 			providerTransportMode,
 			providerModePreferences,
 			settings.ProviderDialContextSettings,
+			settings.LocalDialContextSettings,
 			settings.DnsPumpHost,
 			transferMemory,
+			api,
 		)
 		if err != nil {
 			cancel()
@@ -1783,7 +1826,7 @@ func newDeviceLocalWithOverridesForPlatform(
 				return
 			}
 			defer release()
-			rejectedJwt, current := api.deviceRejectedJwt(authPublication)
+			rejectedJwt, cause, current := api.deviceRejectedJwt(authPublication)
 			if !current {
 				return
 			}
@@ -1797,7 +1840,7 @@ func newDeviceLocalWithOverridesForPlatform(
 			if !accepted {
 				return
 			}
-			deviceLocal.handleApiAuthLogout()
+			deviceLocal.handleApiAuthLogout(cause)
 		}),
 	)
 	if err := api.setDeviceByJwt(preparedAuth, deviceLocal.authPublication, log); err != nil {
@@ -1820,6 +1863,10 @@ func newDeviceLocalWithOverridesForPlatform(
 		// are installed here (G2, L2)
 		provider.extenderDnsPrivilegedPort = settings.ProvideExtenderDnsPrivilegedPort
 		provider.extenderSettingsConfigure = settings.providerExtenderSettings
+		// the role reads the measurements setting as it starts, and a change
+		// reaches a running role through setExtenderMeasurementsEnabled
+		// (lag.dev/PLAN.md C4)
+		provider.extenderMeasurementsEnabled = deviceLocal.GetMeasurementsEnabled
 		localUserNatSub := provider.LocalUserNat().AddReceivePacketCallback(deviceLocal.localFallbackReceive)
 		deviceLocal.localUserNatSub = localUserNatSub
 		// the provider client lives as long as the device, so its contract
@@ -2112,9 +2159,10 @@ func (self *DeviceLocal) GetTunnelDnsInterceptorActive() bool {
 // memory accounting versus its target (see
 // `DeviceLocalSettings.MemoryTargetByteCount`). Tracked usage covers the
 // live budget accounting: in-flight dns resolution, client and provider
-// transfer queues, and platform carrier reservations. On mobile, the shared
-// transfer root also includes P2P receive-window admission and exact egress
-// NAT ownership. Legacy non-mobile NATs retain flow-count-only accounting.
+// transfer queues, and platform carrier reservations. With mobile or explicit
+// low-profile policy, the shared transfer root also includes P2P receive-window
+// admission and exact egress
+// NAT ownership. Legacy non-low-profile NATs retain flow-count-only accounting.
 type DeviceLocalMemoryUsage struct {
 	// The fixed peer-pin child is included in the client/transfer root, not
 	// additive to TotalByteCount. Counts/rejections contain no peer identities.
@@ -2784,12 +2832,14 @@ func (self *DeviceLocal) applyApiRefreshedByJwt(byJwt string) {
 	self.jwtRefreshed(byJwt)
 }
 
-func (self *DeviceLocal) handleApiAuthLogout() {
+// The cause is the rejection's, read with the rejected credential.
+func (self *DeviceLocal) handleApiAuthLogout(cause string) {
 	var provider *deviceLocalProvider
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.byJwt = ""
+		self.authLogoutCause = cause
 		provider = self.provider
 	}()
 	if provider != nil {
@@ -3471,6 +3521,14 @@ func (self *DeviceLocal) AddAuthLogoutListener(listener AuthLogoutListener) Sub 
 	return newSub(func() {
 		self.authLogoutListeners.Remove(callbackId)
 	})
+}
+
+// Why the server ended this device's sign-in when its AuthLogout fired:
+// AuthLogoutCauseSessionRevoked or "" (Device.GetAuthLogoutCause).
+func (self *DeviceLocal) GetAuthLogoutCause() string {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.authLogoutCause
 }
 
 func (self *DeviceLocal) authLogout() {
@@ -4692,16 +4750,13 @@ func (self *DeviceLocal) applyDestination(
 				apiGeneratorSettings.ClientControl = self.settings.ClientControl
 				apiGeneratorSettings.ProviderDiscovery = self.settings.ProviderDiscovery
 				apiGeneratorSettings.PlatformTransportSettingsGenerator = func() *connect.PlatformTransportSettings {
-					settings := newDeviceLocalPlatformTransportSettings(
+					settings := newDeviceLocalPlatformTransportSettingsForProfile(
 						self.settings.MemoryTargetByteCount,
 						self.platformTransportBudget,
 						nil,
 						self.networkSpace.GetAltUrl(),
 						self.settings.DnsPumpHost,
-					)
-					applyMobileLowMemoryPlatformTransportSettings(
-						settings,
-						self.settings.MemoryTargetByteCount,
+						self.settings.LowMemoryProfile,
 					)
 					settings.ReceiveStats = self.platformTransportReceiveStats
 					settings.H1ConnectionStats = &self.h1ConnectionStats
@@ -4742,13 +4797,15 @@ func (self *DeviceLocal) applyDestination(
 						clientSettings.SendBufferSettings.ResendQueueBudget = self.settings.SendBufferSettings.ResendQueueBudget
 						clientSettings.ReceiveBufferSettings.ReceiveQueueBudget = self.settings.ReceiveBufferSettings.ReceiveQueueBudget
 						clientSettings.ReceiveBufferSettings.PackQueueBudget = self.settings.ReceiveBufferSettings.PackQueueBudget
-						applyMobileLowMemoryClientSettings(
+						applyMobileLowMemoryClientSettingsForPlatform(
 							clientSettings,
 							self.settings.MemoryTargetByteCount,
+							self.settings.LowMemoryProfile,
 						)
-						applyMobileH1PerformanceClientSettings(
+						applyMobileH1PerformanceClientSettingsForPlatform(
 							clientSettings,
 							self.settings.MemoryTargetByteCount,
+							self.settings.LowMemoryProfile,
 							transportMode == connect.TransportModeH1,
 						)
 						clientSettings.Log = self.log
@@ -4790,11 +4847,13 @@ func (self *DeviceLocal) applyDestination(
 				self.ownedMultiClientGenerator = ownedGenerator
 			}
 			settings := connect.DefaultMultiClientSettings()
-			applyMobileLowMemoryMultiClientSettings(
+			applyMobileLowMemoryMultiClientSettingsForPlatform(
 				settings,
 				self.settings.MemoryTargetByteCount,
+				self.settings.LowMemoryProfile,
 			)
 			settings.Log = self.log
+			settings.LocalDialContextSettings = self.settings.LocalDialContextSettings
 			settings.DefaultPerformanceProfile = toConnectPerformanceProfile(self.performanceProfile)
 			// smart-routing tier (Phase 1): bake self.routingTier's knobs into
 			// the constructed baseline so a fresh window -- the very first one
@@ -7816,7 +7875,28 @@ func (self *DeviceLocal) UploadLogs(feedbackId string, callback UploadLogsCallba
 	if self.testingBeforeUploadLogs != nil {
 		self.testingBeforeUploadLogs()
 	}
-	return uploadLogs(self.GetApi(), self.log, feedbackId, callback)
+	return uploadLogs(self.GetApi(), self.log, feedbackId, nil, callback)
+}
+
+// UploadLogs, with the log files of another process (uploadLogsFiles) in the
+// same zip, each as <Source>/<Name>, within the same cap: the newest files of
+// every source that fit, oldest left out first.
+//
+// For a process that carries the upload for another one that logs in a
+// directory of its own: on windows the service carries the app's logs, on
+// linux urnetworkd the gui's. The files are borrowed (UploadLogsFile): they are
+// read through duplicates before this returns, and the caller closes its
+// descriptors once it has returned, whatever it returned. A file that is not a
+// regular file with a glog name is left out, and the rest still go.
+func (self *DeviceLocal) UploadLogsWithFiles(feedbackId string, uploadLogsFiles *UploadLogsFileList, callback UploadLogsCallback) error {
+	if self.testingBeforeUploadLogs != nil {
+		self.testingBeforeUploadLogs()
+	}
+	var uploadLogsFileValues []*UploadLogsFile
+	if uploadLogsFiles != nil {
+		uploadLogsFileValues = uploadLogsFiles.getAll()
+	}
+	return uploadLogs(self.GetApi(), self.log, feedbackId, uploadLogsFileValues, callback)
 }
 
 // DiagnosticManifestJson returns the device-side half of the exported bundle's

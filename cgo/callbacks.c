@@ -13,6 +13,10 @@ void urnet_invoke_account_preferences_set(urnet_account_preferences_set_cb cb, v
 	cb(user_data, result_json, err_param);
 }
 
+void urnet_invoke_account_sign_in_required(urnet_account_sign_in_required_cb cb, void* user_data) {
+	cb(user_data);
+}
+
 void urnet_invoke_account_wallets(urnet_account_wallets_cb cb, void* user_data) {
 	cb(user_data);
 }
@@ -135,6 +139,10 @@ void urnet_invoke_client_limit_status_change(urnet_client_limit_status_change_cb
 
 void urnet_invoke_client_refresh_integrity(urnet_client_refresh_integrity_cb cb, void* user_data, uint64_t notice) {
 	cb(user_data, notice);
+}
+
+void urnet_invoke_client_session(urnet_client_session_cb cb, void* user_data, uint64_t snapshot) {
+	cb(user_data, snapshot);
 }
 
 void urnet_invoke_commit(urnet_commit_cb cb, void* user_data, bool success) {
@@ -301,6 +309,10 @@ void urnet_invoke_get_network_reliability(urnet_get_network_reliability_cb cb, v
 	cb(user_data, result_json, err_param);
 }
 
+void urnet_invoke_get_network_sessions(urnet_get_network_sessions_cb cb, void* user_data, uint64_t result, const char* err_param) {
+	cb(user_data, result, err_param);
+}
+
 void urnet_invoke_get_network_user(urnet_get_network_user_cb cb, void* user_data, const char* result_json, const char* err_param) {
 	cb(user_data, result_json, err_param);
 }
@@ -391,6 +403,10 @@ void urnet_invoke_network_delete(urnet_network_delete_cb cb, void* user_data, co
 
 void urnet_invoke_network_peers_change(urnet_network_peers_change_cb cb, void* user_data, const char* network_peers_json) {
 	cb(user_data, network_peers_json);
+}
+
+void urnet_invoke_network_sessions_change(urnet_network_sessions_change_cb cb, void* user_data, uint64_t revision) {
+	cb(user_data, revision);
 }
 
 void urnet_invoke_network_space_update(urnet_network_space_update_cb cb, void* user_data, const char* values_json) {
@@ -577,6 +593,14 @@ void urnet_invoke_send_feedback(urnet_send_feedback_cb cb, void* user_data, cons
 	cb(user_data, result_json, err_param);
 }
 
+void urnet_invoke_session_operation(urnet_session_operation_cb cb, void* user_data, uint64_t result, const char* err_param) {
+	cb(user_data, result, err_param);
+}
+
+void urnet_invoke_session_sign_out(urnet_session_sign_out_cb cb, void* user_data, uint64_t p0, const char* p1) {
+	cb(user_data, p0, p1);
+}
+
 void urnet_invoke_set_emoji_tag(urnet_set_emoji_tag_cb cb, void* user_data, const char* result_json, const char* err_param) {
 	cb(user_data, result_json, err_param);
 }
@@ -638,6 +662,34 @@ void urnet_invoke_sn_get_wallet(urnet_sn_get_wallet_cb cb, void* user_data, cons
 }
 
 void urnet_invoke_sn_head(urnet_sn_head_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
+}
+
+void urnet_invoke_sn_ledger_accounts(urnet_sn_ledger_accounts_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
+}
+
+void urnet_invoke_sn_ledger_claim_confirmed(urnet_sn_ledger_claim_confirmed_cb cb, void* user_data, int64_t no_id, int64_t index, const char* tx_hash, int64_t amount_rao) {
+	cb(user_data, no_id, index, tx_hash, amount_rao);
+}
+
+void urnet_invoke_sn_ledger_claim_done(urnet_sn_ledger_claim_done_cb cb, void* user_data) {
+	cb(user_data);
+}
+
+void urnet_invoke_sn_ledger_claim_failed(urnet_sn_ledger_claim_failed_cb cb, void* user_data, int64_t no_id, int64_t index, const char* message) {
+	cb(user_data, no_id, index, message);
+}
+
+void urnet_invoke_sn_ledger_claim_sent(urnet_sn_ledger_claim_sent_cb cb, void* user_data, int64_t no_id, int64_t index, const char* tx_hash) {
+	cb(user_data, no_id, index, tx_hash);
+}
+
+void urnet_invoke_sn_network_consent_challenge(urnet_sn_network_consent_challenge_cb cb, void* user_data, const char* result_json, const char* err_param) {
+	cb(user_data, result_json, err_param);
+}
+
+void urnet_invoke_sn_network_consent_status(urnet_sn_network_consent_status_cb cb, void* user_data, const char* result_json, const char* err_param) {
 	cb(user_data, result_json, err_param);
 }
 
