@@ -16,6 +16,7 @@ public interface Raw extends Library {
   interface urnet_auth_code_login_cb extends Callback { void invoke(Pointer a0, String a1, String a2); }
   interface urnet_auth_login_cb extends Callback { void invoke(Pointer a0, String a1, String a2); }
   interface urnet_auth_login_with_password_cb extends Callback { void invoke(Pointer a0, String a1, String a2); }
+  interface urnet_auth_logout_event_cb extends Callback { void invoke(Pointer a0, long a1, String a2); }
   interface urnet_auth_logout_cb extends Callback { void invoke(Pointer a0); }
   interface urnet_auth_network_client_cb extends Callback { void invoke(Pointer a0, String a1, String a2); }
   interface urnet_auth_password_reset_cb extends Callback { void invoke(Pointer a0, String a1, String a2); }
@@ -261,6 +262,7 @@ public interface Raw extends Library {
   void urnet_api_account_preferences_update(long a0, String a1, urnet_account_preferences_set_cb a2, Pointer a3);
   long urnet_api_add_account_sign_in_required_listener(long a0, urnet_account_sign_in_required_cb a1, Pointer a2);
   void urnet_api_add_auth(long a0, String a1, urnet_add_auth_cb a2, Pointer a3);
+  long urnet_api_add_auth_logout_event_listener(long a0, urnet_auth_logout_event_cb a1, Pointer a2);
   long urnet_api_add_auth_logout_listener(long a0, urnet_auth_logout_cb a1, Pointer a2);
   long urnet_api_add_client_refresh_integrity_listener(long a0, urnet_client_refresh_integrity_cb a1, Pointer a2);
   long urnet_api_add_jwt_refresh_listener(long a0, urnet_jwt_refresh_cb a1, Pointer a2);
@@ -317,6 +319,7 @@ public interface Raw extends Library {
   void urnet_api_get_referral_network(long a0, urnet_get_referral_network_cb a1, Pointer a2);
   void urnet_api_get_transfer_stats(long a0, urnet_get_transfer_stats_cb a1, Pointer a2);
   byte urnet_api_has_network_credential(long a0);
+  byte urnet_api_is_auth_logout_current(long a0, long a1);
   void urnet_api_list_api_keys(long a0, urnet_list_api_keys_cb a1, Pointer a2);
   void urnet_api_network_block_location(long a0, String a1, urnet_network_block_location_cb a2, Pointer a3);
   void urnet_api_network_check(long a0, String a1, urnet_network_check_cb a2, Pointer a3);
@@ -1093,6 +1096,7 @@ public interface Raw extends Library {
   Pointer urnet_network_space_get_extender_status(long a0);
   Pointer urnet_network_space_get_gossip_url(long a0);
   Pointer urnet_network_space_get_host_name(long a0);
+  Pointer urnet_network_space_get_ingress_country_code(long a0);
   Pointer urnet_network_space_get_key(long a0);
   Pointer urnet_network_space_get_link_host_name(long a0);
   Pointer urnet_network_space_get_migration_host_name(long a0);
@@ -1113,6 +1117,7 @@ public interface Raw extends Library {
   Pointer urnet_network_space_set_control_doh_urls(long a0, String a1);
   void urnet_network_space_set_control_ip_family_policy(long a0, long a1);
   void urnet_network_space_set_extender_gossip_mode(long a0, String a1);
+  Pointer urnet_network_space_set_ingress_country_code(long a0, String a1);
   Pointer urnet_network_space_set_vless_settings(long a0, String a1);
   Pointer urnet_network_space_to_json(long a0, PointerByReference a1);
   long urnet_network_space_manager_add_active_network_space_change_listener(long a0, urnet_active_network_space_change_cb a1, Pointer a2);
@@ -1389,6 +1394,9 @@ public interface Raw extends Library {
   byte urnet_has_regional_dns_recommendation(String a0);
   Pointer urnet_host_base_name(String a0);
   Pointer urnet_id_from_bytes(Pointer a0, int a1, PointerByReference a2);
+  Pointer urnet_ingress_country_codes();
+  Pointer urnet_ingress_doh_urls(String a0);
+  Pointer urnet_ingress_plain_dns_servers(String a0);
   byte urnet_is_balance_code_format_valid(String a0);
   byte urnet_is_checkout_redirect(String a0);
   byte urnet_is_points_leaderboard_sort(String a0);
