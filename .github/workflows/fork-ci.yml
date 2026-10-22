@@ -92,7 +92,7 @@ env:
   CONNECT_REPOSITORY: ${{ inputs.connect_repository }}
   CONNECT_REF: ${{ inputs.connect_ref }}
   TEST_ARGS: ${{ inputs.test_args }}
-  GO_VERSION: "1.27.1"
+  GO_VERSION: "1.27.3"
 
 jobs:
   run:
