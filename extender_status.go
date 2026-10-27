@@ -267,9 +267,14 @@ func extenderStatusTimeMs(t time.Time) int64 {
 	return t.UnixMilli()
 }
 
-// The persisted gossip mode of this space (D5). A space with no storage always
-// reads auto.
+// The gossip mode of this space (D5): the persisted one, or for a space with
+// no storage the one it was built with or last set, auto when neither.
 func (self *NetworkSpace) GetExtenderGossipMode() string {
+	if self.asyncLocalState == nil {
+		if mode, ok := self.extenderGossipMode.Load().(string); ok {
+			return mode
+		}
+	}
 	return extenderGossipMode(self.asyncLocalState)
 }
 
@@ -282,14 +287,17 @@ func extenderGossipMode(asyncLocalState *AsyncLocalState) string {
 	return asyncLocalState.GetLocalState().GetExtenderGossipMode()
 }
 
-// Persists the gossip mode and publishes the new status, so a ui that changed
-// the mode sees the role it now has without asking again.
+// Persists the gossip mode (held in memory by a space with no storage) and
+// publishes the new status, so a ui that changed the mode sees the role it now
+// has without asking again.
 func (self *NetworkSpace) SetExtenderGossipMode(mode string) {
 	mode = NormalExtenderGossipMode(mode)
 	if self.asyncLocalState != nil {
 		self.asyncLocalState.serialAsync(func() error {
 			return self.asyncLocalState.GetLocalState().SetExtenderGossipMode(mode)
 		})
+	} else {
+		self.extenderGossipMode.Store(mode)
 	}
 	self.extenderStatusChanged()
 }

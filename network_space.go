@@ -311,6 +311,11 @@ type NetworkSpace struct {
 	// the key beside `.extender_key`, and for one whose embedder named none,
 	// which then serves no measurement name.
 	extenderMeasurementKeyFile string
+	// The gossip mode of a space with no local state (D5), a string: what its
+	// embedder built it with, else what SetExtenderGossipMode last set. Unset
+	// reads auto. A space with local state keeps `.extender_gossip_mode`
+	// instead, which always wins, and leaves this unset.
+	extenderGossipMode atomic.Value
 	// The gossip node of the member role (D1, D5). Nil in the feed role, on
 	// the js build, and for a space with nothing to join. The provider
 	// extender role swaps it for a listening extender node and back (G2).
@@ -992,7 +997,7 @@ func (self *NetworkSpace) restartExtenderNetwork(resetId string) {
 	self.clientStrategy.SetCustomExtenders(extenderIpSecrets)
 
 	if self.extenderDirectory != nil {
-		role := extenderRole(extenderGossipMode(self.asyncLocalState))
+		role := extenderRole(self.GetExtenderGossipMode())
 		networkClient := newSpaceExtenderNetworkClient(
 			self.ctx,
 			&self.key,
@@ -1267,6 +1272,31 @@ func NewNetworkSpaceWithUrls(
 	platformUrl string,
 	clientStrategySettings *connect.ClientStrategySettings,
 ) *NetworkSpace {
+	return NewNetworkSpaceWithUrlsAndGossipMode(
+		ctx,
+		apiUrl,
+		platformUrl,
+		clientStrategySettings,
+		ExtenderGossipModeAuto,
+	)
+}
+
+// NewNetworkSpaceWithUrlsAndGossipMode is NewNetworkSpaceWithUrls with the
+// space's gossip mode (D5) set from the start, since a storage-less space has
+// no `.extender_gossip_mode` to read it from. An embedder that runs many
+// spaces in one process passes ExtenderGossipModeFeed for all but one: each
+// member space runs its own libp2p node, and a host needs only one on the
+// mesh.
+//
+//gomobile:noexport
+func NewNetworkSpaceWithUrlsAndGossipMode(
+	ctx context.Context,
+	apiUrl string,
+	platformUrl string,
+	clientStrategySettings *connect.ClientStrategySettings,
+	gossipMode string,
+) *NetworkSpace {
+	gossipMode = NormalExtenderGossipMode(gossipMode)
 	cancelCtx, cancel := context.WithCancel(ctx)
 	if clientStrategySettings == nil {
 		clientStrategySettings = connect.DefaultClientStrategySettings()
@@ -1339,8 +1369,9 @@ func NewNetworkSpaceWithUrls(
 		extenderNodeMonitor:           connect.NewMonitor(),
 		extenderStatusChangeListeners: connect.NewCallbackList[ExtenderStatusChangeListener](),
 	}
+	networkSpace.extenderGossipMode.Store(gossipMode)
 	if extenderDirectory != nil {
-		role := extenderRole(extenderGossipMode(nil))
+		role := extenderRole(gossipMode)
 		networkSpace.extenderNetworkClient = newSpaceExtenderNetworkClient(
 			cancelCtx,
 			&key,

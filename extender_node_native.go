@@ -238,7 +238,7 @@ func (self *NetworkSpace) setExtenderNodeRole(
 	listener *gossip.InProcessListener,
 	listenAddrs []ma.Multiaddr,
 ) *spaceExtenderNode {
-	if extenderRole(extenderGossipMode(self.asyncLocalState)) != ExtenderRoleMember {
+	if extenderRole(self.GetExtenderGossipMode()) != ExtenderRoleMember {
 		self.swapExtenderNode(func() *spaceExtenderNode { return nil })
 		return nil
 	}
@@ -264,7 +264,7 @@ func (self *NetworkSpace) setExtenderNodeRole(
 // stops (G2). A space whose app role is feed ends up with no node, which is
 // what it had before the role started.
 func (self *NetworkSpace) restoreExtenderNodeRole() {
-	role := extenderRole(extenderGossipMode(self.asyncLocalState))
+	role := extenderRole(self.GetExtenderGossipMode())
 	values := self.valuesCopy()
 	self.swapExtenderNode(func() *spaceExtenderNode {
 		return newSpaceExtenderNode(
