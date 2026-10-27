@@ -153,6 +153,47 @@ func TestDeviceLocalProviderPublicStandbyDialsDirect(t *testing.T) {
 	}
 }
 
+// A public provider in a proxied space provides from the proxy's address: its
+// standby keeps the space's strategy, which dials through the proxy, and it
+// pins no family, since a pinned transport dials direct.
+func TestDeviceLocalProviderProxiedPublicStandbyKeepsTheProxy(t *testing.T) {
+	provider, recorder := newTestProvideModeProvider(t, ProvideModePublic)
+	proxiedSettings := connect.DefaultClientStrategySettings()
+	proxiedSettings.ProxySettings = &connect.ProxySettings{Network: "tcp", Address: "192.0.2.1:1080"}
+	provider.networkSpace = &NetworkSpace{clientStrategySettings: proxiedSettings}
+
+	if url := providerPinnedPlatformUrl(provider.networkSpace, "wss://connect-v4.space.example"); url != "" {
+		t.Fatalf("a proxied provider pins %s", url)
+	}
+	if url := providerPinnedPlatformUrl(&NetworkSpace{clientStrategySettings: connect.DefaultClientStrategySettings()}, "wss://connect-v4.space.example"); url == "" {
+		t.Fatal("a provider without a proxy lost its pinned url")
+	}
+
+	transport := provider.newProviderPlatformTransport(
+		provider.auth,
+		provider.targetMode,
+		provider.platformTransportSettings,
+	)
+	defer waitTransportDone(t, transport)
+
+	if standbyStrategy := provider.standbyClientStrategy(provider.clientStrategySettings); standbyStrategy != provider.clientStrategy {
+		t.Fatal("a proxied public provider's standby dropped the space's strategy")
+	}
+	provider.stateLock.Lock()
+	directStandbyStrategy := provider.directStandbyStrategy
+	provider.stateLock.Unlock()
+	if directStandbyStrategy != nil {
+		t.Fatal("a proxied provider built a direct-only strategy")
+	}
+	label := recorder.nextDial(30 * time.Second)
+	if label == "" {
+		t.Fatal("the standby never dialed")
+	}
+	if label != "shared" {
+		t.Fatalf("the standby dialed with the %s strategy, want the space's strategy", label)
+	}
+}
+
 // A network provider keeps the shared strategy, extender dialers included:
 // network peers carry no location metadata.
 func TestDeviceLocalProviderNetworkStandbyKeepsSharedStrategy(t *testing.T) {

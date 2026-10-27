@@ -1187,6 +1187,12 @@ func (self *NetworkSpace) newHostedClientStrategy(dnsMemoryTarget *connect.Memor
 // device's private strategy and a provider's direct ones. They are what the
 // space's strategy was built from, with the DoH settings that strategy has in
 // force now, which a bootstrap DoH change replaces in place.
+// Whether the space's embedder routes its dials through a proxy
+// (connect.ProxySettings), as the sn miner does for each proxy provider.
+func (self *NetworkSpace) proxied() bool {
+	return self != nil && self.clientStrategySettings != nil && self.clientStrategySettings.ProxySettings != nil
+}
+
 func (self *NetworkSpace) derivedClientStrategySettings() *connect.ClientStrategySettings {
 	settings := *self.clientStrategySettings
 	settings.DohSettings = self.clientStrategy.DohSettings()

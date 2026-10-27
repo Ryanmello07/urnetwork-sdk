@@ -343,8 +343,8 @@ func newDeviceLocalProviderWithOverrides(
 		clientStrategy:            clientStrategy,
 		clientStrategySettings:    networkSpace.derivedClientStrategySettings(),
 		platformUrl:               networkSpace.platformUrl,
-		platformUrlV4:             networkSpace.GetPlatformUrlV4(),
-		platformUrlV6:             networkSpace.GetPlatformUrlV6(),
+		platformUrlV4:             providerPinnedPlatformUrl(networkSpace, networkSpace.GetPlatformUrlV4()),
+		platformUrlV6:             providerPinnedPlatformUrl(networkSpace, networkSpace.GetPlatformUrlV6()),
 		platformTransportSettings: platformTransportSettings,
 		targetMode:                targetMode,
 		modePreferences:           maps.Clone(modePreferences),
@@ -386,7 +386,11 @@ func provideModeIncludesPublic(provideMode ProvideMode) bool {
 // While the provide mode includes public it is the provider's own direct-only
 // strategy -- no extender dialers, no proxy -- so the platform observes the
 // provider's own address and location on every transport; every other mode
-// keeps the device's shared strategy and its extender dialers.
+// keeps the device's shared strategy and its extender dialers. A space whose
+// embedder set a proxy provides from the proxy's address, so its provider
+// keeps the space's strategy, which dials through the proxy: the direct
+// strategy drops the proxy and would put every proxy provider of one host on
+// the host's own address.
 //
 // The direct strategy is built once and reused by every later generation, and
 // is closed with the provider. It is built with no lock held, because the
@@ -400,7 +404,7 @@ func (self *deviceLocalProvider) standbyClientStrategy(
 		defer self.stateLock.Unlock()
 		return self.directStandbyStrategy, provideModeIncludesPublic(self.provideMode)
 	}()
-	if !public {
+	if !public || self.networkSpace.proxied() {
 		return self.clientStrategy
 	}
 	if directStandbyStrategy != nil {
@@ -487,6 +491,19 @@ func (self *deviceLocalProvider) clientLimitStatus() (connect.ClientLimitStatus,
 		return connect.ClientLimitStatus{}, nil
 	}
 	return self.clientLimitBackoff.Get()
+}
+
+// The family-pinned platform url a provider in networkSpace dials, or empty
+// for none. A pinned transport dials direct (connect.NewDirectClientStrategy
+// drops the proxy, since a pinned dial through a proxy would prove the
+// proxy's family), so a proxied space pins none: the proxy picks the egress
+// family, and its provider runs the single family-agnostic transport through
+// the proxy.
+func providerPinnedPlatformUrl(networkSpace *NetworkSpace, platformUrl string) string {
+	if networkSpace.proxied() {
+		return ""
+	}
+	return platformUrl
 }
 
 // newProviderPlatformTransport builds the provider's transport group: the
