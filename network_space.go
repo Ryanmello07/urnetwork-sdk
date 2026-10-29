@@ -846,6 +846,12 @@ func newSpaceExtenderNetworkClient(
 	if extenderNetworkClientDisabled.Load() || !extenderNetworkClientRuns(key, values) {
 		return nil
 	}
+	// a proxied space's api and platform traffic leaves through its proxy,
+	// and extender routes would only add connections and quic probes to it;
+	// with many proxies on one shared gateway that load is what fails
+	if clientStrategyDialsThroughProxy(clientStrategy) {
+		return nil
+	}
 	return connect.NewExtenderNetworkClient(
 		ctx,
 		clientStrategy,
@@ -1189,6 +1195,16 @@ func (self *NetworkSpace) newHostedClientStrategy(dnsMemoryTarget *connect.Memor
 // force now, which a bootstrap DoH change replaces in place.
 // Whether the space's embedder routes its dials through a proxy
 // (connect.ProxySettings), as the sn miner does for each proxy provider.
+// The strategy's tcp dials go through its proxy. An injected dial context
+// takes priority over the proxy in connect, so a strategy with one does not.
+func clientStrategyDialsThroughProxy(clientStrategy *connect.ClientStrategy) bool {
+	if clientStrategy == nil {
+		return false
+	}
+	settings := clientStrategy.ConnectSettings()
+	return settings.ProxySettings != nil && settings.DialContextSettings == nil
+}
+
 func (self *NetworkSpace) proxied() bool {
 	return self != nil && self.clientStrategySettings != nil && self.clientStrategySettings.ProxySettings != nil
 }

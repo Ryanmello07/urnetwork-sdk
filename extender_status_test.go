@@ -3,6 +3,7 @@ package sdk
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -535,4 +536,41 @@ type extenderStatusChangeListenerFunc func(status *ExtenderStatus)
 
 func (self extenderStatusChangeListenerFunc) ExtenderStatusChanged(status *ExtenderStatus) {
 	self(status)
+}
+
+// A space whose strategy dials through a proxy runs no extender network
+// client; the same space without the proxy, or with an injected dial context
+// that takes priority over it, does.
+func TestProxiedSpaceRunsNoExtenderNetworkClient(t *testing.T) {
+	previous := SetExtenderNetworkClientEnabled(true)
+	defer SetExtenderNetworkClientEnabled(previous)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	key := NewNetworkSpaceKey("space.example", "main")
+	values := NetworkSpaceValues{}
+	build := func(settings *connect.ClientStrategySettings) *connect.ExtenderNetworkClient {
+		strategy := connect.NewClientStrategy(ctx, settings)
+		t.Cleanup(strategy.Close)
+		client := newSpaceExtenderNetworkClient(ctx, key, &values, ExtenderRoleFeed, strategy, connect.NewExtenderDirectoryWithDefaults(ctx), "https://api.space.example", nil)
+		if client != nil {
+			t.Cleanup(client.Close)
+		}
+		return client
+	}
+
+	if build(connect.DefaultClientStrategySettings()) == nil {
+		t.Fatal("a direct space ran no network client, so the test proves nothing")
+	}
+	proxied := connect.DefaultClientStrategySettings()
+	proxied.ProxySettings = &connect.ProxySettings{Network: "tcp", Address: "192.0.2.1:1080"}
+	if build(proxied) != nil {
+		t.Fatal("a proxied space ran an extender network client")
+	}
+	injected := connect.DefaultClientStrategySettings()
+	injected.ProxySettings = proxied.ProxySettings
+	injected.DialContextSettings = &connect.DialContextSettings{DialContext: (&net.Dialer{}).DialContext}
+	if build(injected) == nil {
+		t.Fatal("an injected dial context lost the network client")
+	}
 }
