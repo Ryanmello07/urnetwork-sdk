@@ -2271,6 +2271,7 @@ struct FindProviders2Args {
 	std::optional<std::string> rank_mode;
 	std::optional<bool> force_minimum;
 	std::optional<std::string> ip_family;
+	std::optional<bool> strict;
 };
 
 struct FindProviders2Result {
@@ -2311,6 +2312,7 @@ struct FindProvidersProvider {
 	std::optional<std::string> reputation_failed_names;
 	std::optional<ProviderLocation> location;
 	std::optional<std::string> ip_family;
+	std::optional<std::string> match;
 };
 
 struct FindProvidersResult {
@@ -3573,6 +3575,7 @@ struct SnTopFleet {
 	int64_t generation{};
 	int64_t valid_to_epoch{};
 	double replica_score{};
+	bool has_replica_score{};
 	double validator_score{};
 	bool has_validator_score{};
 	int64_t validator_rank{};
@@ -10360,6 +10363,9 @@ inline void to_json(nlohmann::json& j, const FindProviders2Args& v) {
 	if (v.ip_family) {
 		j["ip_family"] = *v.ip_family;
 	}
+	if (v.strict) {
+		j["strict"] = *v.strict;
+	}
 }
 inline void from_json(const nlohmann::json& j, FindProviders2Args& v) {
 	if (!j.is_object()) {
@@ -10402,6 +10408,11 @@ inline void from_json(const nlohmann::json& j, FindProviders2Args& v) {
 		std::string tmp{};
 		it->get_to(tmp);
 		v.ip_family = std::move(tmp);
+	}
+	if (auto it = j.find("strict"); it != j.end() && !it->is_null()) {
+		bool tmp{};
+		it->get_to(tmp);
+		v.strict = std::move(tmp);
 	}
 }
 
@@ -10580,6 +10591,9 @@ inline void to_json(nlohmann::json& j, const FindProvidersProvider& v) {
 	if (v.ip_family) {
 		j["ip_family"] = *v.ip_family;
 	}
+	if (v.match) {
+		j["match"] = *v.match;
+	}
 }
 inline void from_json(const nlohmann::json& j, FindProvidersProvider& v) {
 	if (!j.is_object()) {
@@ -10623,6 +10637,11 @@ inline void from_json(const nlohmann::json& j, FindProvidersProvider& v) {
 		std::string tmp{};
 		it->get_to(tmp);
 		v.ip_family = std::move(tmp);
+	}
+	if (auto it = j.find("match"); it != j.end() && !it->is_null()) {
+		std::string tmp{};
+		it->get_to(tmp);
+		v.match = std::move(tmp);
 	}
 }
 
@@ -16444,6 +16463,7 @@ inline void to_json(nlohmann::json& j, const SnTopFleet& v) {
 	j["generation"] = v.generation;
 	j["valid_to_epoch"] = v.valid_to_epoch;
 	j["replica_score"] = v.replica_score;
+	j["has_replica_score"] = v.has_replica_score;
 	j["validator_score"] = v.validator_score;
 	j["has_validator_score"] = v.has_validator_score;
 	j["validator_rank"] = v.validator_rank;
@@ -16471,6 +16491,9 @@ inline void from_json(const nlohmann::json& j, SnTopFleet& v) {
 	}
 	if (auto it = j.find("replica_score"); it != j.end() && !it->is_null()) {
 		it->get_to(v.replica_score);
+	}
+	if (auto it = j.find("has_replica_score"); it != j.end() && !it->is_null()) {
+		it->get_to(v.has_replica_score);
 	}
 	if (auto it = j.find("validator_score"); it != j.end() && !it->is_null()) {
 		it->get_to(v.validator_score);
