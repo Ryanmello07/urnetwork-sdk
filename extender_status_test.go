@@ -574,3 +574,24 @@ func TestProxiedSpaceRunsNoExtenderNetworkClient(t *testing.T) {
 		t.Fatal("an injected dial context lost the network client")
 	}
 }
+
+// An injected dial context wins over the proxy in connect, so such a space
+// is not proxied: it keeps its direct transports, and the extender client
+// check agrees.
+func TestSpaceWithInjectedDialerIsNotProxied(t *testing.T) {
+	proxy := &connect.ProxySettings{Network: "tcp", Address: "192.0.2.1:1080"}
+	proxied := connect.DefaultClientStrategySettings()
+	proxied.ProxySettings = proxy
+	if !(&NetworkSpace{clientStrategySettings: proxied}).proxied() {
+		t.Fatal("a space with only a proxy is not proxied")
+	}
+	injected := connect.DefaultClientStrategySettings()
+	injected.ProxySettings = proxy
+	injected.DialContextSettings = &connect.DialContextSettings{DialContext: (&net.Dialer{}).DialContext}
+	if (&NetworkSpace{clientStrategySettings: injected}).proxied() {
+		t.Fatal("a space with an injected dial context is proxied")
+	}
+	if (&NetworkSpace{clientStrategySettings: connect.DefaultClientStrategySettings()}).proxied() {
+		t.Fatal("a direct space is proxied")
+	}
+}

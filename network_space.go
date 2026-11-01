@@ -1189,10 +1189,6 @@ func (self *NetworkSpace) newHostedClientStrategy(dnsMemoryTarget *connect.Memor
 	return connect.NewClientStrategy(self.ctx, &settings)
 }
 
-// The settings a strategy derived from the space's is built from: a hosted
-// device's private strategy and a provider's direct ones. They are what the
-// space's strategy was built from, with the DoH settings that strategy has in
-// force now, which a bootstrap DoH change replaces in place.
 // Whether the space's embedder routes its dials through a proxy
 // (connect.ProxySettings), as the sn miner does for each proxy provider.
 // The strategy's tcp dials go through its proxy. An injected dial context
@@ -1205,10 +1201,17 @@ func clientStrategyDialsThroughProxy(clientStrategy *connect.ClientStrategy) boo
 	return settings.ProxySettings != nil && settings.DialContextSettings == nil
 }
 
+// The same rule as clientStrategyDialsThroughProxy, read from the settings
+// the space's strategy is built from: a space with an injected dial context
+// does not dial through its proxy, so it keeps its direct transports.
 func (self *NetworkSpace) proxied() bool {
-	return self != nil && self.clientStrategySettings != nil && self.clientStrategySettings.ProxySettings != nil
+	return self != nil && self.clientStrategySettings != nil && self.clientStrategySettings.ProxySettings != nil && self.clientStrategySettings.DialContextSettings == nil
 }
 
+// The settings a strategy derived from the space's is built from: a hosted
+// device's private strategy and a provider's direct ones. They are what the
+// space's strategy was built from, with the DoH settings that strategy has in
+// force now, which a bootstrap DoH change replaces in place.
 func (self *NetworkSpace) derivedClientStrategySettings() *connect.ClientStrategySettings {
 	settings := *self.clientStrategySettings
 	settings.DohSettings = self.clientStrategy.DohSettings()
