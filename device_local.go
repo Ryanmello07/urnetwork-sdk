@@ -2076,6 +2076,9 @@ func newDeviceLocalWithOverridesForPlatform(
 		// are installed here (G2, L2)
 		provider.extenderDnsPrivilegedPort = settings.ProvideExtenderDnsPrivilegedPort
 		provider.extenderSettingsConfigure = settings.providerExtenderSettings
+		provider.extenderRoleChanged = func() {
+			deviceLocal.extenderProvideMonitor.NotifyAll()
+		}
 		// the role reads the measurements setting as it starts, and a change
 		// reaches a running role through setExtenderMeasurementsEnabled
 		// (lag.dev/PLAN.md C4)
@@ -3199,6 +3202,18 @@ func (self *DeviceLocal) updateContractStatus(contractStatus *connect.ContractSt
 			if contractStatus.Premium {
 				netContractStatus.Premium = true
 			}
+		}
+		// a result that says nothing about the account (setup, reliability, trust,
+		// a malformed contract) leaves its error as it stood. A refusal aged out of
+		// the window is still the last word on the balance when such a result
+		// pushes it out: clearing it there withdrew the app's out of balance alert,
+		// and reads to a desktop tunnel's failsafe as the balance having come back
+		if contractStatus.Error != nil &&
+			*contractStatus.Error != protocol.ContractError_InsufficientBalance &&
+			*contractStatus.Error != protocol.ContractError_NoPermission &&
+			self.netContractStatus != nil {
+			netContractStatus.InsufficientBalance = self.netContractStatus.InsufficientBalance
+			netContractStatus.NoPermission = self.netContractStatus.NoPermission
 		}
 
 		// only the new update's error is logged. The summary above visits
