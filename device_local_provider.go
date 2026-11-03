@@ -76,6 +76,9 @@ type deviceLocalProvider struct {
 	// next role asks to be replaced. Taken with extenderLock.
 	extenderStartTime     time.Time
 	extenderRestartJitter time.Duration
+	// what the activation of the role that was replaced handed over, for the role
+	// that replaces it. Taken with extenderLock.
+	extenderActivatorState *connect.ExtenderActivatorState
 	// extenderSettingsConfigure, when set, adjusts the extender role's
 	// settings before it is built. Tests bind ephemeral carrier ports and
 	// point the activation at an in-process operator through it.
@@ -1426,6 +1429,10 @@ func shareDevicePeerKeyPinStore(client, device *connect.ClientSettings) {
 func (self *deviceLocalProvider) setExtenderEnabled(enabled bool) {
 	self.extenderLock.Lock()
 	defer self.extenderLock.Unlock()
+	if !enabled {
+		// a role asked for again later starts as a new one does
+		self.extenderActivatorState = nil
+	}
 	self.setExtenderEnabledWithLock(enabled)
 }
 
@@ -1455,6 +1462,13 @@ func (self *deviceLocalProvider) restartExtender(role *deviceLocalExtender) {
 		)
 	}
 	self.setExtenderEnabledWithLock(false)
+	// what its activation was holding outlives it, so a fleet whose roles are
+	// replaced together does not post together. It is closed by now, so what it
+	// hands over is settled. A role that never got as far as activating leaves what
+	// it was handed.
+	if activatorState := role.activatorState(); activatorState != nil {
+		self.extenderActivatorState = activatorState
+	}
 	self.setExtenderEnabledWithLock(true)
 	// the watch of the status holds the old role's channel (F3)
 	if self.extenderRoleChanged != nil {
@@ -1542,11 +1556,14 @@ func (self *deviceLocalProvider) extenderSettings() (*deviceLocalExtenderSetting
 	}
 
 	// the relay's forward dial is the device's own egress: the extender
-	// narrows it by the client's family itself (A7, G2)
+	// narrows it by the client's family itself (A7, G2). A proxy the strategy
+	// names is left out, as it is from the role's activations (C2): the operator
+	// proved this host's address, and a proxy can't keep the client's family
 	connectSettings := *connect.DefaultConnectSettings()
 	if self.clientStrategySettings != nil {
 		connectSettings = self.clientStrategySettings.ConnectSettings
 	}
+	connectSettings.ProxySettings = nil
 	if self.dialContextSettings != nil {
 		connectSettings.DialContextSettings = self.dialContextSettings
 	}
@@ -1570,6 +1587,7 @@ func (self *deviceLocalProvider) extenderSettings() (*deviceLocalExtenderSetting
 		DialContext:            connectSettings.DialContext,
 		Restart:                self.restartExtender,
 		RestartJitter:          self.extenderRestartJitter,
+		ActivatorState:         self.extenderActivatorState,
 	}
 	settings.MeasurementsEnabled = self.extenderMeasurementsEnabled
 	if self.extenderSettingsConfigure != nil {
