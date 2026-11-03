@@ -2864,6 +2864,148 @@ func (self *cAdapterSnEpochCallback) Result(result *sdk.SnEpochResult, errParam 
 	}
 }
 
+type cAdapterSnFleetClaimCallback struct {
+	cbResult C.urnet_sn_fleet_claim_cb
+	userData unsafe.Pointer
+}
+
+func (self *cAdapterSnFleetClaimCallback) Result(result *sdk.SnFleetClaimState, errParam error) {
+	defer cgoGuard("urnet_sn_fleet_claim_cb")
+	result_ := cJson(result, "urnet_sn_fleet_claim_cb")
+	var errParam_ *C.char
+	if errParam != nil {
+		errParam_ = cString(errParam.Error())
+	}
+	C.urnet_invoke_sn_fleet_claim(self.cbResult, self.userData, result_, errParam_)
+	if result_ != nil {
+		cStringFree(result_)
+	}
+	if errParam_ != nil {
+		cStringFree(errParam_)
+	}
+}
+
+type cAdapterSnFleetClaimStore struct {
+	cbLoadSnFleetColdkeyPhrase C.urnet_sn_fleet_claim_store_load_sn_fleet_coldkey_phrase_cb
+	cbLoadSnFleetHotkeySeed    C.urnet_sn_fleet_claim_store_load_sn_fleet_hotkey_seed_cb
+	cbSaveSnFleetHotkeySeed    C.urnet_sn_fleet_claim_store_save_sn_fleet_hotkey_seed_cb
+	userData                   unsafe.Pointer
+}
+
+func (self *cAdapterSnFleetClaimStore) LoadSnFleetColdkeyPhrase(networkId string) string {
+	defer cgoGuard("urnet_sn_fleet_claim_store_load_sn_fleet_coldkey_phrase_cb")
+	networkId_ := cString(string(networkId))
+	r0_ := C.urnet_invoke_sn_fleet_claim_store_load_sn_fleet_coldkey_phrase(self.cbLoadSnFleetColdkeyPhrase, self.userData, networkId_)
+	cStringFree(networkId_)
+	r0 := goString(r0_)
+	if r0_ != nil {
+		urnet_free_string(r0_)
+	}
+	return r0
+}
+
+func (self *cAdapterSnFleetClaimStore) LoadSnFleetHotkeySeed(networkId string) string {
+	defer cgoGuard("urnet_sn_fleet_claim_store_load_sn_fleet_hotkey_seed_cb")
+	networkId_ := cString(string(networkId))
+	r0_ := C.urnet_invoke_sn_fleet_claim_store_load_sn_fleet_hotkey_seed(self.cbLoadSnFleetHotkeySeed, self.userData, networkId_)
+	cStringFree(networkId_)
+	r0 := goString(r0_)
+	if r0_ != nil {
+		urnet_free_string(r0_)
+	}
+	return r0
+}
+
+func (self *cAdapterSnFleetClaimStore) SaveSnFleetHotkeySeed(networkId string, seedHex string) bool {
+	defer cgoGuard("urnet_sn_fleet_claim_store_save_sn_fleet_hotkey_seed_cb")
+	networkId_ := cString(string(networkId))
+	seedHex_ := cString(string(seedHex))
+	r0_ := C.urnet_invoke_sn_fleet_claim_store_save_sn_fleet_hotkey_seed(self.cbSaveSnFleetHotkeySeed, self.userData, networkId_, seedHex_)
+	cStringFree(networkId_)
+	cStringFree(seedHex_)
+	return bool(r0_)
+}
+
+type cAdapterSnFleetDeviceCheckCallback struct {
+	cbResult C.urnet_sn_fleet_device_check_cb
+	userData unsafe.Pointer
+}
+
+func (self *cAdapterSnFleetDeviceCheckCallback) Result(result *sdk.SnFleetDeviceCheckResult, errParam error) {
+	defer cgoGuard("urnet_sn_fleet_device_check_cb")
+	result_ := cJson(result, "urnet_sn_fleet_device_check_cb")
+	var errParam_ *C.char
+	if errParam != nil {
+		errParam_ = cString(errParam.Error())
+	}
+	C.urnet_invoke_sn_fleet_device_check(self.cbResult, self.userData, result_, errParam_)
+	if result_ != nil {
+		cStringFree(result_)
+	}
+	if errParam_ != nil {
+		cStringFree(errParam_)
+	}
+}
+
+type cAdapterSnFleetDeviceLeaveCallback struct {
+	cbResult C.urnet_sn_fleet_device_leave_cb
+	userData unsafe.Pointer
+}
+
+func (self *cAdapterSnFleetDeviceLeaveCallback) Result(result *sdk.SnFleetDeviceLeaveOutcome, errParam error) {
+	defer cgoGuard("urnet_sn_fleet_device_leave_cb")
+	result_ := cJson(result, "urnet_sn_fleet_device_leave_cb")
+	var errParam_ *C.char
+	if errParam != nil {
+		errParam_ = cString(errParam.Error())
+	}
+	C.urnet_invoke_sn_fleet_device_leave(self.cbResult, self.userData, result_, errParam_)
+	if result_ != nil {
+		cStringFree(result_)
+	}
+	if errParam_ != nil {
+		cStringFree(errParam_)
+	}
+}
+
+type cAdapterSnFleetDeviceListener struct {
+	cbSnFleetDeviceChecked C.urnet_sn_fleet_device_cb
+	userData               unsafe.Pointer
+}
+
+func (self *cAdapterSnFleetDeviceListener) SnFleetDeviceChecked(result *sdk.SnFleetDeviceCheckResult) {
+	defer cgoGuard("urnet_sn_fleet_device_cb")
+	result_ := cJson(result, "urnet_sn_fleet_device_cb")
+	C.urnet_invoke_sn_fleet_device(self.cbSnFleetDeviceChecked, self.userData, result_)
+	if result_ != nil {
+		cStringFree(result_)
+	}
+}
+
+type cAdapterSnFleetDeviceStore struct {
+	cbLoadSnFleetDeviceState C.urnet_sn_fleet_device_store_load_sn_fleet_device_state_cb
+	cbSaveSnFleetDeviceState C.urnet_sn_fleet_device_store_save_sn_fleet_device_state_cb
+	userData                 unsafe.Pointer
+}
+
+func (self *cAdapterSnFleetDeviceStore) LoadSnFleetDeviceState() string {
+	defer cgoGuard("urnet_sn_fleet_device_store_load_sn_fleet_device_state_cb")
+	r0_ := C.urnet_invoke_sn_fleet_device_store_load_sn_fleet_device_state(self.cbLoadSnFleetDeviceState, self.userData)
+	r0 := goString(r0_)
+	if r0_ != nil {
+		urnet_free_string(r0_)
+	}
+	return r0
+}
+
+func (self *cAdapterSnFleetDeviceStore) SaveSnFleetDeviceState(stateJson string) bool {
+	defer cgoGuard("urnet_sn_fleet_device_store_save_sn_fleet_device_state_cb")
+	stateJson_ := cString(string(stateJson))
+	r0_ := C.urnet_invoke_sn_fleet_device_store_save_sn_fleet_device_state(self.cbSaveSnFleetDeviceState, self.userData, stateJson_)
+	cStringFree(stateJson_)
+	return bool(r0_)
+}
+
 type cAdapterSnGasBalanceCallback struct {
 	cbResult C.urnet_sn_gas_balance_cb
 	userData unsafe.Pointer
@@ -6677,6 +6819,20 @@ func urnet_bittensor_local_key_flow_cancel_confirmation(self C.uint64_t) {
 	self_.CancelConfirmation()
 }
 
+//export urnet_bittensor_local_key_flow_check_words
+func urnet_bittensor_local_key_flow_check_words(self C.uint64_t, firstWord *C.char, secondWord *C.char) *C.char {
+	defer cgoGuard("urnet_bittensor_local_key_flow_check_words")
+	self_, ok := resolveHandle[*sdk.BittensorLocalKeyFlow](uint64(self), "urnet_bittensor_local_key_flow_check_words")
+	if !ok {
+		return nil
+	}
+	r0 := self_.CheckWords(goString(firstWord), goString(secondWord))
+	if r0 == nil {
+		return nil
+	}
+	return cJson(r0, "urnet_bittensor_local_key_flow_check_words")
+}
+
 //export urnet_bittensor_local_key_flow_close
 func urnet_bittensor_local_key_flow_close(self C.uint64_t) {
 	defer cgoGuard("urnet_bittensor_local_key_flow_close")
@@ -6698,23 +6854,23 @@ func urnet_bittensor_local_key_flow_close_screen(self C.uint64_t) {
 }
 
 //export urnet_bittensor_local_key_flow_confirm_delete
-func urnet_bittensor_local_key_flow_confirm_delete(self C.uint64_t, authenticated C.bool) {
+func urnet_bittensor_local_key_flow_confirm_delete(self C.uint64_t) {
 	defer cgoGuard("urnet_bittensor_local_key_flow_confirm_delete")
 	self_, ok := resolveHandle[*sdk.BittensorLocalKeyFlow](uint64(self), "urnet_bittensor_local_key_flow_confirm_delete")
 	if !ok {
 		return
 	}
-	self_.ConfirmDelete(bool(authenticated))
+	self_.ConfirmDelete()
 }
 
 //export urnet_bittensor_local_key_flow_confirm_keep
-func urnet_bittensor_local_key_flow_confirm_keep(self C.uint64_t, authenticated C.bool) {
+func urnet_bittensor_local_key_flow_confirm_keep(self C.uint64_t) {
 	defer cgoGuard("urnet_bittensor_local_key_flow_confirm_keep")
 	self_, ok := resolveHandle[*sdk.BittensorLocalKeyFlow](uint64(self), "urnet_bittensor_local_key_flow_confirm_keep")
 	if !ok {
 		return
 	}
-	self_.ConfirmKeep(bool(authenticated))
+	self_.ConfirmKeep()
 }
 
 //export urnet_bittensor_local_key_flow_finish_setup
@@ -6736,6 +6892,17 @@ func urnet_bittensor_local_key_flow_forget_network(self C.uint64_t) C.bool {
 	}
 	r0 := self_.ForgetNetwork()
 	return C.bool(r0)
+}
+
+//export urnet_bittensor_local_key_flow_funds_disclaimer_at
+func urnet_bittensor_local_key_flow_funds_disclaimer_at(self C.uint64_t, place *C.char) *C.char {
+	defer cgoGuard("urnet_bittensor_local_key_flow_funds_disclaimer_at")
+	self_, ok := resolveHandle[*sdk.BittensorLocalKeyFlow](uint64(self), "urnet_bittensor_local_key_flow_funds_disclaimer_at")
+	if !ok {
+		return nil
+	}
+	r0 := self_.FundsDisclaimerAt(goString(place))
+	return cString(string(r0))
 }
 
 //export urnet_bittensor_local_key_flow_get_card
@@ -6989,13 +7156,13 @@ func urnet_bittensor_local_key_flow_string(self C.uint64_t) *C.char {
 }
 
 //export urnet_bittensor_local_key_flow_submit_words
-func urnet_bittensor_local_key_flow_submit_words(self C.uint64_t, firstWord *C.char, secondWord *C.char) {
+func urnet_bittensor_local_key_flow_submit_words(self C.uint64_t, firstWord *C.char, secondWord *C.char, authenticated C.bool) {
 	defer cgoGuard("urnet_bittensor_local_key_flow_submit_words")
 	self_, ok := resolveHandle[*sdk.BittensorLocalKeyFlow](uint64(self), "urnet_bittensor_local_key_flow_submit_words")
 	if !ok {
 		return
 	}
-	self_.SubmitWords(goString(firstWord), goString(secondWord))
+	self_.SubmitWords(goString(firstWord), goString(secondWord), bool(authenticated))
 }
 
 //export urnet_bittensor_local_key_generate
@@ -12747,6 +12914,21 @@ func urnet_device_local_sign_sn_fleet_binding(self C.uint64_t, bindingJson *C.ch
 	return cString(string(r0))
 }
 
+//export urnet_device_local_sign_sn_fleet_revoke
+func urnet_device_local_sign_sn_fleet_revoke(self C.uint64_t, revokeJson *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_device_local_sign_sn_fleet_revoke")
+	self_, ok := resolveHandle[*sdk.DeviceLocal](uint64(self), "urnet_device_local_sign_sn_fleet_revoke")
+	if !ok {
+		return nil
+	}
+	r0, err := self_.SignSnFleetRevoke(goString(revokeJson))
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	return cString(string(r0))
+}
+
 //export urnet_device_local_simulate_network_change
 func urnet_device_local_simulate_network_change(self C.uint64_t) {
 	defer cgoGuard("urnet_device_local_simulate_network_change")
@@ -14313,6 +14495,21 @@ func urnet_device_remote_sign_sn_fleet_binding(self C.uint64_t, bindingJson *C.c
 		return nil
 	}
 	r0, err := self_.SignSnFleetBinding(goString(bindingJson))
+	if err != nil {
+		setErrorOut(outError, err)
+		return nil
+	}
+	return cString(string(r0))
+}
+
+//export urnet_device_remote_sign_sn_fleet_revoke
+func urnet_device_remote_sign_sn_fleet_revoke(self C.uint64_t, revokeJson *C.char, outError **C.char) *C.char {
+	defer cgoGuard("urnet_device_remote_sign_sn_fleet_revoke")
+	self_, ok := resolveHandle[*sdk.DeviceRemote](uint64(self), "urnet_device_remote_sign_sn_fleet_revoke")
+	if !ok {
+		return nil
+	}
+	r0, err := self_.SignSnFleetRevoke(goString(revokeJson))
 	if err != nil {
 		setErrorOut(outError, err)
 		return nil
@@ -19037,6 +19234,95 @@ func urnet_new_sn_chain_settings() *C.char {
 	return cJson(r0, "urnet_new_sn_chain_settings")
 }
 
+//export urnet_new_sn_fleet_claim
+func urnet_new_sn_fleet_claim(api C.uint64_t, settings *C.char, store_load_sn_fleet_coldkey_phrase C.urnet_sn_fleet_claim_store_load_sn_fleet_coldkey_phrase_cb, store_load_sn_fleet_hotkey_seed C.urnet_sn_fleet_claim_store_load_sn_fleet_hotkey_seed_cb, store_save_sn_fleet_hotkey_seed C.urnet_sn_fleet_claim_store_save_sn_fleet_hotkey_seed_cb, store_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_new_sn_fleet_claim")
+	var api_ *sdk.Api
+	if api != 0 {
+		var ok bool
+		api_, ok = resolveHandle[*sdk.Api](uint64(api), "urnet_new_sn_fleet_claim")
+		if !ok {
+			return 0
+		}
+	}
+	var settings_ *sdk.SnChainSettings
+	if settings != nil {
+		settings_ = &sdk.SnChainSettings{}
+		if !goJson(settings, settings_, "urnet_new_sn_fleet_claim") {
+			return 0
+		}
+	}
+	var store_ sdk.SnFleetClaimStore
+	if store_load_sn_fleet_coldkey_phrase != nil {
+		store_ = &cAdapterSnFleetClaimStore{cbLoadSnFleetColdkeyPhrase: store_load_sn_fleet_coldkey_phrase, cbLoadSnFleetHotkeySeed: store_load_sn_fleet_hotkey_seed, cbSaveSnFleetHotkeySeed: store_save_sn_fleet_hotkey_seed, userData: store_user_data}
+	}
+	r0 := sdk.NewSnFleetClaim(api_, settings_, store_)
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_new_sn_fleet_device_for_local
+func urnet_new_sn_fleet_device_for_local(api C.uint64_t, device C.uint64_t, store_load_sn_fleet_device_state C.urnet_sn_fleet_device_store_load_sn_fleet_device_state_cb, store_save_sn_fleet_device_state C.urnet_sn_fleet_device_store_save_sn_fleet_device_state_cb, store_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_new_sn_fleet_device_for_local")
+	var api_ *sdk.Api
+	if api != 0 {
+		var ok bool
+		api_, ok = resolveHandle[*sdk.Api](uint64(api), "urnet_new_sn_fleet_device_for_local")
+		if !ok {
+			return 0
+		}
+	}
+	var device_ *sdk.DeviceLocal
+	if device != 0 {
+		var ok bool
+		device_, ok = resolveHandle[*sdk.DeviceLocal](uint64(device), "urnet_new_sn_fleet_device_for_local")
+		if !ok {
+			return 0
+		}
+	}
+	var store_ sdk.SnFleetDeviceStore
+	if store_load_sn_fleet_device_state != nil {
+		store_ = &cAdapterSnFleetDeviceStore{cbLoadSnFleetDeviceState: store_load_sn_fleet_device_state, cbSaveSnFleetDeviceState: store_save_sn_fleet_device_state, userData: store_user_data}
+	}
+	r0 := sdk.NewSnFleetDeviceForLocal(api_, device_, store_)
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
+//export urnet_new_sn_fleet_device_for_remote
+func urnet_new_sn_fleet_device_for_remote(api C.uint64_t, device C.uint64_t, store_load_sn_fleet_device_state C.urnet_sn_fleet_device_store_load_sn_fleet_device_state_cb, store_save_sn_fleet_device_state C.urnet_sn_fleet_device_store_save_sn_fleet_device_state_cb, store_user_data unsafe.Pointer) C.uint64_t {
+	defer cgoGuard("urnet_new_sn_fleet_device_for_remote")
+	var api_ *sdk.Api
+	if api != 0 {
+		var ok bool
+		api_, ok = resolveHandle[*sdk.Api](uint64(api), "urnet_new_sn_fleet_device_for_remote")
+		if !ok {
+			return 0
+		}
+	}
+	var device_ *sdk.DeviceRemote
+	if device != 0 {
+		var ok bool
+		device_, ok = resolveHandle[*sdk.DeviceRemote](uint64(device), "urnet_new_sn_fleet_device_for_remote")
+		if !ok {
+			return 0
+		}
+	}
+	var store_ sdk.SnFleetDeviceStore
+	if store_load_sn_fleet_device_state != nil {
+		store_ = &cAdapterSnFleetDeviceStore{cbLoadSnFleetDeviceState: store_load_sn_fleet_device_state, cbSaveSnFleetDeviceState: store_save_sn_fleet_device_state, userData: store_user_data}
+	}
+	r0 := sdk.NewSnFleetDeviceForRemote(api_, device_, store_)
+	if r0 == nil {
+		return 0
+	}
+	return C.uint64_t(newHandle(r0))
+}
+
 //export urnet_new_subscription_balance_view_controller
 func urnet_new_subscription_balance_view_controller(api C.uint64_t) C.uint64_t {
 	defer cgoGuard("urnet_new_subscription_balance_view_controller")
@@ -20755,6 +21041,151 @@ func urnet_sn_fleet_binding_digest(bindingJson *C.char, outError **C.char) *C.ch
 		return nil
 	}
 	return cString(string(r0))
+}
+
+//export urnet_sn_fleet_claim_advance
+func urnet_sn_fleet_claim_advance(self C.uint64_t, callback_result C.urnet_sn_fleet_claim_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_sn_fleet_claim_advance")
+	self_, ok := resolveHandle[*sdk.SnFleetClaim](uint64(self), "urnet_sn_fleet_claim_advance")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnFleetClaimCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnFleetClaimCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.Advance(callback_)
+}
+
+//export urnet_sn_fleet_claim_leave
+func urnet_sn_fleet_claim_leave(self C.uint64_t, device C.uint64_t, callback_result C.urnet_sn_fleet_device_leave_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_sn_fleet_claim_leave")
+	self_, ok := resolveHandle[*sdk.SnFleetClaim](uint64(self), "urnet_sn_fleet_claim_leave")
+	if !ok {
+		return
+	}
+	var device_ *sdk.SnFleetDevice
+	if device != 0 {
+		var ok bool
+		device_, ok = resolveHandle[*sdk.SnFleetDevice](uint64(device), "urnet_sn_fleet_claim_leave")
+		if !ok {
+			return
+		}
+	}
+	var callback_ sdk.SnFleetDeviceLeaveCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnFleetDeviceLeaveCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.Leave(device_, callback_)
+}
+
+//export urnet_sn_fleet_claim_refresh
+func urnet_sn_fleet_claim_refresh(self C.uint64_t, callback_result C.urnet_sn_fleet_claim_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_sn_fleet_claim_refresh")
+	self_, ok := resolveHandle[*sdk.SnFleetClaim](uint64(self), "urnet_sn_fleet_claim_refresh")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnFleetClaimCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnFleetClaimCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.Refresh(callback_)
+}
+
+//export urnet_sn_fleet_claim_submit_wallet_authorization
+func urnet_sn_fleet_claim_submit_wallet_authorization(self C.uint64_t, signature *C.char, callback_result C.urnet_sn_fleet_claim_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_sn_fleet_claim_submit_wallet_authorization")
+	self_, ok := resolveHandle[*sdk.SnFleetClaim](uint64(self), "urnet_sn_fleet_claim_submit_wallet_authorization")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnFleetClaimCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnFleetClaimCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.SubmitWalletAuthorization(goString(signature), callback_)
+}
+
+//export urnet_sn_fleet_claim_tap
+func urnet_sn_fleet_claim_tap(self C.uint64_t, callback_result C.urnet_sn_fleet_claim_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_sn_fleet_claim_tap")
+	self_, ok := resolveHandle[*sdk.SnFleetClaim](uint64(self), "urnet_sn_fleet_claim_tap")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnFleetClaimCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnFleetClaimCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.Tap(callback_)
+}
+
+//export urnet_sn_fleet_device_check
+func urnet_sn_fleet_device_check(self C.uint64_t, callback_result C.urnet_sn_fleet_device_check_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_sn_fleet_device_check")
+	self_, ok := resolveHandle[*sdk.SnFleetDevice](uint64(self), "urnet_sn_fleet_device_check")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnFleetDeviceCheckCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnFleetDeviceCheckCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.Check(callback_)
+}
+
+//export urnet_sn_fleet_device_close
+func urnet_sn_fleet_device_close(self C.uint64_t) {
+	defer cgoGuard("urnet_sn_fleet_device_close")
+	self_, ok := resolveHandle[*sdk.SnFleetDevice](uint64(self), "urnet_sn_fleet_device_close")
+	if !ok {
+		return
+	}
+	self_.Close()
+}
+
+//export urnet_sn_fleet_device_leave
+func urnet_sn_fleet_device_leave(self C.uint64_t, callback_result C.urnet_sn_fleet_device_leave_cb, callback_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_sn_fleet_device_leave")
+	self_, ok := resolveHandle[*sdk.SnFleetDevice](uint64(self), "urnet_sn_fleet_device_leave")
+	if !ok {
+		return
+	}
+	var callback_ sdk.SnFleetDeviceLeaveCallback
+	if callback_result != nil {
+		callback_ = &cAdapterSnFleetDeviceLeaveCallback{cbResult: callback_result, userData: callback_user_data}
+	}
+	self_.Leave(callback_)
+}
+
+//export urnet_sn_fleet_device_reset
+func urnet_sn_fleet_device_reset(self C.uint64_t, outError **C.char) C.bool {
+	defer cgoGuard("urnet_sn_fleet_device_reset")
+	self_, ok := resolveHandle[*sdk.SnFleetDevice](uint64(self), "urnet_sn_fleet_device_reset")
+	if !ok {
+		return C.bool(false)
+	}
+	err := self_.Reset()
+	if err != nil {
+		setErrorOut(outError, err)
+		return C.bool(false)
+	}
+	return C.bool(true)
+}
+
+//export urnet_sn_fleet_device_start
+func urnet_sn_fleet_device_start(self C.uint64_t, listener_sn_fleet_device_checked C.urnet_sn_fleet_device_cb, listener_user_data unsafe.Pointer) {
+	defer cgoGuard("urnet_sn_fleet_device_start")
+	self_, ok := resolveHandle[*sdk.SnFleetDevice](uint64(self), "urnet_sn_fleet_device_start")
+	if !ok {
+		return
+	}
+	var listener_ sdk.SnFleetDeviceListener
+	if listener_sn_fleet_device_checked != nil {
+		listener_ = &cAdapterSnFleetDeviceListener{cbSnFleetDeviceChecked: listener_sn_fleet_device_checked, userData: listener_user_data}
+	}
+	self_.Start(listener_)
 }
 
 //export urnet_sn_gas_balance_for

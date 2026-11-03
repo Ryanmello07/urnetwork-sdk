@@ -5,9 +5,10 @@ package sdk
 // The payout key's flow (apple BTEASY.md), the same on every app. A casual miner taps once: the key
 // is made here, written to the app's secret store and read back, and only then signs the network's
 // payout consent. Or the user saves the phrase first, and the key signs once they prove it with two
-// of its words. Either way the app never signs until the phrase is safe, since earnings could
-// otherwise be paid to a key nobody holds. link() is the only place here that signs, and each of its
-// three callers has that proof.
+// of its words: then dropped, or kept, which writes it to the store and reads it back before it
+// signs. Either way the app never signs until the phrase is safe, since earnings could otherwise be
+// paid to a key nobody holds. link() is the only place here that signs, and each of its callers has
+// that proof.
 //
 // An app brings what only it can do: a secret store (BittensorLocalKeyStore), its screens with their
 // strings, device authentication, the screen's privacy controls, the pasteboard and its local
@@ -27,7 +28,7 @@ package sdk
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -36,6 +37,7 @@ import (
 	"sync"
 	"time"
 
+	bip39 "github.com/cosmos/go-bip39"
 	"github.com/urnetwork/connect"
 )
 
@@ -97,6 +99,19 @@ const (
 	BittensorLocalKeyConfirmKeep = "keep"
 )
 
+// What a typed word is to the two-word check (BittensorLocalKeyFlow.CheckWords), so the screen can say
+// which one is wrong as the user types.
+const (
+	// nothing typed
+	BittensorLocalKeyWordEmpty = ""
+	// not the word yet, but the start of some word of the list: the user may still be typing
+	BittensorLocalKeyWordTyping = "typing"
+	// not the word: That isn't word N of this recovery phrase
+	BittensorLocalKeyWordWrong = "wrong"
+	// the word
+	BittensorLocalKeyWordRight = "right"
+)
+
 // What a reminder of an unsaved key asks of the app (BittensorLocalKeyFlow.Reminder).
 const (
 	BittensorLocalKeyReminderNone = "none"
@@ -108,6 +123,41 @@ const (
 	BittensorLocalKeyReminderCancel = "cancel"
 )
 
+// The owner's disclaimer for the easy flows (2026-11-03), as the id of the localizations key the screen
+// shows, so each app shows it in the user's language from its own catalog: the sdk has none. The whole
+// text says the key is in this app's secure storage, that it is never shared with URnetwork, and that
+// URnetwork does not touch and is not responsible for any user funds. Where no key is stored here, as
+// before setup, for a network paid to an outside wallet, a key this app deleted, or a phrase saved before
+// anything is stored, the first two sentences would be false, so only the last one shows. A screen shows
+// it once.
+const (
+	// no disclaimer: the screen shows none of the easy flows
+	BittensorFundsDisclaimerNone = ""
+	// the whole text, the key bittensor_funds_disclaimer
+	BittensorFundsDisclaimerFull = "bittensor_funds_disclaimer"
+	// its last sentence alone, the key bittensor_funds_disclaimer_funds_only
+	BittensorFundsDisclaimerFundsOnly = "bittensor_funds_disclaimer_funds_only"
+)
+
+// The screens of the easy flows, for FundsDisclaimerAt. A screen added later asks with its own place:
+// convert and Top 200 have theirs already.
+const (
+	BittensorFundsDisclaimerPlacePayoutCard         = "payout_card"
+	BittensorFundsDisclaimerPlaceKeyScreen          = "key_screen"
+	BittensorFundsDisclaimerPlaceDeleteConfirmation = "delete_confirmation"
+	BittensorFundsDisclaimerPlaceKeepConfirmation   = "keep_confirmation"
+	// what is claimable, and the claim
+	BittensorFundsDisclaimerPlaceClaimCard = "claim_card"
+	// converting SN25α to TAO with the key
+	BittensorFundsDisclaimerPlaceConvert = "convert"
+	// claiming a Top 200 spot
+	BittensorFundsDisclaimerPlaceTop200 = "top200"
+	// the consent sheet's Change wallet, where it offers to create a key on this device
+	BittensorFundsDisclaimerPlaceChangeWallet = "change_wallet"
+	// a claim sheet of its own, over the claim card
+	BittensorFundsDisclaimerPlaceClaimSheet = "claim_sheet"
+)
+
 const (
 	// the words hide themselves this long after they show
 	BittensorLocalKeyRevealSeconds = 60
@@ -115,6 +165,11 @@ const (
 	BittensorLocalKeyCopySeconds = 60
 	// a store's answer for "cannot answer now", which is neither a phrase nor an address
 	BittensorLocalKeyStoreUnavailable = "store_unavailable"
+	// a store's answer for "this device has no secure storage for a key at all", as a Linux desktop with
+	// no Secret Service. It is never a phrase or an address either. No key can be made or kept here, so
+	// the card offers what it offers a session that can't make one: the wallet the user already has. The
+	// first sentence of the funds disclaimer would be untrue on such a device, so no screen offers a key.
+	BittensorLocalKeyStoreAbsent = "store_absent"
 )
 
 const (
@@ -137,9 +192,11 @@ type BittensorLocalKeyStore interface {
 	// Adds the network's item: the phrase as its secret, the address readable without the secret. It
 	// must never replace an item. False if one is there or the store refused.
 	AddKey(networkId string, mnemonic string, address string) bool
-	// The item's phrase. "" with no item, BittensorLocalKeyStoreUnavailable if the store cannot answer.
+	// The item's phrase. "" with no item, BittensorLocalKeyStoreUnavailable if the store cannot answer,
+	// BittensorLocalKeyStoreAbsent if the device has no secure storage for one.
 	KeyPhrase(networkId string) string
-	// The item's address, without touching the secret. "" and BittensorLocalKeyStoreUnavailable as above.
+	// The item's address, without touching the secret. "", BittensorLocalKeyStoreUnavailable and
+	// BittensorLocalKeyStoreAbsent as above.
 	KeyAddress(networkId string) string
 	// Removes the item. False if the store refused. No item is not a refusal. The flow checks the
 	// result by reading again.
@@ -195,6 +252,15 @@ type BittensorLocalKeyCard struct {
 	// a BittensorLocalKeyFailure* or a consent refusal's code, "" if the last action did not stop
 	FailureCode    string `json:"failure_code"`
 	FailureMessage string `json:"failure_message"`
+	// the disclaimer the card shows, a BittensorFundsDisclaimer*
+	FundsDisclaimer string `json:"funds_disclaimer"`
+	// the disclaimer the claim card shows, a BittensorFundsDisclaimer*. The two cards share Earnings and the
+	// disclaimer shows once a screen, so this is none while the payout card has one
+	ClaimFundsDisclaimer string `json:"claim_funds_disclaimer"`
+	// the consent pays the key in this app's store (State is BittensorLocalKeyStateSaveLaterLinked): the
+	// network has a coldkey even before the wallet read lists one, so no card asks for a coldkey, as the
+	// points card's "set a coldkey to get paid" does
+	PaysKeyOnThisDevice bool `json:"pays_key_on_this_device"`
 }
 
 // What the Key screen shows. Holds no secret: the words are RevealedWords.
@@ -206,12 +272,17 @@ type BittensorLocalKeyScreen struct {
 	Address string `json:"address"`
 	// the words show, with Hide and Copy
 	Revealed bool `json:"revealed"`
+	// while revealed, when they hide by themselves, for the screen's countdown
+	RevealedUntilMillis int64 `json:"revealed_until_millis"`
 	// a stored key: tap to reveal asks for device authentication first
 	NeedsAuthentication bool `json:"needs_authentication"`
 	// the screen is being recorded or mirrored, and the words stay hidden until it stops
 	HiddenByCapture bool `json:"hidden_by_capture"`
 	// a BittensorLocalKeyConfirm*: the two-word check is up
 	Confirming string `json:"confirming"`
+	// the confirmation's button asks for device authentication before it acts: deleting a stored key.
+	// Keep, and anything on Save now, never does
+	ConfirmNeedsAuthentication bool `json:"confirm_needs_authentication"`
 	// the two words asked for, counting from 1
 	FirstWordPosition  int `json:"first_word_position"`
 	SecondWordPosition int `json:"second_word_position"`
@@ -229,6 +300,9 @@ type BittensorLocalKeyScreen struct {
 	// as on the card
 	FailureCode    string `json:"failure_code"`
 	FailureMessage string `json:"failure_message"`
+	// the disclaimer the screen shows, its delete and keep confirmations included, a
+	// BittensorFundsDisclaimer*
+	FundsDisclaimer string `json:"funds_disclaimer"`
 }
 
 // What to do about the one reminder of an unsaved key. Holds no secret.
@@ -263,6 +337,12 @@ func (bittensorLocalKeyNoStore) ReadNote(string, string) string {
 }
 
 func (bittensorLocalKeyNoStore) WriteNote(string, string, string) {
+}
+
+// A store's answer that is neither a phrase nor an address: it can't answer now, or the device has no
+// secure storage at all.
+func bittensorLocalKeyStoreCannotSay(answer string) bool {
+	return answer == BittensorLocalKeyStoreUnavailable || answer == BittensorLocalKeyStoreAbsent
 }
 
 // The consent calls this flow makes. *Api is the real one.
@@ -309,15 +389,17 @@ type bittensorLocalKeyCardInputs struct {
 	currentEpoch     int64
 	justLinked       bool
 	storeUnavailable bool
-	storedAddress    string
-	savedAddress     string
-	deletedAddress   string
-	saveNowAddress   string
-	saveNowFailed    bool
-	busy             bool
-	linkGeneration   int64
-	failureCode      string
-	failureMessage   string
+	// the device has no secure storage for a key: none can be made or kept here
+	storeAbsent    bool
+	storedAddress  string
+	savedAddress   string
+	deletedAddress string
+	saveNowAddress string
+	saveNowFailed  bool
+	busy           bool
+	linkGeneration int64
+	failureCode    string
+	failureMessage string
 }
 
 // The payout key's flow for one network on this device. One visit of the Earnings screen makes one.
@@ -334,7 +416,7 @@ type BittensorLocalKeyFlow struct {
 	sign          func(mnemonic string, message string) (string, error)
 	now           func() time.Time
 	afterFunc     func(time.Duration, func()) (stop func() bool)
-	pickPositions func(wordCount int) (first int, second int)
+	pickPositions func(address string, wordCount int) (first int, second int)
 
 	stateLock sync.Mutex
 
@@ -349,6 +431,7 @@ type BittensorLocalKeyFlow struct {
 
 	// read from the store by reload
 	storeUnavailable bool
+	storeAbsent      bool
 	storedAddress    string
 	savedAddress     string
 	deletedAddress   string
@@ -362,7 +445,9 @@ type BittensorLocalKeyFlow struct {
 	// the words on the screen. A stored phrase is let go when they hide
 	revealedPhrase string
 	revealed       bool
-	captureActive  bool
+	// when the words hide by themselves
+	revealedUntilMillis int64
+	captureActive       bool
 	// counts the reveals, so a timer from an earlier one hides nothing
 	revealGeneration int
 	stopHideTimer    func() bool
@@ -477,6 +562,7 @@ func (self *BittensorLocalKeyFlow) cardInputsWithLock(hasNetworkCredential bool)
 		currentEpoch:         self.currentEpoch,
 		justLinked:           self.justLinked,
 		storeUnavailable:     self.storeUnavailable,
+		storeAbsent:          self.storeAbsent,
 		storedAddress:        self.storedAddress,
 		savedAddress:         self.savedAddress,
 		deletedAddress:       self.deletedAddress,
@@ -511,11 +597,17 @@ func bittensorLocalKeyCardOf(in bittensorLocalKeyCardInputs) *BittensorLocalKeyC
 		} else {
 			card.State = BittensorLocalKeyStateSaveNowShowing
 		}
+		// the phrase is in memory only: nothing is in the app's secure storage
+		card.FundsDisclaimer = BittensorFundsDisclaimerFundsOnly
+		card.ClaimFundsDisclaimer = bittensorLocalKeyClaimFundsDisclaimer(card.FundsDisclaimer)
 		return card
 	}
 	if in.storeUnavailable {
 		card.State = BittensorLocalKeyStateStoreUnavailable
 		card.ShowsKeyPath = true
+		// the store can't say where the key is
+		card.FundsDisclaimer = BittensorFundsDisclaimerFundsOnly
+		card.ClaimFundsDisclaimer = bittensorLocalKeyClaimFundsDisclaimer(card.FundsDisclaimer)
 		return card
 	}
 	hasStoredKey := in.storedAddress != ""
@@ -523,7 +615,8 @@ func bittensorLocalKeyCardOf(in bittensorLocalKeyCardInputs) *BittensorLocalKeyC
 	card.KeySaved = hasStoredKey && in.savedAddress == in.storedAddress
 	card.BackupReminder = hasStoredKey && !card.KeySaved
 
-	mayMakeKey := in.hasNetworkCredential && !in.guest && in.networkId != ""
+	// a device with no secure storage keeps no key, so it makes none: the wallet card, as for a guest
+	mayMakeKey := in.hasNetworkCredential && !in.guest && in.networkId != "" && !in.storeAbsent
 	active := in.consentRead == bittensorLocalKeyConsentActive
 	switch {
 	case in.consentRead == bittensorLocalKeyConsentUnread:
@@ -565,6 +658,20 @@ func bittensorLocalKeyCardOf(in bittensorLocalKeyCardInputs) *BittensorLocalKeyC
 		card.OffersSaveFirst = mayMakeKey
 	}
 	card.ShowsKeyPath = card.State == BittensorLocalKeyStateSaveLaterNotLinked || card.State == BittensorLocalKeyStateNone && card.OffersSetUp
+	card.PaysKeyOnThisDevice = card.State == BittensorLocalKeyStateSaveLaterLinked
+	switch {
+	case hasStoredKey:
+		// the key is in the app's secure storage
+		card.FundsDisclaimer = BittensorFundsDisclaimerFull
+	case card.State == BittensorLocalKeyStateSavedAndDeleted, card.State == BittensorLocalKeyStateElsewhere,
+		card.State == BittensorLocalKeyStateNone && card.OffersSetUp:
+		// the consent pays a key that is not stored here, or there is no key yet
+		card.FundsDisclaimer = BittensorFundsDisclaimerFundsOnly
+	default:
+		// the wallet card, for a guest or a session that isn't the owner's, or a consent not read yet
+		card.FundsDisclaimer = BittensorFundsDisclaimerNone
+	}
+	card.ClaimFundsDisclaimer = bittensorLocalKeyClaimFundsDisclaimer(card.FundsDisclaimer)
 	switch card.State {
 	case BittensorLocalKeyStateSaveLaterLinked, BittensorLocalKeyStateSavedAndDeleted:
 		if in.currentEpoch == 0 {
@@ -577,6 +684,77 @@ func bittensorLocalKeyCardOf(in bittensorLocalKeyCardInputs) *BittensorLocalKeyC
 	return card
 }
 
+// The claim card's disclaimer. The claim card and the payout card share Earnings, and the disclaimer
+// shows once a screen: on the payout card when it has one, else on the claim card, as its last sentence,
+// which is true wherever claims land.
+func bittensorLocalKeyClaimFundsDisclaimer(cardFundsDisclaimer string) string {
+	if cardFundsDisclaimer != BittensorFundsDisclaimerNone {
+		return BittensorFundsDisclaimerNone
+	}
+	return BittensorFundsDisclaimerFundsOnly
+}
+
+// The disclaimer a screen of the easy flows shows, a BittensorFundsDisclaimer*, for a
+// BittensorFundsDisclaimerPlace*. The card and screen snapshots carry the same values. An unknown place
+// shows none.
+func (self *BittensorLocalKeyFlow) FundsDisclaimerAt(place string) string {
+	switch place {
+	case BittensorFundsDisclaimerPlacePayoutCard:
+		return self.GetCard().FundsDisclaimer
+	case BittensorFundsDisclaimerPlaceClaimCard:
+		return self.GetCard().ClaimFundsDisclaimer
+	case BittensorFundsDisclaimerPlaceChangeWallet:
+		// the offer to create a key here: there is none here yet
+		if self.GetCard().OffersSetUp {
+			return BittensorFundsDisclaimerFundsOnly
+		}
+		return BittensorFundsDisclaimerNone
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	keyStored := self.storedAddress != "" && !self.storeUnavailable
+	switch place {
+	case BittensorFundsDisclaimerPlaceKeyScreen, BittensorFundsDisclaimerPlaceDeleteConfirmation:
+		return self.keyScreenFundsDisclaimerWithLock()
+	case BittensorFundsDisclaimerPlaceKeepConfirmation:
+		// a stored key stays in the app's secure storage; on Save now the phrase is in memory until the
+		// words are in
+		switch {
+		case self.saveNowKey != nil:
+			return BittensorFundsDisclaimerFundsOnly
+		case keyStored:
+			return BittensorFundsDisclaimerFull
+		default:
+			return BittensorFundsDisclaimerNone
+		}
+	case BittensorFundsDisclaimerPlaceClaimSheet:
+		// a screen of its own: claims land on the consent's coldkey, wherever its key is
+		return BittensorFundsDisclaimerFundsOnly
+	case BittensorFundsDisclaimerPlaceConvert, BittensorFundsDisclaimerPlaceTop200:
+		// convert signs with the key, and a Top 200 claim registers with it: the whole text while it is in
+		// this app's secure storage, the last sentence for a key in a wallet or on another device
+		if keyStored {
+			return BittensorFundsDisclaimerFull
+		}
+		return BittensorFundsDisclaimerFundsOnly
+	default:
+		return BittensorFundsDisclaimerNone
+	}
+}
+
+// The Key screen's disclaimer, open or not: the last sentence for a phrase in memory only, the whole
+// text for a key in the app's secure storage, none with no key to show.
+func (self *BittensorLocalKeyFlow) keyScreenFundsDisclaimerWithLock() string {
+	switch {
+	case self.saveNowKey != nil:
+		return BittensorFundsDisclaimerFundsOnly
+	case self.storedAddress != "" && !self.storeUnavailable:
+		return BittensorFundsDisclaimerFull
+	default:
+		return BittensorFundsDisclaimerNone
+	}
+}
+
 func (self *BittensorLocalKeyFlow) GetScreen() *BittensorLocalKeyScreen {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -586,27 +764,33 @@ func (self *BittensorLocalKeyFlow) GetScreen() *BittensorLocalKeyScreen {
 func (self *BittensorLocalKeyFlow) screenWithLock() *BittensorLocalKeyScreen {
 	saveNow := self.saveNowKey != nil
 	screen := &BittensorLocalKeyScreen{
-		Open:                self.screenOpen,
-		SaveNow:             saveNow,
-		Revealed:            self.revealed,
-		NeedsAuthentication: !saveNow,
-		HiddenByCapture:     self.captureActive,
-		Confirming:          self.confirming,
-		FirstWordPosition:   self.firstPosition,
-		SecondWordPosition:  self.secondPosition,
-		WordsRejected:       self.wordsRejected,
-		WarnsTop200:         !self.top200Registered,
-		OffersKeep:          !saveNow && self.storedAddress != "" && self.savedAddress != self.storedAddress,
-		OffersRetry:         saveNow && self.saveNowFailed,
-		Busy:                self.busy,
-		Done:                self.screenDone,
-		FailureCode:         self.failureCode,
-		FailureMessage:      self.failureMessage,
+		Open:                       self.screenOpen,
+		SaveNow:                    saveNow,
+		Revealed:                   self.revealed,
+		RevealedUntilMillis:        self.revealedUntilMillis,
+		NeedsAuthentication:        !saveNow,
+		HiddenByCapture:            self.captureActive,
+		Confirming:                 self.confirming,
+		ConfirmNeedsAuthentication: self.confirming == BittensorLocalKeyConfirmDelete && !saveNow,
+		FirstWordPosition:          self.firstPosition,
+		SecondWordPosition:         self.secondPosition,
+		WordsRejected:              self.wordsRejected,
+		WarnsTop200:                !self.top200Registered,
+		// Save now keeps by writing the key to the store, and a stored key keeps until its phrase is saved
+		OffersKeep:     saveNow && !self.saveNowFailed || !saveNow && self.storedAddress != "" && self.savedAddress != self.storedAddress,
+		OffersRetry:    saveNow && self.saveNowFailed,
+		Busy:           self.busy,
+		Done:           self.screenDone,
+		FailureCode:    self.failureCode,
+		FailureMessage: self.failureMessage,
 	}
 	if saveNow {
 		screen.Address = self.saveNowKey.Address
 	} else {
 		screen.Address = self.storedAddress
+	}
+	if self.screenOpen {
+		screen.FundsDisclaimer = self.keyScreenFundsDisclaimerWithLock()
 	}
 	return screen
 }
@@ -625,7 +809,8 @@ func (self *BittensorLocalKeyFlow) reload() {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.storeUnavailable = storedAddress == BittensorLocalKeyStoreUnavailable
-	if self.storeUnavailable {
+	self.storeAbsent = storedAddress == BittensorLocalKeyStoreAbsent
+	if self.storeUnavailable || self.storeAbsent {
 		self.storedAddress = ""
 	} else {
 		self.storedAddress = storedAddress
@@ -786,7 +971,7 @@ func (self *BittensorLocalKeyFlow) finishSetup(replaceConfirmed bool) {
 	phrase := self.store.KeyPhrase(self.networkId)
 	address := self.store.KeyAddress(self.networkId)
 	switch {
-	case phrase == BittensorLocalKeyStoreUnavailable || address == BittensorLocalKeyStoreUnavailable:
+	case bittensorLocalKeyStoreCannotSay(phrase) || bittensorLocalKeyStoreCannotSay(address):
 		self.finish(BittensorLocalKeyFailureStoreUnavailable, "")
 		return
 	case phrase == "" || address == "":
@@ -879,7 +1064,7 @@ func (self *BittensorLocalKeyFlow) Reveal(authenticated bool) {
 
 	if phrase == "" {
 		phrase = self.store.KeyPhrase(self.networkId)
-		if phrase == "" || phrase == BittensorLocalKeyStoreUnavailable {
+		if phrase == "" || bittensorLocalKeyStoreCannotSay(phrase) {
 			self.setFailure(BittensorLocalKeyFailureStoreUnavailable, "")
 			return
 		}
@@ -893,6 +1078,7 @@ func (self *BittensorLocalKeyFlow) Reveal(authenticated bool) {
 	}
 	self.revealed = true
 	self.revealedPhrase = phrase
+	self.revealedUntilMillis = self.now().Add(BittensorLocalKeyRevealSeconds * time.Second).UnixMilli()
 	self.failureCode = ""
 	self.failureMessage = ""
 	self.revealGeneration += 1
@@ -930,6 +1116,7 @@ func (self *BittensorLocalKeyFlow) Hide() {
 func (self *BittensorLocalKeyFlow) hideWithLock() {
 	self.revealed = false
 	self.revealedPhrase = ""
+	self.revealedUntilMillis = 0
 	if self.stopHideTimer != nil {
 		self.stopHideTimer()
 		self.stopHideTimer = nil
@@ -968,48 +1155,57 @@ func (self *BittensorLocalKeyFlow) PhraseToCopy() string {
 	return self.revealedPhrase
 }
 
-// I have saved the key, it's OK to delete it now: the words hide and two of them are asked for. A
-// stored key needs device authentication first, as for Reveal. On Save now this same step is what
-// lets the key sign.
-func (self *BittensorLocalKeyFlow) ConfirmDelete(authenticated bool) {
-	self.beginConfirmation(BittensorLocalKeyConfirmDelete, authenticated)
+// I have saved the key, it's OK to delete it now: the words hide and two of them are asked for. On
+// Save now this same step is what lets the key sign. Deleting a stored key asks for device
+// authentication at the end, at its button (SubmitWords), as Reveal does.
+func (self *BittensorLocalKeyFlow) ConfirmDelete() {
+	self.beginConfirmation(BittensorLocalKeyConfirmDelete)
 }
 
-// I have saved the key and will keep it here: the same proof, for a stored key, without the deletion.
-func (self *BittensorLocalKeyFlow) ConfirmKeep(authenticated bool) {
-	self.beginConfirmation(BittensorLocalKeyConfirmKeep, authenticated)
+// I've saved it. Keep it on this device: the same proof, without the deletion. It neither shows nor
+// deletes anything, so it asks for no device authentication. On Save now it writes the key to the store,
+// reads it back, and only then signs.
+func (self *BittensorLocalKeyFlow) ConfirmKeep() {
+	self.beginConfirmation(BittensorLocalKeyConfirmKeep)
 }
 
-func (self *BittensorLocalKeyFlow) beginConfirmation(purpose string, authenticated bool) {
+func (self *BittensorLocalKeyFlow) beginConfirmation(purpose string) {
 	self.stateLock.Lock()
 	if !self.screenOpen || self.busy || self.saveNowFailed {
 		self.stateLock.Unlock()
 		return
 	}
-	var phrase string
+	// the words hide before anything is asked, so none can be read behind the check, and they stay
+	// hidden whatever comes of it
+	wasRevealed := self.revealed
+	self.hideWithLock()
+	var phrase, address string
 	if self.saveNowKey != nil {
-		if purpose != BittensorLocalKeyConfirmDelete {
-			self.stateLock.Unlock()
-			return
-		}
 		phrase = self.saveNowKey.Mnemonic
-	} else if !authenticated {
+		address = self.saveNowKey.Address
+	} else {
+		address = self.storedAddress
+	}
+	offered := self.screenWithLock().OffersKeep
+	if address == "" || purpose == BittensorLocalKeyConfirmKeep && !offered {
 		self.stateLock.Unlock()
+		if wasRevealed {
+			self.publish()
+		}
 		return
 	}
-	self.hideWithLock()
 	self.stateLock.Unlock()
 
 	if phrase == "" {
 		phrase = self.store.KeyPhrase(self.networkId)
-		if phrase == "" || phrase == BittensorLocalKeyStoreUnavailable {
+		if phrase == "" || bittensorLocalKeyStoreCannotSay(phrase) {
 			self.setFailure(BittensorLocalKeyFailureStoreUnavailable, "")
 			return
 		}
 	}
 
 	wordCount := len(strings.Split(phrase, " "))
-	first, second := self.pickPositions(wordCount)
+	first, second := self.pickPositions(address, wordCount)
 	self.stateLock.Lock()
 	self.confirming = purpose
 	self.confirmPhrase = phrase
@@ -1038,17 +1234,77 @@ func (self *BittensorLocalKeyFlow) clearConfirmationWithLock() {
 	self.wordsRejected = false
 }
 
+// The two words as the user types them, for the screen: which is right, which can't be, and whether
+// the confirmation's button can act. Nothing changes and nothing publishes. The positions asked are the
+// same for a key every time, so this can tell nothing of its phrase but those two words (see
+// bittensorLocalKeyPickPositions). Empty while nothing is being confirmed.
+func (self *BittensorLocalKeyFlow) CheckWords(firstWord string, secondWord string) *BittensorLocalKeyWordCheck {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	check := &BittensorLocalKeyWordCheck{}
+	if self.confirming == BittensorLocalKeyConfirmNone {
+		return check
+	}
+	words := strings.Split(self.confirmPhrase, " ")
+	if self.firstPosition < 1 || len(words) < self.firstPosition || self.secondPosition < 1 || len(words) < self.secondPosition {
+		return check
+	}
+	check.First = bittensorLocalKeyWordState(firstWord, words[self.firstPosition-1])
+	check.Second = bittensorLocalKeyWordState(secondWord, words[self.secondPosition-1])
+	check.Ready = check.First == BittensorLocalKeyWordRight && check.Second == BittensorLocalKeyWordRight
+	return check
+}
+
+// The two-word check as the user types.
+type BittensorLocalKeyWordCheck struct {
+	// BittensorLocalKeyWord*, for each field
+	First  string `json:"first"`
+	Second string `json:"second"`
+	// both are right: the button can act
+	Ready bool `json:"ready"`
+}
+
+// Right, wrong, or the start of some listed word, which says nothing about the word asked for.
+func bittensorLocalKeyWordState(typed string, want string) string {
+	word := bittensorLocalKeyNormalizedWord(typed)
+	switch {
+	case word == "":
+		return BittensorLocalKeyWordEmpty
+	case word == want:
+		return BittensorLocalKeyWordRight
+	case bittensorLocalKeyWordStartsLonger(word):
+		return BittensorLocalKeyWordTyping
+	default:
+		return BittensorLocalKeyWordWrong
+	}
+}
+
+// Whether some word of the list is longer than prefix and starts with it.
+func bittensorLocalKeyWordStartsLonger(prefix string) bool {
+	for _, word := range bip39.WordList {
+		if len(prefix) < len(word) && strings.HasPrefix(word, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // The two words the user entered. A match does what the confirmation asked. Anything else keeps it
-// up and changes nothing.
-func (self *BittensorLocalKeyFlow) SubmitWords(firstWord string, secondWord string) {
+// up and changes nothing. authenticated: the device's authentication passed, which deleting a stored
+// key needs (ConfirmNeedsAuthentication); without it that does nothing.
+func (self *BittensorLocalKeyFlow) SubmitWords(firstWord string, secondWord string, authenticated bool) {
 	self.runAsync(func() {
-		self.submitWords(firstWord, secondWord)
+		self.submitWords(firstWord, secondWord, authenticated)
 	})
 }
 
-func (self *BittensorLocalKeyFlow) submitWords(firstWord string, secondWord string) {
+func (self *BittensorLocalKeyFlow) submitWords(firstWord string, secondWord string, authenticated bool) {
 	self.stateLock.Lock()
 	if self.confirming == BittensorLocalKeyConfirmNone || self.busy {
+		self.stateLock.Unlock()
+		return
+	}
+	if self.confirming == BittensorLocalKeyConfirmDelete && self.saveNowKey == nil && !authenticated {
 		self.stateLock.Unlock()
 		return
 	}
@@ -1072,6 +1328,10 @@ func (self *BittensorLocalKeyFlow) submitWords(firstWord string, secondWord stri
 	self.stateLock.Unlock()
 
 	switch {
+	case saveNowKey != nil && purpose == BittensorLocalKeyConfirmKeep:
+		// the user confirmed the phrase, and keeps the key: stored and read back, then it signs
+		self.publish()
+		self.keepSaveNow(saveNowKey)
 	case saveNowKey != nil:
 		// the user confirmed the phrase: it is safe, and the key may sign
 		self.publish()
@@ -1126,6 +1386,39 @@ func (self *BittensorLocalKeyFlow) linkSaveNow(key *BittensorLocalKey) {
 	self.screenDone = true
 	self.stateLock.Unlock()
 	self.finish("", "")
+}
+
+// Keep on Save now. The phrase is proven saved, so the key is written to the store, read back and noted
+// saved, and only the stored phrase signs. A store that refuses leaves Save now as it was: the phrase in
+// memory, nothing signed. Once stored the key is the store's like any other, so a refused consent leaves
+// it there for Finish setup.
+func (self *BittensorLocalKeyFlow) keepSaveNow(key *BittensorLocalKey) {
+	if !self.store.AddKey(self.networkId, key.Mnemonic, key.Address) {
+		self.reload()
+		self.finish(BittensorLocalKeyFailureStore, "")
+		return
+	}
+	phrase := self.store.KeyPhrase(self.networkId)
+	address := self.store.KeyAddress(self.networkId)
+	if phrase != key.Mnemonic || address != key.Address {
+		// this flow wrote it and nothing has signed with it, so there is nothing to keep
+		self.store.DeleteKey(self.networkId)
+		self.reload()
+		self.finish(BittensorLocalKeyFailureStore, "")
+		return
+	}
+	self.store.WriteNote(self.networkId, bittensorLocalKeyNoteSavedAddress, address)
+	self.reload()
+	self.stateLock.Lock()
+	self.saveNowKey = nil
+	self.saveNowFailed = false
+	self.stateLock.Unlock()
+	self.publish()
+	code, message := self.link(phrase, address)
+	self.stateLock.Lock()
+	self.screenDone = true
+	self.stateLock.Unlock()
+	self.finish(code, message)
 }
 
 // The item goes, and a read proves it. Until a read shows it gone the key is treated as still there.
@@ -1255,8 +1548,8 @@ func (self *BittensorLocalKeyFlow) setFailure(failureCode string, failureMessage
 func (self *BittensorLocalKeyFlow) Reminder(currentEpoch int64, claimOpenMillis int64, epochBlocks int64, claimable bool) *BittensorLocalKeyReminder {
 	self.stateLock.Lock()
 	// a store that can't answer, as on a locked device, says nothing about the key: a reminder posted
-	// stays posted
-	if self.storeUnavailable {
+	// stays posted. Nor does a device that has no secure storage now, which may have had some before.
+	if self.storeUnavailable || self.storeAbsent {
 		self.stateLock.Unlock()
 		return &BittensorLocalKeyReminder{Action: BittensorLocalKeyReminderNone}
 	}
@@ -1313,10 +1606,10 @@ func (self *BittensorLocalKeyFlow) ReminderDelivered() {
 
 // Whether the network has a key on this device whose phrase is not known to be saved. The logout and
 // account deletion confirmations warn on it, from a flow made just to ask, with no Api. A store that
-// cannot answer warns nothing: a logout keeps the key anyway.
+// cannot answer warns nothing: a logout keeps the key anyway. Nor does a device with no secure storage.
 func (self *BittensorLocalKeyFlow) NeedsBackup() bool {
 	address := self.store.KeyAddress(self.networkId)
-	if address == "" || address == BittensorLocalKeyStoreUnavailable {
+	if address == "" || bittensorLocalKeyStoreCannotSay(address) {
 		return false
 	}
 	return self.store.ReadNote(self.networkId, bittensorLocalKeyNoteSavedAddress) != address
@@ -1340,19 +1633,18 @@ func (self *BittensorLocalKeyFlow) ForgetNetwork() bool {
 	return gone
 }
 
-// Two different words to ask for, in order, from the system's secure randomness. It only has to stop a
-// user from learning which two get asked, so a failed read falling back to the first and last is fine.
-func bittensorLocalKeyPickPositions(wordCount int) (int, int) {
+// Two different words to ask for, in order, and the same two for a key every time. The check says
+// which typed word is right (CheckWords), and Keep asks for no device authentication, so were the two
+// picked anew each time, asking again and again would read the phrase a word at a time. This way it
+// can only ever tell these two, which leave the rest of the phrase out of reach. They come from a hash
+// of the address, which is no secret: knowing which two are asked says nothing of what they are.
+func bittensorLocalKeyPickPositions(address string, wordCount int) (int, int) {
 	if wordCount < 2 {
 		return 0, 0
 	}
-	var seed [8]byte
-	if _, err := rand.Read(seed[:]); err != nil {
-		return 0, wordCount - 1
-	}
-	value := binary.BigEndian.Uint64(seed[:])
-	first := int(value % uint64(wordCount))
-	second := int((value >> 32) % uint64(wordCount-1))
+	digest := sha256.Sum256([]byte("urnetwork bittensor local key check words\x00" + address))
+	first := int(binary.BigEndian.Uint64(digest[0:8]) % uint64(wordCount))
+	second := int(binary.BigEndian.Uint64(digest[8:16]) % uint64(wordCount-1))
 	if first <= second {
 		second += 1
 	}
