@@ -155,9 +155,54 @@ inline constexpr const char* BalanceCodeRedeemOutcomeAlreadyRedeemed = "already_
 inline constexpr const char* BalanceCodeRedeemOutcomeInvalid = "invalid";
 inline constexpr const char* BalanceCodeRedeemOutcomeRedeemed = "redeemed";
 inline constexpr const char* BalanceCodeRedeemOutcomeUnknown = "unknown";
+inline constexpr const char* BittensorChainErrorWrongChain = "bittensor_wrong_chain";
+inline constexpr const char* BittensorConvertErrorAmountTooHigh = "convert_amount_too_high";
+inline constexpr const char* BittensorConvertErrorAmountTooLow = "convert_amount_too_low";
+inline constexpr const char* BittensorConvertErrorBalanceTooLow = "convert_balance_too_low";
+inline constexpr const char* BittensorConvertErrorExpired = "convert_expired";
+inline constexpr const char* BittensorConvertErrorFailed = "convert_failed";
+inline constexpr const char* BittensorConvertErrorKeyMismatch = "convert_key_mismatch";
+inline constexpr const char* BittensorConvertErrorNothingToConvert = "convert_nothing_to_convert";
+inline constexpr const char* BittensorConvertErrorOutcomeUnknown = "convert_outcome_unknown";
+inline constexpr const char* BittensorConvertErrorPending = "convert_already_pending";
+inline constexpr const char* BittensorConvertErrorPriceImpact = "convert_price_impact_too_high";
+inline constexpr const char* BittensorConvertErrorPriceMoved = "convert_price_moved";
+inline constexpr const char* BittensorConvertErrorRefused = "convert_refused";
+inline constexpr const char* BittensorConvertErrorRuntimeChanged = "convert_runtime_changed";
+inline constexpr const char* BittensorLocalKeyConfirmDelete = "delete";
+inline constexpr const char* BittensorLocalKeyConfirmKeep = "keep";
+inline constexpr const char* BittensorLocalKeyConfirmNone = "";
+inline constexpr int64_t BittensorLocalKeyCopySeconds = 60;
+inline constexpr const char* BittensorLocalKeyErrorFailed = "local_key_failed";
+inline constexpr const char* BittensorLocalKeyErrorInvalidPhrase = "invalid_recovery_phrase";
+inline constexpr const char* BittensorLocalKeyFailureConsent = "consent_failed";
+inline constexpr const char* BittensorLocalKeyFailureDelete = "delete_failed";
+inline constexpr const char* BittensorLocalKeyFailureGenerate = "generate_failed";
+inline constexpr const char* BittensorLocalKeyFailureNotAllowed = "not_allowed";
+inline constexpr const char* BittensorLocalKeyFailureReplacementNotConfirmed = "replacement_not_confirmed";
+inline constexpr const char* BittensorLocalKeyFailureStore = "store_failed";
+inline constexpr const char* BittensorLocalKeyFailureStoreUnavailable = "store_unavailable";
+inline constexpr const char* BittensorLocalKeyReminderCancel = "cancel";
+inline constexpr const char* BittensorLocalKeyReminderDeliverNow = "deliver_now";
+inline constexpr const char* BittensorLocalKeyReminderNone = "none";
+inline constexpr const char* BittensorLocalKeyReminderSchedule = "schedule";
+inline constexpr int64_t BittensorLocalKeyRevealSeconds = 60;
+inline constexpr const char* BittensorLocalKeyStateConsentUnavailable = "consent_unavailable";
+inline constexpr const char* BittensorLocalKeyStateElsewhere = "elsewhere";
+inline constexpr const char* BittensorLocalKeyStateLoading = "loading";
+inline constexpr const char* BittensorLocalKeyStateNone = "none";
+inline constexpr const char* BittensorLocalKeyStateSaveLaterLinked = "save_later_linked";
+inline constexpr const char* BittensorLocalKeyStateSaveLaterNotLinked = "save_later_not_linked";
+inline constexpr const char* BittensorLocalKeyStateSaveNowConsentFailed = "save_now_consent_failed";
+inline constexpr const char* BittensorLocalKeyStateSaveNowShowing = "save_now_showing";
+inline constexpr const char* BittensorLocalKeyStateSavedAndDeleted = "saved_and_deleted";
+inline constexpr const char* BittensorLocalKeyStateStoreUnavailable = "store_unavailable";
+inline constexpr const char* BittensorLocalKeyStoreUnavailable = "store_unavailable";
 inline constexpr const char* BittensorTalismanInjectedName = "talisman";
+inline constexpr const char* BittensorTaoComInjectedName = "@opentensor/bittensor-extension";
 inline constexpr const char* BittensorWalletBridgeErrorAddressMismatch = "address_mismatch";
 inline constexpr const char* BittensorWalletBridgeErrorAddressNotInWallet = "address_not_in_wallet";
+inline constexpr const char* BittensorWalletBridgeErrorExtensionNotAuthorized = "extension_not_authorized";
 inline constexpr const char* BittensorWalletBridgeErrorExtensionNotFound = "extension_not_found";
 inline constexpr const char* BittensorWalletBridgeErrorInvalidRequest = "invalid_request";
 inline constexpr const char* BittensorWalletBridgeErrorNoAccount = "no_account";
@@ -183,6 +228,7 @@ inline constexpr const char* BittensorWalletErrorUnsupportedPlatform = "unsuppor
 inline constexpr const char* BittensorWalletErrorUnsupportedWallet = "unsupported_wallet";
 inline constexpr const char* BittensorWalletErrorWallet = "wallet_error";
 inline constexpr const char* BittensorWalletErrorWrongTransport = "wrong_transport";
+inline constexpr const char* BittensorWalletManual = "manual";
 inline constexpr const char* BittensorWalletPlatformAndroid = "android";
 inline constexpr const char* BittensorWalletPlatformIos = "ios";
 inline constexpr const char* BittensorWalletPlatformLinux = "linux";
@@ -307,6 +353,7 @@ inline constexpr const char* ExtenderImportErrorForeignHost = "import_extenders_
 inline constexpr const char* ExtenderImportErrorInvalid = "import_extenders_invalid";
 inline constexpr const char* ExtenderProvideErrorActivationFailed = "activation_failed";
 inline constexpr const char* ExtenderProvideErrorActivationRefused = "activation_refused";
+inline constexpr const char* ExtenderProvideErrorActivationUnreachable = "activation_unreachable";
 inline constexpr const char* ExtenderProvideErrorListen = "listen";
 inline constexpr const char* ExtenderProvideErrorRevoked = "revoked";
 inline constexpr const char* ExtenderProvideErrorStart = "start";
@@ -484,6 +531,22 @@ inline constexpr const char* SOL = "SOL";
 inline constexpr const char* SnAlphaSymbol = "SN25α";
 inline constexpr int64_t SnChainIdMainnet = 964;
 inline constexpr int64_t SnChainIdTestnet = 945;
+inline constexpr const char* SnClaimActionClaimNow = "claim_now";
+inline constexpr const char* SnClaimActionNone = "none";
+inline constexpr const char* SnClaimActionSelfClaim = "self_claim";
+inline constexpr const char* SnClaimActionTopUpGas = "top_up_gas";
+inline constexpr const char* SnClaimActionWait = "wait";
+inline constexpr const char* SnClaimNowReasonLimit = "limit";
+inline constexpr const char* SnClaimNowReasonRequested = "requested";
+inline constexpr const char* SnClaimNowReasonUnderFloor = "under_floor";
+inline constexpr const char* SnClaimReasonCapReached = "cap_reached";
+inline constexpr const char* SnClaimReasonNothingPending = "nothing_pending";
+inline constexpr const char* SnClaimReasonQueued = "queued";
+inline constexpr const char* SnClaimReasonRefused = "refused";
+inline constexpr const char* SnClaimReasonRelayNotRunning = "relay_not_running";
+inline constexpr const char* SnClaimReasonRelayPaused = "relay_paused";
+inline constexpr const char* SnClaimReasonUnderThreshold = "under_threshold";
+inline constexpr const char* SnClaimRelayStateUnavailable = "unavailable";
 inline constexpr const char* SnClaimStatusClaimable = "claimable";
 inline constexpr const char* SnClaimStatusClaimed = "claimed";
 inline constexpr const char* SnClaimStatusExpired = "expired";
@@ -600,6 +663,7 @@ class AccountPreferencesViewController;
 class AccountViewController;
 class Api;
 class AsyncLocalState;
+class BittensorLocalKeyFlow;
 class BittensorWalletSession;
 class BlockActionViewController;
 class ClientEventQueue;
@@ -714,6 +778,13 @@ struct AuthVerifySendResult;
 struct AuthWalletChallengeArgs;
 struct AuthWalletChallengeResult;
 struct BittensorChallengeMessage;
+struct BittensorConvertEstimateResult;
+struct BittensorConvertReceipt;
+struct BittensorConvertSubmission;
+struct BittensorLocalKey;
+struct BittensorLocalKeyCard;
+struct BittensorLocalKeyReminder;
+struct BittensorLocalKeyScreen;
 struct BittensorSignRequest;
 struct BittensorWalletProof;
 struct BittensorWalletResult;
@@ -945,6 +1016,13 @@ struct SetPayoutWalletResult;
 struct SetPointsLeaderboardPublicArgs;
 struct SetPointsLeaderboardPublicError;
 struct SetPointsLeaderboardPublicResult;
+struct SnClaimNowResult;
+struct SnClaimRelayAccount;
+struct SnClaimRelayClaimNowArgs;
+struct SnClaimRelayError;
+struct SnClaimRelayClaimNowResult;
+struct SnClaimRelayResult;
+struct SnClaimStatusResult;
 struct SnEpochSchedule;
 struct SnClaimsResult;
 struct SnWallet;
@@ -1104,6 +1182,7 @@ using PublicAccountApiKeyList = std::vector<PublicAccountApiKey>;
 using RedeemedBalanceCodeList = std::vector<RedeemedBalanceCode>;
 using RegionGroupList = std::vector<RegionGroup>;
 using RegionalDnsServerList = std::vector<RegionalDnsServer>;
+using SnClaimRelayAccountList = std::vector<SnClaimRelayAccount>;
 using SnEpochClaimList = std::vector<SnEpochClaim>;
 using SnLedgerAccountList = std::vector<SnLedgerAccount>;
 using SnLedgerUnsignedTxList = std::vector<SnLedgerUnsignedTx>;
@@ -1497,6 +1576,109 @@ struct AuthWalletChallengeResult {
 struct BittensorChallengeMessage {
 	std::string Challenge{};
 	int64_t Timestamp{};
+};
+
+struct BittensorConvertEstimateResult {
+	std::string coldkey_ss58{};
+	std::optional<std::string> hotkey_ss58;
+	int64_t netuid{};
+	int64_t stake_rao{};
+	int64_t free_tao_rao{};
+	int64_t price_rao{};
+	int64_t min_amount_rao{};
+	int64_t max_amount_rao{};
+	int64_t amount_rao{};
+	int64_t expected_tao_rao{};
+	int64_t expected_net_tao_rao{};
+	int64_t min_tao_rao{};
+	int64_t limit_price_rao{};
+	int64_t pool_fee_alpha_rao{};
+	int64_t price_impact_bps{};
+	int64_t fee_tao_rao{};
+	int64_t fee_alpha_rao{};
+	bool fee_in_alpha{};
+	int64_t remainder_swept_alpha_rao{};
+	int64_t remainder_swept_tao_rao{};
+	std::optional<int64_t> burn_rao;
+	std::optional<int64_t> register_fee_rao;
+	std::optional<int64_t> burn_tao_needed_rao;
+	std::optional<bool> burn_already_covered;
+	bool can_convert{};
+	std::optional<std::string> notice;
+	std::string funds_disclaimer{};
+	std::optional<SnError> error;
+};
+
+struct BittensorConvertReceipt {
+	std::optional<std::string> tx_hash;
+	std::optional<int64_t> block_number;
+	std::optional<int64_t> extrinsic_index;
+	int64_t alpha_sold_rao{};
+	int64_t tao_received_rao{};
+	int64_t fee_alpha_rao{};
+	int64_t fee_tao_rao{};
+	std::string funds_disclaimer{};
+	std::optional<SnError> error;
+};
+
+struct BittensorConvertSubmission {
+	std::optional<std::string> tx_hash;
+	std::optional<std::string> coldkey_ss58;
+	std::optional<int64_t> first_block;
+	std::optional<int64_t> last_block;
+	std::string funds_disclaimer{};
+	std::optional<SnError> error;
+};
+
+struct BittensorLocalKey {
+	std::string mnemonic{};
+	std::string address{};
+};
+
+struct BittensorLocalKeyCard {
+	std::string state{};
+	std::string address{};
+	std::string stored_address{};
+	bool shows_key_path{};
+	bool offers_set_up{};
+	bool offers_save_first{};
+	bool offers_wallet{};
+	bool offers_finish_setup{};
+	bool offers_key_screen{};
+	bool replaces_payout_wallet{};
+	bool owner_only{};
+	bool payouts_start_next_epoch{};
+	bool backup_reminder{};
+	bool key_saved{};
+	bool busy{};
+	int64_t link_generation{};
+	std::string failure_code{};
+	std::string failure_message{};
+};
+
+struct BittensorLocalKeyReminder {
+	std::string action{};
+	int64_t at_millis{};
+};
+
+struct BittensorLocalKeyScreen {
+	bool open{};
+	bool save_now{};
+	std::string address{};
+	bool revealed{};
+	bool needs_authentication{};
+	bool hidden_by_capture{};
+	std::string confirming{};
+	int64_t first_word_position{};
+	int64_t second_word_position{};
+	bool words_rejected{};
+	bool warns_top200{};
+	bool offers_keep{};
+	bool offers_retry{};
+	bool busy{};
+	bool done{};
+	std::string failure_code{};
+	std::string failure_message{};
 };
 
 struct BittensorSignRequest {
@@ -3437,6 +3619,74 @@ struct SetPointsLeaderboardPublicResult {
 	std::optional<SetPointsLeaderboardPublicError> error;
 };
 
+struct SnClaimNowResult {
+	bool requested{};
+	std::optional<std::string> reason;
+	std::optional<int64_t> next_at_millis;
+	std::optional<SnError> error;
+};
+
+struct SnClaimRelayAccount {
+	std::string coldkey_ss58{};
+	int64_t no_id{};
+	int64_t index{};
+	int64_t claimable_rao{};
+	int64_t value_tao_rao{};
+	int64_t pending_rao{};
+	std::string reason{};
+	bool claim_now_available{};
+	std::optional<std::string> claim_now_reason;
+	std::optional<int64_t> claim_now_next_at_millis;
+	std::optional<bool> connected;
+	std::optional<std::string> action;
+};
+
+struct SnClaimRelayClaimNowArgs {
+	std::string coldkey_ss58{};
+};
+
+struct SnClaimRelayError {
+	std::string message{};
+};
+
+struct SnClaimRelayClaimNowResult {
+	bool requested{};
+	std::optional<std::string> reason;
+	std::optional<int64_t> next_at_millis;
+	std::optional<SnClaimRelayError> error;
+};
+
+struct SnClaimRelayResult {
+	std::string state{};
+	int64_t automatic_threshold_tao_rao{};
+	int64_t transfer_floor_tao_rao{};
+	int64_t automatic_threshold_rao{};
+	int64_t transfer_floor_rao{};
+	int64_t claim_now_period_days{};
+	std::optional<SnClaimRelayAccountList> accounts;
+	std::optional<SnClaimRelayError> error;
+};
+
+struct SnClaimStatusResult {
+	std::string relay_state{};
+	std::optional<std::string> coldkey_ss58;
+	std::string action{};
+	std::string reason{};
+	int64_t claimable_rao{};
+	int64_t value_tao_rao{};
+	int64_t pending_rao{};
+	bool claim_now_available{};
+	std::optional<std::string> claim_now_reason;
+	std::optional<int64_t> claim_now_next_at_millis;
+	bool self_claim_available{};
+	bool self_claim_needs_gas{};
+	int64_t automatic_threshold_rao{};
+	int64_t transfer_floor_rao{};
+	int64_t claim_now_period_days{};
+	std::optional<SnClaimRelayAccountList> accounts;
+	std::optional<SnError> error;
+};
+
 struct SnEpochSchedule {
 	int64_t epoch{};
 	int64_t epoch_blocks{};
@@ -4356,6 +4606,20 @@ inline void to_json(nlohmann::json& j, const AuthWalletChallengeResult& v);
 inline void from_json(const nlohmann::json& j, AuthWalletChallengeResult& v);
 inline void to_json(nlohmann::json& j, const BittensorChallengeMessage& v);
 inline void from_json(const nlohmann::json& j, BittensorChallengeMessage& v);
+inline void to_json(nlohmann::json& j, const BittensorConvertEstimateResult& v);
+inline void from_json(const nlohmann::json& j, BittensorConvertEstimateResult& v);
+inline void to_json(nlohmann::json& j, const BittensorConvertReceipt& v);
+inline void from_json(const nlohmann::json& j, BittensorConvertReceipt& v);
+inline void to_json(nlohmann::json& j, const BittensorConvertSubmission& v);
+inline void from_json(const nlohmann::json& j, BittensorConvertSubmission& v);
+inline void to_json(nlohmann::json& j, const BittensorLocalKey& v);
+inline void from_json(const nlohmann::json& j, BittensorLocalKey& v);
+inline void to_json(nlohmann::json& j, const BittensorLocalKeyCard& v);
+inline void from_json(const nlohmann::json& j, BittensorLocalKeyCard& v);
+inline void to_json(nlohmann::json& j, const BittensorLocalKeyReminder& v);
+inline void from_json(const nlohmann::json& j, BittensorLocalKeyReminder& v);
+inline void to_json(nlohmann::json& j, const BittensorLocalKeyScreen& v);
+inline void from_json(const nlohmann::json& j, BittensorLocalKeyScreen& v);
 inline void to_json(nlohmann::json& j, const BittensorSignRequest& v);
 inline void from_json(const nlohmann::json& j, BittensorSignRequest& v);
 inline void to_json(nlohmann::json& j, const BittensorWalletProof& v);
@@ -4818,6 +5082,20 @@ inline void to_json(nlohmann::json& j, const SetPointsLeaderboardPublicError& v)
 inline void from_json(const nlohmann::json& j, SetPointsLeaderboardPublicError& v);
 inline void to_json(nlohmann::json& j, const SetPointsLeaderboardPublicResult& v);
 inline void from_json(const nlohmann::json& j, SetPointsLeaderboardPublicResult& v);
+inline void to_json(nlohmann::json& j, const SnClaimNowResult& v);
+inline void from_json(const nlohmann::json& j, SnClaimNowResult& v);
+inline void to_json(nlohmann::json& j, const SnClaimRelayAccount& v);
+inline void from_json(const nlohmann::json& j, SnClaimRelayAccount& v);
+inline void to_json(nlohmann::json& j, const SnClaimRelayClaimNowArgs& v);
+inline void from_json(const nlohmann::json& j, SnClaimRelayClaimNowArgs& v);
+inline void to_json(nlohmann::json& j, const SnClaimRelayError& v);
+inline void from_json(const nlohmann::json& j, SnClaimRelayError& v);
+inline void to_json(nlohmann::json& j, const SnClaimRelayClaimNowResult& v);
+inline void from_json(const nlohmann::json& j, SnClaimRelayClaimNowResult& v);
+inline void to_json(nlohmann::json& j, const SnClaimRelayResult& v);
+inline void from_json(const nlohmann::json& j, SnClaimRelayResult& v);
+inline void to_json(nlohmann::json& j, const SnClaimStatusResult& v);
+inline void from_json(const nlohmann::json& j, SnClaimStatusResult& v);
 inline void to_json(nlohmann::json& j, const SnEpochSchedule& v);
 inline void from_json(const nlohmann::json& j, SnEpochSchedule& v);
 inline void to_json(nlohmann::json& j, const SnClaimsResult& v);
@@ -6983,6 +7261,461 @@ inline void from_json(const nlohmann::json& j, BittensorChallengeMessage& v) {
 	}
 	if (auto it = j.find("Timestamp"); it != j.end() && !it->is_null()) {
 		it->get_to(v.Timestamp);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const BittensorConvertEstimateResult& v) {
+	j = nlohmann::json::object();
+	j["coldkey_ss58"] = v.coldkey_ss58;
+	if (v.hotkey_ss58) {
+		j["hotkey_ss58"] = *v.hotkey_ss58;
+	}
+	j["netuid"] = v.netuid;
+	j["stake_rao"] = v.stake_rao;
+	j["free_tao_rao"] = v.free_tao_rao;
+	j["price_rao"] = v.price_rao;
+	j["min_amount_rao"] = v.min_amount_rao;
+	j["max_amount_rao"] = v.max_amount_rao;
+	j["amount_rao"] = v.amount_rao;
+	j["expected_tao_rao"] = v.expected_tao_rao;
+	j["expected_net_tao_rao"] = v.expected_net_tao_rao;
+	j["min_tao_rao"] = v.min_tao_rao;
+	j["limit_price_rao"] = v.limit_price_rao;
+	j["pool_fee_alpha_rao"] = v.pool_fee_alpha_rao;
+	j["price_impact_bps"] = v.price_impact_bps;
+	j["fee_tao_rao"] = v.fee_tao_rao;
+	j["fee_alpha_rao"] = v.fee_alpha_rao;
+	j["fee_in_alpha"] = v.fee_in_alpha;
+	j["remainder_swept_alpha_rao"] = v.remainder_swept_alpha_rao;
+	j["remainder_swept_tao_rao"] = v.remainder_swept_tao_rao;
+	if (v.burn_rao) {
+		j["burn_rao"] = *v.burn_rao;
+	}
+	if (v.register_fee_rao) {
+		j["register_fee_rao"] = *v.register_fee_rao;
+	}
+	if (v.burn_tao_needed_rao) {
+		j["burn_tao_needed_rao"] = *v.burn_tao_needed_rao;
+	}
+	if (v.burn_already_covered) {
+		j["burn_already_covered"] = *v.burn_already_covered;
+	}
+	j["can_convert"] = v.can_convert;
+	if (v.notice) {
+		j["notice"] = *v.notice;
+	}
+	j["funds_disclaimer"] = v.funds_disclaimer;
+	if (v.error) {
+		j["error"] = *v.error;
+	}
+}
+inline void from_json(const nlohmann::json& j, BittensorConvertEstimateResult& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("coldkey_ss58"); it != j.end() && !it->is_null()) {
+		it->get_to(v.coldkey_ss58);
+	}
+	if (auto it = j.find("hotkey_ss58"); it != j.end() && !it->is_null()) {
+		std::string tmp{};
+		it->get_to(tmp);
+		v.hotkey_ss58 = std::move(tmp);
+	}
+	if (auto it = j.find("netuid"); it != j.end() && !it->is_null()) {
+		it->get_to(v.netuid);
+	}
+	if (auto it = j.find("stake_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.stake_rao);
+	}
+	if (auto it = j.find("free_tao_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.free_tao_rao);
+	}
+	if (auto it = j.find("price_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.price_rao);
+	}
+	if (auto it = j.find("min_amount_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.min_amount_rao);
+	}
+	if (auto it = j.find("max_amount_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.max_amount_rao);
+	}
+	if (auto it = j.find("amount_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.amount_rao);
+	}
+	if (auto it = j.find("expected_tao_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.expected_tao_rao);
+	}
+	if (auto it = j.find("expected_net_tao_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.expected_net_tao_rao);
+	}
+	if (auto it = j.find("min_tao_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.min_tao_rao);
+	}
+	if (auto it = j.find("limit_price_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.limit_price_rao);
+	}
+	if (auto it = j.find("pool_fee_alpha_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.pool_fee_alpha_rao);
+	}
+	if (auto it = j.find("price_impact_bps"); it != j.end() && !it->is_null()) {
+		it->get_to(v.price_impact_bps);
+	}
+	if (auto it = j.find("fee_tao_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.fee_tao_rao);
+	}
+	if (auto it = j.find("fee_alpha_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.fee_alpha_rao);
+	}
+	if (auto it = j.find("fee_in_alpha"); it != j.end() && !it->is_null()) {
+		it->get_to(v.fee_in_alpha);
+	}
+	if (auto it = j.find("remainder_swept_alpha_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.remainder_swept_alpha_rao);
+	}
+	if (auto it = j.find("remainder_swept_tao_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.remainder_swept_tao_rao);
+	}
+	if (auto it = j.find("burn_rao"); it != j.end() && !it->is_null()) {
+		int64_t tmp{};
+		it->get_to(tmp);
+		v.burn_rao = std::move(tmp);
+	}
+	if (auto it = j.find("register_fee_rao"); it != j.end() && !it->is_null()) {
+		int64_t tmp{};
+		it->get_to(tmp);
+		v.register_fee_rao = std::move(tmp);
+	}
+	if (auto it = j.find("burn_tao_needed_rao"); it != j.end() && !it->is_null()) {
+		int64_t tmp{};
+		it->get_to(tmp);
+		v.burn_tao_needed_rao = std::move(tmp);
+	}
+	if (auto it = j.find("burn_already_covered"); it != j.end() && !it->is_null()) {
+		bool tmp{};
+		it->get_to(tmp);
+		v.burn_already_covered = std::move(tmp);
+	}
+	if (auto it = j.find("can_convert"); it != j.end() && !it->is_null()) {
+		it->get_to(v.can_convert);
+	}
+	if (auto it = j.find("notice"); it != j.end() && !it->is_null()) {
+		std::string tmp{};
+		it->get_to(tmp);
+		v.notice = std::move(tmp);
+	}
+	if (auto it = j.find("funds_disclaimer"); it != j.end() && !it->is_null()) {
+		it->get_to(v.funds_disclaimer);
+	}
+	if (auto it = j.find("error"); it != j.end() && !it->is_null()) {
+		SnError tmp{};
+		it->get_to(tmp);
+		v.error = std::move(tmp);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const BittensorConvertReceipt& v) {
+	j = nlohmann::json::object();
+	if (v.tx_hash) {
+		j["tx_hash"] = *v.tx_hash;
+	}
+	if (v.block_number) {
+		j["block_number"] = *v.block_number;
+	}
+	if (v.extrinsic_index) {
+		j["extrinsic_index"] = *v.extrinsic_index;
+	}
+	j["alpha_sold_rao"] = v.alpha_sold_rao;
+	j["tao_received_rao"] = v.tao_received_rao;
+	j["fee_alpha_rao"] = v.fee_alpha_rao;
+	j["fee_tao_rao"] = v.fee_tao_rao;
+	j["funds_disclaimer"] = v.funds_disclaimer;
+	if (v.error) {
+		j["error"] = *v.error;
+	}
+}
+inline void from_json(const nlohmann::json& j, BittensorConvertReceipt& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("tx_hash"); it != j.end() && !it->is_null()) {
+		std::string tmp{};
+		it->get_to(tmp);
+		v.tx_hash = std::move(tmp);
+	}
+	if (auto it = j.find("block_number"); it != j.end() && !it->is_null()) {
+		int64_t tmp{};
+		it->get_to(tmp);
+		v.block_number = std::move(tmp);
+	}
+	if (auto it = j.find("extrinsic_index"); it != j.end() && !it->is_null()) {
+		int64_t tmp{};
+		it->get_to(tmp);
+		v.extrinsic_index = std::move(tmp);
+	}
+	if (auto it = j.find("alpha_sold_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.alpha_sold_rao);
+	}
+	if (auto it = j.find("tao_received_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.tao_received_rao);
+	}
+	if (auto it = j.find("fee_alpha_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.fee_alpha_rao);
+	}
+	if (auto it = j.find("fee_tao_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.fee_tao_rao);
+	}
+	if (auto it = j.find("funds_disclaimer"); it != j.end() && !it->is_null()) {
+		it->get_to(v.funds_disclaimer);
+	}
+	if (auto it = j.find("error"); it != j.end() && !it->is_null()) {
+		SnError tmp{};
+		it->get_to(tmp);
+		v.error = std::move(tmp);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const BittensorConvertSubmission& v) {
+	j = nlohmann::json::object();
+	if (v.tx_hash) {
+		j["tx_hash"] = *v.tx_hash;
+	}
+	if (v.coldkey_ss58) {
+		j["coldkey_ss58"] = *v.coldkey_ss58;
+	}
+	if (v.first_block) {
+		j["first_block"] = *v.first_block;
+	}
+	if (v.last_block) {
+		j["last_block"] = *v.last_block;
+	}
+	j["funds_disclaimer"] = v.funds_disclaimer;
+	if (v.error) {
+		j["error"] = *v.error;
+	}
+}
+inline void from_json(const nlohmann::json& j, BittensorConvertSubmission& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("tx_hash"); it != j.end() && !it->is_null()) {
+		std::string tmp{};
+		it->get_to(tmp);
+		v.tx_hash = std::move(tmp);
+	}
+	if (auto it = j.find("coldkey_ss58"); it != j.end() && !it->is_null()) {
+		std::string tmp{};
+		it->get_to(tmp);
+		v.coldkey_ss58 = std::move(tmp);
+	}
+	if (auto it = j.find("first_block"); it != j.end() && !it->is_null()) {
+		int64_t tmp{};
+		it->get_to(tmp);
+		v.first_block = std::move(tmp);
+	}
+	if (auto it = j.find("last_block"); it != j.end() && !it->is_null()) {
+		int64_t tmp{};
+		it->get_to(tmp);
+		v.last_block = std::move(tmp);
+	}
+	if (auto it = j.find("funds_disclaimer"); it != j.end() && !it->is_null()) {
+		it->get_to(v.funds_disclaimer);
+	}
+	if (auto it = j.find("error"); it != j.end() && !it->is_null()) {
+		SnError tmp{};
+		it->get_to(tmp);
+		v.error = std::move(tmp);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const BittensorLocalKey& v) {
+	j = nlohmann::json::object();
+	j["mnemonic"] = v.mnemonic;
+	j["address"] = v.address;
+}
+inline void from_json(const nlohmann::json& j, BittensorLocalKey& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("mnemonic"); it != j.end() && !it->is_null()) {
+		it->get_to(v.mnemonic);
+	}
+	if (auto it = j.find("address"); it != j.end() && !it->is_null()) {
+		it->get_to(v.address);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const BittensorLocalKeyCard& v) {
+	j = nlohmann::json::object();
+	j["state"] = v.state;
+	j["address"] = v.address;
+	j["stored_address"] = v.stored_address;
+	j["shows_key_path"] = v.shows_key_path;
+	j["offers_set_up"] = v.offers_set_up;
+	j["offers_save_first"] = v.offers_save_first;
+	j["offers_wallet"] = v.offers_wallet;
+	j["offers_finish_setup"] = v.offers_finish_setup;
+	j["offers_key_screen"] = v.offers_key_screen;
+	j["replaces_payout_wallet"] = v.replaces_payout_wallet;
+	j["owner_only"] = v.owner_only;
+	j["payouts_start_next_epoch"] = v.payouts_start_next_epoch;
+	j["backup_reminder"] = v.backup_reminder;
+	j["key_saved"] = v.key_saved;
+	j["busy"] = v.busy;
+	j["link_generation"] = v.link_generation;
+	j["failure_code"] = v.failure_code;
+	j["failure_message"] = v.failure_message;
+}
+inline void from_json(const nlohmann::json& j, BittensorLocalKeyCard& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("state"); it != j.end() && !it->is_null()) {
+		it->get_to(v.state);
+	}
+	if (auto it = j.find("address"); it != j.end() && !it->is_null()) {
+		it->get_to(v.address);
+	}
+	if (auto it = j.find("stored_address"); it != j.end() && !it->is_null()) {
+		it->get_to(v.stored_address);
+	}
+	if (auto it = j.find("shows_key_path"); it != j.end() && !it->is_null()) {
+		it->get_to(v.shows_key_path);
+	}
+	if (auto it = j.find("offers_set_up"); it != j.end() && !it->is_null()) {
+		it->get_to(v.offers_set_up);
+	}
+	if (auto it = j.find("offers_save_first"); it != j.end() && !it->is_null()) {
+		it->get_to(v.offers_save_first);
+	}
+	if (auto it = j.find("offers_wallet"); it != j.end() && !it->is_null()) {
+		it->get_to(v.offers_wallet);
+	}
+	if (auto it = j.find("offers_finish_setup"); it != j.end() && !it->is_null()) {
+		it->get_to(v.offers_finish_setup);
+	}
+	if (auto it = j.find("offers_key_screen"); it != j.end() && !it->is_null()) {
+		it->get_to(v.offers_key_screen);
+	}
+	if (auto it = j.find("replaces_payout_wallet"); it != j.end() && !it->is_null()) {
+		it->get_to(v.replaces_payout_wallet);
+	}
+	if (auto it = j.find("owner_only"); it != j.end() && !it->is_null()) {
+		it->get_to(v.owner_only);
+	}
+	if (auto it = j.find("payouts_start_next_epoch"); it != j.end() && !it->is_null()) {
+		it->get_to(v.payouts_start_next_epoch);
+	}
+	if (auto it = j.find("backup_reminder"); it != j.end() && !it->is_null()) {
+		it->get_to(v.backup_reminder);
+	}
+	if (auto it = j.find("key_saved"); it != j.end() && !it->is_null()) {
+		it->get_to(v.key_saved);
+	}
+	if (auto it = j.find("busy"); it != j.end() && !it->is_null()) {
+		it->get_to(v.busy);
+	}
+	if (auto it = j.find("link_generation"); it != j.end() && !it->is_null()) {
+		it->get_to(v.link_generation);
+	}
+	if (auto it = j.find("failure_code"); it != j.end() && !it->is_null()) {
+		it->get_to(v.failure_code);
+	}
+	if (auto it = j.find("failure_message"); it != j.end() && !it->is_null()) {
+		it->get_to(v.failure_message);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const BittensorLocalKeyReminder& v) {
+	j = nlohmann::json::object();
+	j["action"] = v.action;
+	j["at_millis"] = v.at_millis;
+}
+inline void from_json(const nlohmann::json& j, BittensorLocalKeyReminder& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("action"); it != j.end() && !it->is_null()) {
+		it->get_to(v.action);
+	}
+	if (auto it = j.find("at_millis"); it != j.end() && !it->is_null()) {
+		it->get_to(v.at_millis);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const BittensorLocalKeyScreen& v) {
+	j = nlohmann::json::object();
+	j["open"] = v.open;
+	j["save_now"] = v.save_now;
+	j["address"] = v.address;
+	j["revealed"] = v.revealed;
+	j["needs_authentication"] = v.needs_authentication;
+	j["hidden_by_capture"] = v.hidden_by_capture;
+	j["confirming"] = v.confirming;
+	j["first_word_position"] = v.first_word_position;
+	j["second_word_position"] = v.second_word_position;
+	j["words_rejected"] = v.words_rejected;
+	j["warns_top200"] = v.warns_top200;
+	j["offers_keep"] = v.offers_keep;
+	j["offers_retry"] = v.offers_retry;
+	j["busy"] = v.busy;
+	j["done"] = v.done;
+	j["failure_code"] = v.failure_code;
+	j["failure_message"] = v.failure_message;
+}
+inline void from_json(const nlohmann::json& j, BittensorLocalKeyScreen& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("open"); it != j.end() && !it->is_null()) {
+		it->get_to(v.open);
+	}
+	if (auto it = j.find("save_now"); it != j.end() && !it->is_null()) {
+		it->get_to(v.save_now);
+	}
+	if (auto it = j.find("address"); it != j.end() && !it->is_null()) {
+		it->get_to(v.address);
+	}
+	if (auto it = j.find("revealed"); it != j.end() && !it->is_null()) {
+		it->get_to(v.revealed);
+	}
+	if (auto it = j.find("needs_authentication"); it != j.end() && !it->is_null()) {
+		it->get_to(v.needs_authentication);
+	}
+	if (auto it = j.find("hidden_by_capture"); it != j.end() && !it->is_null()) {
+		it->get_to(v.hidden_by_capture);
+	}
+	if (auto it = j.find("confirming"); it != j.end() && !it->is_null()) {
+		it->get_to(v.confirming);
+	}
+	if (auto it = j.find("first_word_position"); it != j.end() && !it->is_null()) {
+		it->get_to(v.first_word_position);
+	}
+	if (auto it = j.find("second_word_position"); it != j.end() && !it->is_null()) {
+		it->get_to(v.second_word_position);
+	}
+	if (auto it = j.find("words_rejected"); it != j.end() && !it->is_null()) {
+		it->get_to(v.words_rejected);
+	}
+	if (auto it = j.find("warns_top200"); it != j.end() && !it->is_null()) {
+		it->get_to(v.warns_top200);
+	}
+	if (auto it = j.find("offers_keep"); it != j.end() && !it->is_null()) {
+		it->get_to(v.offers_keep);
+	}
+	if (auto it = j.find("offers_retry"); it != j.end() && !it->is_null()) {
+		it->get_to(v.offers_retry);
+	}
+	if (auto it = j.find("busy"); it != j.end() && !it->is_null()) {
+		it->get_to(v.busy);
+	}
+	if (auto it = j.find("done"); it != j.end() && !it->is_null()) {
+		it->get_to(v.done);
+	}
+	if (auto it = j.find("failure_code"); it != j.end() && !it->is_null()) {
+		it->get_to(v.failure_code);
+	}
+	if (auto it = j.find("failure_message"); it != j.end() && !it->is_null()) {
+		it->get_to(v.failure_message);
 	}
 }
 
@@ -15757,6 +16490,325 @@ inline void from_json(const nlohmann::json& j, SetPointsLeaderboardPublicResult&
 	}
 }
 
+inline void to_json(nlohmann::json& j, const SnClaimNowResult& v) {
+	j = nlohmann::json::object();
+	j["requested"] = v.requested;
+	if (v.reason) {
+		j["reason"] = *v.reason;
+	}
+	if (v.next_at_millis) {
+		j["next_at_millis"] = *v.next_at_millis;
+	}
+	if (v.error) {
+		j["error"] = *v.error;
+	}
+}
+inline void from_json(const nlohmann::json& j, SnClaimNowResult& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("requested"); it != j.end() && !it->is_null()) {
+		it->get_to(v.requested);
+	}
+	if (auto it = j.find("reason"); it != j.end() && !it->is_null()) {
+		std::string tmp{};
+		it->get_to(tmp);
+		v.reason = std::move(tmp);
+	}
+	if (auto it = j.find("next_at_millis"); it != j.end() && !it->is_null()) {
+		int64_t tmp{};
+		it->get_to(tmp);
+		v.next_at_millis = std::move(tmp);
+	}
+	if (auto it = j.find("error"); it != j.end() && !it->is_null()) {
+		SnError tmp{};
+		it->get_to(tmp);
+		v.error = std::move(tmp);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const SnClaimRelayAccount& v) {
+	j = nlohmann::json::object();
+	j["coldkey_ss58"] = v.coldkey_ss58;
+	j["no_id"] = v.no_id;
+	j["index"] = v.index;
+	j["claimable_rao"] = v.claimable_rao;
+	j["value_tao_rao"] = v.value_tao_rao;
+	j["pending_rao"] = v.pending_rao;
+	j["reason"] = v.reason;
+	j["claim_now_available"] = v.claim_now_available;
+	if (v.claim_now_reason) {
+		j["claim_now_reason"] = *v.claim_now_reason;
+	}
+	if (v.claim_now_next_at_millis) {
+		j["claim_now_next_at_millis"] = *v.claim_now_next_at_millis;
+	}
+	if (v.connected) {
+		j["connected"] = *v.connected;
+	}
+	if (v.action) {
+		j["action"] = *v.action;
+	}
+}
+inline void from_json(const nlohmann::json& j, SnClaimRelayAccount& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("coldkey_ss58"); it != j.end() && !it->is_null()) {
+		it->get_to(v.coldkey_ss58);
+	}
+	if (auto it = j.find("no_id"); it != j.end() && !it->is_null()) {
+		it->get_to(v.no_id);
+	}
+	if (auto it = j.find("index"); it != j.end() && !it->is_null()) {
+		it->get_to(v.index);
+	}
+	if (auto it = j.find("claimable_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.claimable_rao);
+	}
+	if (auto it = j.find("value_tao_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.value_tao_rao);
+	}
+	if (auto it = j.find("pending_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.pending_rao);
+	}
+	if (auto it = j.find("reason"); it != j.end() && !it->is_null()) {
+		it->get_to(v.reason);
+	}
+	if (auto it = j.find("claim_now_available"); it != j.end() && !it->is_null()) {
+		it->get_to(v.claim_now_available);
+	}
+	if (auto it = j.find("claim_now_reason"); it != j.end() && !it->is_null()) {
+		std::string tmp{};
+		it->get_to(tmp);
+		v.claim_now_reason = std::move(tmp);
+	}
+	if (auto it = j.find("claim_now_next_at_millis"); it != j.end() && !it->is_null()) {
+		int64_t tmp{};
+		it->get_to(tmp);
+		v.claim_now_next_at_millis = std::move(tmp);
+	}
+	if (auto it = j.find("connected"); it != j.end() && !it->is_null()) {
+		bool tmp{};
+		it->get_to(tmp);
+		v.connected = std::move(tmp);
+	}
+	if (auto it = j.find("action"); it != j.end() && !it->is_null()) {
+		std::string tmp{};
+		it->get_to(tmp);
+		v.action = std::move(tmp);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const SnClaimRelayClaimNowArgs& v) {
+	j = nlohmann::json::object();
+	j["coldkey_ss58"] = v.coldkey_ss58;
+}
+inline void from_json(const nlohmann::json& j, SnClaimRelayClaimNowArgs& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("coldkey_ss58"); it != j.end() && !it->is_null()) {
+		it->get_to(v.coldkey_ss58);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const SnClaimRelayError& v) {
+	j = nlohmann::json::object();
+	j["message"] = v.message;
+}
+inline void from_json(const nlohmann::json& j, SnClaimRelayError& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("message"); it != j.end() && !it->is_null()) {
+		it->get_to(v.message);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const SnClaimRelayClaimNowResult& v) {
+	j = nlohmann::json::object();
+	j["requested"] = v.requested;
+	if (v.reason) {
+		j["reason"] = *v.reason;
+	}
+	if (v.next_at_millis) {
+		j["next_at_millis"] = *v.next_at_millis;
+	}
+	if (v.error) {
+		j["error"] = *v.error;
+	}
+}
+inline void from_json(const nlohmann::json& j, SnClaimRelayClaimNowResult& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("requested"); it != j.end() && !it->is_null()) {
+		it->get_to(v.requested);
+	}
+	if (auto it = j.find("reason"); it != j.end() && !it->is_null()) {
+		std::string tmp{};
+		it->get_to(tmp);
+		v.reason = std::move(tmp);
+	}
+	if (auto it = j.find("next_at_millis"); it != j.end() && !it->is_null()) {
+		int64_t tmp{};
+		it->get_to(tmp);
+		v.next_at_millis = std::move(tmp);
+	}
+	if (auto it = j.find("error"); it != j.end() && !it->is_null()) {
+		SnClaimRelayError tmp{};
+		it->get_to(tmp);
+		v.error = std::move(tmp);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const SnClaimRelayResult& v) {
+	j = nlohmann::json::object();
+	j["state"] = v.state;
+	j["automatic_threshold_tao_rao"] = v.automatic_threshold_tao_rao;
+	j["transfer_floor_tao_rao"] = v.transfer_floor_tao_rao;
+	j["automatic_threshold_rao"] = v.automatic_threshold_rao;
+	j["transfer_floor_rao"] = v.transfer_floor_rao;
+	j["claim_now_period_days"] = v.claim_now_period_days;
+	if (v.accounts) {
+		j["accounts"] = *v.accounts;
+	}
+	if (v.error) {
+		j["error"] = *v.error;
+	}
+}
+inline void from_json(const nlohmann::json& j, SnClaimRelayResult& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("state"); it != j.end() && !it->is_null()) {
+		it->get_to(v.state);
+	}
+	if (auto it = j.find("automatic_threshold_tao_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.automatic_threshold_tao_rao);
+	}
+	if (auto it = j.find("transfer_floor_tao_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.transfer_floor_tao_rao);
+	}
+	if (auto it = j.find("automatic_threshold_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.automatic_threshold_rao);
+	}
+	if (auto it = j.find("transfer_floor_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.transfer_floor_rao);
+	}
+	if (auto it = j.find("claim_now_period_days"); it != j.end() && !it->is_null()) {
+		it->get_to(v.claim_now_period_days);
+	}
+	if (auto it = j.find("accounts"); it != j.end() && !it->is_null()) {
+		SnClaimRelayAccountList tmp{};
+		it->get_to(tmp);
+		v.accounts = std::move(tmp);
+	}
+	if (auto it = j.find("error"); it != j.end() && !it->is_null()) {
+		SnClaimRelayError tmp{};
+		it->get_to(tmp);
+		v.error = std::move(tmp);
+	}
+}
+
+inline void to_json(nlohmann::json& j, const SnClaimStatusResult& v) {
+	j = nlohmann::json::object();
+	j["relay_state"] = v.relay_state;
+	if (v.coldkey_ss58) {
+		j["coldkey_ss58"] = *v.coldkey_ss58;
+	}
+	j["action"] = v.action;
+	j["reason"] = v.reason;
+	j["claimable_rao"] = v.claimable_rao;
+	j["value_tao_rao"] = v.value_tao_rao;
+	j["pending_rao"] = v.pending_rao;
+	j["claim_now_available"] = v.claim_now_available;
+	if (v.claim_now_reason) {
+		j["claim_now_reason"] = *v.claim_now_reason;
+	}
+	if (v.claim_now_next_at_millis) {
+		j["claim_now_next_at_millis"] = *v.claim_now_next_at_millis;
+	}
+	j["self_claim_available"] = v.self_claim_available;
+	j["self_claim_needs_gas"] = v.self_claim_needs_gas;
+	j["automatic_threshold_rao"] = v.automatic_threshold_rao;
+	j["transfer_floor_rao"] = v.transfer_floor_rao;
+	j["claim_now_period_days"] = v.claim_now_period_days;
+	if (v.accounts) {
+		j["accounts"] = *v.accounts;
+	}
+	if (v.error) {
+		j["error"] = *v.error;
+	}
+}
+inline void from_json(const nlohmann::json& j, SnClaimStatusResult& v) {
+	if (!j.is_object()) {
+		return;
+	}
+	if (auto it = j.find("relay_state"); it != j.end() && !it->is_null()) {
+		it->get_to(v.relay_state);
+	}
+	if (auto it = j.find("coldkey_ss58"); it != j.end() && !it->is_null()) {
+		std::string tmp{};
+		it->get_to(tmp);
+		v.coldkey_ss58 = std::move(tmp);
+	}
+	if (auto it = j.find("action"); it != j.end() && !it->is_null()) {
+		it->get_to(v.action);
+	}
+	if (auto it = j.find("reason"); it != j.end() && !it->is_null()) {
+		it->get_to(v.reason);
+	}
+	if (auto it = j.find("claimable_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.claimable_rao);
+	}
+	if (auto it = j.find("value_tao_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.value_tao_rao);
+	}
+	if (auto it = j.find("pending_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.pending_rao);
+	}
+	if (auto it = j.find("claim_now_available"); it != j.end() && !it->is_null()) {
+		it->get_to(v.claim_now_available);
+	}
+	if (auto it = j.find("claim_now_reason"); it != j.end() && !it->is_null()) {
+		std::string tmp{};
+		it->get_to(tmp);
+		v.claim_now_reason = std::move(tmp);
+	}
+	if (auto it = j.find("claim_now_next_at_millis"); it != j.end() && !it->is_null()) {
+		int64_t tmp{};
+		it->get_to(tmp);
+		v.claim_now_next_at_millis = std::move(tmp);
+	}
+	if (auto it = j.find("self_claim_available"); it != j.end() && !it->is_null()) {
+		it->get_to(v.self_claim_available);
+	}
+	if (auto it = j.find("self_claim_needs_gas"); it != j.end() && !it->is_null()) {
+		it->get_to(v.self_claim_needs_gas);
+	}
+	if (auto it = j.find("automatic_threshold_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.automatic_threshold_rao);
+	}
+	if (auto it = j.find("transfer_floor_rao"); it != j.end() && !it->is_null()) {
+		it->get_to(v.transfer_floor_rao);
+	}
+	if (auto it = j.find("claim_now_period_days"); it != j.end() && !it->is_null()) {
+		it->get_to(v.claim_now_period_days);
+	}
+	if (auto it = j.find("accounts"); it != j.end() && !it->is_null()) {
+		SnClaimRelayAccountList tmp{};
+		it->get_to(tmp);
+		v.accounts = std::move(tmp);
+	}
+	if (auto it = j.find("error"); it != j.end() && !it->is_null()) {
+		SnError tmp{};
+		it->get_to(tmp);
+		v.error = std::move(tmp);
+	}
+}
+
 inline void to_json(nlohmann::json& j, const SnEpochSchedule& v) {
 	j = nlohmann::json::object();
 	j["epoch"] = v.epoch;
@@ -19491,6 +20543,18 @@ using AuthPasswordResetCallback = std::function<void(std::optional<AuthPasswordR
 using AuthVerifyCallback = std::function<void(std::optional<AuthVerifyResult> result, std::optional<std::string> err_param)>;
 using AuthVerifySendCallback = std::function<void(std::optional<AuthVerifySendResult> result, std::optional<std::string> err_param)>;
 using AuthWalletChallengeCallback = std::function<void(std::optional<AuthWalletChallengeResult> result, std::optional<std::string> err_param)>;
+using BittensorConvertEstimateCallback = std::function<void(std::optional<BittensorConvertEstimateResult> result, std::optional<std::string> err_param)>;
+using BittensorConvertReceiptCallback = std::function<void(std::optional<BittensorConvertReceipt> result, std::optional<std::string> err_param)>;
+using BittensorConvertSubmitCallback = std::function<void(std::optional<BittensorConvertSubmission> result, std::optional<std::string> err_param)>;
+using BittensorLocalKeyFlowListener = std::function<void()>;
+struct BittensorLocalKeyStore {
+	std::function<bool(std::string network_id, std::string mnemonic, std::string address)> add_key;
+	std::function<bool(std::string network_id)> delete_key;
+	std::function<std::string(std::string network_id)> key_address;
+	std::function<std::string(std::string network_id)> key_phrase;
+	std::function<std::string(std::string network_id, std::string name)> read_note;
+	std::function<void(std::string network_id, std::string name, std::string value)> write_note;
+};
 using BlockActionOverridesChangeListener = std::function<void(std::optional<BlockActionOverrideList> block_action_overrides)>;
 using BlockActionStatsListener = std::function<void()>;
 using BlockActionWindowChangeListener = std::function<void(std::optional<BlockActionWindow> block_action_window)>;
@@ -19637,6 +20701,10 @@ struct SnClaimCallback {
 	std::function<void(int64_t epoch, std::string message)> failed;
 	std::function<void(int64_t epoch, std::string tx_hash)> sent;
 };
+using SnClaimNowCallback = std::function<void(std::optional<SnClaimNowResult> result, std::optional<std::string> err_param)>;
+using SnClaimRelayCallback = std::function<void(std::optional<SnClaimRelayResult> result, std::optional<std::string> err_param)>;
+using SnClaimRelayClaimNowCallback = std::function<void(std::optional<SnClaimRelayClaimNowResult> result, std::optional<std::string> err_param)>;
+using SnClaimStatusCallback = std::function<void(std::optional<SnClaimStatusResult> result, std::optional<std::string> err_param)>;
 using SnClaimsCallback = std::function<void(std::optional<SnClaimsResult> result, std::optional<std::string> err_param)>;
 using SnConnectWalletCallback = std::function<void(std::optional<SnConnectWalletResult> result, std::optional<std::string> err_param)>;
 using SnEpochCallback = std::function<void(std::optional<SnEpochResult> result, std::optional<std::string> err_param)>;
@@ -20007,6 +21075,8 @@ public:
 	void setPayoutWallet(const std::optional<SetPayoutWalletArgs>& payout_wallet, SetPayoutWalletCallback callback) const;
 	void setPointsLeaderboardPublic(const std::optional<SetPointsLeaderboardPublicArgs>& args, SetPointsLeaderboardPublicCallback callback) const;
 	void signOut(SessionSignOutCallback callback) const;
+	void snClaimRelay(SnClaimRelayCallback callback) const;
+	void snClaimRelayClaimNow(const std::optional<SnClaimRelayClaimNowArgs>& args, SnClaimRelayClaimNowCallback callback) const;
 	void snEpoch(SnEpochCallback callback) const;
 	std::optional<SnEpochResult> snEpochSync() const;
 	void snGetWallet(SnGetWalletCallback callback) const;
@@ -20062,6 +21132,44 @@ public:
 	void parseByJwt(ParseByJwtCallback callback) const;
 	void setByClientJwt(const std::string& by_client_jwt, CommitCallback callback) const;
 	void setByJwt(const std::string& by_jwt, CommitCallback callback) const;
+};
+
+class BittensorLocalKeyFlow final : public detail::Handle {
+public:
+	BittensorLocalKeyFlow() = default;
+	explicit BittensorLocalKeyFlow(uint64_t h) : detail::Handle(h) {}
+	Sub addBittensorLocalKeyFlowListener(BittensorLocalKeyFlowListener listener) const;
+	void cancelConfirmation() const;
+	void close() const;
+	void closeScreen() const;
+	void confirmDelete(bool authenticated) const;
+	void confirmKeep(bool authenticated) const;
+	void finishSetup(bool replace_confirmed) const;
+	bool forgetNetwork() const;
+	std::optional<BittensorLocalKeyCard> getCard() const;
+	std::optional<BittensorLocalKeyScreen> getScreen() const;
+	std::string goString() const;
+	void hide() const;
+	bool needsBackup() const;
+	void openScreen() const;
+	std::string phraseToCopy() const;
+	void reload() const;
+	std::optional<BittensorLocalKeyReminder> reminder(int64_t current_epoch, int64_t claim_open_millis, int64_t epoch_blocks, bool claimable) const;
+	void reminderDelivered() const;
+	void reminderScheduled(int64_t at_millis) const;
+	void retrySaveNow() const;
+	void reveal(bool authenticated) const;
+	std::optional<StringList> revealedWords() const;
+	void saveFirst(bool replace_confirmed) const;
+	void setCaptureActive(bool active) const;
+	void setConsent(bool active, const std::string& coldkey_ss58, int64_t from_epoch) const;
+	void setConsentUnavailable() const;
+	void setCurrentEpoch(int64_t current_epoch) const;
+	void setGuest(bool guest) const;
+	void setTop200Registered(bool registered) const;
+	void setUpPayouts(bool replace_confirmed) const;
+	std::string string() const;
+	void submitWords(const std::string& first_word, const std::string& second_word) const;
 };
 
 class BittensorWalletSession final : public detail::Handle {
@@ -20404,6 +21512,8 @@ public:
 	std::string signSnFleetBinding(const std::string& binding_json) const;
 	void simulateNetworkChange() const;
 	void snClaim(const std::optional<Int64List>& epochs, SnClaimCallback callback) const;
+	void snClaimNow(const std::string& coldkey_ss58, SnClaimNowCallback callback) const;
+	void snClaimStatus(SnClaimStatusCallback callback) const;
 	std::optional<SnUnsignedTxList> snClaimTransactions(const std::optional<Int64List>& epochs) const;
 	void snClaims(SnClaimsCallback callback) const;
 	void snGasBalance(SnGasBalanceCallback callback) const;
@@ -20550,6 +21660,8 @@ public:
 	std::string signSnFleetBinding(const std::string& binding_json) const;
 	void simulateNetworkChange() const;
 	void snClaim(const std::optional<Int64List>& epochs, SnClaimCallback callback) const;
+	void snClaimNow(const std::string& coldkey_ss58, SnClaimNowCallback callback) const;
+	void snClaimStatus(SnClaimStatusCallback callback) const;
 	std::optional<SnUnsignedTxList> snClaimTransactions(const std::optional<Int64List>& epochs) const;
 	void snClaims(SnClaimsCallback callback) const;
 	void snGasBalance(SnGasBalanceCallback callback) const;
@@ -21845,6 +22957,211 @@ inline void oneshot_auth_wallet_challenge(void* user_data, const char* result_js
 	} catch (...) {
 	}
 	delete f;
+}
+
+inline void retained_bittensor_convert_estimate(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<BittensorConvertEstimateCallback*>(user_data);
+	try {
+		std::optional<BittensorConvertEstimateResult> result_v;
+		if (result_json) {
+			result_v = parseJson<BittensorConvertEstimateResult>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+}
+inline void oneshot_bittensor_convert_estimate(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<BittensorConvertEstimateCallback*>(user_data);
+	try {
+		std::optional<BittensorConvertEstimateResult> result_v;
+		if (result_json) {
+			result_v = parseJson<BittensorConvertEstimateResult>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	delete f;
+}
+
+inline void retained_bittensor_convert_receipt(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<BittensorConvertReceiptCallback*>(user_data);
+	try {
+		std::optional<BittensorConvertReceipt> result_v;
+		if (result_json) {
+			result_v = parseJson<BittensorConvertReceipt>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+}
+inline void oneshot_bittensor_convert_receipt(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<BittensorConvertReceiptCallback*>(user_data);
+	try {
+		std::optional<BittensorConvertReceipt> result_v;
+		if (result_json) {
+			result_v = parseJson<BittensorConvertReceipt>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	delete f;
+}
+
+inline void retained_bittensor_convert_submit(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<BittensorConvertSubmitCallback*>(user_data);
+	try {
+		std::optional<BittensorConvertSubmission> result_v;
+		if (result_json) {
+			result_v = parseJson<BittensorConvertSubmission>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+}
+inline void oneshot_bittensor_convert_submit(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<BittensorConvertSubmitCallback*>(user_data);
+	try {
+		std::optional<BittensorConvertSubmission> result_v;
+		if (result_json) {
+			result_v = parseJson<BittensorConvertSubmission>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	delete f;
+}
+
+inline void retained_bittensor_local_key_flow(void* user_data) {
+	auto* f = static_cast<BittensorLocalKeyFlowListener*>(user_data);
+	try {
+		(*f)();
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+}
+inline void oneshot_bittensor_local_key_flow(void* user_data) {
+	auto* f = static_cast<BittensorLocalKeyFlowListener*>(user_data);
+	try {
+		(*f)();
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	delete f;
+}
+
+inline bool retained_bittensor_local_key_store_add_key(void* user_data, const char* network_id, const char* mnemonic, const char* address) {
+	auto* f = static_cast<BittensorLocalKeyStore*>(user_data);
+	bool r{};
+	try {
+		if (f->add_key) {
+			r = f->add_key(std::string(network_id ? network_id : ""), std::string(mnemonic ? mnemonic : ""), std::string(address ? address : ""));
+		}
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	return r;
+}
+inline bool retained_bittensor_local_key_store_delete_key(void* user_data, const char* network_id) {
+	auto* f = static_cast<BittensorLocalKeyStore*>(user_data);
+	bool r{};
+	try {
+		if (f->delete_key) {
+			r = f->delete_key(std::string(network_id ? network_id : ""));
+		}
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	return r;
+}
+inline char* retained_bittensor_local_key_store_key_address(void* user_data, const char* network_id) {
+	auto* f = static_cast<BittensorLocalKeyStore*>(user_data);
+	std::string r{};
+	try {
+		if (f->key_address) {
+			r = f->key_address(std::string(network_id ? network_id : ""));
+		}
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	return dupCString(r);
+}
+inline char* retained_bittensor_local_key_store_key_phrase(void* user_data, const char* network_id) {
+	auto* f = static_cast<BittensorLocalKeyStore*>(user_data);
+	std::string r{};
+	try {
+		if (f->key_phrase) {
+			r = f->key_phrase(std::string(network_id ? network_id : ""));
+		}
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	return dupCString(r);
+}
+inline char* retained_bittensor_local_key_store_read_note(void* user_data, const char* network_id, const char* name) {
+	auto* f = static_cast<BittensorLocalKeyStore*>(user_data);
+	std::string r{};
+	try {
+		if (f->read_note) {
+			r = f->read_note(std::string(network_id ? network_id : ""), std::string(name ? name : ""));
+		}
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	return dupCString(r);
+}
+inline void retained_bittensor_local_key_store_write_note(void* user_data, const char* network_id, const char* name, const char* value) {
+	auto* f = static_cast<BittensorLocalKeyStore*>(user_data);
+	try {
+		if (f->write_note) {
+			f->write_note(std::string(network_id ? network_id : ""), std::string(name ? name : ""), std::string(value ? value : ""));
+		}
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
 }
 
 inline void retained_block_action_overrides_change(void* user_data, const char* block_action_overrides_json) {
@@ -25820,6 +27137,150 @@ inline void retained_sn_claim_sent(void* user_data, int64_t epoch, const char* t
 	}
 }
 
+inline void retained_sn_claim_now(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<SnClaimNowCallback*>(user_data);
+	try {
+		std::optional<SnClaimNowResult> result_v;
+		if (result_json) {
+			result_v = parseJson<SnClaimNowResult>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+}
+inline void oneshot_sn_claim_now(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<SnClaimNowCallback*>(user_data);
+	try {
+		std::optional<SnClaimNowResult> result_v;
+		if (result_json) {
+			result_v = parseJson<SnClaimNowResult>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	delete f;
+}
+
+inline void retained_sn_claim_relay(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<SnClaimRelayCallback*>(user_data);
+	try {
+		std::optional<SnClaimRelayResult> result_v;
+		if (result_json) {
+			result_v = parseJson<SnClaimRelayResult>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+}
+inline void oneshot_sn_claim_relay(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<SnClaimRelayCallback*>(user_data);
+	try {
+		std::optional<SnClaimRelayResult> result_v;
+		if (result_json) {
+			result_v = parseJson<SnClaimRelayResult>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	delete f;
+}
+
+inline void retained_sn_claim_relay_claim_now(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<SnClaimRelayClaimNowCallback*>(user_data);
+	try {
+		std::optional<SnClaimRelayClaimNowResult> result_v;
+		if (result_json) {
+			result_v = parseJson<SnClaimRelayClaimNowResult>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+}
+inline void oneshot_sn_claim_relay_claim_now(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<SnClaimRelayClaimNowCallback*>(user_data);
+	try {
+		std::optional<SnClaimRelayClaimNowResult> result_v;
+		if (result_json) {
+			result_v = parseJson<SnClaimRelayClaimNowResult>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	delete f;
+}
+
+inline void retained_sn_claim_status(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<SnClaimStatusCallback*>(user_data);
+	try {
+		std::optional<SnClaimStatusResult> result_v;
+		if (result_json) {
+			result_v = parseJson<SnClaimStatusResult>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+}
+inline void oneshot_sn_claim_status(void* user_data, const char* result_json, const char* err_param) {
+	auto* f = static_cast<SnClaimStatusCallback*>(user_data);
+	try {
+		std::optional<SnClaimStatusResult> result_v;
+		if (result_json) {
+			result_v = parseJson<SnClaimStatusResult>(result_json);
+		}
+		std::optional<std::string> err_param_v;
+		if (err_param) {
+			err_param_v = std::string(err_param);
+		}
+		(*f)(std::move(result_v), std::move(err_param_v));
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "urnet callback error: %s\n", e.what());
+	} catch (...) {
+	}
+	delete f;
+}
+
 inline void retained_sn_claims(void* user_data, const char* result_json, const char* err_param) {
 	auto* f = static_cast<SnClaimsCallback*>(user_data);
 	try {
@@ -29453,6 +30914,20 @@ inline void Api::signOut(SessionSignOutCallback callback) const {
 	auto* callback_fn = callback ? new SessionSignOutCallback(std::move(callback)) : nullptr;
 	urnet_api_sign_out(handle(), callback_fn ? &detail::oneshot_session_sign_out : nullptr, callback_fn);
 }
+inline void Api::snClaimRelay(SnClaimRelayCallback callback) const {
+	auto* callback_fn = callback ? new SnClaimRelayCallback(std::move(callback)) : nullptr;
+	urnet_api_sn_claim_relay(handle(), callback_fn ? &detail::oneshot_sn_claim_relay : nullptr, callback_fn);
+}
+inline void Api::snClaimRelayClaimNow(const std::optional<SnClaimRelayClaimNowArgs>& args, SnClaimRelayClaimNowCallback callback) const {
+	std::string args_json;
+	const char* args_c = nullptr;
+	if (args) {
+		args_json = nlohmann::json(*args).dump();
+		args_c = args_json.c_str();
+	}
+	auto* callback_fn = callback ? new SnClaimRelayClaimNowCallback(std::move(callback)) : nullptr;
+	urnet_api_sn_claim_relay_claim_now(handle(), args_c, callback_fn ? &detail::oneshot_sn_claim_relay_claim_now : nullptr, callback_fn);
+}
 inline void Api::snEpoch(SnEpochCallback callback) const {
 	auto* callback_fn = callback ? new SnEpochCallback(std::move(callback)) : nullptr;
 	urnet_api_sn_epoch(handle(), callback_fn ? &detail::oneshot_sn_epoch : nullptr, callback_fn);
@@ -29855,6 +31330,135 @@ inline void AsyncLocalState::setByClientJwt(const std::string& by_client_jwt, Co
 inline void AsyncLocalState::setByJwt(const std::string& by_jwt, CommitCallback callback) const {
 	auto* callback_fn = callback ? new CommitCallback(std::move(callback)) : nullptr;
 	urnet_async_local_state_set_by_jwt(handle(), by_jwt.c_str(), callback_fn ? &detail::oneshot_commit : nullptr, callback_fn);
+}
+inline Sub BittensorLocalKeyFlow::addBittensorLocalKeyFlowListener(BittensorLocalKeyFlowListener listener) const {
+	std::shared_ptr<BittensorLocalKeyFlowListener> listener_fn;
+	if (listener) {
+		listener_fn = std::make_shared<BittensorLocalKeyFlowListener>(std::move(listener));
+	}
+	Sub r(urnet_bittensor_local_key_flow_add_bittensor_local_key_flow_listener(handle(), listener_fn ? &detail::retained_bittensor_local_key_flow : nullptr, listener_fn.get()));
+	if (listener_fn) {
+		r.retain(listener_fn);
+	}
+	return r;
+}
+inline void BittensorLocalKeyFlow::cancelConfirmation() const {
+	urnet_bittensor_local_key_flow_cancel_confirmation(handle());
+}
+inline void BittensorLocalKeyFlow::close() const {
+	urnet_bittensor_local_key_flow_close(handle());
+}
+inline void BittensorLocalKeyFlow::closeScreen() const {
+	urnet_bittensor_local_key_flow_close_screen(handle());
+}
+inline void BittensorLocalKeyFlow::confirmDelete(bool authenticated) const {
+	urnet_bittensor_local_key_flow_confirm_delete(handle(), authenticated);
+}
+inline void BittensorLocalKeyFlow::confirmKeep(bool authenticated) const {
+	urnet_bittensor_local_key_flow_confirm_keep(handle(), authenticated);
+}
+inline void BittensorLocalKeyFlow::finishSetup(bool replace_confirmed) const {
+	urnet_bittensor_local_key_flow_finish_setup(handle(), replace_confirmed);
+}
+inline bool BittensorLocalKeyFlow::forgetNetwork() const {
+	bool r = urnet_bittensor_local_key_flow_forget_network(handle());
+	return r;
+}
+inline std::optional<BittensorLocalKeyCard> BittensorLocalKeyFlow::getCard() const {
+	char* r_c = urnet_bittensor_local_key_flow_get_card(handle());
+	auto r_s = detail::takeStringOpt(r_c);
+	if (!r_s) {
+		return std::nullopt;
+	}
+	return detail::parseJson<BittensorLocalKeyCard>(r_s->c_str());
+}
+inline std::optional<BittensorLocalKeyScreen> BittensorLocalKeyFlow::getScreen() const {
+	char* r_c = urnet_bittensor_local_key_flow_get_screen(handle());
+	auto r_s = detail::takeStringOpt(r_c);
+	if (!r_s) {
+		return std::nullopt;
+	}
+	return detail::parseJson<BittensorLocalKeyScreen>(r_s->c_str());
+}
+inline std::string BittensorLocalKeyFlow::goString() const {
+	char* r_c = urnet_bittensor_local_key_flow_go_string(handle());
+	return detail::takeString(r_c);
+}
+inline void BittensorLocalKeyFlow::hide() const {
+	urnet_bittensor_local_key_flow_hide(handle());
+}
+inline bool BittensorLocalKeyFlow::needsBackup() const {
+	bool r = urnet_bittensor_local_key_flow_needs_backup(handle());
+	return r;
+}
+inline void BittensorLocalKeyFlow::openScreen() const {
+	urnet_bittensor_local_key_flow_open_screen(handle());
+}
+inline std::string BittensorLocalKeyFlow::phraseToCopy() const {
+	char* r_c = urnet_bittensor_local_key_flow_phrase_to_copy(handle());
+	return detail::takeString(r_c);
+}
+inline void BittensorLocalKeyFlow::reload() const {
+	urnet_bittensor_local_key_flow_reload(handle());
+}
+inline std::optional<BittensorLocalKeyReminder> BittensorLocalKeyFlow::reminder(int64_t current_epoch, int64_t claim_open_millis, int64_t epoch_blocks, bool claimable) const {
+	char* r_c = urnet_bittensor_local_key_flow_reminder(handle(), current_epoch, claim_open_millis, epoch_blocks, claimable);
+	auto r_s = detail::takeStringOpt(r_c);
+	if (!r_s) {
+		return std::nullopt;
+	}
+	return detail::parseJson<BittensorLocalKeyReminder>(r_s->c_str());
+}
+inline void BittensorLocalKeyFlow::reminderDelivered() const {
+	urnet_bittensor_local_key_flow_reminder_delivered(handle());
+}
+inline void BittensorLocalKeyFlow::reminderScheduled(int64_t at_millis) const {
+	urnet_bittensor_local_key_flow_reminder_scheduled(handle(), at_millis);
+}
+inline void BittensorLocalKeyFlow::retrySaveNow() const {
+	urnet_bittensor_local_key_flow_retry_save_now(handle());
+}
+inline void BittensorLocalKeyFlow::reveal(bool authenticated) const {
+	urnet_bittensor_local_key_flow_reveal(handle(), authenticated);
+}
+inline std::optional<StringList> BittensorLocalKeyFlow::revealedWords() const {
+	char* r_c = urnet_bittensor_local_key_flow_revealed_words(handle());
+	auto r_s = detail::takeStringOpt(r_c);
+	if (!r_s) {
+		return std::nullopt;
+	}
+	return detail::parseJson<StringList>(r_s->c_str());
+}
+inline void BittensorLocalKeyFlow::saveFirst(bool replace_confirmed) const {
+	urnet_bittensor_local_key_flow_save_first(handle(), replace_confirmed);
+}
+inline void BittensorLocalKeyFlow::setCaptureActive(bool active) const {
+	urnet_bittensor_local_key_flow_set_capture_active(handle(), active);
+}
+inline void BittensorLocalKeyFlow::setConsent(bool active, const std::string& coldkey_ss58, int64_t from_epoch) const {
+	urnet_bittensor_local_key_flow_set_consent(handle(), active, coldkey_ss58.c_str(), from_epoch);
+}
+inline void BittensorLocalKeyFlow::setConsentUnavailable() const {
+	urnet_bittensor_local_key_flow_set_consent_unavailable(handle());
+}
+inline void BittensorLocalKeyFlow::setCurrentEpoch(int64_t current_epoch) const {
+	urnet_bittensor_local_key_flow_set_current_epoch(handle(), current_epoch);
+}
+inline void BittensorLocalKeyFlow::setGuest(bool guest) const {
+	urnet_bittensor_local_key_flow_set_guest(handle(), guest);
+}
+inline void BittensorLocalKeyFlow::setTop200Registered(bool registered) const {
+	urnet_bittensor_local_key_flow_set_top200_registered(handle(), registered);
+}
+inline void BittensorLocalKeyFlow::setUpPayouts(bool replace_confirmed) const {
+	urnet_bittensor_local_key_flow_set_up_payouts(handle(), replace_confirmed);
+}
+inline std::string BittensorLocalKeyFlow::string() const {
+	char* r_c = urnet_bittensor_local_key_flow_string(handle());
+	return detail::takeString(r_c);
+}
+inline void BittensorLocalKeyFlow::submitWords(const std::string& first_word, const std::string& second_word) const {
+	urnet_bittensor_local_key_flow_submit_words(handle(), first_word.c_str(), second_word.c_str());
 }
 inline std::string BittensorWalletSession::bridgeUrl() const {
 	char* err_c = nullptr;
@@ -31261,6 +32865,14 @@ inline void DeviceLocal::snClaim(const std::optional<Int64List>& epochs, SnClaim
 	}
 	urnet_device_local_sn_claim(handle(), epochs_c, callback_fn ? &detail::retained_sn_claim_confirmed : nullptr, callback_fn ? &detail::retained_sn_claim_done : nullptr, callback_fn ? &detail::retained_sn_claim_failed : nullptr, callback_fn ? &detail::retained_sn_claim_sent : nullptr, callback_fn.get());
 }
+inline void DeviceLocal::snClaimNow(const std::string& coldkey_ss58, SnClaimNowCallback callback) const {
+	auto* callback_fn = callback ? new SnClaimNowCallback(std::move(callback)) : nullptr;
+	urnet_device_local_sn_claim_now(handle(), coldkey_ss58.c_str(), callback_fn ? &detail::oneshot_sn_claim_now : nullptr, callback_fn);
+}
+inline void DeviceLocal::snClaimStatus(SnClaimStatusCallback callback) const {
+	auto* callback_fn = callback ? new SnClaimStatusCallback(std::move(callback)) : nullptr;
+	urnet_device_local_sn_claim_status(handle(), callback_fn ? &detail::oneshot_sn_claim_status : nullptr, callback_fn);
+}
 inline std::optional<SnUnsignedTxList> DeviceLocal::snClaimTransactions(const std::optional<Int64List>& epochs) const {
 	std::string epochs_json;
 	const char* epochs_c = nullptr;
@@ -31869,6 +33481,14 @@ inline void DeviceRemote::snClaim(const std::optional<Int64List>& epochs, SnClai
 		retain(callback_fn);
 	}
 	urnet_device_remote_sn_claim(handle(), epochs_c, callback_fn ? &detail::retained_sn_claim_confirmed : nullptr, callback_fn ? &detail::retained_sn_claim_done : nullptr, callback_fn ? &detail::retained_sn_claim_failed : nullptr, callback_fn ? &detail::retained_sn_claim_sent : nullptr, callback_fn.get());
+}
+inline void DeviceRemote::snClaimNow(const std::string& coldkey_ss58, SnClaimNowCallback callback) const {
+	auto* callback_fn = callback ? new SnClaimNowCallback(std::move(callback)) : nullptr;
+	urnet_device_remote_sn_claim_now(handle(), coldkey_ss58.c_str(), callback_fn ? &detail::oneshot_sn_claim_now : nullptr, callback_fn);
+}
+inline void DeviceRemote::snClaimStatus(SnClaimStatusCallback callback) const {
+	auto* callback_fn = callback ? new SnClaimStatusCallback(std::move(callback)) : nullptr;
+	urnet_device_remote_sn_claim_status(handle(), callback_fn ? &detail::oneshot_sn_claim_status : nullptr, callback_fn);
 }
 inline std::optional<SnUnsignedTxList> DeviceRemote::snClaimTransactions(const std::optional<Int64List>& epochs) const {
 	std::string epochs_json;
@@ -34556,6 +36176,86 @@ inline double alphaFromRao(int64_t rao) {
 	double r = urnet_alpha_from_rao(rao);
 	return r;
 }
+inline void bittensorConvertEstimate(const std::optional<SnChainSettings>& settings, const std::string& coldkey_ss58, int64_t amount_rao, BittensorConvertEstimateCallback callback) {
+	std::string settings_json;
+	const char* settings_c = nullptr;
+	if (settings) {
+		settings_json = nlohmann::json(*settings).dump();
+		settings_c = settings_json.c_str();
+	}
+	auto* callback_fn = callback ? new BittensorConvertEstimateCallback(std::move(callback)) : nullptr;
+	urnet_bittensor_convert_estimate(settings_c, coldkey_ss58.c_str(), amount_rao, callback_fn ? &detail::oneshot_bittensor_convert_estimate : nullptr, callback_fn);
+}
+inline void bittensorConvertEstimateForBurn(const std::optional<SnChainSettings>& settings, const std::string& coldkey_ss58, BittensorConvertEstimateCallback callback) {
+	std::string settings_json;
+	const char* settings_c = nullptr;
+	if (settings) {
+		settings_json = nlohmann::json(*settings).dump();
+		settings_c = settings_json.c_str();
+	}
+	auto* callback_fn = callback ? new BittensorConvertEstimateCallback(std::move(callback)) : nullptr;
+	urnet_bittensor_convert_estimate_for_burn(settings_c, coldkey_ss58.c_str(), callback_fn ? &detail::oneshot_bittensor_convert_estimate : nullptr, callback_fn);
+}
+inline void bittensorConvertSubmit(const std::optional<SnChainSettings>& settings, const std::string& mnemonic, const std::optional<BittensorConvertEstimateResult>& estimate, BittensorConvertSubmitCallback callback) {
+	std::string settings_json;
+	const char* settings_c = nullptr;
+	if (settings) {
+		settings_json = nlohmann::json(*settings).dump();
+		settings_c = settings_json.c_str();
+	}
+	std::string estimate_json;
+	const char* estimate_c = nullptr;
+	if (estimate) {
+		estimate_json = nlohmann::json(*estimate).dump();
+		estimate_c = estimate_json.c_str();
+	}
+	auto* callback_fn = callback ? new BittensorConvertSubmitCallback(std::move(callback)) : nullptr;
+	urnet_bittensor_convert_submit(settings_c, mnemonic.c_str(), estimate_c, callback_fn ? &detail::oneshot_bittensor_convert_submit : nullptr, callback_fn);
+}
+inline void bittensorConvertWait(const std::optional<SnChainSettings>& settings, const std::optional<BittensorConvertSubmission>& submission, BittensorConvertReceiptCallback callback) {
+	std::string settings_json;
+	const char* settings_c = nullptr;
+	if (settings) {
+		settings_json = nlohmann::json(*settings).dump();
+		settings_c = settings_json.c_str();
+	}
+	std::string submission_json;
+	const char* submission_c = nullptr;
+	if (submission) {
+		submission_json = nlohmann::json(*submission).dump();
+		submission_c = submission_json.c_str();
+	}
+	auto* callback_fn = callback ? new BittensorConvertReceiptCallback(std::move(callback)) : nullptr;
+	urnet_bittensor_convert_wait(settings_c, submission_c, callback_fn ? &detail::oneshot_bittensor_convert_receipt : nullptr, callback_fn);
+}
+inline std::string bittensorLocalKeyAddress(const std::string& mnemonic) {
+	char* err_c = nullptr;
+	char* r_c = urnet_bittensor_local_key_address(mnemonic.c_str(), &err_c);
+	if (err_c) {
+		detail::throwError(err_c);
+	}
+	return detail::takeString(r_c);
+}
+inline std::optional<BittensorLocalKey> bittensorLocalKeyGenerate() {
+	char* err_c = nullptr;
+	char* r_c = urnet_bittensor_local_key_generate(&err_c);
+	if (err_c) {
+		detail::throwError(err_c);
+	}
+	auto r_s = detail::takeStringOpt(r_c);
+	if (!r_s) {
+		return std::nullopt;
+	}
+	return detail::parseJson<BittensorLocalKey>(r_s->c_str());
+}
+inline std::string bittensorLocalKeySign(const std::string& mnemonic, const std::string& message) {
+	char* err_c = nullptr;
+	char* r_c = urnet_bittensor_local_key_sign(mnemonic.c_str(), message.c_str(), &err_c);
+	if (err_c) {
+		detail::throwError(err_c);
+	}
+	return detail::takeString(r_c);
+}
 inline std::string bittensorSignRawData(const std::string& message) {
 	char* r_c = urnet_bittensor_sign_raw_data(message.c_str());
 	return detail::takeString(r_c);
@@ -34944,6 +36644,14 @@ inline std::string formatShareBps(int64_t share_bps) {
 	char* r_c = urnet_format_share_bps(share_bps);
 	return detail::takeString(r_c);
 }
+inline std::string formatTao(int64_t rao) {
+	char* r_c = urnet_format_tao(rao);
+	return detail::takeString(r_c);
+}
+inline std::string formatTaoAmount(int64_t rao) {
+	char* r_c = urnet_format_tao_amount(rao);
+	return detail::takeString(r_c);
+}
 inline void freeMemory() {
 	urnet_free_memory();
 }
@@ -35193,6 +36901,17 @@ inline void networkChanged() {
 }
 inline AsyncLocalState newAsyncLocalState(const std::string& local_storage_home) {
 	AsyncLocalState r(urnet_new_async_local_state(local_storage_home.c_str()));
+	return r;
+}
+inline BittensorLocalKeyFlow newBittensorLocalKeyFlow(const Api& api, const std::string& network_id, BittensorLocalKeyStore store) {
+	std::shared_ptr<BittensorLocalKeyStore> store_fn;
+	if ((static_cast<bool>(store.add_key) || static_cast<bool>(store.delete_key) || static_cast<bool>(store.key_address) || static_cast<bool>(store.key_phrase) || static_cast<bool>(store.read_note) || static_cast<bool>(store.write_note))) {
+		store_fn = std::make_shared<BittensorLocalKeyStore>(std::move(store));
+	}
+	BittensorLocalKeyFlow r(urnet_new_bittensor_local_key_flow(api.handle(), network_id.c_str(), store_fn ? &detail::retained_bittensor_local_key_store_add_key : nullptr, store_fn ? &detail::retained_bittensor_local_key_store_delete_key : nullptr, store_fn ? &detail::retained_bittensor_local_key_store_key_address : nullptr, store_fn ? &detail::retained_bittensor_local_key_store_key_phrase : nullptr, store_fn ? &detail::retained_bittensor_local_key_store_read_note : nullptr, store_fn ? &detail::retained_bittensor_local_key_store_write_note : nullptr, store_fn.get()));
+	if (store_fn) {
+		r.retain(store_fn);
+	}
 	return r;
 }
 inline BittensorWalletSession newBittensorWalletSession(const std::string& wallet_id, const std::string& platform, const std::string& purpose, const std::string& redirect_link) {

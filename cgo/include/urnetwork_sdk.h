@@ -104,9 +104,54 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_BALANCE_CODE_REDEEM_OUTCOME_INVALID "invalid"
 #define URNET_BALANCE_CODE_REDEEM_OUTCOME_REDEEMED "redeemed"
 #define URNET_BALANCE_CODE_REDEEM_OUTCOME_UNKNOWN "unknown"
+#define URNET_BITTENSOR_CHAIN_ERROR_WRONG_CHAIN "bittensor_wrong_chain"
+#define URNET_BITTENSOR_CONVERT_ERROR_AMOUNT_TOO_HIGH "convert_amount_too_high"
+#define URNET_BITTENSOR_CONVERT_ERROR_AMOUNT_TOO_LOW "convert_amount_too_low"
+#define URNET_BITTENSOR_CONVERT_ERROR_BALANCE_TOO_LOW "convert_balance_too_low"
+#define URNET_BITTENSOR_CONVERT_ERROR_EXPIRED "convert_expired"
+#define URNET_BITTENSOR_CONVERT_ERROR_FAILED "convert_failed"
+#define URNET_BITTENSOR_CONVERT_ERROR_KEY_MISMATCH "convert_key_mismatch"
+#define URNET_BITTENSOR_CONVERT_ERROR_NOTHING_TO_CONVERT "convert_nothing_to_convert"
+#define URNET_BITTENSOR_CONVERT_ERROR_OUTCOME_UNKNOWN "convert_outcome_unknown"
+#define URNET_BITTENSOR_CONVERT_ERROR_PENDING "convert_already_pending"
+#define URNET_BITTENSOR_CONVERT_ERROR_PRICE_IMPACT "convert_price_impact_too_high"
+#define URNET_BITTENSOR_CONVERT_ERROR_PRICE_MOVED "convert_price_moved"
+#define URNET_BITTENSOR_CONVERT_ERROR_REFUSED "convert_refused"
+#define URNET_BITTENSOR_CONVERT_ERROR_RUNTIME_CHANGED "convert_runtime_changed"
+#define URNET_BITTENSOR_LOCAL_KEY_CONFIRM_DELETE "delete"
+#define URNET_BITTENSOR_LOCAL_KEY_CONFIRM_KEEP "keep"
+#define URNET_BITTENSOR_LOCAL_KEY_CONFIRM_NONE ""
+#define URNET_BITTENSOR_LOCAL_KEY_COPY_SECONDS 60
+#define URNET_BITTENSOR_LOCAL_KEY_ERROR_FAILED "local_key_failed"
+#define URNET_BITTENSOR_LOCAL_KEY_ERROR_INVALID_PHRASE "invalid_recovery_phrase"
+#define URNET_BITTENSOR_LOCAL_KEY_FAILURE_CONSENT "consent_failed"
+#define URNET_BITTENSOR_LOCAL_KEY_FAILURE_DELETE "delete_failed"
+#define URNET_BITTENSOR_LOCAL_KEY_FAILURE_GENERATE "generate_failed"
+#define URNET_BITTENSOR_LOCAL_KEY_FAILURE_NOT_ALLOWED "not_allowed"
+#define URNET_BITTENSOR_LOCAL_KEY_FAILURE_REPLACEMENT_NOT_CONFIRMED "replacement_not_confirmed"
+#define URNET_BITTENSOR_LOCAL_KEY_FAILURE_STORE "store_failed"
+#define URNET_BITTENSOR_LOCAL_KEY_FAILURE_STORE_UNAVAILABLE "store_unavailable"
+#define URNET_BITTENSOR_LOCAL_KEY_REMINDER_CANCEL "cancel"
+#define URNET_BITTENSOR_LOCAL_KEY_REMINDER_DELIVER_NOW "deliver_now"
+#define URNET_BITTENSOR_LOCAL_KEY_REMINDER_NONE "none"
+#define URNET_BITTENSOR_LOCAL_KEY_REMINDER_SCHEDULE "schedule"
+#define URNET_BITTENSOR_LOCAL_KEY_REVEAL_SECONDS 60
+#define URNET_BITTENSOR_LOCAL_KEY_STATE_CONSENT_UNAVAILABLE "consent_unavailable"
+#define URNET_BITTENSOR_LOCAL_KEY_STATE_ELSEWHERE "elsewhere"
+#define URNET_BITTENSOR_LOCAL_KEY_STATE_LOADING "loading"
+#define URNET_BITTENSOR_LOCAL_KEY_STATE_NONE "none"
+#define URNET_BITTENSOR_LOCAL_KEY_STATE_SAVED_AND_DELETED "saved_and_deleted"
+#define URNET_BITTENSOR_LOCAL_KEY_STATE_SAVE_LATER_LINKED "save_later_linked"
+#define URNET_BITTENSOR_LOCAL_KEY_STATE_SAVE_LATER_NOT_LINKED "save_later_not_linked"
+#define URNET_BITTENSOR_LOCAL_KEY_STATE_SAVE_NOW_CONSENT_FAILED "save_now_consent_failed"
+#define URNET_BITTENSOR_LOCAL_KEY_STATE_SAVE_NOW_SHOWING "save_now_showing"
+#define URNET_BITTENSOR_LOCAL_KEY_STATE_STORE_UNAVAILABLE "store_unavailable"
+#define URNET_BITTENSOR_LOCAL_KEY_STORE_UNAVAILABLE "store_unavailable"
 #define URNET_BITTENSOR_TALISMAN_INJECTED_NAME "talisman"
+#define URNET_BITTENSOR_TAO_COM_INJECTED_NAME "@opentensor/bittensor-extension"
 #define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_ADDRESS_MISMATCH "address_mismatch"
 #define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_ADDRESS_NOT_IN_WALLET "address_not_in_wallet"
+#define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_EXTENSION_NOT_AUTHORIZED "extension_not_authorized"
 #define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_EXTENSION_NOT_FOUND "extension_not_found"
 #define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_INVALID_REQUEST "invalid_request"
 #define URNET_BITTENSOR_WALLET_BRIDGE_ERROR_NO_ACCOUNT "no_account"
@@ -132,6 +177,7 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_BITTENSOR_WALLET_ERROR_UNSUPPORTED_WALLET "unsupported_wallet"
 #define URNET_BITTENSOR_WALLET_ERROR_WALLET "wallet_error"
 #define URNET_BITTENSOR_WALLET_ERROR_WRONG_TRANSPORT "wrong_transport"
+#define URNET_BITTENSOR_WALLET_MANUAL "manual"
 #define URNET_BITTENSOR_WALLET_PLATFORM_ANDROID "android"
 #define URNET_BITTENSOR_WALLET_PLATFORM_IOS "ios"
 #define URNET_BITTENSOR_WALLET_PLATFORM_LINUX "linux"
@@ -256,6 +302,7 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_EXTENDER_IMPORT_ERROR_INVALID "import_extenders_invalid"
 #define URNET_EXTENDER_PROVIDE_ERROR_ACTIVATION_FAILED "activation_failed"
 #define URNET_EXTENDER_PROVIDE_ERROR_ACTIVATION_REFUSED "activation_refused"
+#define URNET_EXTENDER_PROVIDE_ERROR_ACTIVATION_UNREACHABLE "activation_unreachable"
 #define URNET_EXTENDER_PROVIDE_ERROR_LISTEN "listen"
 #define URNET_EXTENDER_PROVIDE_ERROR_REVOKED "revoked"
 #define URNET_EXTENDER_PROVIDE_ERROR_START "start"
@@ -432,6 +479,22 @@ bool urnet_packet_batch_get(uint64_t self, int64_t index, uint8_t* out, int32_t*
 #define URNET_SN_ALPHA_SYMBOL "SN25α"
 #define URNET_SN_CHAIN_ID_MAINNET 964
 #define URNET_SN_CHAIN_ID_TESTNET 945
+#define URNET_SN_CLAIM_ACTION_CLAIM_NOW "claim_now"
+#define URNET_SN_CLAIM_ACTION_NONE "none"
+#define URNET_SN_CLAIM_ACTION_SELF_CLAIM "self_claim"
+#define URNET_SN_CLAIM_ACTION_TOP_UP_GAS "top_up_gas"
+#define URNET_SN_CLAIM_ACTION_WAIT "wait"
+#define URNET_SN_CLAIM_NOW_REASON_LIMIT "limit"
+#define URNET_SN_CLAIM_NOW_REASON_REQUESTED "requested"
+#define URNET_SN_CLAIM_NOW_REASON_UNDER_FLOOR "under_floor"
+#define URNET_SN_CLAIM_REASON_CAP_REACHED "cap_reached"
+#define URNET_SN_CLAIM_REASON_NOTHING_PENDING "nothing_pending"
+#define URNET_SN_CLAIM_REASON_QUEUED "queued"
+#define URNET_SN_CLAIM_REASON_REFUSED "refused"
+#define URNET_SN_CLAIM_REASON_RELAY_NOT_RUNNING "relay_not_running"
+#define URNET_SN_CLAIM_REASON_RELAY_PAUSED "relay_paused"
+#define URNET_SN_CLAIM_REASON_UNDER_THRESHOLD "under_threshold"
+#define URNET_SN_CLAIM_RELAY_STATE_UNAVAILABLE "unavailable"
 #define URNET_SN_CLAIM_STATUS_CLAIMABLE "claimable"
 #define URNET_SN_CLAIM_STATUS_CLAIMED "claimed"
 #define URNET_SN_CLAIM_STATUS_EXPIRED "expired"
@@ -583,6 +646,21 @@ typedef void (*urnet_auth_verify_cb)(void* user_data, const char* result_json, c
 typedef void (*urnet_auth_verify_send_cb)(void* user_data, const char* result_json, const char* err_param);
 /* AuthWalletChallengeCallback */
 typedef void (*urnet_auth_wallet_challenge_cb)(void* user_data, const char* result_json, const char* err_param);
+/* BittensorConvertEstimateCallback */
+typedef void (*urnet_bittensor_convert_estimate_cb)(void* user_data, const char* result_json, const char* err_param);
+/* BittensorConvertReceiptCallback */
+typedef void (*urnet_bittensor_convert_receipt_cb)(void* user_data, const char* result_json, const char* err_param);
+/* BittensorConvertSubmitCallback */
+typedef void (*urnet_bittensor_convert_submit_cb)(void* user_data, const char* result_json, const char* err_param);
+/* BittensorLocalKeyFlowListener */
+typedef void (*urnet_bittensor_local_key_flow_cb)(void* user_data);
+/* BittensorLocalKeyStore */
+typedef bool (*urnet_bittensor_local_key_store_add_key_cb)(void* user_data, const char* network_id, const char* mnemonic, const char* address);
+typedef bool (*urnet_bittensor_local_key_store_delete_key_cb)(void* user_data, const char* network_id);
+typedef char* (*urnet_bittensor_local_key_store_key_address_cb)(void* user_data, const char* network_id);
+typedef char* (*urnet_bittensor_local_key_store_key_phrase_cb)(void* user_data, const char* network_id);
+typedef char* (*urnet_bittensor_local_key_store_read_note_cb)(void* user_data, const char* network_id, const char* name);
+typedef void (*urnet_bittensor_local_key_store_write_note_cb)(void* user_data, const char* network_id, const char* name, const char* value);
 /* BlockActionOverridesChangeListener */
 typedef void (*urnet_block_action_overrides_change_cb)(void* user_data, const char* block_action_overrides_json);
 /* BlockActionStatsListener */
@@ -868,6 +946,14 @@ typedef void (*urnet_sn_claim_confirmed_cb)(void* user_data, int64_t epoch, cons
 typedef void (*urnet_sn_claim_done_cb)(void* user_data);
 typedef void (*urnet_sn_claim_failed_cb)(void* user_data, int64_t epoch, const char* message);
 typedef void (*urnet_sn_claim_sent_cb)(void* user_data, int64_t epoch, const char* tx_hash);
+/* SnClaimNowCallback */
+typedef void (*urnet_sn_claim_now_cb)(void* user_data, const char* result_json, const char* err_param);
+/* SnClaimRelayCallback */
+typedef void (*urnet_sn_claim_relay_cb)(void* user_data, const char* result_json, const char* err_param);
+/* SnClaimRelayClaimNowCallback */
+typedef void (*urnet_sn_claim_relay_claim_now_cb)(void* user_data, const char* result_json, const char* err_param);
+/* SnClaimStatusCallback */
+typedef void (*urnet_sn_claim_status_cb)(void* user_data, const char* result_json, const char* err_param);
 /* SnClaimsCallback */
 typedef void (*urnet_sn_claims_cb)(void* user_data, const char* result_json, const char* err_param);
 /* SnConnectWalletCallback */
@@ -1093,6 +1179,8 @@ void urnet_api_set_network_referral(uint64_t self, const char* args_json, urnet_
 void urnet_api_set_payout_wallet(uint64_t self, const char* payout_wallet_json, urnet_set_payout_wallet_cb callback_result, void* callback_user_data);
 void urnet_api_set_points_leaderboard_public(uint64_t self, const char* args_json, urnet_set_points_leaderboard_public_cb callback_result, void* callback_user_data);
 void urnet_api_sign_out(uint64_t self, urnet_session_sign_out_cb callback_result, void* callback_user_data);
+void urnet_api_sn_claim_relay(uint64_t self, urnet_sn_claim_relay_cb callback_result, void* callback_user_data);
+void urnet_api_sn_claim_relay_claim_now(uint64_t self, const char* args_json, urnet_sn_claim_relay_claim_now_cb callback_result, void* callback_user_data);
 void urnet_api_sn_epoch(uint64_t self, urnet_sn_epoch_cb callback_result, void* callback_user_data);
 char* urnet_api_sn_epoch_sync(uint64_t self, char** out_error);
 void urnet_api_sn_get_wallet(uint64_t self, urnet_sn_get_wallet_cb callback_result, void* callback_user_data);
@@ -1145,6 +1233,41 @@ void urnet_async_local_state_logout(uint64_t self, urnet_commit_cb callback_comp
 void urnet_async_local_state_parse_by_jwt(uint64_t self, urnet_parse_by_jwt_cb callback_result, void* callback_user_data);
 void urnet_async_local_state_set_by_client_jwt(uint64_t self, const char* by_client_jwt, urnet_commit_cb callback_complete, void* callback_user_data);
 void urnet_async_local_state_set_by_jwt(uint64_t self, const char* by_jwt, urnet_commit_cb callback_complete, void* callback_user_data);
+
+/* ----- BittensorLocalKeyFlow ----- */
+
+uint64_t urnet_bittensor_local_key_flow_add_bittensor_local_key_flow_listener(uint64_t self, urnet_bittensor_local_key_flow_cb listener_bittensor_local_key_flow_changed, void* listener_user_data);
+void urnet_bittensor_local_key_flow_cancel_confirmation(uint64_t self);
+void urnet_bittensor_local_key_flow_close(uint64_t self);
+void urnet_bittensor_local_key_flow_close_screen(uint64_t self);
+void urnet_bittensor_local_key_flow_confirm_delete(uint64_t self, bool authenticated);
+void urnet_bittensor_local_key_flow_confirm_keep(uint64_t self, bool authenticated);
+void urnet_bittensor_local_key_flow_finish_setup(uint64_t self, bool replace_confirmed);
+bool urnet_bittensor_local_key_flow_forget_network(uint64_t self);
+char* urnet_bittensor_local_key_flow_get_card(uint64_t self);
+char* urnet_bittensor_local_key_flow_get_screen(uint64_t self);
+char* urnet_bittensor_local_key_flow_go_string(uint64_t self);
+void urnet_bittensor_local_key_flow_hide(uint64_t self);
+bool urnet_bittensor_local_key_flow_needs_backup(uint64_t self);
+void urnet_bittensor_local_key_flow_open_screen(uint64_t self);
+char* urnet_bittensor_local_key_flow_phrase_to_copy(uint64_t self);
+void urnet_bittensor_local_key_flow_reload(uint64_t self);
+char* urnet_bittensor_local_key_flow_reminder(uint64_t self, int64_t current_epoch, int64_t claim_open_millis, int64_t epoch_blocks, bool claimable);
+void urnet_bittensor_local_key_flow_reminder_delivered(uint64_t self);
+void urnet_bittensor_local_key_flow_reminder_scheduled(uint64_t self, int64_t at_millis);
+void urnet_bittensor_local_key_flow_retry_save_now(uint64_t self);
+void urnet_bittensor_local_key_flow_reveal(uint64_t self, bool authenticated);
+char* urnet_bittensor_local_key_flow_revealed_words(uint64_t self);
+void urnet_bittensor_local_key_flow_save_first(uint64_t self, bool replace_confirmed);
+void urnet_bittensor_local_key_flow_set_capture_active(uint64_t self, bool active);
+void urnet_bittensor_local_key_flow_set_consent(uint64_t self, bool active, const char* coldkey_ss58, int64_t from_epoch);
+void urnet_bittensor_local_key_flow_set_consent_unavailable(uint64_t self);
+void urnet_bittensor_local_key_flow_set_current_epoch(uint64_t self, int64_t current_epoch);
+void urnet_bittensor_local_key_flow_set_guest(uint64_t self, bool guest);
+void urnet_bittensor_local_key_flow_set_top200_registered(uint64_t self, bool registered);
+void urnet_bittensor_local_key_flow_set_up_payouts(uint64_t self, bool replace_confirmed);
+char* urnet_bittensor_local_key_flow_string(uint64_t self);
+void urnet_bittensor_local_key_flow_submit_words(uint64_t self, const char* first_word, const char* second_word);
 
 /* ----- BittensorWalletSession ----- */
 
@@ -1598,6 +1721,8 @@ void urnet_device_local_shuffle_exits(uint64_t self);
 char* urnet_device_local_sign_sn_fleet_binding(uint64_t self, const char* binding_json, char** out_error);
 void urnet_device_local_simulate_network_change(uint64_t self);
 void urnet_device_local_sn_claim(uint64_t self, const char* epochs_json, urnet_sn_claim_confirmed_cb callback_confirmed, urnet_sn_claim_done_cb callback_done, urnet_sn_claim_failed_cb callback_failed, urnet_sn_claim_sent_cb callback_sent, void* callback_user_data);
+void urnet_device_local_sn_claim_now(uint64_t self, const char* coldkey_ss58, urnet_sn_claim_now_cb callback_result, void* callback_user_data);
+void urnet_device_local_sn_claim_status(uint64_t self, urnet_sn_claim_status_cb callback_result, void* callback_user_data);
 char* urnet_device_local_sn_claim_transactions(uint64_t self, const char* epochs_json, char** out_error);
 void urnet_device_local_sn_claims(uint64_t self, urnet_sn_claims_cb callback_result, void* callback_user_data);
 void urnet_device_local_sn_gas_balance(uint64_t self, urnet_sn_gas_balance_cb callback_result, void* callback_user_data);
@@ -1721,6 +1846,8 @@ void urnet_device_remote_shuffle_exits(uint64_t self);
 char* urnet_device_remote_sign_sn_fleet_binding(uint64_t self, const char* binding_json, char** out_error);
 void urnet_device_remote_simulate_network_change(uint64_t self);
 void urnet_device_remote_sn_claim(uint64_t self, const char* epochs_json, urnet_sn_claim_confirmed_cb callback_confirmed, urnet_sn_claim_done_cb callback_done, urnet_sn_claim_failed_cb callback_failed, urnet_sn_claim_sent_cb callback_sent, void* callback_user_data);
+void urnet_device_remote_sn_claim_now(uint64_t self, const char* coldkey_ss58, urnet_sn_claim_now_cb callback_result, void* callback_user_data);
+void urnet_device_remote_sn_claim_status(uint64_t self, urnet_sn_claim_status_cb callback_result, void* callback_user_data);
 char* urnet_device_remote_sn_claim_transactions(uint64_t self, const char* epochs_json, char** out_error);
 void urnet_device_remote_sn_claims(uint64_t self, urnet_sn_claims_cb callback_result, void* callback_user_data);
 void urnet_device_remote_sn_gas_balance(uint64_t self, urnet_sn_gas_balance_cb callback_result, void* callback_user_data);
@@ -2282,6 +2409,13 @@ bool urnet_websocket_device_rpc_listener_close(uint64_t self, char** out_error);
 /* ----- functions ----- */
 
 double urnet_alpha_from_rao(int64_t rao);
+void urnet_bittensor_convert_estimate(const char* settings_json, const char* coldkey_ss58, int64_t amount_rao, urnet_bittensor_convert_estimate_cb callback_result, void* callback_user_data);
+void urnet_bittensor_convert_estimate_for_burn(const char* settings_json, const char* coldkey_ss58, urnet_bittensor_convert_estimate_cb callback_result, void* callback_user_data);
+void urnet_bittensor_convert_submit(const char* settings_json, const char* mnemonic, const char* estimate_json, urnet_bittensor_convert_submit_cb callback_result, void* callback_user_data);
+void urnet_bittensor_convert_wait(const char* settings_json, const char* submission_json, urnet_bittensor_convert_receipt_cb callback_result, void* callback_user_data);
+char* urnet_bittensor_local_key_address(const char* mnemonic, char** out_error);
+char* urnet_bittensor_local_key_generate(char** out_error);
+char* urnet_bittensor_local_key_sign(const char* mnemonic, const char* message, char** out_error);
 char* urnet_bittensor_sign_raw_data(const char* message);
 char* urnet_bittensor_wallet_display_name(const char* wallet_id);
 char* urnet_bittensor_wallet_id_list(void);
@@ -2329,6 +2463,8 @@ char* urnet_format_alpha_amount(int64_t rao);
 char* urnet_format_points(double points);
 char* urnet_format_rank(int64_t rank);
 char* urnet_format_share_bps(int64_t share_bps);
+char* urnet_format_tao(int64_t rao);
+char* urnet_format_tao_amount(int64_t rao);
 void urnet_free_memory(void);
 uint64_t urnet_generate_device_rpc_key_material(char** out_error);
 char* urnet_generate_nonce(void);
@@ -2373,6 +2509,7 @@ double urnet_nano_cents_to_usd(int64_t nano_cents);
 double urnet_nano_points_to_points(int64_t nano_points);
 void urnet_network_changed(void);
 uint64_t urnet_new_async_local_state(const char* local_storage_home);
+uint64_t urnet_new_bittensor_local_key_flow(uint64_t api, const char* network_id, urnet_bittensor_local_key_store_add_key_cb store_add_key, urnet_bittensor_local_key_store_delete_key_cb store_delete_key, urnet_bittensor_local_key_store_key_address_cb store_key_address, urnet_bittensor_local_key_store_key_phrase_cb store_key_phrase, urnet_bittensor_local_key_store_read_note_cb store_read_note, urnet_bittensor_local_key_store_write_note_cb store_write_note, void* store_user_data);
 uint64_t urnet_new_bittensor_wallet_session(const char* wallet_id, const char* platform, const char* purpose, const char* redirect_link, char** out_error);
 uint64_t urnet_new_client_event_queue(uint64_t network_space, const char* platform, const char* app_version, const char* locale);
 char* urnet_new_client_info(const char* device_type, const char* app_version);
@@ -2780,6 +2917,109 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
 /* BittensorChallengeMessage (json):
  *   Challenge: string
  *   Timestamp: number
+ */
+
+/* BittensorConvertEstimateResult (json):
+ *   coldkey_ss58: string
+ *   hotkey_ss58?: string
+ *   netuid: number
+ *   stake_rao: number
+ *   free_tao_rao: number
+ *   price_rao: number
+ *   min_amount_rao: number
+ *   max_amount_rao: number
+ *   amount_rao: number
+ *   expected_tao_rao: number
+ *   expected_net_tao_rao: number
+ *   min_tao_rao: number
+ *   limit_price_rao: number
+ *   pool_fee_alpha_rao: number
+ *   price_impact_bps: number
+ *   fee_tao_rao: number
+ *   fee_alpha_rao: number
+ *   fee_in_alpha: boolean
+ *   remainder_swept_alpha_rao: number
+ *   remainder_swept_tao_rao: number
+ *   burn_rao?: number
+ *   register_fee_rao?: number
+ *   burn_tao_needed_rao?: number
+ *   burn_already_covered?: boolean
+ *   can_convert: boolean
+ *   notice?: string
+ *   funds_disclaimer: string
+ *   error?: SnError | null
+ */
+
+/* BittensorConvertReceipt (json):
+ *   tx_hash?: string
+ *   block_number?: number
+ *   extrinsic_index?: number
+ *   alpha_sold_rao: number
+ *   tao_received_rao: number
+ *   fee_alpha_rao: number
+ *   fee_tao_rao: number
+ *   funds_disclaimer: string
+ *   error?: SnError | null
+ */
+
+/* BittensorConvertSubmission (json):
+ *   tx_hash?: string
+ *   coldkey_ss58?: string
+ *   first_block?: number
+ *   last_block?: number
+ *   funds_disclaimer: string
+ *   error?: SnError | null
+ */
+
+/* BittensorLocalKey (json):
+ *   mnemonic: string
+ *   address: string
+ */
+
+/* BittensorLocalKeyCard (json):
+ *   state: string
+ *   address: string
+ *   stored_address: string
+ *   shows_key_path: boolean
+ *   offers_set_up: boolean
+ *   offers_save_first: boolean
+ *   offers_wallet: boolean
+ *   offers_finish_setup: boolean
+ *   offers_key_screen: boolean
+ *   replaces_payout_wallet: boolean
+ *   owner_only: boolean
+ *   payouts_start_next_epoch: boolean
+ *   backup_reminder: boolean
+ *   key_saved: boolean
+ *   busy: boolean
+ *   link_generation: number
+ *   failure_code: string
+ *   failure_message: string
+ */
+
+/* BittensorLocalKeyReminder (json):
+ *   action: string
+ *   at_millis: number
+ */
+
+/* BittensorLocalKeyScreen (json):
+ *   open: boolean
+ *   save_now: boolean
+ *   address: string
+ *   revealed: boolean
+ *   needs_authentication: boolean
+ *   hidden_by_capture: boolean
+ *   confirming: string
+ *   first_word_position: number
+ *   second_word_position: number
+ *   words_rejected: boolean
+ *   warns_top200: boolean
+ *   offers_keep: boolean
+ *   offers_retry: boolean
+ *   busy: boolean
+ *   done: boolean
+ *   failure_code: string
+ *   failure_message: string
  */
 
 /* BittensorSignRequest (json):
@@ -4962,6 +5202,78 @@ uint64_t urnet_new_io_loop(uint64_t device_local, int64_t fd, urnet_io_loop_done
  *   artifact_base_url: string
  *   tx_type: string
  *   lookback_epochs: number
+ */
+
+/* SnClaimNowResult (json):
+ *   requested: boolean
+ *   reason?: string
+ *   next_at_millis?: number
+ *   error?: SnError | null
+ */
+
+/* SnClaimRelayAccount (json):
+ *   coldkey_ss58: string
+ *   no_id: number
+ *   index: number
+ *   claimable_rao: number
+ *   value_tao_rao: number
+ *   pending_rao: number
+ *   reason: string
+ *   claim_now_available: boolean
+ *   claim_now_reason?: string
+ *   claim_now_next_at_millis?: number
+ *   connected?: boolean
+ *   action?: string
+ */
+
+/* SnClaimRelayAccountList (json):
+ *   = SnClaimRelayAccount | null[]
+ */
+
+/* SnClaimRelayClaimNowArgs (json):
+ *   coldkey_ss58: string
+ */
+
+/* SnClaimRelayClaimNowResult (json):
+ *   requested: boolean
+ *   reason?: string
+ *   next_at_millis?: number
+ *   error?: SnClaimRelayError | null
+ */
+
+/* SnClaimRelayError (json):
+ *   message: string
+ */
+
+/* SnClaimRelayResult (json):
+ *   state: string
+ *   automatic_threshold_tao_rao: number
+ *   transfer_floor_tao_rao: number
+ *   automatic_threshold_rao: number
+ *   transfer_floor_rao: number
+ *   claim_now_period_days: number
+ *   accounts: SnClaimRelayAccountList | null
+ *   error?: SnClaimRelayError | null
+ */
+
+/* SnClaimStatusResult (json):
+ *   relay_state: string
+ *   coldkey_ss58?: string
+ *   action: string
+ *   reason: string
+ *   claimable_rao: number
+ *   value_tao_rao: number
+ *   pending_rao: number
+ *   claim_now_available: boolean
+ *   claim_now_reason?: string
+ *   claim_now_next_at_millis?: number
+ *   self_claim_available: boolean
+ *   self_claim_needs_gas: boolean
+ *   automatic_threshold_rao: number
+ *   transfer_floor_rao: number
+ *   claim_now_period_days: number
+ *   accounts: SnClaimRelayAccountList | null
+ *   error?: SnError | null
  */
 
 /* SnClaimsResult (json):
